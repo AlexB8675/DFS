@@ -607,15 +607,15 @@ The design aims to survive **losing the VPS** (DB plus disks), as long as the Di
 
 ## 9. API Surface (v1)
 
-All routes are under `/api`, use JSON unless noted, and are validated with Zod schemas shared with the frontend. All list endpoints use **cursor (keyset) pagination**.
+All routes are under `/api`, use JSON unless noted, and are validated with Zod schemas shared with the frontend (`packages/shared`). All list endpoints use **cursor (keyset) pagination**.
 
 | Method & Path | Purpose |
 |---|---|
 | `GET /auth/discord` · `GET /auth/discord/callback` · `POST /auth/logout` · `GET /auth/me` | Auth |
-| `GET /nodes/:id` · `GET /nodes/:id/children?sort&cursor&limit` · `GET /nodes/:id/path` | Browse |
+| `GET /nodes/:id` · `GET /nodes/:id/children?kind&sort&order&cursor&limit` · `GET /nodes/:id/path` | Browse. `kind=folder` lists subfolders only (folder tree, move dialog). Folder nodes carry `hasChildFolders`, so the tree only shows an expand arrow where there is something to expand |
 | `POST /folders` `{parentId, name}` · `POST /folders/ensure` `{parentId, paths[]}` | Create folder / `mkdir -p` in bulk |
 | `PATCH /nodes/:id` `{name?, parentId?}` · `POST /nodes/move` `{ids[], parentId}` | Rename / move (single or bulk) |
-| `DELETE /nodes/:id` · `POST /nodes/trash` `{ids[]}` · `POST /nodes/:id/restore` · `GET /trash` · `DELETE /trash` | Trash |
+| `DELETE /nodes/:id` · `POST /nodes/trash` `{ids[]}` · `POST /nodes/:id/restore` · `GET /trash` · `DELETE /trash/:id` · `DELETE /trash` | Trash: move, restore, list, delete one item forever, empty |
 | `POST /uploads` · `POST /uploads/batch` · `GET /uploads/:id` · `PUT /uploads/:id/parts/:idx` (binary) · `POST /uploads/:id/complete` · `DELETE /uploads/:id` | Multipart upload |
 | `GET /files/:id/content` (Range) · `GET /files/:id/versions` · `POST /files/:id/versions/:vid/restore` | Content & versions |
 | `GET /folders/:id/archive` · `POST /archive` `{ids[]}` | ZIP download |
@@ -636,7 +636,11 @@ Internal (bot), only reachable on `dfs_internal` and returning `404` at the edge
 
 ## 10. Frontend (React)
 
-**Stack:** React 19 + Vite + TypeScript, TanStack Query (server state, infinite queries), **TanStack Virtual** (virtualized lists for folders with 100k+ entries), React Router, Tailwind CSS + shadcn/ui (Radix primitives), `@dnd-kit` (drag-and-drop moves), Zod (shared schemas), and a Web Worker for hashing parts (`hash-wasm`).
+**Stack:** React 19 with the **React Compiler** (automatic memoization, so no hand-written `useMemo`/`useCallback`), Vite 8, TypeScript 6.0, TanStack Query (server state, infinite queries), **TanStack Virtual** (virtualized lists and grids for folders with 100k+ entries), React Router 8 (data router; route loaders gate on the session), Tailwind CSS 4 + shadcn/ui (Radix primitives), zustand (client state: selection, uploads, preferences), Zod (schemas shared with the API), and `@dnd-kit` for drag-to-move (later). Dark mode is the default; light and system themes are available.
+
+**Visual style:** squared-off corners (6 px base radius); a softly cool-tinted neutral palette instead of pure black and white (body text about 13:1, every text pair at least WCAG AA); short transitions on one shared ease-out curve (about 160 ms for hover and selection, 200–300 ms for content and panels, a crossfade when the theme changes). Motion is cut to a minimum under `prefers-reduced-motion`.
+
+**Mock API:** in development, MSW 3 serves the §9 API from the browser with seeded demo data (including a 6,000-file folder, deep nesting and every sync state), so the UI can be built and tested before the API exists (D14). `VITE_API_MOCKS=off` switches the dev server to the real API on `localhost:3000`. No mock code ships in production builds.
 
 ### 10.1 Screens
 
@@ -656,7 +660,7 @@ Internal (bot), only reachable on `dfs_internal` and returning `404` at the edge
 
 - **Folder drops** walk the directory tree (`DataTransferItem.webkitGetAsEntry`) lazily, so dropping 100k files doesn't freeze the tab. The engine creates the folders with `POST /folders/ensure`, then creates sessions in batches of 500 (`POST /uploads/batch`).
 - **Concurrency:** up to 4 concurrent large-file parts, or up to 8 concurrent small-file `PUT`s (configurable). It retries with exponential backoff and honours `Retry-After`.
-- Each part: `file.slice()` → SHA-256 in a worker → `PUT` with `X-Part-SHA256`.
+- Each part: `file.slice()` → SHA-256 with Web Crypto (`crypto.subtle.digest`, which runs off the main thread; parts are at most `CHUNK_SIZE`, so no streaming hasher is needed) → `PUT` with `X-Part-SHA256`.
 - Upload IDs are saved to IndexedDB, so after a page reload the user can re-select the same files and resume (matched by relative path + size + lastModified).
 
 ---
@@ -692,7 +696,7 @@ Expected profile (D7): **few users (≤ ~20), many files.** The design targets *
 | **Discord message count** (rate limits) | Small-file packing (§6.6), batched journal (§8), batched URL refresh (50 blobs/call), more storage channels as needed. |
 | **Discord upload throughput** | Parallel uploads across channels. Measure real per-channel throughput in M1 and size `UPLOAD_CHANNEL_CONCURRENCY` and the channel count from that. |
 | **Postgres row counts** | Compact bigint keys on the high-volume tables. Every hot query is index-only or keyset-paginated, with no `OFFSET` or `COUNT(*)`. With 10M nodes, about 15M chunks, and a few million blobs, the DB stays in the tens of GB, comfortable on a single PG instance. `chunks` can be hash-partitioned by `version_id` later if needed (the schema allows it without app changes). |
-| **Hot rows** (folder sizes, quota) | **Folder sizes are eventually consistent**: writes append to `folder_stat_deltas`, and a periodic job folds them up the ancestor chain in batches, so bulk uploads don't contend on the root folder's row. Quota uses short per-user transactions; with few users this is fine. There are two deliberate serialization points: the journal's commit-order lock (§8) and Postgres's serialization of commits that `NOTIFY` (§6.1). Both are hit once per batch or pack, not once per file. |
+| **Hot rows** (folder sizes, quota) | **Folder sizes are eventually consistent**: writes append to `folder_stat_deltas`, and a periodic job folds them up the ancestor chain in batches, so bulk uploads don't contend on the root folder's row. Quota uses short per-user transactions; with few users this is fine. There are two deliberate serialization points: the journal's commit-order lock (§8) and Postgres's serialization of commits that `NOTIFY` (§6.1). Bulk work hits both once per batch or pack, not once per file. Single actions, such as one upload or a rename, cost one serialized commit each. |
 | **Huge folders** | Keyset pagination plus virtualized rendering. No "load all children" code paths. |
 | **Bulk operations** (trash or move 100k items) | Moves are O(1) (only the parent changes). Trash and restore of very large subtrees run as batched background jobs (§6.3). |
 | **API CPU/IO** (encryption, streaming) | The API is **stateless**: sessions live in PG, staging is a shared volume, the cache is per instance, and live events fan out through Postgres `LISTEN/NOTIFY` (§6.1), so any instance can serve any user's SSE stream. Scale with `docker compose up --scale api=N`; Caddy load-balances. |
@@ -719,12 +723,13 @@ Expected profile (D7): **few users (≤ ~20), many files.** The design targets *
 
 | Piece | How it runs locally |
 |---|---|
-| Node.js 24 LTS + **pnpm** (via Corepack) | Native on Windows |
+| Node.js 24 LTS + **pnpm** (via Corepack) | Native on Windows. Without a global `pnpm`, run commands as `corepack pnpm …` |
 | PostgreSQL 18 | `docker compose -f docker/docker-compose.dev.yml up -d` (Docker Desktop). Port `5432` is published to **localhost only** |
 | api (`:3000`), bot (`:3001`), web (`:5173`) | `pnpm dev` (Turborepo runs all three in watch mode with `tsx` / Vite) |
 | Web → API | The Vite dev server proxies `/api` to `localhost:3000`, so the browser sees one origin, as it will in production |
 | Discord | A **separate dev guild and dev bot application**, so dev never touches production data |
 | No-Discord mode | `BLOB_STORE=local` swaps in `LocalBlobStore` (files under `./.data/blobs`). Most work, including all of M0–M3 UI work, can happen offline |
+| No-backend mode | `pnpm dev` with no API running: the web app uses its in-browser mock API (§10, D14). Set `VITE_API_MOCKS=off` once the API exists |
 
 - The repository uses `.gitattributes` with `* text=auto eol=lf`, so shell scripts and config files work unchanged on Fedora.
 - Paths are always built with `node:path`, never hard-coded separators.
@@ -748,7 +753,7 @@ pnpm workspaces + Turborepo.
 ```
 dfs/
 ├─ apps/
-│  ├─ web/            React SPA (Vite)
+│  ├─ web/            React SPA (Vite), with an MSW mock API in src/mocks
 │  ├─ api/            Fastify HTTP API
 │  └─ bot/            discord.js worker + packer + internal RPC
 ├─ packages/
@@ -775,6 +780,8 @@ The **`BlobStore` interface** (`put(blob) → ref`, `get(ref, range?) → stream
 | Concern | Choice | Rationale |
 |---|---|---|
 | Runtime | Node.js 24 LTS | Current LTS; native `fetch`, web streams |
+| Language | TypeScript 6.0 | Strict, with `erasableSyntaxOnly` so shared code also runs under Node's type stripping. Not 7.0 yet: typescript-eslint does not support it |
+| Frontend | React 19 + React Compiler, Vite 8, React Router 8, TanStack Query/Virtual, Tailwind 4 + shadcn/ui, zustand | See §10 |
 | Package manager | pnpm 10 + Turborepo | Fast workspaces, cached task graph |
 | HTTP | Fastify 5 | Fast, good streaming, schema validation via Zod type provider |
 | Database | PostgreSQL 18 | Native `uuidv7()`, async I/O, mature |
@@ -783,7 +790,7 @@ The **`BlobStore` interface** (`put(blob) → ref`, `get(ref, range?) → stream
 | Discord | discord.js v14 / @discordjs/rest | De-facto standard, built-in rate-limit handling |
 | Crypto | Node `crypto` (AES-256-GCM, HKDF), argon2 for share passwords | No exotic dependencies |
 | Logging | pino | Structured JSON, fast |
-| Testing | Vitest, Testcontainers (Postgres), Playwright (E2E) | |
+| Testing | Vitest, Testcontainers (Postgres), Playwright (E2E), MSW (mock API) | |
 | Lint/format | ESLint + Prettier | |
 
 ---
@@ -881,5 +888,6 @@ flowchart LR
 | D11 | Live events with several API replicas | Postgres **`LISTEN/NOTIFY`**, sent in the same transaction as the change, with one listener connection per API instance. | §6.1, §9, §12.1 |
 | D12 | Share link routing | `/s/:token` is an **SPA route**, and its data comes from `/api/s/*`. The edge proxies only `/api/*`. | §3, §7.2, §7.5, §9, §10.1 |
 | D13 | Thumbnails | **Deferred to after v1.** The grid shows file-type icons. The planned design (an extra encrypted frame per image version) has AAD type `0x02` reserved, so adding it needs no format change. | §1.2, §7.3, §10.1, §18 |
+| D14 | Build order | **UI first, against a mock API.** MSW serves the §9 contract in the browser during development, so the web app is built and tested before the API and bot exist. | §10, §13.1, §14 |
 
 No open questions at this time.
