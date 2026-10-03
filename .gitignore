@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+
+# Build output and caches
+dist/
+build/
+coverage/
+.turbo/
+.vite/
+*.tsbuildinfo
+
+# Test reports
+playwright-report/
+test-results/
+
+# Local data (LocalBlobStore, staging, cache)
+.data/
+
+# Secrets: never commit real keys or env files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+
+# Claude Code personal settings
+.claude/settings.local.json

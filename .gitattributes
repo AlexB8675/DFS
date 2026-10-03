@@ -1,0 +1,2 @@
+# LF everywhere, so scripts and configs work unchanged on Fedora (DESIGN.md §13.1)
+* text=auto eol=lf
