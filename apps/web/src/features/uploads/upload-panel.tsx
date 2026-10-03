@@ -3,10 +3,13 @@ import { NodeIcon } from '@/components/node-icon'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 import { Spinner } from '@/components/ui/spinner'
+import { VirtualList } from '@/components/virtual-list'
 import { formatBytes, formatCount } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { cancelUpload, retryUpload } from './upload-engine'
 import { summarize, useUploadStore, type UploadItem } from './upload-store'
+
+const UPLOAD_ROW_HEIGHT = 48
 
 /** A docked panel with the progress of every upload in this session. */
 export function UploadPanel() {
@@ -69,11 +72,16 @@ export function UploadPanel() {
         inert={collapsed}
       >
         <div className="overflow-hidden">
-          <ul className="max-h-72 overflow-y-auto border-t py-1">
-            {items.map((item) => (
-              <UploadRow key={item.id} item={item} />
-            ))}
-          </ul>
+          {/* Virtualized: dropping a folder can queue thousands of files. */}
+          <VirtualList
+            role="list"
+            aria-label="Upload queue"
+            className="max-h-72 border-t"
+            items={items}
+            getKey={(item) => item.id}
+            itemHeight={UPLOAD_ROW_HEIGHT}
+            renderItem={(item) => <UploadRow item={item} />}
+          />
         </div>
       </div>
     </section>
@@ -82,7 +90,7 @@ export function UploadPanel() {
 
 function UploadRow({ item }: { item: UploadItem }) {
   return (
-    <li className="flex items-center gap-3 py-1.5 pr-2 pl-4">
+    <div role="listitem" className="flex h-full items-center gap-3 pr-2 pl-4">
       <NodeIcon
         node={{ kind: 'file', name: item.file.name, mimeType: item.file.type || null }}
         className="size-5 shrink-0"
@@ -102,7 +110,7 @@ function UploadRow({ item }: { item: UploadItem }) {
         </p>
       </div>
       <UploadRowAction item={item} />
-    </li>
+    </div>
   )
 }
 

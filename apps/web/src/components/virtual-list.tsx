@@ -64,7 +64,7 @@ export function VirtualList<T>({
   }, [scrollToIndex, virtualizer])
 
   return (
-    <div ref={scrollRef} className={cn('overflow-y-auto', className)} {...props}>
+    <div ref={scrollRef} className={cn('overflow-y-auto contain-content', className)} {...props}>
       <div className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
         {virtualItems.map((virtualItem) => {
           const item = items[virtualItem.index]

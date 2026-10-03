@@ -1,3 +1,4 @@
+import type { DriveNode } from '@dfs/shared'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { ChevronRight, Folder, FolderOpen, HardDrive } from 'lucide-react'
 import { useEffect, type KeyboardEvent } from 'react'
@@ -6,6 +7,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useCurrentUser } from '@/features/auth/session'
 import { childFoldersQuery, pathQuery } from '@/features/drive/api'
 import { folderUrl } from '@/features/drive/use-node-actions'
+import { usePrefetchOnHover } from '@/features/drive/use-prefetch-on-hover'
 import { cn } from '@/lib/utils'
 import { useTreeStore } from './tree-store'
 
@@ -95,6 +97,8 @@ export function FolderTree({ onNavigate }: { onNavigate?: () => void }) {
 
 interface TreeItemProps {
   id: string
+  /** The folder as listed by its parent; absent for the root. */
+  node?: DriveNode
   name: string
   level: number
   hasChildren: boolean
@@ -102,11 +106,12 @@ interface TreeItemProps {
   onNavigate: (() => void) | undefined
 }
 
-function TreeItem({ id, name, level, hasChildren, currentId, onNavigate }: TreeItemProps) {
+function TreeItem({ id, node, name, level, hasChildren, currentId, onNavigate }: TreeItemProps) {
   const { rootFolderId } = useCurrentUser()
   const expanded = useTreeStore((state) => state.expanded.has(id))
   const toggle = useTreeStore((state) => state.toggle)
   const children = useInfiniteQuery({ ...childFoldersQuery(id), enabled: expanded && hasChildren })
+  const prefetch = usePrefetchOnHover(node)
 
   const isRoot = level === 1
   const isCurrent = id === currentId
@@ -127,6 +132,7 @@ function TreeItem({ id, name, level, hasChildren, currentId, onNavigate }: TreeI
         aria-current={isCurrent ? 'page' : undefined}
         tabIndex={isRoot ? 0 : -1}
         data-folder-id={id}
+        {...prefetch}
         title={name}
         className={cn(
           'flex h-8 items-center gap-1.5 rounded-md pr-2 transition-colors outline-none select-none',
@@ -181,6 +187,7 @@ function TreeItem({ id, name, level, hasChildren, currentId, onNavigate }: TreeI
             <TreeItem
               key={folder.id}
               id={folder.id}
+              node={folder}
               name={folder.name}
               level={level + 1}
               hasChildren={folder.hasChildFolders}

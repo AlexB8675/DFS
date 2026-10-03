@@ -6,6 +6,7 @@ import { formatBytes, formatDate, formatFullDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { listColumns, optionId, type ListedNode } from './list-layout'
 import { useSelection } from './selection'
+import { usePrefetchOnHover } from './use-prefetch-on-hover'
 
 export interface NodeItemProps {
   node: ListedNode
@@ -24,6 +25,7 @@ export function NodeRow({
 }: NodeItemProps & { showLocation: boolean }) {
   const selected = useSelection((state) => state.selected.has(node.id))
   const active = useSelection((state) => state.activeId === node.id)
+  const prefetch = usePrefetchOnHover(node)
 
   return (
     <div
@@ -31,6 +33,7 @@ export function NodeRow({
       role="option"
       aria-selected={selected}
       data-node-id={node.id}
+      {...prefetch}
       className={cn(
         'mx-2 grid h-full cursor-default items-center gap-4 rounded-md px-3 text-sm transition-[background-color,box-shadow] select-none',
         listColumns(showLocation),

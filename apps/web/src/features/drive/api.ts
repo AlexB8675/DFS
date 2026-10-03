@@ -12,6 +12,7 @@ import { infiniteQueryOptions, queryOptions, useMutation } from '@tanstack/react
 import { queryClient } from '@/app/query-client'
 import { apiFetch, apiGet, apiSend } from '@/lib/api/client'
 import { mocksEnabled } from '@/lib/env'
+import { usePreferences } from '@/lib/preferences'
 
 const PAGE_SIZE = 200
 
@@ -62,6 +63,27 @@ export function childrenQuery(id: string, params: ChildrenParams) {
 /** Subfolders only, A→Z: what the folder tree and the move dialog show. */
 export function childFoldersQuery(id: string) {
   return childrenQuery(id, { kind: 'folder', sort: 'name', order: 'asc' })
+}
+
+/**
+ * Warms the cache for a folder the user is about to open, so it appears
+ * instantly: its first page in the current sort order and its path. The
+ * folder itself is already known from the list it was shown in. Fresh data
+ * (within `staleTime`) is not fetched again.
+ */
+export function prefetchFolder(folder: DriveNode): void {
+  if (folder.kind !== 'folder') return
+  const { sortField: sort, sortOrder: order } = usePreferences.getState()
+  if (queryClient.getQueryData(nodeKeys.node(folder.id)) === undefined) {
+    queryClient.setQueryData(nodeKeys.node(folder.id), folder)
+  }
+  // Prefetch failures are harmless: opening the folder fetches again.
+  queryClient.infiniteQuery(childrenQuery(folder.id, { sort, order })).catch(ignore)
+  queryClient.query(pathQuery(folder.id)).catch(ignore)
+}
+
+function ignore(): void {
+  // Intentionally empty.
 }
 
 // ── Mutations ────────────────────────────────────────────────────────────────

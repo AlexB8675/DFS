@@ -5,11 +5,13 @@ import { cn } from '@/lib/utils'
 import { optionId } from './list-layout'
 import type { NodeItemProps } from './node-row'
 import { useSelection } from './selection'
+import { usePrefetchOnHover } from './use-prefetch-on-hover'
 
 /** One tile of the grid view. */
 export function NodeTile({ node, onSelect, onOpen, onContextMenu }: NodeItemProps) {
   const selected = useSelection((state) => state.selected.has(node.id))
   const active = useSelection((state) => state.activeId === node.id)
+  const prefetch = usePrefetchOnHover(node)
 
   return (
     <div
@@ -17,6 +19,7 @@ export function NodeTile({ node, onSelect, onOpen, onContextMenu }: NodeItemProp
       role="option"
       aria-selected={selected}
       data-node-id={node.id}
+      {...prefetch}
       className="h-full p-1.5 select-none"
       onClick={(event) => {
         onSelect(event, node)

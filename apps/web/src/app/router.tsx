@@ -1,25 +1,23 @@
 import { createBrowserRouter, Navigate } from 'react-router'
 import { NotFoundPage, RouteError, SplashScreen } from '@/components/status-pages'
-import { LoginPage } from '@/features/auth/login-page'
 import { redirectIfSignedIn, requireSession } from '@/features/auth/session'
-import { DrivePage } from '@/features/drive/drive-page'
-import { SearchPage } from '@/features/search/search-page'
-import { SettingsPage } from '@/features/settings/settings-page'
-import { SharesPage } from '@/features/shares/shares-page'
-import { TrashPage } from '@/features/trash/trash-page'
 import { AppShell } from '@/layout/app-shell'
 
 /**
  * Creates the router. It is a function, not a module-level constant, because a
  * router starts loading the current route as soon as it exists, and that must
  * wait until the mock API is listening.
+ *
+ * Pages are split into their own chunks and loaded on first visit. React
+ * Router fetches a page's code in parallel with the session check, so this
+ * adds no waterfall.
  */
 export function createAppRouter() {
   return createBrowserRouter([
     {
       path: '/login',
       loader: redirectIfSignedIn,
-      element: <LoginPage />,
+      lazy: async () => ({ Component: (await import('@/features/auth/login-page')).LoginPage }),
       hydrateFallbackElement: <SplashScreen />,
       errorElement: <RouteError />,
     },
@@ -31,14 +29,38 @@ export function createAppRouter() {
       errorElement: <RouteError />,
       children: [
         { index: true, element: <Navigate to="/drive" replace /> },
-        { path: 'drive', element: <DrivePage /> },
-        { path: 'drive/:folderId', element: <DrivePage /> },
-        { path: 'search', element: <SearchPage /> },
-        { path: 'shared', element: <SharesPage /> },
-        { path: 'trash', element: <TrashPage /> },
-        { path: 'settings', element: <SettingsPage /> },
+        { path: 'drive', lazy: drivePage },
+        { path: 'drive/:folderId', lazy: drivePage },
+        {
+          path: 'search',
+          lazy: async () => ({
+            Component: (await import('@/features/search/search-page')).SearchPage,
+          }),
+        },
+        {
+          path: 'shared',
+          lazy: async () => ({
+            Component: (await import('@/features/shares/shares-page')).SharesPage,
+          }),
+        },
+        {
+          path: 'trash',
+          lazy: async () => ({
+            Component: (await import('@/features/trash/trash-page')).TrashPage,
+          }),
+        },
+        {
+          path: 'settings',
+          lazy: async () => ({
+            Component: (await import('@/features/settings/settings-page')).SettingsPage,
+          }),
+        },
         { path: '*', element: <NotFoundPage /> },
       ],
     },
   ])
+}
+
+async function drivePage() {
+  return { Component: (await import('@/features/drive/drive-page')).DrivePage }
 }

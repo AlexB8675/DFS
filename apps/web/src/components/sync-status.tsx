@@ -7,7 +7,6 @@ import {
   TriangleAlert,
   type LucideIcon,
 } from 'lucide-react'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 
 const SYNC_STATES: Record<SyncState, { icon: LucideIcon; label: string; className: string }> = {
@@ -38,17 +37,16 @@ const SYNC_STATES: Record<SyncState, { icon: LucideIcon; label: string; classNam
   },
 }
 
-/** An icon for where a file's bytes are (§5.2), explained in a tooltip. */
+/**
+ * An icon for where a file's bytes are (§5.2). It explains itself with a
+ * native tooltip rather than a Radix one: it appears in every list row, and
+ * rows mount constantly while scrolling.
+ */
 export function SyncStatus({ state, className }: { state: SyncState; className?: string }) {
   const { icon: Icon, label, className: color } = SYNC_STATES[state]
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className={cn('inline-flex', className)} aria-label={label}>
-          <Icon className={cn('size-4', color)} aria-hidden />
-        </span>
-      </TooltipTrigger>
-      <TooltipContent>{label}</TooltipContent>
-    </Tooltip>
+    <span className={cn('inline-flex', className)} role="img" aria-label={label} title={label}>
+      <Icon className={cn('size-4', color)} aria-hidden />
+    </span>
   )
 }
