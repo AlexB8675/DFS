@@ -8,7 +8,7 @@
 | **Stack** | TypeScript everywhere: React + Fastify + discord.js + PostgreSQL 18 |
 | **Deployment** | Docker Compose on **one Fedora Linux VPS**. Only the web UI (Caddy edge) is public; API, bot, and DB sit on an internal Docker network (§3.2, §13) |
 | **Development** | Locally on Windows: Node 24 + pnpm, with Postgres in Docker Desktop (§13.1) |
-| **Chunk size** | 10 MiB Discord attachment limit (unboosted server) |
+| **Chunk size** | `CHUNK_SIZE` = 10 MiB − 128 KiB, under the 10 MiB Discord attachment limit (unboosted server, §2, D10) |
 | **Scale target** | Few users, **many files** (millions of nodes, multiple TB). Designed to scale horizontally where it matters (§12) |
 
 ---
@@ -327,7 +327,7 @@ stateDiagram-v2
     direction LR
     [*] --> uploading : upload session created
     uploading --> syncing : all parts received (readable from staging)
-    syncing --> stored : every chunk's blob stored in Discord
+    syncing --> stored : every data chunk's blob stored in Discord
     uploading --> failed : session expired
     syncing --> failed : unrecoverable error
     stored --> purging : trash emptied / version pruned
