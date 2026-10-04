@@ -1,5 +1,5 @@
 import type { Page, TrashItem } from '@dfs/shared'
-import { purgeSubtrees, type Executor } from '@dfs/db'
+import { appendJournal, purgeSubtrees, type Executor } from '@dfs/db'
 import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
@@ -68,7 +68,9 @@ export async function deleteForever(app: FastifyInstance, auth: Auth, id: string
       SELECT id FROM nodes
       WHERE id = ${id} AND owner_id = ${auth.user.id} AND deleted_at IS NOT NULL`)
     if (!rows[0]) throw notFound()
-    return purgeSubtrees(tx, auth.user.id, [id])
+    const purged = await purgeSubtrees(tx, auth.user.id, [id])
+    await appendJournal(tx, purged.records)
+    return purged.versionIds
   })
   await removeStagedVersions(app, staged)
 }
@@ -79,11 +81,13 @@ export async function emptyTrash(app: FastifyInstance, auth: Auth): Promise<void
     await lockDrive(tx, auth.user.id)
     const { rows } = await tx.execute<{ id: string }>(sql`
       SELECT id FROM nodes WHERE owner_id = ${auth.user.id} AND deleted_at IS NOT NULL`)
-    return purgeSubtrees(
+    const purged = await purgeSubtrees(
       tx,
       auth.user.id,
       rows.map((row) => row.id),
     )
+    await appendJournal(tx, purged.records)
+    return purged.versionIds
   })
   await removeStagedVersions(app, staged)
 }

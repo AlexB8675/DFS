@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm'
 import { markFoldersDirty, uuidArray } from './folder-stats.ts'
-import type { Executor } from './journal.ts'
+import { appendJournal, type Executor, type JournalRecord } from './journal.ts'
 import { purgeSubtrees, purgeVersions, releaseReservation } from './purge.ts'
 
 /**
@@ -45,13 +45,17 @@ export async function abandonUploads(
   )
 
   const staged: string[] = []
+  const records: JournalRecord[] = []
   for (const row of rows) {
     if (unfinished(row)) {
-      staged.push(...(await purgeSubtrees(tx, row.user_id, [row.node_id])))
+      const purged = await purgeSubtrees(tx, row.user_id, [row.node_id])
+      staged.push(...purged.versionIds)
+      records.push(...purged.records)
     } else {
-      await purgeVersions(tx, row.user_id, [row.version_id])
+      records.push(...(await purgeVersions(tx, row.user_id, [row.version_id])))
       staged.push(row.version_id)
     }
   }
+  await appendJournal(tx, records)
   return staged
 }

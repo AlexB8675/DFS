@@ -7,7 +7,7 @@ import {
   type BlobUploadJob,
   type Database,
 } from '@dfs/db'
-import { LocalBlobStore, Staging } from '@dfs/storage'
+import { ChaosBlobStore, LocalBlobStore, Staging, type BlobStore } from '@dfs/storage'
 import { sql } from 'drizzle-orm'
 import type { FastifyBaseLogger } from 'fastify'
 import type { JobResult, PgBoss } from 'pg-boss'
@@ -37,8 +37,13 @@ export async function startLeaderWork(options: {
   const { retryDelayMax: _fixed, ...changeable } = BLOB_UPLOAD_QUEUE
   await boss.updateQueue(QUEUES.blobUpload, changeable)
 
-  if (config.blobStore === 'local') {
-    const deps = { db, staging, store: new LocalBlobStore(config.localBlobDir) }
+  if (config.blobStore !== 'discord') {
+    let store: BlobStore = new LocalBlobStore(config.localBlobDir)
+    if (config.blobStore === 'chaos') {
+      store = new ChaosBlobStore(store)
+      log.warn('BLOB_STORE=chaos: storing blobs will fail now and then, on purpose')
+    }
+    const deps = { db, staging, store }
     await boss.work<
       BlobUploadJob,
       unknown,
@@ -85,20 +90,19 @@ export async function startLeaderWork(options: {
 
 /** Gives up uploads past their 24 hours, and forgets ended sessions. */
 export async function cleanUp(db: Database, staging: Staging): Promise<void> {
+  await db.execute(
+    sql`DELETE FROM upload_sessions WHERE expires_at <= now() AND state = 'completed'`,
+  )
+  await db.execute(sql`DELETE FROM sessions WHERE expires_at <= now()`)
   const versions = await db.transaction(async (tx) => {
     const { rows } = await tx.execute<{ id: string }>(sql`
       SELECT id FROM upload_sessions
       WHERE expires_at <= now() AND state = 'receiving'
       LIMIT 500 FOR UPDATE SKIP LOCKED`)
-    const staged = await abandonUploads(
+    return abandonUploads(
       tx,
       rows.map((row) => row.id),
     )
-    await tx.execute(
-      sql`DELETE FROM upload_sessions WHERE expires_at <= now() AND state = 'completed'`,
-    )
-    await tx.execute(sql`DELETE FROM sessions WHERE expires_at <= now()`)
-    return staged
   })
   for (const versionId of versions) await staging.removeVersion(versionId)
 }

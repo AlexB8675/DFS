@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.app.json && tsc -p tsconfig.node.json",
     "lint": "eslint .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "check:engine": "vitest run --silent=false src/features/uploads/upload-engine.stack.test.ts"
   },
   "dependencies": {
     "@dfs/shared": "workspace:*",

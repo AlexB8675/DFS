@@ -13,7 +13,11 @@ export interface Config {
   nodeEnv: NodeEnv
   logLevel: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace' | 'silent'
   databaseUrl: string
-  blobStore: 'discord' | 'local'
+  /**
+   * Where blobs go. `chaos` is the local store with the bot's writes failing
+   * now and then (DESIGN.md §17), to test retries; development only.
+   */
+  blobStore: 'discord' | 'local' | 'chaos'
   localBlobDir: string
   discord: {
     botToken: string | null
@@ -126,7 +130,7 @@ const envSchema = z.object({
     z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
   ),
   DATABASE_URL: setting(z.url({ protocol: /^postgres(ql)?$/ }).optional()),
-  BLOB_STORE: setting(z.enum(['discord', 'local']).optional()),
+  BLOB_STORE: setting(z.enum(['discord', 'local', 'chaos']).optional()),
   LOCAL_BLOB_DIR: setting(z.string().default('.data/blobs')),
   DISCORD_BOT_TOKEN: setting(z.string().optional()),
   DISCORD_GUILD_ID: setting(
@@ -201,6 +205,9 @@ export function loadConfig(env: Record<string, string | undefined>, options: Loa
   const internalRpcSecret = required('INTERNAL_RPC_SECRET')
   if (production && internalRpcSecret && internalRpcSecret.length < 32) {
     problems.push('INTERNAL_RPC_SECRET: use at least 32 random characters')
+  }
+  if (production && raw.BLOB_STORE === 'chaos') {
+    problems.push('BLOB_STORE: chaos is for development only')
   }
   if (production && options.service === 'api' && !raw.PUBLIC_BASE_URL) {
     problems.push('PUBLIC_BASE_URL: required in production')

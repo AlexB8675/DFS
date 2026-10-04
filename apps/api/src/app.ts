@@ -125,7 +125,8 @@ export async function buildApp({ config, logger }: AppOptions): Promise<FastifyI
 
 /** The local store in development; reading from Discord arrives with M1. */
 function blobStoreFor(config: Config): BlobStore {
-  if (config.blobStore === 'local') return new LocalBlobStore(config.localBlobDir)
+  // Chaos troubles only the bot's writes; the API reads the local store as is.
+  if (config.blobStore !== 'discord') return new LocalBlobStore(config.localBlobDir)
   const unavailable = () =>
     Promise.reject(
       new BlobStoreError('Reading from Discord arrives with M1.', { retryable: false }),

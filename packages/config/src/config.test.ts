@@ -86,6 +86,19 @@ describe('loadConfig', () => {
     ).toEqual(['INTERNAL_RPC_SECRET: use at least 32 random characters'])
   })
 
+  it('takes the chaos blob store in development only', () => {
+    expect(loadConfig({ BLOB_STORE: 'chaos' }, api).blobStore).toBe('chaos')
+    const production = {
+      NODE_ENV: 'production',
+      DATABASE_URL: 'postgres://dfs@postgres/dfs',
+      INTERNAL_RPC_SECRET: 'x'.repeat(32),
+      BLOB_STORE: 'chaos',
+    }
+    expect(problems(production, { ...api, service: 'bot' })).toEqual([
+      'BLOB_STORE: chaos is for development only',
+    ])
+  })
+
   it('refuses pack sizes that can never fit an attachment', () => {
     expect(problems({ PACK_THRESHOLD_BYTES: '10 MiB', PACK_TARGET_BYTES: '10 MiB' })).toEqual([
       expect.stringMatching(/^PACK_THRESHOLD_BYTES: must be at most 10420186 bytes/),

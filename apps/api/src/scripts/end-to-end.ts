@@ -165,8 +165,14 @@ function phase(name: string): void {
 async function step(name: string, work: () => Promise<void>): Promise<void> {
   phaseStarted = performance.now()
   const started = performance.now()
-  await work()
-  console.log(`✓ ${name} (${((performance.now() - started) / 1000).toFixed(1)} s)`)
+  const took = () => `${((performance.now() - started) / 1000).toFixed(1)} s`
+  try {
+    await work()
+  } catch (error) {
+    console.error(`✗ ${name} (after ${took()})`)
+    throw error
+  }
+  console.log(`✓ ${name} (${took()})`)
 }
 
 async function inParallel<T>(

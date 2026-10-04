@@ -64,7 +64,7 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
       WHERE blob.state = 'lost' ORDER BY blob.lost_at DESC NULLS LAST LIMIT 50`),
   ])
   const numbers = figures.rows[0]
-  const local = app.config.blobStore === 'local'
+  const local = app.config.blobStore !== 'discord'
   return {
     checkedAt: new Date().toISOString(),
     services: [

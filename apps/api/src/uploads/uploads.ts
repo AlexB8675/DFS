@@ -442,7 +442,7 @@ export async function completeUpload(
       ORDER BY version_no DESC
       OFFSET ${app.config.versionRetention}`)
     const prunedIds = old.map((row) => row.id)
-    await purgeVersions(tx, auth.user.id, prunedIds)
+    const pruneRecords = await purgeVersions(tx, auth.user.id, prunedIds)
 
     if (blobs.length > 0) {
       const jobs = blobs.map((blob) => ({ data: { blobId: blob.id } satisfies BlobUploadJob }))
@@ -456,7 +456,7 @@ export async function completeUpload(
         reserved_bytes = greatest(0, reserved_bytes - ${upload.reserved_bytes})
       WHERE id = ${auth.user.id}`)
     if (upload.parent_id) await markFoldersDirty(tx, [upload.parent_id])
-    await appendJournal(tx, [nodeRecord(node)])
+    await appendJournal(tx, [...pruneRecords, nodeRecord(node)])
     return prunedIds
   })
   await removeStagedVersions(app, pruned)
