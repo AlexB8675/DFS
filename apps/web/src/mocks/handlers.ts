@@ -24,7 +24,7 @@ import {
 import { delay, http, HttpResponse, sse, type JsonBodyType } from 'msw'
 import { z, ZodError } from 'zod'
 import { AdminMockDb } from './admin-db'
-import { MockApiError, type MockEvent } from './db'
+import { MockApiError, type MockEvent, type MockFileContent } from './db'
 import { MOCK_RESPONSE_HEADER } from './marker'
 import { DEMO_ACCOUNTS } from './seed'
 
@@ -242,15 +242,7 @@ export const handlers = [
 
   // ── Content ────────────────────────────────────────────────────────────────
   http.get<Id>('/api/files/:id/content', ({ request, params }) =>
-    respond(request, () => {
-      const file = db.fileContent(params.id)
-      return new HttpResponse(file.body, {
-        headers: {
-          'Content-Type': file.mimeType,
-          'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(file.name)}`,
-        },
-      })
-    }),
+    respond(request, () => fileResponse(request, db.fileContent(params.id))),
   ),
 
   // ── Archives (§6.2) ────────────────────────────────────────────────────────
@@ -379,13 +371,7 @@ export const handlers = [
         // Only a request from byte 0 counts as a download (§7.5).
         const range = request.headers.get('Range')
         const fromStart = range === null || range.startsWith('bytes=0-')
-        const file = db.shareFileContent(params.token, params.id, fromStart)
-        return new HttpResponse(file.body, {
-          headers: {
-            'Content-Type': file.mimeType,
-            'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(file.name)}`,
-          },
-        })
+        return fileResponse(request, db.shareFileContent(params.token, params.id, fromStart))
       },
       { public: true },
     ),
@@ -508,6 +494,30 @@ function toErrorResponse(error: unknown): Response {
     )
   }
   throw error
+}
+
+/** A file, or the single byte range asked for, as the real API sends it (§6.2). */
+function fileResponse(request: Request, file: MockFileContent): Response {
+  const size = file.body.length
+  const headers: Record<string, string> = {
+    'Content-Type': file.mimeType,
+    'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(file.name)}`,
+    'Accept-Ranges': 'bytes',
+  }
+  const match = /^bytes=(\d*)-(\d*)$/.exec(request.headers.get('Range') ?? '')
+  if (!match || (match[1] === '' && match[2] === '')) {
+    return new HttpResponse(file.body.slice(), { headers })
+  }
+  const [, from = '', to = ''] = match
+  const start = from === '' ? Math.max(0, size - Number(to)) : Number(from)
+  const end = from === '' || to === '' ? size - 1 : Math.min(Number(to), size - 1)
+  if (start >= size || start > end) {
+    return new HttpResponse(null, { status: 416, headers: { 'Content-Range': `bytes */${size}` } })
+  }
+  return new HttpResponse(file.body.slice(start, end + 1), {
+    status: 206,
+    headers: { ...headers, 'Content-Range': `bytes ${start}-${end}/${size}` },
+  })
 }
 
 function zipResponse(body: Uint8Array<ArrayBuffer>, fileName: string): Response {

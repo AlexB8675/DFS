@@ -373,6 +373,21 @@ export const uploadSessions = pgTable(
   ],
 )
 
+/**
+ * Single-use links for a ZIP of several items (D17): kept in the database so
+ * any API instance can redeem them, and only once.
+ */
+export const archiveTickets = pgTable('archive_tickets', {
+  /** SHA-256 of the link's token. */
+  tokenHash: bytea('token_hash').primaryKey(),
+  userId: uuid('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  nodeIds: uuid('node_ids').array().notNull(),
+  fileName: text('file_name').notNull(),
+  expiresAt: timestamptz('expires_at').notNull(),
+})
+
 // ── Audit and recovery ───────────────────────────────────────────────────────
 
 export const auditLog = pgTable(

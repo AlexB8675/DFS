@@ -3,7 +3,7 @@ import cookie from '@fastify/cookie'
 import type { Config } from '@dfs/config'
 import type { MasterKeys } from '@dfs/crypto'
 import { createDatabase, createPool, type Database } from '@dfs/db'
-import { Staging } from '@dfs/storage'
+import { BlobStoreError, LocalBlobStore, Staging, type BlobStore } from '@dfs/storage'
 import Fastify, { LogController, type FastifyInstance, type FastifyServerOptions } from 'fastify'
 import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod'
 import type pg from 'pg'
@@ -15,6 +15,7 @@ import { DataKeyCache, loadMasterKeys } from './keys.ts'
 import { JobQueue } from './queue.ts'
 import { adminRoutes } from './routes/admin.ts'
 import { authRoutes } from './routes/auth.ts'
+import { contentRoutes } from './routes/content.ts'
 import { eventRoutes } from './routes/events.ts'
 import { healthRoutes } from './routes/health.ts'
 import { nodeRoutes } from './routes/nodes.ts'
@@ -38,6 +39,8 @@ declare module 'fastify' {
     queue: JobQueue
     /** Live events for the users with open streams on this instance (§6.1). */
     events: EventHub
+    /** Where stored blobs are read from (§6.2). */
+    blobStore: BlobStore
   }
 }
 
@@ -87,6 +90,7 @@ export async function buildApp({ config, logger }: AppOptions): Promise<FastifyI
   app.decorate('dataKeys', new DataKeyCache())
   app.decorate('queue', queue)
   app.decorate('events', events)
+  app.decorate('blobStore', blobStoreFor(config))
   // Open event streams would keep the server from closing.
   app.addHook('preClose', (done) => {
     events.endStreams()
@@ -110,7 +114,18 @@ export async function buildApp({ config, logger }: AppOptions): Promise<FastifyI
   await app.register(nodeRoutes, { prefix: '/api' })
   await app.register(uploadRoutes, { prefix: '/api' })
   await app.register(eventRoutes, { prefix: '/api' })
+  await app.register(contentRoutes, { prefix: '/api' })
   return app
+}
+
+/** The local store in development; reading from Discord arrives with M1. */
+function blobStoreFor(config: Config): BlobStore {
+  if (config.blobStore === 'local') return new LocalBlobStore(config.localBlobDir)
+  const unavailable = () =>
+    Promise.reject(
+      new BlobStoreError('Reading from Discord arrives with M1.', { retryable: false }),
+    )
+  return { put: unavailable, read: unavailable, delete: unavailable }
 }
 
 function loggerOptions(config: Config): FastifyServerOptions['logger'] {

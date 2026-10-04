@@ -107,6 +107,12 @@ export type MockChannel = Pick<
 
 export type MockAuditEntry = AuditEntry
 
+export interface MockFileContent {
+  name: string
+  mimeType: string
+  body: Uint8Array
+}
+
 export interface MockState {
   version: number
   /** The signed-in user, or the last one while signed out. */
@@ -167,6 +173,12 @@ export class MockDb {
   private readonly archiveTickets = new Map<string, { ids: string[]; expiresAt: number }>()
   /** Share tokens unlocked with their password; the real API uses a short-lived cookie. */
   private readonly unlockedShares = new Set<string>()
+  /**
+   * What uploads sent, kept in memory only: parts by upload, then whole files
+   * by node. After a reload a file reads as placeholder text again.
+   */
+  private readonly receivedBytes = new Map<string, Map<number, Uint8Array>>()
+  private readonly fileBytes = new Map<string, Uint8Array>()
 
   constructor() {
     this.state = loadState() ?? createSeed(STATE_VERSION)
@@ -392,10 +404,22 @@ export class MockDb {
     }))
   }
 
-  fileContent(id: string): { name: string; mimeType: string; body: string } {
+  fileContent(id: string): MockFileContent {
     const node = this.visibleNode(id)
     if (node.kind !== 'file') throw notFound()
-    return { name: node.name, mimeType: 'text/plain', body: mockContent(node) }
+    return this.contentOf(node)
+  }
+
+  /** What a file holds: the bytes uploaded in this page's lifetime, or placeholder text. */
+  protected contentOf(node: MockNode): MockFileContent {
+    const bytes = this.fileBytes.get(node.id)
+    if (bytes)
+      return { name: node.name, mimeType: node.mimeType ?? 'application/octet-stream', body: bytes }
+    return {
+      name: node.name,
+      mimeType: 'text/plain',
+      body: new TextEncoder().encode(mockContent(node)),
+    }
   }
 
   // ── Archives (§6.2) ────────────────────────────────────────────────────────
@@ -433,13 +457,12 @@ export class MockDb {
   }
 
   private zipEntries(roots: MockNode[]): ZipEntry[] {
-    const encoder = new TextEncoder()
     const entries: ZipEntry[] = []
     const add = (node: MockNode, prefix: string) => {
       const path = `${prefix}${node.name}`
       const modifiedAt = new Date(node.updatedAt)
       if (node.kind === 'file') {
-        entries.push({ path, data: encoder.encode(mockContent(node)), modifiedAt })
+        entries.push({ path, data: this.contentOf(node).body, modifiedAt })
         return
       }
       // Folders get their own entry, so empty ones survive.
@@ -649,6 +672,9 @@ export class MockDb {
       throw new MockApiError(409, 'upload_completed', 'This upload is already complete.')
     }
     upload.receivedParts[index] = sha256
+    const parts = this.receivedBytes.get(uploadId) ?? new Map<number, Uint8Array>()
+    parts.set(index, new Uint8Array(body))
+    this.receivedBytes.set(uploadId, parts)
     // A single-part upload completes on its own (§6.1), saving a request per small file.
     if (upload.chunkCount === 1) this.completeUpload(uploadId)
     else this.save()
@@ -676,6 +702,18 @@ export class MockDb {
       this.scheduleSyncCompletion(node)
     }
     upload.state = 'completed'
+    const parts = this.receivedBytes.get(uploadId)
+    this.receivedBytes.delete(uploadId)
+    if (parts) {
+      const ordered = [...parts.entries()].sort(([a], [b]) => a - b).map(([, bytes]) => bytes)
+      const whole = new Uint8Array(ordered.reduce((total, bytes) => total + bytes.length, 0))
+      let at = 0
+      for (const bytes of ordered) {
+        whole.set(bytes, at)
+        at += bytes.length
+      }
+      this.fileBytes.set(upload.nodeId, whole)
+    }
     this.changed()
   }
 
@@ -807,16 +845,12 @@ export class MockDb {
    * `GET /s/:token/files/:id/content`. Counts toward the download limit only
    * when the request starts at byte 0, so seeking in a video doesn't use it up.
    */
-  shareFileContent(
-    token: string,
-    id: string,
-    fromStart: boolean,
-  ): { name: string; mimeType: string; body: string } {
+  shareFileContent(token: string, id: string, fromStart: boolean): MockFileContent {
     const { share, root } = this.liveShare(token)
     const node = this.nodeInShare(root, id)
     if (node.kind !== 'file') throw notFound()
     if (fromStart) this.countDownload(share)
-    return { name: node.name, mimeType: 'text/plain', body: mockContent(node) }
+    return this.contentOf(node)
   }
 
   /** `GET /s/:token/archive?nodeId`: the shared folder, or a folder inside it, as a ZIP. */

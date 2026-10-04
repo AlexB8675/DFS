@@ -43,6 +43,13 @@
       "when": 1791137269974,
       "tag": "0005_staged_chunks",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1791137986696,
+      "tag": "0006_archive_tickets",
+      "breakpoints": true
     }
   ]
 }

@@ -31,6 +31,7 @@ export interface Assertion {
   toBeNull: () => void
   toHaveLength: (length: number) => void
   toContain: (item: unknown) => void
+  toMatch: (pattern: RegExp | string) => void
   toBeGreaterThan: (value: number) => void
   not: Assertion
 }
