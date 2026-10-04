@@ -1,9 +1,9 @@
 # DFS — Discord File System
-### Design Document · v0.6 (Draft)
+### Design Document · v0.7 (Draft)
 
 | | |
 |---|---|
-| **Status** | Draft, for review. All questions from v0.1/v0.2 resolved, v0.3 review findings fixed as D8–D13, and the UI-first build and its API details settled as D14–D18 (see §19). The web UI is done against a mock API; the backend is next (§18.1) |
+| **Status** | Draft, for review. All questions from v0.1/v0.2 resolved, v0.3 review findings fixed as D8–D13, and the UI-first build and its API details settled as D14–D18, and the backend plan as D19–D28 (see §19). The web UI is done against a mock API; the backend is next ([BACKEND.md](BACKEND.md)) |
 | **Date** | 2026-10-04 |
 | **Stack** | TypeScript everywhere: React + Fastify + discord.js + PostgreSQL 18 |
 | **Deployment** | Docker Compose on **one Fedora Linux VPS**. Only the web UI (Caddy edge) is public; API, bot, and DB sit on an internal Docker network (§3.2, §13) |
@@ -152,8 +152,9 @@ flowchart LR
  └─ #dfs-log         human-readable bot events and alerts
 ```
 
-- **Permissions:** `@everyone` is denied View Channel on the category. The bot role gets View, Send Messages, Attach Files, Read Message History, and Manage Messages. Admin users can view `#dfs-log`.
+- **Permissions:** `@everyone` is denied View Channel on the category. The bot role gets View, Send Messages, Attach Files, Read Message History, and Manage Messages, plus Manage Channels and Manage Roles while `dfs setup` creates the category and sets its permissions (they can be removed afterwards). Admin users can view `#dfs-log`.
 - **Bootstrap:** `/dfs setup` (or `dfs setup` in the CLI) creates the category and channels if they are missing, then registers them in the `storage_channels` table.
+- **Environments (D25):** development shares the server and the bot with production. Production uses the `DFS` category, development a `DFS Dev` category (`DISCORD_CATEGORY_NAME`). Each environment registers only its own channels in its own `storage_channels`, and everything that reads or deletes messages (reconciler, scrubber, GC, recovery) works only in registered channels, so neither can take the other's messages for orphans. Development runs without a gateway connection (`DISCORD_GATEWAY=off`): slash commands and tamper watch belong to production, and development sets up its channels with the CLI (`dfs setup`). The two share Discord's rate limits, so load tests use `LocalBlobStore` or `ChaosBlobStore`, never Discord.
 - **Message formats.** They leak no file names, and every attachment is encrypted:
   ```
   #storage-NN   content: dfs1 b=184467 k=pack n=212        attachment: 184467.bin
@@ -317,7 +318,7 @@ Supporting tables not drawn above: `journal` (outbox of metadata changes, §8), 
 - **Blob queues:** partial indexes `blobs (state) WHERE state IN ('staged','uploading','deleting')` and `chunks (id) WHERE blob_id IS NULL AND purged_at IS NULL` (frames waiting for the packer).
 - **Tree queries:** paths and breadcrumbs use recursive CTEs, which are cheap because trees are shallow. A move is one `UPDATE` plus a cycle check (the new parent must not be a descendant).
 - **Quota:** `upload_sessions` reserve bytes up front (`users.reserved_bytes`). When the upload completes, the reservation becomes `used_bytes` in one short transaction.
-- **Versions:** v1 keeps the **current version plus N previous ones** (`VERSION_RETENTION`, default 3). Older versions move to `purging`.
+- **Versions:** v1 keeps the **current version plus N previous ones** (`VERSION_RETENTION`, default 3). Older versions move to `purging`. Old versions count toward the owner's quota until they are purged, like the trash (D24).
 
 ### 5.2 Lifecycle state machines
 
@@ -405,7 +406,12 @@ sequenceDiagram
 
 - **Resume:** `GET /api/uploads/:id` returns the session with `receivedParts`, the part indexes already received. The client only re-sends the missing ones. Upload sessions expire after 24 h; a janitor job cleans up expired sessions and releases their reserved quota.
 - **Small files in bulk:** `POST /api/uploads/batch` creates up to 500 sessions in one call. It answers per upload, in request order (`{results: [{ok: true, session} | {ok: false, error}]}`), because a batch can partly fail: an invalid name, or the quota running out halfway (`507 quota_exceeded`). A single-part file is uploaded with one `PUT` and **auto-completes**, so uploading a small file costs 2 requests in total. Folder trees are created first with `POST /api/folders/ensure` (like `mkdir -p` for many paths in one transaction).
-- **Idempotency:** Discord's `nonce` + `enforce_nonce` on message create prevents duplicate posts when a job retries within a short window. A reconciler also scans for orphan `dfs1` messages whose blob is not `stored`, and deletes or adopts them.
+- **Same name, new version (D20):** an upload whose name matches a non-trashed **file** in the target folder (by `name_key`, so ignoring case) creates a new version of that file instead of a new node. The node keeps its ID and its stored name, so links, shares and paths keep working. A matching **folder** is a `409 name_conflict`. Renames and moves still answer `409` on any clash; only uploads make versions.
+  - The new version reserves its full size; old versions still count (D24), so there must be room for both.
+  - `current_version_id` moves to the new version only when the upload completes, in the same transaction that turns the reservation into used bytes. Until then, readers and shares get the previous version.
+  - Completing it moves versions beyond `VERSION_RETENTION` to `purging`, which frees their quota.
+  - The upload session says which version it creates (`versionId`), and `GET /uploads/:id` answers until the session expires, also after completion (`state: 'receiving' | 'completed'`). A client retrying a part whose response was lost checks that state; it can't tell from the node, whose current version may be an older, stored one.
+- **Idempotency:** Discord's `nonce` + `enforce_nonce` on message create prevents duplicate posts when a job retries within a short window. A reconciler also scans its environment's registered channels (§4) for orphan `dfs1` messages whose blob is not `stored`, and deletes or adopts them.
 - **Channel selection:** the least-loaded enabled data channel, which spreads rate-limit buckets across channels. Concurrency per channel is configurable (default 2 in-flight requests).
 - **Backpressure:** if staging passes `STAGING_MAX_BYTES`, `PUT part` returns `503` with `Retry-After` (seconds or an HTTP date) and the client backs off. Staging cannot grow without limit when Discord is slower than the user's upload.
 - **Read-your-writes:** a `syncing` version is fully readable. The download path reads frames from staging until their blob is `stored`.
@@ -513,10 +519,11 @@ flowchart LR
 
 ### 7.1 Authentication: "Log in with Discord"
 
-- Users sign in with **Discord OAuth2** (scopes `identify` and `guilds.members.read`).
-- Login is **gated by membership in the DFS guild plus a `DFS User` role**, so admins manage access by assigning a Discord role. There are no passwords to store.
-- An optional `DFS Admin` role maps to the `admin` role in DFS (synced on each login and periodically by the bot).
+- Users sign in with **Discord OAuth2** (scope `identify`).
+- **Access is a list kept in DFS (D27):** an admin adds a person by their Discord user ID on the Users page, with a quota and a role. A Discord account that hasn't been added gets a clear "no access" message and no session. The Discord server is private to the owner and only holds the storage channels; users never join it. Disabling a user on the Users page ends their sessions at once.
+- **Admins are set in DFS (D28):** any admin can make a user an admin on the Users page. The **owner** (`OWNER_DISCORD_ID`) is always an admin, and nobody can demote or disable that account from the page, so there is always someone who can manage access.
 - Sessions are server-side rows in Postgres, referenced by an `HttpOnly; Secure; SameSite=Lax` cookie with a sliding 30-day expiry. Every state-changing request needs a CSRF token header.
+- **Development only (D21):** with `DEV_LOGIN=1`, `POST /api/auth/dev-login` signs in as a local admin without Discord, so API work needs no Discord application. Config parsing refuses to start the API when `DEV_LOGIN` is set and `NODE_ENV=production`.
 
 ### 7.2 Authorization
 
@@ -626,14 +633,14 @@ All routes are under `/api`, use JSON unless noted, and are validated with Zod s
 | `POST /folders` `{parentId, name}` · `POST /folders/ensure` `{parentId, paths[]}` | Create folder / `mkdir -p` in bulk |
 | `PATCH /nodes/:id` `{name?, parentId?}` · `POST /nodes/move` `{ids[], parentId}` | Rename / move (single or bulk) |
 | `DELETE /nodes/:id` · `POST /nodes/trash` `{ids[]}` · `POST /nodes/:id/restore` · `GET /trash` · `DELETE /trash/:id` · `DELETE /trash` | Trash: move, restore, list, delete one item forever, empty |
-| `POST /uploads` · `POST /uploads/batch` (per-upload results) · `GET /uploads/:id` (with `receivedParts`) · `PUT /uploads/:id/parts/:idx` (binary) · `POST /uploads/:id/complete` · `DELETE /uploads/:id` | Multipart upload (§6.1) |
+| `POST /uploads` · `POST /uploads/batch` (per-upload results) · `GET /uploads/:id` (`receivedParts`; also `state` and `versionId`, until the session expires) · `PUT /uploads/:id/parts/:idx` (binary) · `POST /uploads/:id/complete` · `DELETE /uploads/:id` | Multipart upload (§6.1) |
 | `GET /files/:id/content` (Range) · `GET /files/:id/versions` · `POST /files/:id/versions/:vid/restore` | Content & versions |
 | `GET /folders/:id/archive` · `POST /archive` `{ids[]}` → `{url, fileName, expiresAt}` · `GET /archive/:ticket` | ZIP download. Several items get a short-lived, single-use link (D17), which the browser then downloads with a plain navigation |
 | `GET /search?q=&type=&cursor` | Name search (`pg_trgm`) |
 | `POST /shares` · `GET /shares` · `PATCH /shares/:id` (expiry, password, cap) · `DELETE /shares/:id` | Share links (owner) |
 | `GET /s/:token` · `POST /s/:token/unlock` `{password}` · `GET /s/:token/children?parentId&cursor` · `GET /s/:token/files/:id/content` (Range) · `GET /s/:token/archive?nodeId` | Public share access, no login. Used by the SPA page at `/s/:token`. `:id`, `parentId` and `nodeId` must be the shared node or inside its subtree. `GET /s/:token` answers `{locked: true}` for a password-protected link that isn't unlocked, otherwise the shared node, who shared it, the expiry and the downloads left. Children come with their `path` inside the share. Dead links answer `410` (`share_expired`, `share_revoked`, `share_used_up`), unknown ones `404`. A locked link or a wrong password is `403`, never `401`, which means "sign in" to the app (D18) |
 | `GET /events` (SSE) | Sync progress, background changes, quota, keep-alive pings (fed by `LISTEN/NOTIFY`; payloads in §6.1) |
-| `GET /admin/users` · `PATCH /admin/users/:id` (quota, role, disable) | Admin: users |
+| `GET /admin/users` · `POST /admin/users` `{discordUserId, quotaBytes?, role?}` · `PATCH /admin/users/:id` (quota, role, disable; never the owner) | Admin: users |
 | `GET /admin/users/:id/usage` · `GET /admin/nodes/:id` · `GET /admin/nodes/:id/path` · `GET /admin/nodes/:id/children` · `GET /admin/search?q=&userId=` | Admin: **read-only metadata** of any user (no content routes) |
 | `DELETE /admin/nodes/:id` `{reason}` | Admin: moderation trash (audited; the owner sees the reason in their trash) |
 | `GET /admin/health` · `GET /admin/channels` · `POST /admin/channels` · `PATCH /admin/channels/:id` `{enabled}` · `GET /admin/audit` | Admin: system. At least one channel always stays enabled. Admins can't demote or disable themselves |
@@ -668,7 +675,7 @@ Internal (bot), only reachable on `dfs_internal` and returning `404` at the edge
 
 | Screen | Key features |
 |---|---|
-| **Login** | "Continue with Discord" button, plus a clear message if the user lacks the role |
+| **Login** | "Continue with Discord" button, plus a clear message if the Discord account hasn't been added to DFS |
 | **Drive** (main) | Breadcrumbs, virtualized list/grid (file-type icons; thumbnails come later, §1.2), sort, multi-select (shift/ctrl, select-all across pages), right-click context menu, drag-drop upload (files *and* folders, onto the folder or straight onto a subfolder), drag-to-move, inline rename, keyboard shortcuts (F2, Del, Ctrl+A), sync status icon per file (syncing / stored / lost), download (one file as itself, folders and multiple items as a ZIP) |
 | **Upload panel** | Docked queue showing aggregate progress (files and bytes), speed and time left, per-file two-phase progress (upload → Discord sync), pause/resume/cancel per file and for all, retry failed |
 | **Preview** | Image, video/audio (streamed with Range), PDF, text/code (with size cap), plus version history and share actions |
@@ -676,7 +683,7 @@ Internal (bot), only reachable on `dfs_internal` and returning `404` at the edge
 | **Shared links** | List, revoke, and edit expiry, password and download limit. A new link is shown (copy, open) only when it is created |
 | **Public share page** | Minimal, unauthenticated SPA route `/s/:token` (data from `/api/s/*`), loaded without the signed-in app: a password prompt if needed (a wrong password shakes the card), then the file with a download button, or a folder to browse (breadcrumbs inside the share, per-file download, ZIP of any folder). Shows who shared it, the expiry and the downloads left, and a clear message for expired, revoked and used-up links. Previews come with the Preview screen |
 | **Settings** | Profile, quota usage bar |
-| **Admin** | Tabs: **Overview** (service status, sync backlog with speed and time left, job queue, staging and cache use, storage, scrubber progress, backups, lost blobs; refreshes every 5 s), **Users** (quotas, roles, disable; per-user usage by file type and a **read-only metadata browser**: names, tree, sizes, dates, with no open/download/preview; moderation trash with a reason), **Channels** (add, enable/disable), **Audit log**. A `requireAdmin` route loader makes the pages a 404 for everyone else |
+| **Admin** | Tabs: **Overview** (service status, sync backlog with speed and time left, job queue, staging and cache use, storage, scrubber progress, backups, lost blobs; refreshes every 5 s), **Users** (add a person by Discord user ID, quotas, roles, disable; the owner can't be changed; per-user usage by file type and a **read-only metadata browser**: names, tree, sizes, dates, with no open/download/preview; moderation trash with a reason), **Channels** (add, enable/disable), **Audit log**. A `requireAdmin` route loader makes the pages a 404 for everyone else |
 
 ### 10.2 Client upload engine
 
@@ -693,7 +700,7 @@ Internal (bot), only reachable on `dfs_internal` and returning `404` at the edge
 
 ## 11. Bot Service
 
-- **discord.js v14**, intents: `Guilds`, `GuildMessages`, `GuildMembers` (for role sync). Message Content intent is **not** needed, because the bot reads its own messages.
+- **discord.js v14**, intents: `Guilds` and `GuildMessages`. Users aren't members of the server (D27), so `GuildMembers` and its privileged intent aren't needed. Message Content intent is **not** needed, because the bot reads its own messages.
 - **Leader election:** the bot takes a Postgres advisory lock at startup. A second instance waits as a hot standby, so only one gateway connection and one packer exist at a time.
 - **Job workers (pg-boss queues):**
   | Queue | Priority | Notes |
@@ -706,7 +713,7 @@ Internal (bot), only reachable on `dfs_internal` and returning `404` at the edge
   | `blob.verify` | lowest | rolling scrubber, request-budgeted |
   | `reconcile.orphans` | cron, daily | scans channel history since the last checkpoint for untracked `dfs1` messages |
 - **Slash commands** (admin-only): `/dfs setup`, `/dfs status` (usage, queue depth, sync backlog, throughput), `/dfs health` (lost blobs, last scrub), `/dfs channel add`.
-- **Gateway events:** `messageDelete`/`messageDeleteBulk` in storage channels → mark blobs `lost` and alert. `guildMemberUpdate` → role sync (revoke sessions when the `DFS User` role is removed).
+- **Gateway events:** `messageDelete`/`messageDeleteBulk` in storage channels → mark blobs `lost` and alert.
 - **Rate limiting:** relies on `@discordjs/rest`'s bucket handling, plus our own per-channel concurrency limiter. Rate-limit metrics are exported to `/internal/health`.
 
 ---
@@ -749,11 +756,12 @@ Expected profile (D7): **few users (≤ ~20), many files.** The design targets *
 
 | Piece | How it runs locally |
 |---|---|
-| Node.js 24 LTS + **pnpm** (via Corepack) | Native on Windows. Without a global `pnpm`, run commands as `corepack pnpm …` |
+| Node.js 24 LTS + **pnpm** (via Corepack) | Native on Windows. `pnpm` itself must be on the PATH (`corepack enable pnpm`), because Turborepo calls it; `corepack pnpm …` alone is not enough |
 | PostgreSQL 18 | `docker compose -f docker/docker-compose.dev.yml up -d` (Docker Desktop). Port `5432` is published to **localhost only** |
-| api (`:3000`), bot (`:3001`), web (`:5173`) | `pnpm dev` (Turborepo runs all three in watch mode with `tsx` / Vite) |
+| api (`:3000`), bot (`:3001`), web (`:5173`) | `pnpm dev` (Turborepo runs all three in watch mode: `node --watch` on the TypeScript sources, D22, and Vite) |
+| Sign-in without Discord | `DEV_LOGIN=1` enables a development-only sign-in as a local admin (D21) |
 | Web → API | The Vite dev server proxies `/api` to `localhost:3000`, so the browser sees one origin, as it will in production |
-| Discord | A **separate dev guild and dev bot application**, so dev never touches production data |
+| Discord | The production server and bot, with development's own `DFS Dev` channels and no gateway connection (D25, §4). Development never touches production's channels |
 | No-Discord mode | `BLOB_STORE=local` swaps in `LocalBlobStore` (files under `./.data/blobs`). Most work, including all of M0–M3 UI work, can happen offline |
 | No-backend mode | `pnpm dev` with no API running: the web app uses its in-browser mock API (§10, D14). Set `VITE_API_MOCKS=off` once the API exists |
 
@@ -767,6 +775,7 @@ Expected profile (D7): **few users (≤ ~20), many files.** The design targets *
 - **firewalld:** allow only `ssh`, `http`, `https` (plus `443/udp` for HTTP/3). Docker writes its own iptables/nftables rules for published ports. That is fine here because only Caddy publishes ports.
 - **Secrets:** `/etc/dfs/secrets/*` (mode `0600`, root-owned) are mounted as Compose `secrets:`. Nothing sensitive goes into images or environment files committed to git.
 - **Lifecycle:** `restart: unless-stopped` and Docker enabled via systemd (`systemctl enable --now docker`). Updates: `git pull && docker compose build && docker compose up -d`. Migrations run automatically in a one-shot `migrate` service before `api`/`bot` start.
+- **Code (D26):** a private GitHub repository. The VPS pulls it with a read-only deploy key. There is no CI: `pnpm check` (format, typecheck, lint, tests) runs locally before pushing.
 - **Host hardening:** `dnf-automatic` security updates, SSH key-only login, fail2ban (optional), and a non-root deploy user in the `docker` group.
 - **Disk:** staging (`STAGING_MAX_BYTES`) and cache (`CACHE_MAX_BYTES`) must fit on the VPS disk alongside Postgres. Size the VPS disk from those plus the DB estimate (§12.2).
 
@@ -796,7 +805,8 @@ dfs/
 │  ├─ Caddyfile                 TLS, SPA, route allowlist, streaming settings
 │  └─ *.Dockerfile              multi-stage builds per app
 └─ docs/
-   └─ DESIGN.md
+   ├─ DESIGN.md      the spec
+   └─ BACKEND.md     the build plan for api, bot and db
 ```
 
 The **`BlobStore` interface** (`put(blob) → ref`, `get(ref, range?) → stream`, `delete(ref)`) keeps the file-system logic independent of Discord. It exists so tests and offline development can use `LocalBlobStore` and `ChaosBlobStore`. Production only ever uses `DiscordBlobStore` (no mirroring, D5).
@@ -805,7 +815,7 @@ The **`BlobStore` interface** (`put(blob) → ref`, `get(ref, range?) → stream
 
 | Concern | Choice | Rationale |
 |---|---|---|
-| Runtime | Node.js 24 LTS | Current LTS; native `fetch`, web streams |
+| Runtime | Node.js 24 LTS | Current LTS; native `fetch`, web streams. Runs the TypeScript sources directly with type stripping, so api, bot and packages have no build step (D22) |
 | Language | TypeScript 6.0 | Strict, with `erasableSyntaxOnly` so shared code also runs under Node's type stripping. Not 7.0 yet: typescript-eslint does not support it |
 | Frontend | React 19 + React Compiler, Vite 8, React Router 8, TanStack Query/Virtual, Tailwind 4 + shadcn/ui, zustand | See §10 |
 | Package manager | pnpm 10 + Turborepo | Fast workspaces, cached task graph |
@@ -829,10 +839,12 @@ The **`BlobStore` interface** (`put(blob) → ref`, `get(ref, range?) → stream
 | `DATABASE_URL` | — | |
 | `BLOB_STORE` | `discord` | `local` for offline development and tests |
 | `LOCAL_BLOB_DIR` | `./.data/blobs` | when `BLOB_STORE=local` |
-| `DISCORD_BOT_TOKEN` | — | bot only |
+| `DISCORD_BOT_TOKEN` | — | bot only; not needed when `BLOB_STORE=local` |
 | `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` | — | OAuth (api) |
 | `DISCORD_GUILD_ID` | — | |
-| `DFS_USER_ROLE_ID` / `DFS_ADMIN_ROLE_ID` | — | access gating |
+| `DISCORD_CATEGORY_NAME` | `DFS` | the channel category this environment uses and creates (§4); `DFS Dev` in development |
+| `DISCORD_GATEWAY` | `on` | `off` in development: REST only, no slash commands or tamper watch (D25) |
+| `OWNER_DISCORD_ID` | — | the owner's Discord user ID: always an admin, can't be demoted or disabled (D28) |
 | `DISCORD_ATTACHMENT_LIMIT` | `10485760` | 10 MiB (unboosted server). Only raise it if the server is boosted. |
 | `BLOB_MAX_BYTES` / `CHUNK_SIZE` | derived | Not set directly. Attachment limit − 64 KiB (hard cap on every attachment) / the largest multiple of 64 KiB that fits one frame under that cap (§7.3) |
 | `PACK_THRESHOLD_BYTES` | `4194304` | files smaller than this are packed |
@@ -854,6 +866,7 @@ The **`BlobStore` interface** (`put(blob) → ref`, `get(ref, range?) → stream
 | `API_PORT` / `BOT_PORT` | `3000` / `3001` | |
 | `TRUSTED_PROXY_CIDRS` | Docker network CIDR | addresses allowed to set `X-Forwarded-*` |
 | `LOG_LEVEL` | `info` | |
+| `DEV_LOGIN` | unset | `1` enables the development-only sign-in (§7.1). Refused when `NODE_ENV=production` |
 
 At startup, config parsing rejects size settings that can't work: it requires `PACK_THRESHOLD_BYTES + 38 ≤ BLOB_MAX_BYTES` (otherwise some small-file frames could never be packed) and `PACK_TARGET_BYTES ≤ BLOB_MAX_BYTES`.
 
@@ -875,7 +888,7 @@ At startup, config parsing rejects size settings that can't work: it requires `P
 | Unit | Crypto round-trips and tamper detection (including flipped header bytes and frames moved between object types or versions), frame parsing, pack assembly/offsets (property test: a pack never exceeds `BLOB_MAX_BYTES`), chunk math (range → chunks), name normalization, tree cycle detection |
 | Integration | API + Postgres (Testcontainers) + `LocalBlobStore`: full upload/download/trash/purge flows, packing and compaction, quota accounting, concurrent renames, SSE events across two API instances, and a **recovery drill**: rebuild an empty DB from the blob store alone (snapshot + journal) and diff it against the source DB |
 | Scale | Seed 1M nodes and check that listing, search, and move latencies stay within budget (p95 < 100 ms for list and search) |
-| Discord contract | `DiscordBlobStore` against a **dedicated test guild** (opt-in, real token): upload, Range read on the CDN, URL refresh, delete |
+| Discord contract | `DiscordBlobStore` against a test channel in the `DFS Dev` category (opt-in, real token; D25): upload, Range read on the CDN, URL refresh, delete |
 | Fault injection | A `ChaosBlobStore` wrapper: random 429s, 5xx, timeouts, dropped responses after a successful post (to test idempotency and the reconciler) |
 | E2E | Playwright: log in (mocked OAuth), upload a folder of 1,000 files, preview a video with seeking, share link, restore from trash |
 
@@ -885,28 +898,24 @@ At startup, config parsing rejects size settings that can't work: it requires `P
 
 ```mermaid
 flowchart LR
-    M0["M0 · Foundations<br/>monorepo, dev compose,<br/>DB schema + migrations,<br/>config, health endpoints"] --> M1["M1 · Storage engine<br/>frame crypto, BlobStore,<br/>packer, bot uploads,<br/>CLI put/get"]
-    M1 --> M2["M2 · API core<br/>Discord OAuth, nodes CRUD,<br/>multipart + batch upload,<br/>Range download, live events"]
-    M2 --> M3["M3 · Web UI<br/>virtualized drive, upload panel,<br/>previews, trash"]
-    M3 --> M4["M4 · Durability<br/>GC, compaction, scrubber,<br/>tamper watch, journal,<br/>DB backups, recover tool"]
-    M4 --> M5["M5 · Sharing, admin & deploy<br/>share links, quotas, admin UI,<br/>prod compose + Caddy on Fedora"]
+    M0["M0 · Foundations<br/>monorepo, dev compose,<br/>DB schema + migrations,<br/>config, health endpoints"] --> M2["M2 · API core<br/>on local storage: Discord OAuth,<br/>nodes, versions, uploads,<br/>Range download, shares, live events"]
+    M3["M3 · Web UI<br/>done against the mock API<br/>(previews later)"] -.->|"switches to the real API"| M2
+    M2 --> M1["M1 · Storage engine on Discord<br/>bot, packer, CDN URLs,<br/>tamper watch"]
+    M1 --> DEP["First deployment<br/>Compose + Caddy on Fedora,<br/>test data only"]
+    DEP --> M4["M4 · Durability<br/>GC, compaction, scrubber,<br/>journal, DB backups, recover tool"]
+    M4 --> M5["M5 · Finish<br/>real data, previews and versions,<br/>admin search, hardening"]
     M5 --> F["Future<br/>thumbnails, WebDAV, E2EE, parity blobs,<br/>dedup, desktop sync, split hosts"]
 ```
 
-**MVP = M0 through M3.** Users can log in, upload a large file or a folder with thousands of small files, see them sync to Discord, browse, and stream content back.
+The numbers are the original milestones; the arrows are the order of work (D19): the API comes before Discord storage, so the finished UI runs against a real server early, and the first deployment happens once Discord storage works (D23).
+
+**MVP = M0, M2, M1 and the UI.** Users can log in, upload a large file or a folder with thousands of small files, see them sync to Discord, browse, and stream content back.
 
 ### 18.1 Status and future work
 
 **Done (2026-10-04):** the web UI, built first against the mock API (D14). It covers the screens of §10.1 except Preview: drive with drag-to-move and ZIP downloads, upload panel and engine, trash, shared links, the public share page, settings, and the admin area, with live events and the motion described in §10. The mock implements the §9 contract in the browser, and its spec tests (`apps/web/src/mocks/db.test.ts`) encode the rules the real API must follow.
 
-**Next: the backend.**
-
-1. **M0 · Foundations:** `apps/api` (Fastify) and `apps/bot` (discord.js) in the monorepo, `packages/config`, the PostgreSQL schema and migrations (§5), dev compose with Postgres 18, health endpoints.
-2. **M1 · Storage engine:** frame format and crypto (§7.3), BlobStore, packer, bot uploads with rate-limit handling, a CLI for put/get.
-3. **M2 · API core:** Discord OAuth, then the §9 routes the UI already uses, Range downloads, `LISTEN/NOTIFY` live events. Port the mock's spec tests to the API as integration tests, then point the UI at it (`VITE_API_MOCKS=off`).
-4. **M4/M5:** durability (GC, compaction, scrubber, journal, backups, recovery), production compose with Caddy on Fedora.
-
-A Discord application (OAuth client and bot token) and a test server are needed from M1 on.
+**Next: the backend**, in the order above. [BACKEND.md](BACKEND.md) is the build plan: packages, conventions, the tasks of each milestone and how each is checked.
 
 **Web UI, still to do:**
 
@@ -944,5 +953,15 @@ A Discord application (OAuth client and bot token) and a test server are needed 
 | D16 | Drag-to-move | **A small pointer-event controller** instead of `@dnd-kit`. Folders spring open mid-drag and remount the list, so the drag must outlive the list it started in; one animation-frame loop with direct DOM writes keeps it fast without a dependency. | §10 |
 | D17 | Downloading several items | `POST /archive {ids}` returns a **short-lived, single-use link** that streams the ZIP. The browser downloads it natively (progress, no memory buffering), and state-changing requests stay JSON with a CSRF header. | §6.2, §9 |
 | D18 | Public share access | `GET /s/:token` answers `{locked: true}` until a password-protected link is unlocked, so a link reveals nothing without its password. Locked and wrong-password answers are `403`, dead links `410` with a reason, and `401` stays reserved for "sign in to the app". | §7.5, §9, §10.1 |
+| D19 | Backend build order | **API first, Discord later:** M0, then M2 on `LocalBlobStore` (files already encrypted as DFS1 frames, the bot running as a worker without Discord), then M1. The finished UI runs against a real server one milestone sooner; the Discord work is unchanged, only later. | §18, BACKEND.md |
+| D20 | Uploading onto an existing name | **A new version** of that file (matched by `name_key`), switching over only when the upload completes; a matching folder is a `409`. Renames and moves still refuse clashes. | §5.1, §6.1, §9 |
+| D21 | Signing in during development | **A development-only sign-in** (`DEV_LOGIN=1`) as a local admin; the API refuses to start with it in production. | §7.1, §13.1, §15 |
+| D22 | Running the backend's TypeScript | **Node runs the sources directly** (type stripping): no build step for api, bot and packages. Imports name their `.ts` files, there are no path aliases at runtime, and those packages are typechecked with Node's module rules. | §13, §14.1, BACKEND.md |
+| D23 | First deployment | **Once Discord storage works** (after M1), as a private instance with test data only, until the M4 recovery drill passes. | §18 |
+| D24 | Old versions and the quota | **They count** until purged, like the trash, so the quota measures everything a user keeps. | §5.1, §6.1 |
+| D25 | Discord for development | **The production server and bot**, with development in its own `DFS Dev` category, REST only (no gateway). Each environment works only in the channels registered in its own database. Rate limits are shared, so load tests never use Discord. | §4, §6.1, §13.1, §15, §17 |
+| D26 | Code hosting and checks | **A private GitHub repository, no CI.** `pnpm check` runs locally before pushing; the VPS pulls with a read-only deploy key. | §13.2, BACKEND.md |
+| D27 | Who may sign in | **People an admin added**, by Discord user ID, on the Users page. Discord only proves who someone is (`identify`); the server is private to the owner and holds only storage channels, so there are no guild or role checks. Replaces the role-gated sign-in of earlier drafts. | §7.1, §9, §10.1, §11, §15 |
+| D28 | Admins | **Set in DFS** on the Users page. The owner, named by `OWNER_DISCORD_ID`, is always an admin and can't be demoted or disabled there. | §7.1, §15 |
 
 No open questions at this time.

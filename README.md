@@ -5,8 +5,8 @@ keeps the real file system in PostgreSQL. See [docs/DESIGN.md](docs/DESIGN.md) f
 the full design.
 
 **Status:** the web UI is done, built first against an in-browser mock API (D14).
-The API service, bot and database come next; see "Status and future work" (§18.1)
-in the design document.
+The API service, bot and database come next; [docs/BACKEND.md](docs/BACKEND.md) is
+the build plan.
 
 ## Requirements
 
