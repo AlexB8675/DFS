@@ -49,13 +49,158 @@
 }
 
 /*
- * Motion: one easing curve and a default duration for every transition, so
- * hover, selection and panel changes all move the same way.
+ * Motion. Color and hover changes use one short ease-out curve. Things that
+ * move or appear use springs, the way iOS does: `linear()` curves sampled from
+ * a damped spring (response, bounce), so they run on the compositor like any
+ * CSS animation. Each spring needs its own duration to settle, which the
+ * motion-* utilities below pair with it.
+ *
+ * Overshoot is only for transform. Opacity, height and grid tracks use glide.
  */
 @theme {
   --ease-smooth: cubic-bezier(0.2, 0, 0, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+  /* Critically damped (bounce 0, response 0.3 s): settles in 350 ms, no overshoot. */
+  --ease-glide: linear(
+    0,
+    0.0247 3.3%,
+    0.0847 6.7%,
+    0.1637 10%,
+    0.2508 13.3%,
+    0.3389 16.7%,
+    0.4236 20%,
+    0.5024 23.3%,
+    0.5738 26.7%,
+    0.6375 30%,
+    0.6934 33.3%,
+    0.742 36.7%,
+    0.7839 40%,
+    0.8196 43.3%,
+    0.8499 46.7%,
+    0.8756 50%,
+    0.8971 53.3%,
+    0.9151 56.7%,
+    0.9301 60%,
+    0.9426 63.3%,
+    0.9529 66.7%,
+    0.9615 70%,
+    0.9685 73.3%,
+    0.9743 76.7%,
+    0.9791 80%,
+    0.983 83.3%,
+    0.9862 86.7%,
+    0.9888 90%,
+    0.9909 93.3%,
+    0.9926 96.7%,
+    1
+  );
+  /* Gentle bounce (0.22, response 0.38 s): 2% overshoot, settles in 430 ms. */
+  --ease-spring: linear(
+    0,
+    0.0246 3.3%,
+    0.0868 6.7%,
+    0.1722 10%,
+    0.2697 13.3%,
+    0.3709 16.7%,
+    0.4702 20%,
+    0.5635 23.3%,
+    0.6482 26.7%,
+    0.7232 30%,
+    0.7879 33.3%,
+    0.8425 36.7%,
+    0.8876 40%,
+    0.9241 43.3%,
+    0.9528 46.7%,
+    0.9749 50%,
+    0.9913 53.3%,
+    1.0031 56.7%,
+    1.0111 60%,
+    1.0161 63.3%,
+    1.0189 66.7%,
+    1.0199 70%,
+    1.0197 73.3%,
+    1.0186 76.7%,
+    1.017 80%,
+    1.0151 83.3%,
+    1.0131 86.7%,
+    1.0111 90%,
+    1.0092 93.3%,
+    1.0075 96.7%,
+    1
+  );
+  /* Playful bounce (0.38, response 0.42 s): 8% overshoot, settles in 580 ms. */
+  --ease-bounce: linear(
+    0,
+    0.0365 3.3%,
+    0.1285 6.7%,
+    0.253 10%,
+    0.3917 13.3%,
+    0.5308 16.7%,
+    0.6605 20%,
+    0.7748 23.3%,
+    0.8703 26.7%,
+    0.9462 30%,
+    1.003 33.3%,
+    1.0426 36.7%,
+    1.0674 40%,
+    1.0801 43.3%,
+    1.0835 46.7%,
+    1.0801 50%,
+    1.0722 53.3%,
+    1.0617 56.7%,
+    1.0501 60%,
+    1.0385 63.3%,
+    1.0277 66.7%,
+    1.0183 70%,
+    1.0104 73.3%,
+    1.0042 76.7%,
+    0.9995 80%,
+    0.9963 83.3%,
+    0.9943 86.7%,
+    0.9933 90%,
+    0.993 93.3%,
+    0.9933 96.7%,
+    1
+  );
   --default-transition-duration: 160ms;
   --default-transition-timing-function: var(--ease-smooth);
+}
+
+/*
+ * Motion presets: a curve with the duration it needs. They set the variables
+ * that both Tailwind's transition-* and tw-animate-css's animate-in/out read.
+ */
+@utility motion-glide {
+  --tw-ease: var(--ease-glide);
+  --tw-duration: 350ms;
+}
+@utility motion-spring {
+  --tw-ease: var(--ease-spring);
+  --tw-duration: 430ms;
+}
+@utility motion-bounce {
+  --tw-ease: var(--ease-bounce);
+  --tw-duration: 580ms;
+}
+/* Leaving is quick and doesn't bounce. */
+@utility motion-exit {
+  --tw-ease: var(--ease-exit);
+  --tw-duration: 150ms;
+}
+
+/*
+ * Press feedback: shrinks a little while held and springs back on release.
+ * Colors keep the short curve; only the scale bounces.
+ */
+@utility pressable {
+  transition-property: color, background-color, border-color, box-shadow, opacity, scale;
+  transition-duration: 160ms, 160ms, 160ms, 160ms, 160ms, 430ms;
+  transition-timing-function:
+    var(--ease-smooth), var(--ease-smooth), var(--ease-smooth), var(--ease-smooth),
+    var(--ease-smooth), var(--ease-spring);
+  &:active:not(:disabled, [aria-disabled='true']) {
+    scale: 0.96;
+  }
 }
 
 /*
@@ -68,6 +213,7 @@
   color-scheme: light;
   --radius: 0.375rem;
   --scrollbar: oklch(0.82 0.006 270);
+  --drop-target: oklch(0.53 0.16 277 / 14%);
 
   --background: oklch(0.982 0.003 270);
   --foreground: oklch(0.29 0.012 270);
@@ -110,6 +256,7 @@
 .dark {
   color-scheme: dark;
   --scrollbar: oklch(0.36 0.008 270);
+  --drop-target: oklch(0.72 0.11 277 / 18%);
   --background: oklch(0.205 0.006 270);
   --foreground: oklch(0.905 0.006 270);
   --card: oklch(0.232 0.007 270);
@@ -143,11 +290,92 @@
   --sidebar-ring: oklch(0.66 0.1 277);
 }
 
-/* Theme changes crossfade (see lib/theme.ts). */
+/*
+ * View transitions. The theme switch crossfades the whole page. Navigation
+ * animates only the content pane (`view-transition-name: page`), in a style
+ * set by `data-nav` on <html> (see lib/navigation.ts): into a folder the new
+ * page slides in from the right, out of it from the left, and sections fade
+ * through. The overlay lets clicks through, so a transition never eats input.
+ */
+::view-transition {
+  pointer-events: none;
+}
 ::view-transition-old(root),
 ::view-transition-new(root) {
   animation-duration: 240ms;
   animation-timing-function: var(--ease-smooth);
+}
+html[data-nav]::view-transition-group(page) {
+  animation-duration: 350ms;
+  animation-timing-function: var(--ease-glide);
+}
+html[data-nav]::view-transition-old(page) {
+  animation: 120ms var(--ease-exit) both page-fade-out;
+}
+html[data-nav='forward']::view-transition-new(page) {
+  animation: 350ms var(--ease-glide) both page-in-from-right;
+}
+html[data-nav='back']::view-transition-new(page) {
+  animation: 350ms var(--ease-glide) both page-in-from-left;
+}
+html[data-nav='section']::view-transition-new(page) {
+  animation: 430ms var(--ease-spring) both page-in-zoom;
+}
+
+@keyframes page-fade-out {
+  to {
+    opacity: 0;
+  }
+}
+@keyframes page-in-from-right {
+  from {
+    opacity: 0;
+    transform: translateX(28px);
+  }
+}
+@keyframes page-in-from-left {
+  from {
+    opacity: 0;
+    transform: translateX(-28px);
+  }
+}
+@keyframes page-in-zoom {
+  from {
+    opacity: 0;
+    transform: scale(0.985);
+  }
+}
+
+/* The live indicator ripples once when the connection comes up. */
+@keyframes live-ripple {
+  from {
+    opacity: 0.7;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(3.5);
+  }
+}
+
+/* Bars that grow in from the left (usage breakdowns). */
+@keyframes grow-x {
+  from {
+    transform: scaleX(0);
+  }
+}
+
+/* A drop target that spring-loads: it blinks twice, then opens (Finder style). */
+@keyframes spring-load {
+  0%,
+  50%,
+  100% {
+    background-color: var(--drop-target);
+  }
+  25%,
+  75% {
+    background-color: transparent;
+  }
 }
 
 /*
@@ -164,6 +392,12 @@
     transition-duration: 1ms !important;
     scroll-behavior: auto !important;
   }
+  /* The rule above doesn't reach view-transition pseudo-elements. */
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
+  }
 }
 
 @layer base {
@@ -178,5 +412,10 @@
   }
   html {
     @apply font-sans;
+  }
+  /* While dragging to move, the whole page shows the grabbing hand. */
+  html[data-dragging],
+  html[data-dragging] * {
+    cursor: grabbing !important;
   }
 }

@@ -1,6 +1,7 @@
 import type { DriveNode } from '@dfs/shared'
 import {
   Download,
+  FileArchive,
   FileUp,
   FolderInput,
   FolderOpen,
@@ -69,7 +70,6 @@ export function useNodeMenu(
   }
 
   const single = targets.length === 1 ? targets[0] : undefined
-  const hasFiles = targets.some((node) => node.kind === 'file')
   const menu: MenuAction[] = []
 
   if (single?.kind === 'folder') {
@@ -93,16 +93,14 @@ export function useNodeMenu(
       },
     })
   }
-  if (hasFiles) {
-    menu.push({
-      key: 'download',
-      label: 'Download',
-      icon: Download,
-      onSelect: () => {
-        actions.download(targets)
-      },
-    })
-  }
+  menu.push({
+    key: 'download',
+    label: single?.kind === 'file' ? 'Download' : 'Download as ZIP',
+    icon: single?.kind === 'file' ? Download : FileArchive,
+    onSelect: () => {
+      actions.download(targets)
+    },
+  })
   if (single) {
     menu.push(
       {

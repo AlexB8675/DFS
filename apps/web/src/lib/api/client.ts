@@ -5,12 +5,15 @@ import type { z } from 'zod'
 export class ApiError extends Error {
   readonly status: number
   readonly code: string
+  /** From a `Retry-After` header (503 when staging is full, 429): how long to back off. */
+  readonly retryAfterMs: number | null
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, retryAfterMs: number | null = null) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
+    this.retryAfterMs = retryAfterMs
   }
 }
 
@@ -106,8 +109,24 @@ function buildUrl(path: string, query: QueryParams = {}): string {
 async function toApiError(response: Response): Promise<ApiError> {
   const body: unknown = await response.json().catch(() => null)
   const parsed = apiErrorSchema.safeParse(body)
+  const retryAfterMs = parseRetryAfter(response.headers.get('Retry-After'))
   if (parsed.success) {
-    return new ApiError(response.status, parsed.data.error.code, parsed.data.error.message)
+    const { code, message } = parsed.data.error
+    return new ApiError(response.status, code, message, retryAfterMs)
   }
-  return new ApiError(response.status, 'http_error', `Request failed (${response.status}).`)
+  return new ApiError(
+    response.status,
+    'http_error',
+    `Request failed (${response.status}).`,
+    retryAfterMs,
+  )
+}
+
+/** `Retry-After` is either a number of seconds or an HTTP date. Returns milliseconds from `now`. */
+export function parseRetryAfter(value: string | null, now = Date.now()): number | null {
+  if (value === null || value.trim() === '') return null
+  const seconds = Number(value)
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000)
+  const date = Date.parse(value)
+  return Number.isNaN(date) ? null : Math.max(0, date - now)
 }

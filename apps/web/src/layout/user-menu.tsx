@@ -16,6 +16,7 @@ import {
 import { signOut, useCurrentUser } from '@/features/auth/session'
 import { apiSend, errorMessage } from '@/lib/api/client'
 import { mocksEnabled } from '@/lib/env'
+import { transitionLinkProps } from '@/lib/navigation'
 
 export function UserMenu() {
   const user = useCurrentUser()
@@ -41,7 +42,7 @@ export function UserMenu() {
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
         <DropdownMenuItem asChild>
-          <Link to="/settings">
+          <Link to="/settings" {...transitionLinkProps('section')}>
             <Settings /> Settings
           </Link>
         </DropdownMenuItem>

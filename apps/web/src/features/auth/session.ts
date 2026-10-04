@@ -4,6 +4,7 @@ import { redirect, type LoaderFunctionArgs, type NavigateFunction } from 'react-
 import { queryClient } from '@/app/query-client'
 import { apiGet, apiSend, isUnauthorized, setCsrfToken } from '@/lib/api/client'
 import { mocksEnabled } from '@/lib/env'
+import { prepareNavTransition } from '@/lib/navigation'
 
 export const sessionQuery = queryOptions({
   queryKey: ['session'],
@@ -61,7 +62,8 @@ export async function signIn(next: string, navigate: NavigateFunction): Promise<
   }
   await apiSend('POST', '/auth/dev-login')
   queryClient.removeQueries({ queryKey: sessionQuery.queryKey })
-  await navigate(next, { replace: true })
+  // The drive zooms in as the sign-in page fades out.
+  await navigate(next, { replace: true, viewTransition: prepareNavTransition('section') })
 }
 
 export async function signOut(): Promise<void> {

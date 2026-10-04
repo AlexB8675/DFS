@@ -1,4 +1,4 @@
-import { Link2, Plus, Trash2, type LucideIcon } from 'lucide-react'
+import { Link2, Plus, ShieldCheck, Trash2, type LucideIcon } from 'lucide-react'
 import { NavLink, useParams } from 'react-router'
 import { Button } from '@/components/ui/button'
 import {
@@ -11,6 +11,7 @@ import { useCurrentUser } from '@/features/auth/session'
 import { DropdownMenuActions } from '@/features/drive/menu-actions'
 import { useNodeMenu } from '@/features/drive/node-menu'
 import { FolderTree } from '@/features/tree/folder-tree'
+import { transitionLinkProps } from '@/lib/navigation'
 import { cn } from '@/lib/utils'
 import { QuotaMeter } from './quota-meter'
 
@@ -20,6 +21,7 @@ interface SidebarProps {
 }
 
 export function Sidebar({ onNavigate }: SidebarProps) {
+  const { role } = useCurrentUser()
   return (
     <div className="flex h-full flex-col gap-3 bg-sidebar p-3 text-sidebar-foreground">
       <NewMenu />
@@ -35,6 +37,11 @@ export function Sidebar({ onNavigate }: SidebarProps) {
         <SidebarLink to="/trash" icon={Trash2} onNavigate={onNavigate}>
           Trash
         </SidebarLink>
+        {role === 'admin' && (
+          <SidebarLink to="/admin" icon={ShieldCheck} onNavigate={onNavigate}>
+            Admin
+          </SidebarLink>
+        )}
       </nav>
       <QuotaMeter onNavigate={onNavigate} />
     </div>
@@ -72,6 +79,7 @@ function SidebarLink({ to, icon: Icon, onNavigate, children }: SidebarLinkProps)
   return (
     <NavLink
       to={to}
+      {...transitionLinkProps('section')}
       onClick={onNavigate}
       className={({ isActive }) =>
         cn(

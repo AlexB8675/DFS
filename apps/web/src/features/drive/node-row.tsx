@@ -1,11 +1,11 @@
 import type { DriveNode } from '@dfs/shared'
-import type { MouseEvent } from 'react'
+import type { MouseEvent, PointerEvent } from 'react'
 import { NodeIcon } from '@/components/node-icon'
 import { SyncStatus } from '@/components/sync-status'
 import { formatBytes, formatDate, formatFullDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { listColumns, optionId, type ListedNode } from './list-layout'
-import { useSelection } from './selection'
+import { itemDropProps, useItemState } from './item-state'
 import { usePrefetchOnHover } from './use-prefetch-on-hover'
 
 export interface NodeItemProps {
@@ -13,6 +13,8 @@ export interface NodeItemProps {
   onSelect: (event: MouseEvent, node: DriveNode) => void
   onOpen: (node: DriveNode) => void
   onContextMenu: (node: DriveNode) => void
+  /** Starts a drag-to-move once the pointer moves. */
+  onPointerDown: (event: PointerEvent<HTMLElement>, node: DriveNode) => void
 }
 
 /** One row of the list view. */
@@ -22,25 +24,34 @@ export function NodeRow({
   onSelect,
   onOpen,
   onContextMenu,
+  onPointerDown,
 }: NodeItemProps & { showLocation: boolean }) {
-  const selected = useSelection((state) => state.selected.has(node.id))
-  const active = useSelection((state) => state.activeId === node.id)
+  const state = useItemState(node)
   const prefetch = usePrefetchOnHover(node)
 
   return (
     <div
       id={optionId(node.id)}
       role="option"
-      aria-selected={selected}
+      aria-selected={state.selected}
       data-node-id={node.id}
+      {...itemDropProps(node)}
       {...prefetch}
       className={cn(
-        'mx-2 grid h-full cursor-default items-center gap-4 rounded-md px-3 text-sm transition-[background-color,box-shadow] select-none',
+        'mx-2 grid h-full cursor-default items-center gap-4 rounded-md px-3 text-sm transition-[background-color,box-shadow,opacity] select-none',
         listColumns(showLocation),
-        selected ? 'bg-primary/15' : 'hover:bg-muted/60',
-        active &&
+        state.selected ? 'bg-primary/15' : 'hover:bg-muted/60',
+        state.active &&
           'group-focus-visible/list:ring-1 group-focus-visible/list:ring-ring group-focus-visible/list:ring-inset',
+        state.dragged && 'opacity-40',
+        state.over && 'bg-(--drop-target) ring-1 ring-primary/60 ring-inset',
+        state.springing && 'animate-[spring-load_450ms_ease-in-out]',
+        state.fresh && 'animate-in fade-in-0 zoom-in-95 motion-spring',
+        state.leaving && 'animate-out fill-mode-forwards fade-out-0 zoom-out-95 motion-exit',
       )}
+      onPointerDown={(event) => {
+        onPointerDown(event, node)
+      }}
       onClick={(event) => {
         onSelect(event, node)
       }}

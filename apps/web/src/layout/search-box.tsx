@@ -1,14 +1,15 @@
 import { Search } from 'lucide-react'
 import { useRef } from 'react'
-import { useLocation, useNavigate, useSearchParams } from 'react-router'
+import { useLocation, useSearchParams } from 'react-router'
 import { Input } from '@/components/ui/input'
 import { Kbd } from '@/components/ui/kbd'
 import { useHotkey } from '@/lib/use-hotkey'
+import { useTransitionNavigate } from '@/lib/navigation'
 import { cn } from '@/lib/utils'
 
 /** Searches file and folder names. Press `/` anywhere to focus it. */
 export function SearchBox({ className }: { className?: string }) {
-  const navigate = useNavigate()
+  const navigate = useTransitionNavigate()
   const { pathname } = useLocation()
   const [searchParams] = useSearchParams()
   const inputRef = useRef<HTMLInputElement>(null)
@@ -24,7 +25,7 @@ export function SearchBox({ className }: { className?: string }) {
         event.preventDefault()
         const value = new FormData(event.currentTarget).get('q')
         const q = typeof value === 'string' ? value.trim() : ''
-        if (q) void navigate(`/search?q=${encodeURIComponent(q)}`)
+        if (q) navigate(`/search?q=${encodeURIComponent(q)}`, 'section')
         inputRef.current?.blur()
       }}
     >

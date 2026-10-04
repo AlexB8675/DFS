@@ -2,6 +2,8 @@ import { Menu } from 'lucide-react'
 import { Link } from 'react-router'
 import { AppLogo } from '@/components/app-logo'
 import { Button } from '@/components/ui/button'
+import { transitionLinkProps } from '@/lib/navigation'
+import { LiveIndicator } from './live-indicator'
 import { SearchBox } from './search-box'
 import { ThemeMenu } from './theme-menu'
 import { UserMenu } from './user-menu'
@@ -25,6 +27,7 @@ export function Header({ onOpenNavigation }: HeaderProps) {
       {/* Matches the sidebar's width, so the search box lines up with the content. */}
       <Link
         to="/drive"
+        {...transitionLinkProps('section')}
         aria-label="DFS home"
         className="flex shrink-0 items-center rounded-md px-1 outline-none focus-visible:ring-2 focus-visible:ring-ring md:w-[calc(var(--sidebar-width)-0.75rem)]"
       >
@@ -32,6 +35,7 @@ export function Header({ onOpenNavigation }: HeaderProps) {
       </Link>
       <SearchBox className="min-w-0 flex-1 md:max-w-2xl" />
       <div className="ml-auto flex items-center gap-1">
+        <LiveIndicator />
         <ThemeMenu />
         <UserMenu />
       </div>

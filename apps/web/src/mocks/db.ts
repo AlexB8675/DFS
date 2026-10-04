@@ -3,6 +3,10 @@ import {
   normalizeName,
   splitExtension,
   validateName,
+  type AdminUser,
+  type ArchiveTicket,
+  type AuditEntry,
+  type CreateUploadInput,
   type DriveNode,
   type NodeKind,
   type NodePath,
@@ -13,19 +17,26 @@ import {
   type SortField,
   type SortOrder,
   type SyncState,
+  type StorageChannel,
   type TrashItem,
+  type UploadBatchResult,
   type UploadSession,
+  type UploadSessionStatus,
   type User,
 } from '@dfs/shared'
 import { createSeed } from './seed'
+import { createZip, type ZipEntry } from './zip'
 
 // An in-memory stand-in for the API's database, persisted to localStorage so
 // changes survive a reload. It follows the rules of DESIGN.md §5–§6 closely
 // enough to exercise the UI: unique names per folder, cycle checks on moves,
-// trash and restore, keyset pagination, and uploads that sync after a delay.
+// trash and restore, keyset pagination, quotas, uploads that sync after a
+// delay, ZIP archives, and the admin views of other users (read-only, D4).
 
 export interface MockNode {
   id: string
+  /** The user whose drive this is. */
+  ownerId: string
   parentId: string | null
   kind: NodeKind
   name: string
@@ -62,16 +73,33 @@ interface MockUpload {
   receivedParts: number[]
 }
 
+export type MockUser = Omit<AdminUser, 'usedBytes' | 'fileCount'>
+
+export type MockChannel = Pick<
+  StorageChannel,
+  'id' | 'discordChannelId' | 'name' | 'enabled' | 'createdAt'
+>
+
+export type MockAuditEntry = AuditEntry
+
 export interface MockState {
   version: number
-  user: Omit<User, 'usedBytes'>
+  /** The signed-in user. */
+  userId: string
+  users: MockUser[]
   signedIn: boolean
   nodes: Record<string, MockNode>
   shares: MockShare[]
   uploads: Record<string, MockUpload>
+  channels: MockChannel[]
+  audit: MockAuditEntry[]
 }
 
-export type MockEvent = { type: 'nodes.changed' } | { type: 'quota.changed' }
+/** Live events (§6.1), as the SSE stream sends them. */
+export type MockEvent =
+  | { type: 'nodes.synced'; nodes: { id: string; parentId: string; syncState: SyncState }[] }
+  | { type: 'nodes.changed'; parentIds: string[] }
+  | { type: 'quota.changed'; usedBytes: number }
 
 export class MockApiError extends Error {
   readonly status: number
@@ -84,13 +112,15 @@ export class MockApiError extends Error {
   }
 }
 
-const STATE_VERSION = 2
+const STATE_VERSION = 3
 const STORAGE_KEY = 'dfs.mock-db'
 /** `CHUNK_SIZE` at the 10 MiB attachment limit (§7.3). */
-const CHUNK_SIZE = 10 * 1024 * 1024 - 128 * 1024
+export const CHUNK_SIZE = 10 * 1024 * 1024 - 128 * 1024
 const CSRF_TOKEN = 'mock-csrf-token'
+/** Archive links from `POST /archive` work once, for a minute (§9). */
+const ARCHIVE_TICKET_MS = 60_000
 
-interface ListOptions {
+export interface ListOptions {
   kind?: NodeKind
   sort: SortField
   order: SortOrder
@@ -103,14 +133,32 @@ interface Derived {
   parentsOfFolders: Set<string>
 }
 
-class MockDb {
-  private state: MockState
+export class MockDb {
+  protected state: MockState
   private derived: Derived | null = null
   private readonly listeners = new Set<(event: MockEvent) => void>()
+  private readonly archiveTickets = new Map<string, { ids: string[]; expiresAt: number }>()
 
   constructor() {
     this.state = loadState() ?? createSeed(STATE_VERSION)
+    this.expireUploads()
     this.scheduleSyncCompletions()
+  }
+
+  /**
+   * Upload sessions don't survive a reload here: nothing could resume them.
+   * Drops them with their half-uploaded files, as the real API's janitor
+   * does after 24 h (§6.1).
+   */
+  private expireUploads(): void {
+    const uploads = Object.values(this.state.uploads)
+    if (uploads.length === 0) return
+    for (const upload of uploads) {
+      const node = this.state.nodes[upload.nodeId]
+      if (node?.syncState === 'uploading') Reflect.deleteProperty(this.state.nodes, node.id)
+    }
+    this.state.uploads = {}
+    this.save()
   }
 
   // ── Session ────────────────────────────────────────────────────────────────
@@ -134,7 +182,27 @@ class MockDb {
   }
 
   session(): Session {
-    return { user: { ...this.state.user, usedBytes: this.usedBytes() }, csrfToken: CSRF_TOKEN }
+    return { user: this.publicUser(this.currentUser()), csrfToken: CSRF_TOKEN }
+  }
+
+  protected currentUser(): MockUser {
+    const user = this.state.users.find((candidate) => candidate.id === this.state.userId)
+    if (!user) throw new MockApiError(401, 'unauthenticated', 'Sign in to continue.')
+    return user
+  }
+
+  protected publicUser(user: MockUser): User {
+    const { id, discordUserId, displayName, avatarUrl, role, rootFolderId, quotaBytes } = user
+    return {
+      id,
+      discordUserId,
+      displayName,
+      avatarUrl,
+      role,
+      rootFolderId,
+      quotaBytes,
+      usedBytes: this.usedBytes(id),
+    }
   }
 
   reset(): void {
@@ -152,7 +220,7 @@ class MockDb {
     return () => this.listeners.delete(listener)
   }
 
-  private emit(event: MockEvent): void {
+  protected emit(event: MockEvent): void {
     for (const listener of this.listeners) listener(event)
   }
 
@@ -181,7 +249,11 @@ class MockDb {
     const needle = nameKey(query)
     if (needle.length === 0) return { items: [], nextCursor: null }
     const matches = Object.values(this.state.nodes).filter(
-      (node) => node.parentId !== null && isVisible(node) && nameKey(node.name).includes(needle),
+      (node) =>
+        node.ownerId === this.state.userId &&
+        node.parentId !== null &&
+        isVisible(node) &&
+        nameKey(node.name).includes(needle),
     )
     return paginate(sortNodes(matches, 'name', 'asc'), { cursor, limit }, (node) => ({
       ...this.toDto(node),
@@ -191,7 +263,7 @@ class MockDb {
 
   trashItems(cursor: string | null, limit: number): Page<TrashItem> {
     const trashed = Object.values(this.state.nodes)
-      .filter((node) => node.deletedAt !== null)
+      .filter((node) => node.ownerId === this.state.userId && node.deletedAt !== null)
       .sort((a, b) => (b.deletedAt ?? '').localeCompare(a.deletedAt ?? ''))
     return paginate(trashed, { cursor, limit }, (node) => ({
       ...this.toDto(node),
@@ -209,11 +281,59 @@ class MockDb {
   fileContent(id: string): { name: string; mimeType: string; body: string } {
     const node = this.visibleNode(id)
     if (node.kind !== 'file') throw notFound()
+    return { name: node.name, mimeType: 'text/plain', body: mockContent(node) }
+  }
+
+  // ── Archives (§6.2) ────────────────────────────────────────────────────────
+
+  /** `GET /folders/:id/archive`: the folder and everything in it. */
+  folderArchive(id: string): { name: string; body: Uint8Array<ArrayBuffer> } {
+    const folder = this.requireFolder(id)
+    return { name: `${folder.name}.zip`, body: createZip(this.zipEntries([folder])) }
+  }
+
+  /** `POST /archive`: a one-time link for a ZIP of several items. */
+  createArchiveTicket(ids: string[]): ArchiveTicket {
+    const nodes = ids.map((id) => this.visibleNode(id))
+    const token = crypto.randomUUID().replaceAll('-', '')
+    const expiresAt = Date.now() + ARCHIVE_TICKET_MS
+    this.archiveTickets.set(token, { ids: nodes.map((node) => node.id), expiresAt })
+    const [first] = nodes
+    const parent = first?.parentId ? this.state.nodes[first.parentId] : undefined
+    const prefix = parent && parent.parentId !== null ? parent.name : 'DFS'
     return {
-      name: node.name,
-      mimeType: 'text/plain',
-      body: `Mock content of “${node.name}” (${node.sizeBytes} bytes in the real file).\n`,
+      url: `/api/archive/${token}`,
+      fileName: `${prefix} (${nodes.length} items).zip`,
+      expiresAt: new Date(expiresAt).toISOString(),
     }
+  }
+
+  /** `GET /archive/:token`: redeems the link. */
+  takeArchive(token: string): Uint8Array<ArrayBuffer> {
+    const ticket = this.archiveTickets.get(token)
+    this.archiveTickets.delete(token)
+    if (!ticket || ticket.expiresAt < Date.now()) {
+      throw new MockApiError(404, 'archive_expired', 'This download link has expired.')
+    }
+    return createZip(this.zipEntries(ticket.ids.map((id) => this.visibleNode(id))))
+  }
+
+  private zipEntries(roots: MockNode[]): ZipEntry[] {
+    const encoder = new TextEncoder()
+    const entries: ZipEntry[] = []
+    const add = (node: MockNode, prefix: string) => {
+      const path = `${prefix}${node.name}`
+      const modifiedAt = new Date(node.updatedAt)
+      if (node.kind === 'file') {
+        entries.push({ path, data: encoder.encode(mockContent(node)), modifiedAt })
+        return
+      }
+      // Folders get their own entry, so empty ones survive.
+      entries.push({ path: `${path}/`, modifiedAt })
+      for (const child of sortNodes(this.childrenOf(node.id), 'name', 'asc')) add(child, `${path}/`)
+    }
+    for (const root of roots) add(root, '')
+    return entries
   }
 
   // ── Folder and node changes ────────────────────────────────────────────────
@@ -292,11 +412,12 @@ class MockDb {
 
   restore(id: string): DriveNode {
     const node = this.state.nodes[id]
-    if (!node?.deletedAt) throw notFound()
+    if (!node?.deletedAt || node.ownerId !== this.state.userId) throw notFound()
     const parent = node.parentId ? this.state.nodes[node.parentId] : undefined
+    const { rootFolderId } = this.currentUser()
     // Restore into the original folder if it still exists, otherwise into the root.
-    if (!parent || !isVisible(parent)) node.parentId = this.state.user.rootFolderId
-    node.name = this.freeName(node.parentId ?? this.state.user.rootFolderId, node.name)
+    if (!parent || !isVisible(parent)) node.parentId = rootFolderId
+    node.name = this.freeName(node.parentId ?? rootFolderId, node.name)
     node.deletedAt = null
     node.moderationReason = null
     for (const descendant of this.descendants(node.id)) {
@@ -308,19 +429,38 @@ class MockDb {
 
   deleteForever(id: string): void {
     const node = this.state.nodes[id]
-    if (!node?.deletedAt) throw notFound()
+    if (!node?.deletedAt || node.ownerId !== this.state.userId) throw notFound()
     this.remove(node)
     this.changed()
   }
 
   emptyTrash(): void {
     for (const node of Object.values(this.state.nodes)) {
-      if (node.deletedAt && this.state.nodes[node.id]) this.remove(node)
+      const mine = node.ownerId === this.state.userId
+      if (mine && node.deletedAt && this.state.nodes[node.id]) this.remove(node)
     }
     this.changed()
   }
 
   // ── Uploads (§6.1) ─────────────────────────────────────────────────────────
+
+  /** `POST /uploads/batch`: answers per upload, so one bad name doesn't sink the rest. */
+  createUploads(inputs: CreateUploadInput[]): UploadBatchResult['results'] {
+    return inputs.map((input) => {
+      try {
+        const session = this.createUpload(
+          input.parentId,
+          input.name,
+          input.sizeBytes,
+          input.mimeType,
+        )
+        return { ok: true as const, session }
+      } catch (error) {
+        if (!(error instanceof MockApiError)) throw error
+        return { ok: false as const, error: { code: error.code, message: error.message } }
+      }
+    })
+  }
 
   createUpload(
     parentId: string,
@@ -329,6 +469,10 @@ class MockDb {
     mimeType: string,
   ): UploadSession {
     this.requireFolder(parentId)
+    const user = this.currentUser()
+    if (this.usedBytes(user.id) + sizeBytes > user.quotaBytes) {
+      throw new MockApiError(507, 'quota_exceeded', `Not enough storage left for “${rawName}”.`)
+    }
     const name = this.freeName(parentId, checkedName(rawName))
     const node = this.insert({
       parentId,
@@ -352,6 +496,18 @@ class MockDb {
       nodeId: node.id,
       chunkSize: upload.chunkSize,
       chunkCount: upload.chunkCount,
+    }
+  }
+
+  /** `GET /uploads/:id`: which parts arrived, for resuming. */
+  uploadStatus(uploadId: string): UploadSessionStatus {
+    const upload = this.upload(uploadId)
+    return {
+      uploadId: upload.id,
+      nodeId: upload.nodeId,
+      chunkSize: upload.chunkSize,
+      chunkCount: upload.chunkCount,
+      receivedParts: upload.receivedParts.toSorted((a, b) => a - b),
     }
   }
 
@@ -445,8 +601,10 @@ class MockDb {
     fields: Pick<MockNode, 'parentId' | 'kind' | 'name'> & Partial<MockNode>,
   ): MockNode {
     const now = new Date().toISOString()
+    const parent = fields.parentId ? this.state.nodes[fields.parentId] : undefined
     const node: MockNode = {
       id: crypto.randomUUID(),
+      ownerId: parent?.ownerId ?? this.state.userId,
       mimeType: null,
       sizeBytes: 0,
       createdAt: now,
@@ -471,13 +629,21 @@ class MockDb {
     this.state.shares = this.state.shares.filter((share) => !doomed.has(share.nodeId))
   }
 
-  private visibleNode(id: string): MockNode {
+  /** A node of the signed-in user that is not in the trash. */
+  protected visibleNode(id: string): MockNode {
+    const node = this.anyVisibleNode(id)
+    if (node.ownerId !== this.state.userId) throw notFound()
+    return node
+  }
+
+  /** Any user's node that is not in the trash (admin views). */
+  protected anyVisibleNode(id: string): MockNode {
     const node = this.state.nodes[id]
     if (!node || !isVisible(node)) throw notFound()
     return node
   }
 
-  private requireFolder(id: string): MockNode {
+  protected requireFolder(id: string): MockNode {
     const node = this.visibleNode(id)
     if (node.kind !== 'folder')
       throw new MockApiError(400, 'not_a_folder', 'The target is not a folder.')
@@ -490,14 +656,14 @@ class MockDb {
     return upload
   }
 
-  private childrenOf(parentId: string): MockNode[] {
+  protected childrenOf(parentId: string): MockNode[] {
     return Object.values(this.state.nodes).filter(
       (node) => node.parentId === parentId && isVisible(node),
     )
   }
 
   /** Every node below `id`, trashed or not. */
-  private descendants(id: string): MockNode[] {
+  protected descendants(id: string): MockNode[] {
     const byParent = new Map<string, MockNode[]>()
     for (const node of Object.values(this.state.nodes)) {
       if (!node.parentId) continue
@@ -517,7 +683,7 @@ class MockDb {
     return result
   }
 
-  private ancestors(node: MockNode): MockNode[] {
+  protected ancestors(node: MockNode): MockNode[] {
     const chain = [node]
     let current = node
     while (current.parentId) {
@@ -530,7 +696,7 @@ class MockDb {
   }
 
   /** "My Drive / Photos / 2024" for the folder that contains `node`. */
-  private location(node: MockNode): string {
+  protected location(node: MockNode): string {
     const parent = node.parentId ? this.state.nodes[node.parentId] : undefined
     return parent
       ? this.ancestors(parent)
@@ -563,15 +729,16 @@ class MockDb {
     return candidate
   }
 
-  private usedBytes(): number {
+  protected usedBytes(userId: string): number {
     // Trashed files still count until they are purged (§6.4).
-    return Object.values(this.state.nodes).reduce(
-      (total, node) => total + (node.kind === 'file' ? node.sizeBytes : 0),
-      0,
-    )
+    let total = 0
+    for (const node of Object.values(this.state.nodes)) {
+      if (node.ownerId === userId && node.kind === 'file') total += node.sizeBytes
+    }
+    return total
   }
 
-  private toDto(node: MockNode): DriveNode {
+  protected toDto(node: MockNode): DriveNode {
     const derived = this.getDerived()
     const syncState =
       node.syncState === 'syncing' &&
@@ -638,7 +805,12 @@ class MockDb {
         current.syncState = 'stored'
         current.syncCompletesAt = null
         this.save()
-        this.emit({ type: 'nodes.changed' })
+        if (current.ownerId === this.state.userId && current.parentId) {
+          this.emit({
+            type: 'nodes.synced',
+            nodes: [{ id: current.id, parentId: current.parentId, syncState: 'stored' }],
+          })
+        }
       },
       Math.max(0, node.syncCompletesAt - Date.now()),
     )
@@ -648,12 +820,12 @@ class MockDb {
    * Call after a client-initiated change. No event is pushed: the client
    * refreshes its own data, and events are for background changes (syncs).
    */
-  private changed(): void {
+  protected changed(): void {
     this.derived = null
     this.save()
   }
 
-  private save(): void {
+  protected save(): void {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(this.state))
     } catch {
@@ -664,7 +836,12 @@ class MockDb {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function isVisible(node: MockNode): boolean {
+/** What a mock file contains: a line of text, since the mock stores no bytes. */
+function mockContent(node: MockNode): string {
+  return `Mock content of “${node.name}” (${node.sizeBytes} bytes in the real file).\n`
+}
+
+export function isVisible(node: MockNode): boolean {
   return node.deletedAt === null && node.trashedVia === null
 }
 
@@ -675,7 +852,7 @@ function checkedName(raw: string): string {
   return name
 }
 
-function notFound(): MockApiError {
+export function notFound(): MockApiError {
   return new MockApiError(404, 'not_found', 'This item no longer exists.')
 }
 
@@ -684,7 +861,7 @@ function nameConflict(name: string): MockApiError {
 }
 
 /** Folders first, then by the chosen field, with name and ID as tie-breakers (§5.1). */
-function sortNodes(nodes: MockNode[], sort: SortField, order: SortOrder): MockNode[] {
+export function sortNodes(nodes: MockNode[], sort: SortField, order: SortOrder): MockNode[] {
   const direction = order === 'asc' ? 1 : -1
   const byName = (a: MockNode, b: MockNode) =>
     a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }) ||
@@ -699,7 +876,7 @@ function sortNodes(nodes: MockNode[], sort: SortField, order: SortOrder): MockNo
 }
 
 /** Keyset-style pagination: the cursor names the last item of the previous page. */
-function paginate<T>(
+export function paginate<T>(
   sorted: MockNode[],
   options: { cursor?: string | null | undefined; limit: number },
   toItem: (node: MockNode) => T,
@@ -748,5 +925,3 @@ function loadState(): MockState | null {
     return null
   }
 }
-
-export const db = new MockDb()

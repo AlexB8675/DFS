@@ -3,24 +3,31 @@ import { SyncStatus } from '@/components/sync-status'
 import { formatBytes } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { optionId } from './list-layout'
+import { itemDropProps, useItemState } from './item-state'
 import type { NodeItemProps } from './node-row'
-import { useSelection } from './selection'
 import { usePrefetchOnHover } from './use-prefetch-on-hover'
 
 /** One tile of the grid view. */
-export function NodeTile({ node, onSelect, onOpen, onContextMenu }: NodeItemProps) {
-  const selected = useSelection((state) => state.selected.has(node.id))
-  const active = useSelection((state) => state.activeId === node.id)
+export function NodeTile({ node, onSelect, onOpen, onContextMenu, onPointerDown }: NodeItemProps) {
+  const state = useItemState(node)
   const prefetch = usePrefetchOnHover(node)
 
   return (
     <div
       id={optionId(node.id)}
       role="option"
-      aria-selected={selected}
+      aria-selected={state.selected}
       data-node-id={node.id}
+      {...itemDropProps(node)}
       {...prefetch}
-      className="h-full p-1.5 select-none"
+      className={cn(
+        'h-full p-1.5 select-none',
+        state.fresh && 'animate-in fade-in-0 zoom-in-75 motion-bounce',
+        state.leaving && 'animate-out fill-mode-forwards fade-out-0 zoom-out-75 motion-exit',
+      )}
+      onPointerDown={(event) => {
+        onPointerDown(event, node)
+      }}
       onClick={(event) => {
         onSelect(event, node)
       }}
@@ -31,11 +38,15 @@ export function NodeTile({ node, onSelect, onOpen, onContextMenu }: NodeItemProp
         onContextMenu(node)
       }}
     >
+      {/* Presses shrink a little and spring back; a folder under a drag swells to say "drop here". */}
       <div
         className={cn(
-          'flex h-full flex-col gap-1 rounded-lg border p-3 transition-[background-color,border-color,box-shadow]',
-          selected ? 'border-primary/60 bg-primary/10' : 'bg-card hover:bg-muted/60',
-          active && 'group-focus-visible/list:ring-2 group-focus-visible/list:ring-ring',
+          'pressable flex h-full flex-col gap-1 rounded-lg border p-3',
+          state.selected ? 'border-primary/60 bg-primary/10' : 'bg-card hover:bg-muted/60',
+          state.active && 'group-focus-visible/list:ring-2 group-focus-visible/list:ring-ring',
+          state.dragged && 'opacity-40',
+          state.over && 'scale-105 border-primary bg-(--drop-target) shadow-lg',
+          state.springing && 'animate-[spring-load_450ms_ease-in-out]',
         )}
       >
         <div className="flex flex-1 items-center justify-center">

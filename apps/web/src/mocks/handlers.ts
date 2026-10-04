@@ -1,21 +1,32 @@
 import {
+  createChannelSchema,
   createFolderSchema,
   createShareSchema,
+  createUploadBatchSchema,
   createUploadSchema,
   ensureFoldersSchema,
+  moderationSchema,
   moveNodesSchema,
   nodeIdsSchema,
   nodeKindSchema,
   sortFieldSchema,
   sortOrderSchema,
+  updateChannelSchema,
   updateNodeSchema,
+  updateUserSchema,
 } from '@dfs/shared'
 import { delay, http, HttpResponse, sse, type JsonBodyType } from 'msw'
 import { z, ZodError } from 'zod'
-import { db, MockApiError, type MockEvent } from './db'
+import { AdminMockDb } from './admin-db'
+import { MockApiError, type MockEvent } from './db'
 import { MOCK_RESPONSE_HEADER } from './marker'
 
 // Mocks the HTTP API of DESIGN.md §9 on top of the in-memory database.
+
+export const db = new AdminMockDb()
+
+/** The real API pings every 25 s so clients notice dead connections (§6.1). */
+const PING_INTERVAL_MS = 25_000
 
 interface Id {
   id: string
@@ -143,6 +154,19 @@ export const handlers = [
   ),
 
   // ── Uploads (§6.1) ─────────────────────────────────────────────────────────
+  http.post('/api/uploads/batch', ({ request }) =>
+    respond(
+      request,
+      async () => {
+        const input = createUploadBatchSchema.parse(await request.json())
+        return { results: db.createUploads(input.uploads) }
+      },
+      { status: 201 },
+    ),
+  ),
+  http.get<Id>('/api/uploads/:id', ({ request, params }) =>
+    respond(request, () => db.uploadStatus(params.id)),
+  ),
   http.post('/api/uploads', ({ request }) =>
     respond(
       request,
@@ -188,6 +212,69 @@ export const handlers = [
     }),
   ),
 
+  // ── Archives (§6.2) ────────────────────────────────────────────────────────
+  http.get<Id>('/api/folders/:id/archive', ({ request, params }) =>
+    respond(request, () => {
+      const archive = db.folderArchive(params.id)
+      return zipResponse(archive.body, archive.name)
+    }),
+  ),
+  http.post('/api/archive', ({ request }) =>
+    respond(
+      request,
+      async () => db.createArchiveTicket(nodeIdsSchema.parse(await request.json()).ids),
+      { status: 201 },
+    ),
+  ),
+  http.get<{ token: string }>('/api/archive/:token', ({ request, params }) =>
+    respond(request, () => zipResponse(db.takeArchive(params.token), 'download.zip')),
+  ),
+
+  // ── Admin (§9) ─────────────────────────────────────────────────────────────
+  http.get('/api/admin/users', ({ request }) => respond(request, () => db.adminUsers())),
+  http.patch<Id>('/api/admin/users/:id', ({ request, params }) =>
+    respond(request, async () =>
+      db.updateUser(params.id, updateUserSchema.parse(await request.json())),
+    ),
+  ),
+  http.get<Id>('/api/admin/users/:id/usage', ({ request, params }) =>
+    respond(request, () => db.userUsage(params.id)),
+  ),
+  http.get<Id>('/api/admin/nodes/:id', ({ request, params }) =>
+    respond(request, () => db.adminNode(params.id)),
+  ),
+  http.get<Id>('/api/admin/nodes/:id/path', ({ request, params }) =>
+    respond(request, () => db.adminPath(params.id)),
+  ),
+  http.get<Id>('/api/admin/nodes/:id/children', ({ request, params }) =>
+    respond(request, () => db.adminChildren(params.id, readQuery(request, listQuery))),
+  ),
+  http.delete<Id>('/api/admin/nodes/:id', ({ request, params }) =>
+    respondEmpty(request, async () => {
+      db.moderate(params.id, moderationSchema.parse(await request.json()).reason)
+    }),
+  ),
+  http.get('/api/admin/health', ({ request }) => respond(request, () => db.health())),
+  http.get('/api/admin/channels', ({ request }) => respond(request, () => db.channels())),
+  http.post('/api/admin/channels', ({ request }) =>
+    respond(
+      request,
+      async () => db.createChannel(createChannelSchema.parse(await request.json())),
+      { status: 201 },
+    ),
+  ),
+  http.patch<Id>('/api/admin/channels/:id', ({ request, params }) =>
+    respond(request, async () =>
+      db.updateChannel(params.id, updateChannelSchema.parse(await request.json()).enabled),
+    ),
+  ),
+  http.get('/api/admin/audit', ({ request }) =>
+    respond(request, () => {
+      const query = readQuery(request, pageQuery)
+      return db.auditLog(query.cursor ?? null, query.limit)
+    }),
+  ),
+
   // ── Share links ────────────────────────────────────────────────────────────
   http.get('/api/shares', ({ request }) => respond(request, () => db.shares())),
   http.post('/api/shares', ({ request }) =>
@@ -202,15 +289,26 @@ export const handlers = [
   ),
 
   // ── Live events (§6.1) ─────────────────────────────────────────────────────
-  sse<Record<MockEvent['type'], string>>('/api/events', ({ client, request }) => {
+  sse<Record<MockEvent['type'] | 'ping', string>>('/api/events', ({ client, request }) => {
     if (!db.signedIn) {
       client.error()
       return
     }
-    const unsubscribe = db.subscribe((event) => {
-      client.send({ event: event.type, data: JSON.stringify(event) })
+    // The event type goes in the SSE `event` field, the rest is the JSON payload.
+    const unsubscribe = db.subscribe(({ type, ...payload }) => {
+      client.send({ event: type, data: JSON.stringify(payload) })
     })
-    request.signal.addEventListener('abort', unsubscribe, { once: true })
+    const ping = setInterval(() => {
+      client.send({ event: 'ping', data: '{}' })
+    }, PING_INTERVAL_MS)
+    request.signal.addEventListener(
+      'abort',
+      () => {
+        unsubscribe()
+        clearInterval(ping)
+      },
+      { once: true },
+    )
   }),
 ]
 
@@ -287,6 +385,15 @@ function toErrorResponse(error: unknown): Response {
     )
   }
   throw error
+}
+
+function zipResponse(body: Uint8Array<ArrayBuffer>, fileName: string): Response {
+  return new HttpResponse(body, {
+    headers: {
+      'Content-Type': 'application/zip',
+      'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+    },
+  })
 }
 
 function readQuery<T>(request: Request, schema: z.ZodType<T>): T {

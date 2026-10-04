@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatBytes, formatCount, formatDate } from './format'
+import { formatBytes, formatCount, formatDate, formatDuration } from './format'
 
 describe('formatBytes', () => {
   it.each([
@@ -37,5 +37,19 @@ describe('formatCount', () => {
   it('pluralizes', () => {
     expect(formatCount(1, 'item')).toBe('1 item')
     expect(formatCount(1204, 'item')).toMatch(/^1.204 items$/)
+  })
+})
+
+describe('formatDuration', () => {
+  it.each([
+    [3, 'a few seconds'],
+    [42, '40 s'],
+    [59, '60 s'],
+    [125, '2 min'],
+    [3600, '1 h'],
+    [7500, '2 h 5 min'],
+    [Number.POSITIVE_INFINITY, '—'],
+  ])('formats %d seconds as %s', (seconds, expected) => {
+    expect(formatDuration(seconds)).toBe(expected)
   })
 })

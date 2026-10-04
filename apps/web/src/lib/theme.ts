@@ -1,4 +1,6 @@
 import { create } from 'zustand'
+import { canUseViewTransitions } from './motion'
+import { clearNavTransition } from './navigation'
 
 export type Theme = 'dark' | 'light' | 'system'
 
@@ -48,11 +50,12 @@ function applyTheme(theme: Theme): void {
 
 /** Runs a DOM update as a View Transition where supported and motion is welcome. */
 function withViewTransition(update: () => void): void {
-  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches
-  if (reduceMotion || !('startViewTransition' in document)) {
+  if (!canUseViewTransitions()) {
     update()
     return
   }
+  // A plain crossfade: drop the navigation style a page change may have left.
+  clearNavTransition()
   document.startViewTransition(update)
 }
 

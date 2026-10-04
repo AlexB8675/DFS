@@ -34,7 +34,7 @@ export function RenameDialog({ node, onClose }: RenameDialogProps) {
       const problem = validateName(name)
       if (problem) return { name, error: problem }
       try {
-        if (name !== node.name) await rename.mutateAsync({ id: node.id, name })
+        if (name !== node.name) await rename.mutateAsync({ node, name })
         onClose()
         return { name, error: null }
       } catch (error) {

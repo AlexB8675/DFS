@@ -2,7 +2,6 @@ import type { DriveNode } from '@dfs/shared'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { ArrowLeft, ChevronRight, Folder, HardDrive } from 'lucide-react'
 import { useState } from 'react'
-import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -13,10 +12,9 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Spinner } from '@/components/ui/spinner'
 import { useCurrentUser } from '@/features/auth/session'
-import { errorMessage } from '@/lib/api/client'
-import { childFoldersQuery, pathQuery, useMoveNodes } from '../api'
+import { childFoldersQuery, pathQuery } from '../api'
+import { useNodeActions } from '../use-node-actions'
 
 interface MoveDialogProps {
   nodes: DriveNode[]
@@ -29,7 +27,7 @@ export function MoveDialog({ nodes, onClose }: MoveDialogProps) {
   const [folderId, setFolderId] = useState(nodes[0]?.parentId ?? rootFolderId)
   const path = useQuery(pathQuery(folderId))
   const subfolders = useInfiniteQuery(childFoldersQuery(folderId))
-  const move = useMoveNodes()
+  const actions = useNodeActions()
 
   const movingIds = new Set(nodes.map((node) => node.id))
   const current = path.data?.at(-1)
@@ -39,14 +37,10 @@ export function MoveDialog({ nodes, onClose }: MoveDialogProps) {
   const [first] = nodes
   const subject = nodes.length === 1 && first ? `“${first.name}”` : `${nodes.length} items`
 
-  async function confirm() {
-    try {
-      await move.mutateAsync({ ids: [...movingIds], parentId: folderId })
-      toast.success(`Moved ${subject} to “${current?.name ?? 'folder'}”`)
-      onClose()
-    } catch (error) {
-      toast.error('Could not move', { description: errorMessage(error) })
-    }
+  function confirm() {
+    if (!current) return
+    onClose()
+    actions.moveTo(nodes, current)
   }
 
   return (
@@ -136,11 +130,8 @@ export function MoveDialog({ nodes, onClose }: MoveDialogProps) {
           <Button variant="outline" onClick={onClose}>
             Cancel
           </Button>
-          <Button
-            disabled={alreadyThere || move.isPending || !current}
-            onClick={() => void confirm()}
-          >
-            {move.isPending && <Spinner />} Move here
+          <Button disabled={alreadyThere || !current} onClick={confirm}>
+            Move here
           </Button>
         </DialogFooter>
       </DialogContent>

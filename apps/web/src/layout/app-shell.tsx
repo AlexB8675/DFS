@@ -1,6 +1,7 @@
 import { useState, type CSSProperties } from 'react'
-import { Outlet, useLocation } from 'react-router'
+import { Outlet } from 'react-router'
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet'
+import { DragLayer } from '@/features/drag/drag-layer'
 import { DriveDialogs } from '@/features/drive/dialogs/drive-dialogs'
 import { useLiveEvents } from '@/features/live-events/use-live-events'
 import { UploadPanel } from '@/features/uploads/upload-panel'
@@ -12,7 +13,6 @@ import { SidebarResizer } from './sidebar-resizer'
 /** The signed-in layout: header, sidebar with the folder tree, and the page. */
 export function AppShell() {
   const sidebarWidth = usePreferences((state) => state.sidebarWidth)
-  const { pathname } = useLocation()
   const [navigationOpen, setNavigationOpen] = useState(false)
   useLiveEvents()
 
@@ -42,18 +42,14 @@ export function AppShell() {
             <Sidebar onNavigate={closeNavigation} />
           </SheetContent>
         </Sheet>
-        <main className="flex min-w-0 flex-1 flex-col">
-          {/* Keyed by path, so each page eases in when you navigate to it. */}
-          <div
-            key={pathname}
-            className="flex min-h-0 flex-1 flex-col animate-in duration-200 ease-smooth fade-in-0 slide-in-from-bottom-1"
-          >
-            <Outlet />
-          </div>
+        {/* Named for View Transitions: navigating animates this pane alone (lib/navigation.ts). */}
+        <main className="flex min-w-0 flex-1 flex-col [view-transition-name:page]">
+          <Outlet />
         </main>
       </div>
       <UploadPanel />
       <DriveDialogs />
+      <DragLayer />
     </div>
   )
 }

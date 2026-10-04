@@ -154,6 +154,66 @@ export const uploadSessionSchema = z.object({
 })
 export type UploadSession = z.infer<typeof uploadSessionSchema>
 
+export const createUploadBatchSchema = z.object({
+  uploads: z.array(createUploadSchema).min(1).max(500),
+})
+export type CreateUploadBatchInput = z.infer<typeof createUploadBatchSchema>
+
+/**
+ * `POST /uploads/batch` answers per upload, in request order, because a batch
+ * can partly fail: a name may be invalid, or the quota may run out halfway.
+ */
+export const uploadBatchResultSchema = z.object({
+  results: z.array(
+    z.discriminatedUnion('ok', [
+      z.object({ ok: z.literal(true), session: uploadSessionSchema }),
+      z.object({ ok: z.literal(false), error: apiErrorSchema.shape.error }),
+    ]),
+  ),
+})
+export type UploadBatchResult = z.infer<typeof uploadBatchResultSchema>
+
+/** `GET /uploads/:id`: the parts the server already has, so a resumed upload sends only the rest. */
+export const uploadStatusSchema = uploadSessionSchema.extend({
+  receivedParts: z.array(z.number().int().min(0)),
+})
+export type UploadSessionStatus = z.infer<typeof uploadStatusSchema>
+
+// ── Downloads ────────────────────────────────────────────────────────────────
+
+/**
+ * `POST /archive {ids}` answers with a short-lived, single-use link that
+ * streams the ZIP. The browser then downloads it with a plain navigation, so
+ * the download manager shows progress and nothing is buffered in memory.
+ */
+export const archiveTicketSchema = z.object({
+  url: z.string().startsWith('/api/archive/'),
+  fileName: z.string(),
+  expiresAt: timestamp,
+})
+export type ArchiveTicket = z.infer<typeof archiveTicketSchema>
+
+// ── Live events (`GET /events`, §6.1) ────────────────────────────────────────
+
+/**
+ * Server-sent events: the SSE `event` field is the key, `data` is the JSON
+ * payload. Payloads carry enough to update the UI in place: which files
+ * synced and where they are, which folders changed, the new quota use.
+ */
+export const liveEventSchemas = {
+  /** Files whose sync state changed, e.g. a pack reached Discord. */
+  'nodes.synced': z.object({
+    nodes: z.array(z.object({ id, parentId: id, syncState: syncStateSchema })),
+  }),
+  /** Folders whose contents changed in the background; their listings are stale. */
+  'nodes.changed': z.object({ parentIds: z.array(id) }),
+  'quota.changed': z.object({ usedBytes: byteCount }),
+  /** Sent every 25 s, so a silently dropped connection is noticed. */
+  ping: z.object({}),
+} as const
+export type LiveEventType = keyof typeof liveEventSchemas
+export type LiveEventPayload<T extends LiveEventType> = z.infer<(typeof liveEventSchemas)[T]>
+
 // ── Share links ──────────────────────────────────────────────────────────────
 
 export const shareLinkSchema = z.object({
@@ -180,3 +240,118 @@ export const createShareSchema = z.object({
   maxDownloads: z.number().int().positive().nullable(),
 })
 export type CreateShareInput = z.infer<typeof createShareSchema>
+
+// ── Admin (§9, read-only metadata per D4) ────────────────────────────────────
+
+const count = z.number().int().min(0)
+
+export const adminUserSchema = userSchema.extend({
+  disabled: z.boolean(),
+  fileCount: count,
+  createdAt: timestamp,
+  lastSeenAt: timestamp.nullable(),
+})
+export type AdminUser = z.infer<typeof adminUserSchema>
+export const adminUserPageSchema = pageSchema(adminUserSchema)
+
+export const updateUserSchema = z.object({
+  quotaBytes: byteCount.optional(),
+  role: roleSchema.optional(),
+  disabled: z.boolean().optional(),
+})
+export type UpdateUserInput = z.infer<typeof updateUserSchema>
+
+export const usageCategorySchema = z.enum([
+  'image',
+  'video',
+  'audio',
+  'document',
+  'archive',
+  'other',
+])
+export type UsageCategory = z.infer<typeof usageCategorySchema>
+
+export const userUsageSchema = z.object({
+  usedBytes: byteCount,
+  quotaBytes: byteCount,
+  fileCount: count,
+  folderCount: count,
+  trashBytes: byteCount,
+  categories: z.array(z.object({ category: usageCategorySchema, bytes: byteCount, count })),
+})
+export type UserUsage = z.infer<typeof userUsageSchema>
+
+/** `DELETE /admin/nodes/:id`: moderation trash. The owner sees the reason in their trash. */
+export const moderationSchema = z.object({ reason: z.string().trim().min(3).max(500) })
+export type ModerationInput = z.infer<typeof moderationSchema>
+
+export const serviceStatusSchema = z.enum(['ok', 'degraded', 'down'])
+export type ServiceStatus = z.infer<typeof serviceStatusSchema>
+
+export const systemHealthSchema = z.object({
+  checkedAt: timestamp,
+  services: z.array(
+    z.object({ name: z.string(), status: serviceStatusSchema, detail: z.string() }),
+  ),
+  queue: z.object({ pendingJobs: count, failedJobs: count, oldestPendingSeconds: count }),
+  sync: z.object({
+    backlogFiles: count,
+    backlogBytes: byteCount,
+    /** Upload rate to Discord over the last minute. */
+    bytesPerSecond: z.number().min(0),
+  }),
+  staging: z.object({ usedBytes: byteCount, maxBytes: byteCount }),
+  cache: z.object({ usedBytes: byteCount, maxBytes: byteCount, hitRate: z.number().min(0).max(1) }),
+  storage: z.object({
+    blobCount: count,
+    packCount: count,
+    storedBytes: byteCount,
+    liveBytes: byteCount,
+  }),
+  scrubber: z.object({
+    lastRunAt: timestamp.nullable(),
+    checkedBlobs: count,
+    totalBlobs: count,
+    problems: count,
+  }),
+  backups: z.object({
+    lastBackupAt: timestamp.nullable(),
+    lastJournalFlushAt: timestamp.nullable(),
+  }),
+  lostBlobs: z.array(
+    z.object({ blobId: id, channelName: z.string(), detectedAt: timestamp, affectedFiles: count }),
+  ),
+})
+export type SystemHealth = z.infer<typeof systemHealthSchema>
+
+export const storageChannelSchema = z.object({
+  id,
+  discordChannelId: z.string(),
+  name: z.string(),
+  /** Disabled channels take no new blobs; existing ones stay readable. */
+  enabled: z.boolean(),
+  blobCount: count,
+  storedBytes: byteCount,
+  createdAt: timestamp,
+})
+export type StorageChannel = z.infer<typeof storageChannelSchema>
+export const storageChannelListSchema = z.array(storageChannelSchema)
+
+export const createChannelSchema = z.object({
+  discordChannelId: z.string().regex(/^\d{17,20}$/, 'A Discord channel ID is 17–20 digits.'),
+  name: z.string().trim().min(1).max(100),
+})
+export type CreateChannelInput = z.infer<typeof createChannelSchema>
+
+export const updateChannelSchema = z.object({ enabled: z.boolean() })
+
+export const auditEntrySchema = z.object({
+  id,
+  at: timestamp,
+  actorName: z.string(),
+  action: z.string(),
+  target: z.string(),
+  details: z.string().nullable(),
+})
+export type AuditEntry = z.infer<typeof auditEntrySchema>
+export const auditPageSchema = pageSchema(auditEntrySchema)

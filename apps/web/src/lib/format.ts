@@ -47,6 +47,18 @@ export function formatCount(count: number, noun: string): string {
   return `${count.toLocaleString()} ${noun}${count === 1 ? '' : 's'}`
 }
 
+/** A rough time left, for progress: "a few seconds", "45 s", "12 min", "2 h 5 min". */
+export function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds)) return '—'
+  if (seconds < 10) return 'a few seconds'
+  if (seconds < 60) return `${Math.round(seconds / 5) * 5} s`
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return `${minutes} min`
+  const hours = Math.floor(minutes / 60)
+  const rest = minutes % 60
+  return rest === 0 ? `${hours} h` : `${hours} h ${rest} min`
+}
+
 function isSameDay(a: Date, b: Date): boolean {
   return (
     a.getFullYear() === b.getFullYear() &&

@@ -50,6 +50,43 @@ export function createAppRouter() {
           }),
         },
         {
+          path: 'admin',
+          // Only the role check; the pages load with the layout's chunk.
+          loader: async (args) => (await import('@/features/admin/api')).requireAdmin(args),
+          lazy: async () => ({
+            Component: (await import('@/features/admin/admin-layout')).AdminLayout,
+          }),
+          errorElement: <NotFoundPage />,
+          children: [
+            {
+              index: true,
+              lazy: async () => ({
+                Component: (await import('@/features/admin/overview-page')).OverviewPage,
+              }),
+            },
+            {
+              path: 'users',
+              lazy: async () => ({
+                Component: (await import('@/features/admin/users-page')).UsersPage,
+              }),
+            },
+            { path: 'users/:userId', lazy: adminUserPage },
+            { path: 'users/:userId/folders/:folderId', lazy: adminUserPage },
+            {
+              path: 'channels',
+              lazy: async () => ({
+                Component: (await import('@/features/admin/channels-page')).ChannelsPage,
+              }),
+            },
+            {
+              path: 'audit',
+              lazy: async () => ({
+                Component: (await import('@/features/admin/audit-page')).AuditPage,
+              }),
+            },
+          ],
+        },
+        {
           path: 'settings',
           lazy: async () => ({
             Component: (await import('@/features/settings/settings-page')).SettingsPage,
@@ -63,4 +100,8 @@ export function createAppRouter() {
 
 async function drivePage() {
   return { Component: (await import('@/features/drive/drive-page')).DrivePage }
+}
+
+async function adminUserPage() {
+  return { Component: (await import('@/features/admin/user-page')).UserPage }
 }

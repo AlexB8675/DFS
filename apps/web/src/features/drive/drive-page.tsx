@@ -1,6 +1,6 @@
 import { keepPreviousData, useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { FolderOpen, FolderPlus, FolderX, Upload } from 'lucide-react'
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
+import { Link, useParams, useSearchParams } from 'react-router'
 import { Button } from '@/components/ui/button'
 import {
   Empty,
@@ -15,6 +15,7 @@ import { ListSkeleton } from '@/components/list-skeleton'
 import { useCurrentUser } from '@/features/auth/session'
 import { DropZone } from '@/features/uploads/drop-zone'
 import { ApiError } from '@/lib/api/client'
+import { transitionLinkProps, useTransitionNavigate } from '@/lib/navigation'
 import { usePreferences } from '@/lib/preferences'
 import { childrenQuery, nodeQuery, pathQuery } from './api'
 import { Breadcrumbs } from './breadcrumbs'
@@ -34,7 +35,7 @@ export function DrivePage() {
 }
 
 function FolderView({ folderId }: { folderId: string }) {
-  const navigate = useNavigate()
+  const navigate = useTransitionNavigate()
   const [searchParams] = useSearchParams()
   const { rootFolderId } = useCurrentUser()
   const sort = usePreferences((state) => state.sortField)
@@ -80,7 +81,13 @@ function FolderView({ folderId }: { folderId: string }) {
             hasMore={children.hasNextPage}
             isLoadingMore={children.isFetchingNextPage}
             onLoadMore={() => void children.fetchNextPage()}
-            onBack={parent ? () => void navigate(folderUrl(parent.id, rootFolderId)) : undefined}
+            onBack={
+              parent
+                ? () => {
+                    navigate(folderUrl(parent.id, rootFolderId), 'back')
+                  }
+                : undefined
+            }
             empty={
               <Empty className="flex-1">
                 <EmptyHeader>
@@ -134,7 +141,9 @@ function FolderError({ error }: { error: Error }) {
       </EmptyHeader>
       <EmptyContent>
         <Button asChild variant="outline">
-          <Link to="/drive">Go to My Drive</Link>
+          <Link to="/drive" {...transitionLinkProps('section')}>
+            Go to My Drive
+          </Link>
         </Button>
       </EmptyContent>
     </Empty>

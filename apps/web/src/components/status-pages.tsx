@@ -11,6 +11,7 @@ import {
   EmptyTitle,
 } from '@/components/ui/empty'
 import { Spinner } from '@/components/ui/spinner'
+import { transitionLinkProps } from '@/lib/navigation'
 
 /** Shown while the first route loads (session check). */
 export function SplashScreen() {
@@ -35,7 +36,9 @@ export function NotFoundPage() {
       </EmptyHeader>
       <EmptyContent>
         <Button asChild variant="outline">
-          <Link to="/drive">Go to My Drive</Link>
+          <Link to="/drive" {...transitionLinkProps('section')}>
+            Go to My Drive
+          </Link>
         </Button>
       </EmptyContent>
     </Empty>

@@ -1,9 +1,10 @@
 import { splitExtension, type SyncState } from '@dfs/shared'
-import type { MockNode, MockShare, MockState } from './db'
+import type { MockAuditEntry, MockChannel, MockNode, MockShare, MockState, MockUser } from './db'
 
 // Builds a deterministic demo drive. It deliberately includes the edge cases
 // the UI must handle: a folder with 6,000 files, deep nesting, long names, an
 // empty folder, every sync state, trashed and moderated items, and share links.
+// A few other users, storage channels and an audit log feed the admin pages.
 
 const KB = 1024
 const MB = 1024 * KB
@@ -54,11 +55,15 @@ export function createSeed(version: number): MockState {
 
   const between = (min: number, max: number) => Math.round(min + random() * (max - min))
   const ago = (ms: number) => new Date(now - ms).toISOString()
+  const demoUserId = makeUuid(random)
+  /** Whose drive `add` is filling. */
+  let owner = demoUserId
 
   function add(fields: Pick<MockNode, 'parentId' | 'kind' | 'name'> & Partial<MockNode>): MockNode {
     const updatedAt = fields.updatedAt ?? ago(between(30, 900) * DAY)
     const node: MockNode = {
       id: makeUuid(random),
+      ownerId: owner,
       mimeType: null,
       sizeBytes: 0,
       createdAt: updatedAt,
@@ -339,21 +344,137 @@ export function createSeed(version: number): MockState {
     share(wedding, { expiresAt: ago(DAY), downloadCount: 12 }),
   ]
 
+  // ── Other users (for the admin pages) ─────────────────────────────────────
+  const demoUser: MockUser = {
+    id: demoUserId,
+    discordUserId: '123456789012345678',
+    displayName: 'Demo User',
+    avatarUrl: null,
+    role: 'admin',
+    rootFolderId: root,
+    quotaBytes: 200 * GB,
+    disabled: false,
+    createdAt: ago(420 * DAY),
+    lastSeenAt: ago(MINUTE),
+  }
+  const users = [demoUser]
+
+  function user(fields: Pick<MockUser, 'displayName' | 'role' | 'quotaBytes'> & Partial<MockUser>) {
+    const id = makeUuid(random)
+    owner = id
+    const userRoot = folder(null, 'My Drive')
+    users.push({
+      id,
+      discordUserId:
+        String(between(100_000_000, 999_999_999)) + String(between(100_000_000, 999_999_999)),
+      avatarUrl: null,
+      rootFolderId: userRoot,
+      disabled: false,
+      createdAt: ago(between(30, 400) * DAY),
+      lastSeenAt: ago(between(1, 72) * 60 * MINUTE),
+      ...fields,
+    })
+    return userRoot
+  }
+
+  const sam = user({ displayName: 'Sam Rivera', role: 'user', quotaBytes: 100 * GB })
+  photos(folder(sam, 'Photos'), 140, 1, 20 * DAY)
+  const samWork = folder(sam, 'Work')
+  file(samWork, 'Quarterly report.pdf', 4.2 * MB)
+  file(samWork, 'Roadmap.xlsx', 220 * KB)
+  file(samWork, 'Onboarding.docx', 96 * KB)
+  const games = folder(sam, 'Games')
+  file(games, 'cracked-launcher.exe', 64 * MB, { age: 2 * DAY })
+  file(games, 'saves.zip', 380 * MB)
+
+  const priya = user({ displayName: 'Priya Patel', role: 'admin', quotaBytes: 500 * GB })
+  const research = folder(priya, 'Research')
+  for (let i = 1; i <= 24; i += 1)
+    file(research, `Paper ${String(i).padStart(2, '0')}.pdf`, between(1 * MB, 9 * MB))
+  const datasets = folder(research, 'Datasets')
+  file(datasets, 'measurements-2025.csv', 1.8 * GB)
+  file(datasets, 'raw-images.tar.gz', 36 * GB, { syncState: 'syncing' })
+  const lectures = folder(priya, 'Lectures')
+  for (let i = 1; i <= 12; i += 1) file(lectures, `Week ${i}.mp4`, between(400 * MB, 1200 * MB))
+
+  const jordan = user({
+    displayName: 'Jordan Lee',
+    role: 'user',
+    quotaBytes: 20 * GB,
+    disabled: true,
+    lastSeenAt: ago(90 * DAY),
+  })
+  const oldStuff = folder(jordan, 'Old stuff')
+  file(oldStuff, 'notes.txt', 3 * KB)
+  file(oldStuff, 'scan.pdf', 2.4 * MB)
+
+  const alex = user({ displayName: 'Alex Kim', role: 'user', quotaBytes: 50 * GB })
+  const alexBackups = folder(alex, 'Backups')
+  file(alexBackups, 'desktop-full.tar.gz', 38 * GB)
+  file(alexBackups, 'photos-2025.zip', 7.5 * GB)
+  file(folder(alex, 'Documents'), 'Taxes 2025.pdf', 1.1 * MB)
+
+  // ── Storage channels and the audit log ────────────────────────────────────
+  const channel = (name: string, enabled: boolean, age: number): MockChannel => ({
+    id: makeUuid(random),
+    discordChannelId:
+      String(between(100_000_000, 999_999_999)) + String(between(100_000_000, 999_999_999)),
+    name,
+    enabled,
+    createdAt: ago(age),
+  })
+  const channels = [
+    channel('dfs-legacy', false, 400 * DAY),
+    channel('dfs-data-1', true, 300 * DAY),
+    channel('dfs-data-2', true, 300 * DAY),
+    channel('dfs-data-3', true, 45 * DAY),
+  ]
+
+  const audit: MockAuditEntry[] = []
+  const log = (
+    age: number,
+    actorName: string,
+    action: string,
+    target: string,
+    details: string | null = null,
+  ) => {
+    audit.push({ id: makeUuid(random), at: ago(age), actorName, action, target, details })
+  }
+  log(2 * 60 * MINUTE, 'System', 'backup.completed', 'Database', 'Dump 1.2 GB, 3 blobs')
+  log(
+    6 * 60 * MINUTE,
+    'Demo User',
+    'node.moderated',
+    'free-movies.exe (Demo User)',
+    'Executable files are not allowed on this server.',
+  )
+  log(2 * DAY, 'Priya Patel', 'user.updated', 'Sam Rivera', 'Quota 50 GB → 100 GB')
+  log(3 * DAY, 'System', 'scrub.completed', 'All channels', 'Checked 41,208 blobs, 1 lost')
+  log(9 * DAY, 'System', 'blob.lost', 'dfs-data-1', 'Old camcorder tape 1998.avi')
+  log(45 * DAY, 'Demo User', 'channel.created', 'dfs-data-3', null)
+  log(60 * DAY, 'Demo User', 'channel.disabled', 'dfs-legacy', null)
+  log(90 * DAY, 'Priya Patel', 'user.disabled', 'Jordan Lee', null)
+  for (let day = 4; day <= 40; day += 1) {
+    log(
+      day * DAY + between(0, 600) * MINUTE,
+      'System',
+      'backup.completed',
+      'Database',
+      `Dump ${(1 + random() * 0.2).toFixed(1)} GB`,
+    )
+  }
+  audit.sort((a, b) => b.at.localeCompare(a.at))
+
   return {
     version,
-    user: {
-      id: makeUuid(random),
-      discordUserId: '123456789012345678',
-      displayName: 'Demo User',
-      avatarUrl: null,
-      role: 'admin',
-      rootFolderId: root,
-      quotaBytes: 200 * GB,
-    },
+    userId: demoUserId,
+    users,
     signedIn: false,
     nodes,
     shares,
     uploads: {},
+    channels,
+    audit,
   }
 }
 

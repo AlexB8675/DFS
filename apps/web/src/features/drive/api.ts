@@ -1,4 +1,5 @@
 import {
+  archiveTicketSchema,
   nodePageSchema,
   nodePathSchema,
   nodeSchema,
@@ -13,6 +14,14 @@ import { queryClient } from '@/app/query-client'
 import { apiFetch, apiGet, apiSend } from '@/lib/api/client'
 import { mocksEnabled } from '@/lib/env'
 import { usePreferences } from '@/lib/preferences'
+import {
+  invalidateListings,
+  invalidateNodes,
+  invalidatePaths,
+  patchNodes,
+  removeFromListings,
+} from './cache'
+import { markFresh, settleLeaving } from './list-motion'
 
 const PAGE_SIZE = 200
 
@@ -67,7 +76,8 @@ export function childFoldersQuery(id: string) {
 
 /**
  * Warms the cache for a folder the user is about to open, so it appears
- * instantly: its first page in the current sort order and its path. The
+ * instantly: its first page in the current sort order, its path, and its
+ * subfolders for the tree. The
  * folder itself is already known from the list it was shown in. Fresh data
  * (within `staleTime`) is not fetched again.
  */
@@ -80,6 +90,8 @@ export function prefetchFolder(folder: DriveNode): void {
   // Prefetch failures are harmless: opening the folder fetches again.
   queryClient.infiniteQuery(childrenQuery(folder.id, { sort, order })).catch(ignore)
   queryClient.query(pathQuery(folder.id)).catch(ignore)
+  // What the folder tree shows when it is expanded.
+  if (folder.hasChildFolders) queryClient.infiniteQuery(childFoldersQuery(folder.id)).catch(ignore)
 }
 
 function ignore(): void {
@@ -87,43 +99,79 @@ function ignore(): void {
 }
 
 // ── Mutations ────────────────────────────────────────────────────────────────
-
-/** Refetches everything a change to the tree can affect, including the quota. */
-export async function invalidateDriveData(): Promise<void> {
-  await Promise.all(
-    [['nodes'], ['trash'], ['search'], ['session']].map((queryKey) =>
-      queryClient.invalidateQueries({ queryKey }),
-    ),
-  )
-}
+//
+// Each change updates the cache right away (removing moved or trashed rows,
+// patching a renamed one), then refetches only the folders it touched.
 
 export function useCreateFolder() {
   return useMutation({
     mutationFn: (input: CreateFolderInput) => apiSend('POST', '/folders', input, nodeSchema),
-    onSettled: invalidateDriveData,
+    onSuccess: (folder) => {
+      markFresh([folder.id])
+    },
+    onSettled: (_folder, _error, input) => invalidateListings([input.parentId]),
   })
 }
 
 export function useRenameNode() {
   return useMutation({
-    mutationFn: ({ id, name }: { id: string; name: string }) =>
-      apiSend('PATCH', `/nodes/${id}`, { name }, nodeSchema),
-    onSettled: invalidateDriveData,
+    mutationFn: ({ node, name }: { node: DriveNode; name: string }) =>
+      apiSend('PATCH', `/nodes/${node.id}`, { name }, nodeSchema),
+    onMutate: ({ node, name }) => {
+      patchNodes(new Map([[node.id, { name }]]))
+    },
+    onSettled: (_node, _error, { node }) =>
+      Promise.all([
+        invalidateListings([node.parentId]),
+        invalidateNodes([node.id]),
+        invalidatePaths(),
+        queryClient.invalidateQueries({ queryKey: ['search'] }),
+      ]),
   })
+}
+
+export interface MoveInput {
+  nodes: DriveNode[]
+  parentId: string
 }
 
 export function useMoveNodes() {
   return useMutation({
-    mutationFn: ({ ids, parentId }: { ids: string[]; parentId: string }) =>
-      apiSend('POST', '/nodes/move', { ids, parentId }),
-    onSettled: invalidateDriveData,
+    mutationFn: ({ nodes, parentId }: MoveInput) =>
+      apiSend('POST', '/nodes/move', { ids: nodes.map((node) => node.id), parentId }),
+    onMutate: ({ nodes }) => {
+      removeFromListings(new Set(nodes.map((node) => node.id)))
+    },
+    onSuccess: (_result, { nodes }) => {
+      markFresh(nodes.map((node) => node.id))
+    },
+    onSettled: (_result, _error, { nodes, parentId }) => {
+      settleLeaving(nodes.map((node) => node.id))
+      return Promise.all([
+        invalidateListings([...nodes.map((node) => node.parentId), parentId]),
+        invalidateNodes(nodes.map((node) => node.id)),
+        invalidatePaths(),
+        queryClient.invalidateQueries({ queryKey: ['search'] }),
+      ])
+    },
   })
 }
 
 export function useTrashNodes() {
   return useMutation({
-    mutationFn: (ids: string[]) => apiSend('POST', '/nodes/trash', { ids }),
-    onSettled: invalidateDriveData,
+    mutationFn: (nodes: DriveNode[]) =>
+      apiSend('POST', '/nodes/trash', { ids: nodes.map((node) => node.id) }),
+    onMutate: (nodes) => {
+      removeFromListings(new Set(nodes.map((node) => node.id)))
+    },
+    onSettled: (_result, _error, nodes) => {
+      settleLeaving(nodes.map((node) => node.id))
+      return Promise.all([
+        invalidateListings(nodes.map((node) => node.parentId)),
+        queryClient.invalidateQueries({ queryKey: ['trash'] }),
+        queryClient.invalidateQueries({ queryKey: ['search'] }),
+      ])
+    },
   })
 }
 
@@ -131,25 +179,63 @@ export function useRestoreNodes() {
   return useMutation({
     mutationFn: (ids: string[]) =>
       Promise.all(ids.map((id) => apiSend('POST', `/nodes/${id}/restore`, undefined, nodeSchema))),
-    onSettled: invalidateDriveData,
+    onSuccess: (nodes) => {
+      markFresh(nodes.map((node) => node.id))
+    },
+    onSettled: (nodes) =>
+      Promise.all([
+        invalidateListings(nodes?.map((node) => node.parentId) ?? []),
+        queryClient.invalidateQueries({ queryKey: ['trash'] }),
+        queryClient.invalidateQueries({ queryKey: ['search'] }),
+        queryClient.invalidateQueries({ queryKey: ['session'] }),
+      ]),
   })
 }
 
 // ── Downloads ────────────────────────────────────────────────────────────────
 
 /**
- * Downloads a file. The real API streams it with `Content-Disposition:
- * attachment` (§7.5). The mock API cannot intercept a download navigation, so
- * mock mode fetches the bytes and saves them from memory.
+ * Downloads nodes: one file as itself, a folder or several items as a ZIP
+ * (§6.2). The real API streams both with `Content-Disposition: attachment`,
+ * so the browser's download manager takes over. Several items first get a
+ * short-lived link from `POST /archive`, which keeps every state-changing
+ * request on JSON with a CSRF header.
  */
-export async function downloadFile(node: DriveNode): Promise<void> {
+export async function downloadNodes(nodes: DriveNode[]): Promise<void> {
+  const [first] = nodes
+  if (!first) return
+  if (nodes.length === 1 && first.kind === 'file') {
+    await save(`/files/${first.id}/content`, first.name)
+  } else if (nodes.length === 1) {
+    await save(`/folders/${first.id}/archive`, `${first.name}.zip`)
+  } else {
+    const ticket = await apiSend(
+      'POST',
+      '/archive',
+      { ids: nodes.map((node) => node.id) },
+      archiveTicketSchema,
+    )
+    await save(ticket.url.slice('/api'.length), ticket.fileName)
+  }
+}
+
+/** Whether downloading these nodes builds a ZIP. */
+export function isArchiveDownload(nodes: DriveNode[]): boolean {
+  return nodes.length > 1 || nodes[0]?.kind === 'folder'
+}
+
+/**
+ * Saves `/api{path}`. The mock API cannot intercept a download navigation,
+ * so mock mode fetches the bytes and saves them from memory.
+ */
+async function save(path: string, fileName: string): Promise<void> {
   if (!mocksEnabled) {
-    saveAs(`/api/files/${node.id}/content`, node.name)
+    saveAs(`/api${path}`, fileName)
     return
   }
-  const response = await apiFetch(`/files/${node.id}/content`)
+  const response = await apiFetch(path)
   const objectUrl = URL.createObjectURL(await response.blob())
-  saveAs(objectUrl, node.name)
+  saveAs(objectUrl, fileName)
   window.setTimeout(() => {
     URL.revokeObjectURL(objectUrl)
   }, 10_000)

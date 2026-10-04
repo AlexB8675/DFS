@@ -1,6 +1,6 @@
 import { trashPageSchema } from '@dfs/shared'
 import { infiniteQueryOptions, useMutation } from '@tanstack/react-query'
-import { invalidateDriveData } from '@/features/drive/api'
+import { queryClient } from '@/app/query-client'
 import { apiGet, apiSend } from '@/lib/api/client'
 
 export const trashQuery = infiniteQueryOptions({
@@ -14,13 +14,21 @@ export const trashQuery = infiniteQueryOptions({
 export function useDeleteForever() {
   return useMutation({
     mutationFn: (id: string) => apiSend('DELETE', `/trash/${id}`),
-    onSettled: invalidateDriveData,
+    onSettled: invalidateTrash,
   })
 }
 
 export function useEmptyTrash() {
   return useMutation({
     mutationFn: () => apiSend('DELETE', '/trash'),
-    onSettled: invalidateDriveData,
+    onSettled: invalidateTrash,
   })
+}
+
+/** Deleting forever frees quota, so the session (which carries usage) refetches too. */
+async function invalidateTrash(): Promise<void> {
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: ['trash'] }),
+    queryClient.invalidateQueries({ queryKey: ['session'] }),
+  ])
 }

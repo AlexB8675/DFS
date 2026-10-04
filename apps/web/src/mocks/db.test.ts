@@ -16,7 +16,9 @@ vi.hoisted(() => {
   vi.useFakeTimers()
 })
 
-const { db, MockApiError } = await import('./db')
+const { MockApiError } = await import('./db')
+const { AdminMockDb } = await import('./admin-db')
+const db = new AdminMockDb()
 
 // These tests double as a spec for the real API: they encode the rules of
 // DESIGN.md §5–§6 that the mock imitates.
@@ -42,6 +44,23 @@ function apiError(action: () => unknown) {
     throw error
   }
   throw new Error('Expected an API error')
+}
+
+/** The entry names in a ZIP, read from its central directory. */
+function zipNames(zip: Uint8Array): string[] {
+  const view = new DataView(zip.buffer, zip.byteOffset, zip.byteLength)
+  const end = zip.byteLength - 22
+  const count = view.getUint16(end + 10, true)
+  let offset = view.getUint32(end + 16, true)
+  const names: string[] = []
+  for (let index = 0; index < count; index += 1) {
+    expect(view.getUint32(offset, true)).toBe(0x02014b50)
+    expect(view.getUint16(offset + 8, true) & 0x0800).toBe(0x0800) // UTF-8 names
+    const nameLength = view.getUint16(offset + 28, true)
+    names.push(new TextDecoder().decode(zip.subarray(offset + 46, offset + 46 + nameLength)))
+    offset += 46 + nameLength
+  }
+  return names
 }
 
 async function sha256Hex(data: ArrayBuffer) {
@@ -140,5 +159,109 @@ describe('mock API database', () => {
 
     vi.advanceTimersByTime(10_000)
     expect(db.node(upload.nodeId).syncState).toBe('stored')
+  })
+
+  it('creates upload sessions in a batch, failing only the uploads that don’t fit', () => {
+    const results = db.createUploads([
+      { parentId: rootId(), name: 'small.txt', sizeBytes: 10, mimeType: 'text/plain' },
+      { parentId: rootId(), name: 'huge.bin', sizeBytes: 10 * 1024 ** 4, mimeType: 'x/y' },
+      { parentId: rootId(), name: 'bad/name', sizeBytes: 10, mimeType: 'text/plain' },
+    ])
+    expect(results.map((result) => (result.ok ? 'ok' : result.error.code))).toEqual([
+      'ok',
+      'quota_exceeded',
+      'invalid_name',
+    ])
+  })
+
+  it('reports the parts it has, so an upload can resume', async () => {
+    const upload = db.createUpload(rootId(), 'movie.mkv', 25 * 1024 * 1024, 'video/x-matroska')
+    expect(upload.chunkCount).toBe(3)
+    const part = new Uint8Array(upload.chunkSize).buffer
+    await db.receivePart(upload.uploadId, 2, part, null)
+    await db.receivePart(upload.uploadId, 0, part, null)
+
+    expect(db.uploadStatus(upload.uploadId).receivedParts).toEqual([0, 2])
+    expect(
+      apiError(() => {
+        db.completeUpload(upload.uploadId)
+      }),
+    ).toEqual({
+      status: 409,
+      code: 'incomplete_upload',
+    })
+  })
+
+  it('zips a folder with its subfolders, empty ones included', async () => {
+    const folder = db.createFolder(rootId(), 'Zip test')
+    db.createFolder(folder.id, 'Empty')
+    const bytes = new TextEncoder().encode('hi').buffer
+    const upload = db.createUpload(folder.id, 'Grüße.txt', bytes.byteLength, 'text/plain')
+    await db.receivePart(upload.uploadId, 0, bytes, null)
+
+    const archive = db.folderArchive(folder.id)
+    expect(archive.name).toBe('Zip test.zip')
+    expect(zipNames(archive.body)).toEqual(['Zip test/', 'Zip test/Empty/', 'Zip test/Grüße.txt'])
+  })
+
+  it('serves an archive link once', () => {
+    const ids = list(child(rootId(), 'Documents').id).map((node) => node.id)
+    const token = db.createArchiveTicket(ids).url.split('/').at(-1) ?? ''
+
+    expect(zipNames(db.takeArchive(token))).toContain('Taxes/')
+    expect(apiError(() => db.takeArchive(token))).toEqual({ status: 404, code: 'archive_expired' })
+  })
+
+  it('keeps users apart, while admins see everyone’s metadata', () => {
+    const sam = db.adminUsers().items.find((user) => user.displayName === 'Sam Rivera')
+    if (!sam) throw new Error('Sam is missing from the seed')
+
+    expect(
+      apiError(() => db.children(sam.rootFolderId, { sort: 'name', order: 'asc', limit: 10 })),
+    ).toEqual({ status: 404, code: 'not_found' })
+    expect(db.search('cracked', null, 10).items).toHaveLength(0)
+    const names = db
+      .adminChildren(sam.rootFolderId, { sort: 'name', order: 'asc', limit: 10 })
+      .items.map((node) => node.name)
+    expect(names).toEqual(['Games', 'Photos', 'Work'])
+  })
+
+  it('moderation moves an item to its owner’s trash, with the reason, and logs it', () => {
+    const sam = db.adminUsers().items.find((user) => user.displayName === 'Sam Rivera')
+    if (!sam) throw new Error('Sam is missing from the seed')
+    const options = { sort: 'name', order: 'asc', limit: 50 } as const
+    const games = db.adminChildren(sam.rootFolderId, options).items.find((n) => n.name === 'Games')
+    const exe = db.adminChildren(games?.id ?? '', options).items.find((n) => n.kind === 'file')
+    if (!exe) throw new Error('No file to moderate')
+
+    db.moderate(exe.id, 'No executables.')
+
+    expect(db.adminChildren(games?.id ?? '', options).items.map((n) => n.id)).not.toContain(exe.id)
+    expect(db.auditLog(null, 1).items[0]).toMatchObject({
+      action: 'node.moderated',
+      details: 'No executables.',
+    })
+  })
+
+  it('doesn’t let admins demote or disable themselves', () => {
+    const me = db.session().user
+    expect(apiError(() => db.updateUser(me.id, { role: 'user' }))).toEqual({
+      status: 409,
+      code: 'self_change',
+    })
+  })
+
+  it('keeps at least one channel taking new blobs', () => {
+    const enabled = db.channels().filter((channel) => channel.enabled)
+    const last = enabled.pop()
+    for (const channel of enabled) db.updateChannel(channel.id, false)
+    expect(
+      apiError(() => {
+        db.updateChannel(last?.id ?? '', false)
+      }),
+    ).toEqual({
+      status: 409,
+      code: 'last_channel',
+    })
   })
 })

@@ -1,8 +1,9 @@
 import type { DriveNode } from '@dfs/shared'
-import type { MouseEvent, ReactNode } from 'react'
+import type { MouseEvent, PointerEvent, ReactNode } from 'react'
 import { Spinner } from '@/components/ui/spinner'
 import { ContextMenu, ContextMenuContent, ContextMenuTrigger } from '@/components/ui/context-menu'
 import { VirtualList } from '@/components/virtual-list'
+import { beginPointerDrag } from '@/features/drag/drag-controller'
 import { useElementWidth } from '@/lib/use-element-width'
 import { usePreferences } from '@/lib/preferences'
 import { ListHeader } from './list-header'
@@ -82,6 +83,16 @@ export function NodeList({
     if (!store.getState().selected.has(node.id)) store.getState().select(node.id)
   }
 
+  function handlePointerDown(event: PointerEvent<HTMLElement>, node: DriveNode) {
+    beginPointerDrag(event, () => {
+      // Dragging an unselected item drags it alone, as in file managers.
+      const state = store.getState()
+      if (!state.selected.has(node.id)) state.select(node.id)
+      const { selected: dragged } = store.getState()
+      return nodes.filter((candidate) => dragged.has(candidate.id))
+    })
+  }
+
   function handleBackgroundClick(event: MouseEvent<HTMLElement>) {
     if (event.target instanceof Element && !event.target.closest('[data-node-id]'))
       store.getState().clear()
@@ -91,6 +102,7 @@ export function NodeList({
     onSelect: handleSelect,
     onOpen: actions.open,
     onContextMenu: handleContextMenu,
+    onPointerDown: handlePointerDown,
   }
 
   return (
@@ -119,6 +131,7 @@ export function NodeList({
                 activeId && activeIndex !== -1 ? optionId(activeId) : undefined
               }
               tabIndex={0}
+              data-drag-scroll
               className="group/list flex-1 animate-in py-1 duration-200 ease-smooth outline-none fade-in-0"
               onKeyDown={handleKeyDown}
               items={nodes}
@@ -126,6 +139,7 @@ export function NodeList({
               itemHeight={viewMode === 'list' ? ROW_HEIGHT : TILE_HEIGHT}
               lanes={columns}
               scrollToIndex={activeIndex}
+              animateMoves
               onEndReached={hasMore && !isLoadingMore ? onLoadMore : undefined}
               renderItem={(node) =>
                 viewMode === 'list' ? (

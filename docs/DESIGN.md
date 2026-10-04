@@ -1,10 +1,10 @@
 # DFS — Discord File System
-### Design Document · v0.4 (Draft)
+### Design Document · v0.5 (Draft)
 
 | | |
 |---|---|
-| **Status** | Draft, for review. All questions from v0.1/v0.2 resolved, and v0.3 review findings fixed as D8–D13 (see §19) |
-| **Date** | 2026-10-03 |
+| **Status** | Draft, for review. All questions from v0.1/v0.2 resolved, v0.3 review findings fixed as D8–D13, and the UI-first build and its API details settled as D14–D17 (see §19) |
+| **Date** | 2026-10-04 |
 | **Stack** | TypeScript everywhere: React + Fastify + discord.js + PostgreSQL 18 |
 | **Deployment** | Docker Compose on **one Fedora Linux VPS**. Only the web UI (Caddy edge) is public; API, bot, and DB sit on an internal Docker network (§3.2, §13) |
 | **Development** | Locally on Windows: Node 24 + pnpm, with Postgres in Docker Desktop (§13.1) |
@@ -403,14 +403,24 @@ sequenceDiagram
 
 **Details**
 
-- **Resume:** `GET /api/uploads/:id` returns the part indexes already received. The client only re-sends the missing ones. Upload sessions expire after 24 h; a janitor job cleans up expired sessions and releases their reserved quota.
-- **Small files in bulk:** `POST /api/uploads/batch` creates up to 500 sessions in one call. A single-part file is uploaded with one `PUT` and **auto-completes**, so uploading a small file costs 2 requests in total. Folder trees are created first with `POST /api/folders/ensure` (like `mkdir -p` for many paths in one transaction).
+- **Resume:** `GET /api/uploads/:id` returns the session with `receivedParts`, the part indexes already received. The client only re-sends the missing ones. Upload sessions expire after 24 h; a janitor job cleans up expired sessions and releases their reserved quota.
+- **Small files in bulk:** `POST /api/uploads/batch` creates up to 500 sessions in one call. It answers per upload, in request order (`{results: [{ok: true, session} | {ok: false, error}]}`), because a batch can partly fail: an invalid name, or the quota running out halfway (`507 quota_exceeded`). A single-part file is uploaded with one `PUT` and **auto-completes**, so uploading a small file costs 2 requests in total. Folder trees are created first with `POST /api/folders/ensure` (like `mkdir -p` for many paths in one transaction).
 - **Idempotency:** Discord's `nonce` + `enforce_nonce` on message create prevents duplicate posts when a job retries within a short window. A reconciler also scans for orphan `dfs1` messages whose blob is not `stored`, and deletes or adopts them.
 - **Channel selection:** the least-loaded enabled data channel, which spreads rate-limit buckets across channels. Concurrency per channel is configurable (default 2 in-flight requests).
-- **Backpressure:** if staging passes `STAGING_MAX_BYTES`, `PUT part` returns `503 Retry-After` and the client backs off. Staging cannot grow without limit when Discord is slower than the user's upload.
+- **Backpressure:** if staging passes `STAGING_MAX_BYTES`, `PUT part` returns `503` with `Retry-After` (seconds or an HTTP date) and the client backs off. Staging cannot grow without limit when Discord is slower than the user's upload.
 - **Read-your-writes:** a `syncing` version is fully readable. The download path reads frames from staging until their blob is `stored`.
-- **Progress:** the UI shows two phases. *Uploading* is browser→API. *Syncing to Discord* is in the background and streamed via SSE from `GET /api/events`.
-- **Live events across API replicas:** the bot never talks to browsers, and a user's SSE stream can be on any API instance. Every state change the UI shows (version synced or failed, blob lost, quota changed) calls `pg_notify('dfs_events', …)` in the same transaction, so the event is delivered only if the change commits. Each API instance `LISTEN`s on one dedicated connection and forwards events to its own SSE clients for that user. Payloads stay small (user ID, event type, a few IDs; Postgres caps them at 8 KB). Bulk changes send one coalesced event per transaction (for example, per pack), and the UI refetches what it shows. Events are not durable: after a reconnect, the client refetches. Postgres serializes the commits of transactions that issue `NOTIFY`, so only transactions that are already infrequent send one: per pack, per batch, or rare events such as a lost blob. Per-file transactions, such as completing a small-file upload, don't notify. The uploading browser already knows about those, and it refetches the quota when a batch finishes.
+- **Progress:** the UI shows two phases. *Uploading* is browser→API. *Syncing to Discord* is in the background and streamed via SSE from `GET /api/events` (`nodes.synced`).
+- **Live events across API replicas:** the bot never talks to browsers, and a user's SSE stream can be on any API instance. Every state change the UI shows (version synced or failed, blob lost, quota changed) calls `pg_notify('dfs_events', …)` in the same transaction, so the event is delivered only if the change commits. Each API instance `LISTEN`s on one dedicated connection and forwards events to its own SSE clients for that user. Payloads stay small (user ID, event type, a few IDs; Postgres caps them at 8 KB). Bulk changes send one coalesced event per transaction (for example, per pack). Events are not durable: after a reconnect, the client refetches. Postgres serializes the commits of transactions that issue `NOTIFY`, so only transactions that are already infrequent send one: per pack, per batch, or rare events such as a lost blob. Per-file transactions, such as completing a small-file upload, don't notify. The uploading browser already knows about those, and it refetches the quota when a batch finishes.
+- **Event payloads** (shared Zod schemas, `liveEventSchemas`): the SSE `event` field is the type and `data` is JSON. They say what changed, so the UI updates in place instead of refetching whole folders (a 6,000-file folder is 30 pages):
+
+  | Event | Payload | The UI |
+  |---|---|---|
+  | `nodes.synced` | `{nodes: [{id, parentId, syncState}]}`, at most 500 nodes | patches the rows in the cache; the upload panel ticks off phase two (or shows the failure) |
+  | `nodes.changed` | `{parentIds}` | refetches only those folders' listings (background changes, e.g. moderation) |
+  | `quota.changed` | `{usedBytes}` | sets the quota meter directly |
+  | `ping` | `{}` | every 25 s. Proxies keep the stream open, and a client that hears nothing for 60 s reconnects |
+
+  The `NOTIFY` itself carries only IDs (a pack or a few versions), well under the 8 KB cap; the API instance that receives it expands them into the SSE payload. A pack of more than 500 files becomes `nodes.changed` for their folders instead. An event the client can't parse makes it refetch everything, and after a reconnect the upload panel re-checks the files it still shows as syncing, so a newer server or a missed event never leaves a stale screen.
 
 ### 6.2 Download (streaming, Range-aware)
 
@@ -616,17 +626,17 @@ All routes are under `/api`, use JSON unless noted, and are validated with Zod s
 | `POST /folders` `{parentId, name}` · `POST /folders/ensure` `{parentId, paths[]}` | Create folder / `mkdir -p` in bulk |
 | `PATCH /nodes/:id` `{name?, parentId?}` · `POST /nodes/move` `{ids[], parentId}` | Rename / move (single or bulk) |
 | `DELETE /nodes/:id` · `POST /nodes/trash` `{ids[]}` · `POST /nodes/:id/restore` · `GET /trash` · `DELETE /trash/:id` · `DELETE /trash` | Trash: move, restore, list, delete one item forever, empty |
-| `POST /uploads` · `POST /uploads/batch` · `GET /uploads/:id` · `PUT /uploads/:id/parts/:idx` (binary) · `POST /uploads/:id/complete` · `DELETE /uploads/:id` | Multipart upload |
+| `POST /uploads` · `POST /uploads/batch` (per-upload results) · `GET /uploads/:id` (with `receivedParts`) · `PUT /uploads/:id/parts/:idx` (binary) · `POST /uploads/:id/complete` · `DELETE /uploads/:id` | Multipart upload (§6.1) |
 | `GET /files/:id/content` (Range) · `GET /files/:id/versions` · `POST /files/:id/versions/:vid/restore` | Content & versions |
-| `GET /folders/:id/archive` · `POST /archive` `{ids[]}` | ZIP download |
+| `GET /folders/:id/archive` · `POST /archive` `{ids[]}` → `{url, fileName, expiresAt}` · `GET /archive/:ticket` | ZIP download. Several items get a short-lived, single-use link (D17), which the browser then downloads with a plain navigation |
 | `GET /search?q=&type=&cursor` | Name search (`pg_trgm`) |
 | `POST /shares` · `GET /shares` · `PATCH /shares/:id` (expiry, password, cap) · `DELETE /shares/:id` | Share links (owner) |
 | `GET /s/:token` · `POST /s/:token/unlock` · `GET /s/:token/children?parentId&cursor` · `GET /s/:token/files/:id/content` (Range) · `GET /s/:token/archive` | Public share access, no login. Used by the SPA page at `/s/:token`. `:id` and `parentId` must be the shared node or inside its subtree |
-| `GET /events` (SSE) | Upload/sync progress, quota changes, lost files (fed by `LISTEN/NOTIFY`, §6.1) |
+| `GET /events` (SSE) | Sync progress, background changes, quota, keep-alive pings (fed by `LISTEN/NOTIFY`; payloads in §6.1) |
 | `GET /admin/users` · `PATCH /admin/users/:id` (quota, role, disable) | Admin: users |
-| `GET /admin/users/:id/usage` · `GET /admin/nodes/:id` · `GET /admin/nodes/:id/children` · `GET /admin/search?q=&userId=` | Admin: **read-only metadata** of any user (no content routes) |
+| `GET /admin/users/:id/usage` · `GET /admin/nodes/:id` · `GET /admin/nodes/:id/path` · `GET /admin/nodes/:id/children` · `GET /admin/search?q=&userId=` | Admin: **read-only metadata** of any user (no content routes) |
 | `DELETE /admin/nodes/:id` `{reason}` | Admin: moderation trash (audited; the owner sees the reason in their trash) |
-| `GET /admin/health` · `GET /admin/channels` · `POST /admin/channels` · `GET /admin/audit` | Admin: system |
+| `GET /admin/health` · `GET /admin/channels` · `POST /admin/channels` · `PATCH /admin/channels/:id` `{enabled}` · `GET /admin/audit` | Admin: system. At least one channel always stays enabled. Admins can't demote or disable themselves |
 
 There is no copy endpoint (D3).
 
@@ -636,9 +646,21 @@ Internal (bot), only reachable on `dfs_internal` and returning `404` at the edge
 
 ## 10. Frontend (React)
 
-**Stack:** React 19 with the **React Compiler** (automatic memoization, so no hand-written `useMemo`/`useCallback`), Vite 8, TypeScript 6.0, TanStack Query (server state, infinite queries), **TanStack Virtual** (virtualized lists and grids for folders with 100k+ entries), React Router 8 (data router; route loaders gate on the session), Tailwind CSS 4 + shadcn/ui (Radix primitives), zustand (client state: selection, uploads, preferences), Zod (schemas shared with the API), and `@dnd-kit` for drag-to-move (later). Dark mode is the default; light and system themes are available.
+**Stack:** React 19 with the **React Compiler** (automatic memoization, so no hand-written `useMemo`/`useCallback`), Vite 8, TypeScript 6.0, TanStack Query (server state, infinite queries), **TanStack Virtual** (virtualized lists and grids for folders with 100k+ entries), React Router 8 (data router; route loaders gate on the session), Tailwind CSS 4 + shadcn/ui (Radix primitives), zustand (client state: selection, uploads, preferences, drag state), and Zod (schemas shared with the API). Dark mode is the default; light and system themes are available.
 
-**Visual style:** squared-off corners (6 px base radius); a softly cool-tinted neutral palette instead of pure black and white (body text about 13:1, every text pair at least WCAG AA); short transitions on one shared ease-out curve (about 160 ms for hover and selection, 200–300 ms for content and panels, a crossfade when the theme changes). Motion is cut to a minimum under `prefers-reduced-motion`.
+**Visual style:** squared-off corners (6 px base radius); a softly cool-tinted neutral palette instead of pure black and white (body text about 13:1, every text pair at least WCAG AA). Motion is cut to a minimum under `prefers-reduced-motion`, View Transitions included.
+
+**Motion:** smooth and a little bouncy, like iOS, without glass effects. Color and hover changes use one short ease-out curve (160 ms). Anything that moves or appears uses **springs**: CSS `linear()` curves sampled from a damped spring, so they run on the compositor like any CSS animation, with no animation library. There are three, each paired with the duration it needs to settle (`motion-*` utilities): *glide* (no overshoot, 350 ms) for opacity, heights and page slides; *spring* (2% overshoot, 430 ms) for menus, dialogs and rows moving; *bounce* (8% overshoot, 580 ms) for small things that pop, such as badges, checkmarks and the switch knob. Overshoot is only ever applied to transforms. Specifically:
+
+- Navigating slides the content pane with a View Transition: into a folder from the right, back out from the left, between sections with a soft zoom. Only the pane is named, the overlay lets clicks through, and nothing animates while dragging or when the page is hidden.
+- Rows glide to their new place when items are added, removed or re-sorted (a transform-only transition, keyed so a grid reflow doesn't animate). Removed rows shrink out first; new, restored and uploaded rows pop in.
+- Buttons and tiles shrink slightly while pressed and spring back. Tree groups open and close to their natural height; tab underlines slide between tabs.
+
+**Drag-to-move:** a small pointer-driven controller instead of a library (D16). While dragging, a requestAnimationFrame loop moves the floating preview with a transform and finds the folder under the pointer, so React only re-renders the two rows whose highlight changes. Drop targets are folder rows and tiles, tree folders and breadcrumb ancestors; a folder can't be dropped into itself or its subtree. Resting on a folder makes it blink and spring open (tree folders expand instead); lists scroll near their edges; Escape cancels and the preview floats back. Moves update the cache at once, with Undo. Mouse and pen only: touch and keyboard users have the Move dialog. Files dragged in from the desktop onto a folder row upload into that folder.
+
+**Live connection:** SSE (`GET /api/events`) rather than WebSockets (D15). Event payloads patch the cache in place (§6.1), reconnects back off from 1 s to 30 s, a missing ping or the browser coming back online reconnects at once, and a reconnect refetches what is on screen. A dot in the header shows the connection state.
+
+**Data updates:** mutations update the cache optimistically (moved and trashed rows leave at once, renames show at once) and then refetch only the folders they touched, never every cached folder.
 
 **Mock API:** in development, MSW 3 serves the §9 API from the browser with seeded demo data (including a 6,000-file folder, deep nesting and every sync state), so the UI can be built and tested before the API exists (D14). `VITE_API_MOCKS=off` switches the dev server to the real API on `localhost:3000`. No mock code ships in production builds.
 
@@ -647,21 +669,25 @@ Internal (bot), only reachable on `dfs_internal` and returning `404` at the edge
 | Screen | Key features |
 |---|---|
 | **Login** | "Continue with Discord" button, plus a clear message if the user lacks the role |
-| **Drive** (main) | Breadcrumbs, virtualized list/grid (file-type icons; thumbnails come later, §1.2), sort, multi-select (shift/ctrl, select-all across pages), right-click context menu, drag-drop upload (files *and* folders), drag-to-move, inline rename, keyboard shortcuts (F2, Del, Ctrl+A), sync status icon per file (syncing / stored / lost) |
-| **Upload panel** | Docked queue showing aggregate progress (files and bytes) for large batches, per-file two-phase progress (upload → Discord sync), pause/resume/cancel, retry failed |
+| **Drive** (main) | Breadcrumbs, virtualized list/grid (file-type icons; thumbnails come later, §1.2), sort, multi-select (shift/ctrl, select-all across pages), right-click context menu, drag-drop upload (files *and* folders, onto the folder or straight onto a subfolder), drag-to-move, inline rename, keyboard shortcuts (F2, Del, Ctrl+A), sync status icon per file (syncing / stored / lost), download (one file as itself, folders and multiple items as a ZIP) |
+| **Upload panel** | Docked queue showing aggregate progress (files and bytes), speed and time left, per-file two-phase progress (upload → Discord sync), pause/resume/cancel per file and for all, retry failed |
 | **Preview** | Image, video/audio (streamed with Range), PDF, text/code (with size cap), plus version history and share actions |
 | **Trash** | Restore, delete forever, empty trash |
 | **Shared links** | List, copy, revoke, and edit expiry/password |
 | **Public share page** | Minimal, unauthenticated SPA route `/s/:token` (data from `/api/s/*`): a password prompt if needed, then file preview/download, or a folder listing with per-file and ZIP download |
 | **Settings** | Profile, quota usage bar |
-| **Admin** | Users and quotas, **per-user usage and a read-only metadata browser** (names, tree, sizes, dates; no open/download/preview), moderation trash, storage channels (add/disable), queue depth and sync backlog, lost-blob report, scrubber status, backups, audit log viewer |
+| **Admin** | Tabs: **Overview** (service status, sync backlog with speed and time left, job queue, staging and cache use, storage, scrubber progress, backups, lost blobs; refreshes every 5 s), **Users** (quotas, roles, disable; per-user usage by file type and a **read-only metadata browser**: names, tree, sizes, dates, with no open/download/preview; moderation trash with a reason), **Channels** (add, enable/disable), **Audit log**. A `requireAdmin` route loader makes the pages a 404 for everyone else |
 
 ### 10.2 Client upload engine
 
-- **Folder drops** walk the directory tree (`DataTransferItem.webkitGetAsEntry`) lazily, so dropping 100k files doesn't freeze the tab. The engine creates the folders with `POST /folders/ensure`, then creates sessions in batches of 500 (`POST /uploads/batch`).
-- **Concurrency:** up to 4 concurrent large-file parts, or up to 8 concurrent small-file `PUT`s (configurable). It retries with exponential backoff and honours `Retry-After`.
-- Each part: `file.slice()` → SHA-256 with Web Crypto (`crypto.subtle.digest`, which runs off the main thread; parts are at most `CHUNK_SIZE`, so no streaming hasher is needed) → `PUT` with `X-Part-SHA256`.
-- Upload IDs are saved to IndexedDB, so after a page reload the user can re-select the same files and resume (matched by relative path + size + lastModified).
+- **Folder drops** walk the directory tree (`DataTransferItem.webkitGetAsEntry`) lazily, so dropping 100k files doesn't freeze the tab. The engine creates the folders with `POST /folders/ensure`, 500 paths per call.
+- **Sessions ahead of time:** sessions are created in batches (`POST /uploads/batch`, 64 per call, the next batch once fewer than 32 are ready, so few placeholder files exist at once), so the new files show up in their folders at once, marked as uploading, and a small file then costs a single `PUT`. A batch that partly fails fails only those files.
+- **Concurrency:** up to 8 requests in flight. Large (multi-part) files go one at a time, each with up to 4 parts in parallel; small files fill the remaining slots. All configurable.
+- **Retries:** each part is retried up to 6 times with exponential backoff (1 s doubling to 30 s, ±20% jitter), or exactly as long as `Retry-After` asks. Network errors, 408/425/429/5xx and `hash_mismatch` are retried; other 4xx fail the file. When the browser comes back online, waiting retries go at once. A single-part retry that finds its session gone checks the node, because the lost response may have been the one that completed it.
+- **Pause, resume, retry:** pausing aborts the file's in-flight parts but keeps its session; resuming sends only what's missing. Retrying a failed file asks `GET /uploads/:id` which parts arrived. Cancelling, or clearing a failed file from the panel, deletes its session, so no stuck "uploading" file is left behind.
+- Each part: `file.slice()` → SHA-256 with Web Crypto (`crypto.subtle.digest`, which runs off the main thread; parts are at most `CHUNK_SIZE`, so no streaming hasher is needed) → `PUT` with `X-Part-SHA256`. Progress counts finished parts, so it never goes backwards when parts finish out of order.
+- **No lag with big batches:** the engine keeps its own state and publishes it to the UI store at most ten times a second; the upload panel is virtualized. Speed is measured over the last 5 s.
+- **Later:** upload IDs saved to IndexedDB, so after a page reload the user can re-select the same files and resume (matched by relative path + size + lastModified).
 
 ---
 
@@ -889,5 +915,8 @@ flowchart LR
 | D12 | Share link routing | `/s/:token` is an **SPA route**, and its data comes from `/api/s/*`. The edge proxies only `/api/*`. | §3, §7.2, §7.5, §9, §10.1 |
 | D13 | Thumbnails | **Deferred to after v1.** The grid shows file-type icons. The planned design (an extra encrypted frame per image version) has AAD type `0x02` reserved, so adding it needs no format change. | §1.2, §7.3, §10.1, §18 |
 | D14 | Build order | **UI first, against a mock API.** MSW serves the §9 contract in the browser during development, so the web app is built and tested before the API and bot exist. | §10, §13.1, §14 |
+| D15 | Live connection: SSE or WebSockets? | **SSE**, with typed payloads. Traffic is one-way (the browser talks back over plain HTTP), SSE shares the API's HTTP/2 connection through Caddy, and it fits the `LISTEN/NOTIFY` fan-out (D11). A 25 s ping catches dead connections. | §6.1, §9, §10 |
+| D16 | Drag-to-move | **A small pointer-event controller** instead of `@dnd-kit`. Folders spring open mid-drag and remount the list, so the drag must outlive the list it started in; one animation-frame loop with direct DOM writes keeps it fast without a dependency. | §10 |
+| D17 | Downloading several items | `POST /archive {ids}` returns a **short-lived, single-use link** that streams the ZIP. The browser downloads it natively (progress, no memory buffering), and state-changing requests stay JSON with a CSRF header. | §6.2, §9 |
 
 No open questions at this time.

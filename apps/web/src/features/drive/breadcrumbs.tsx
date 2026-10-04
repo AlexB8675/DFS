@@ -11,6 +11,9 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { useCurrentUser } from '@/features/auth/session'
+import { dropTargetProps, useDragFeedback } from '@/features/drag/drag-store'
+import { transitionLinkProps } from '@/lib/navigation'
+import { cn } from '@/lib/utils'
 import { DropdownMenuActions } from './menu-actions'
 import { useNodeMenu } from './node-menu'
 import { folderUrl } from './use-node-actions'
@@ -60,7 +63,12 @@ export function Breadcrumbs({ path, folder }: BreadcrumbsProps) {
                     <DropdownMenuContent align="start">
                       {hidden.map((segment) => (
                         <DropdownMenuItem key={segment.id} asChild>
-                          <Link to={folderUrl(segment.id, rootFolderId)}>{segment.name}</Link>
+                          <Link
+                            to={folderUrl(segment.id, rootFolderId)}
+                            {...transitionLinkProps('back')}
+                          >
+                            {segment.name}
+                          </Link>
                         </DropdownMenuItem>
                       ))}
                     </DropdownMenuContent>
@@ -70,12 +78,7 @@ export function Breadcrumbs({ path, folder }: BreadcrumbsProps) {
               </>
             )}
             <li className="min-w-0">
-              <Button variant="ghost" size="sm" className="max-w-48 text-muted-foreground" asChild>
-                <Link to={folderUrl(entry.id, rootFolderId)}>
-                  {entry.id === rootFolderId && <HardDrive />}
-                  <span className="truncate">{entry.name}</span>
-                </Link>
-              </Button>
+              <AncestorLink entry={entry} isRoot={entry.id === rootFolderId} />
             </li>
             <Separator />
           </Fragment>
@@ -100,6 +103,34 @@ export function Breadcrumbs({ path, folder }: BreadcrumbsProps) {
         </li>
       </ol>
     </nav>
+  )
+}
+
+/** A folder up the path. Items can be dropped on it to move them there. */
+function AncestorLink({ entry, isRoot }: { entry: NodePath[number]; isRoot: boolean }) {
+  const { rootFolderId } = useCurrentUser()
+  const drag = useDragFeedback(entry.id)
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      className={cn(
+        'max-w-48 text-muted-foreground',
+        drag.over && 'scale-105 bg-(--drop-target) text-foreground ring-1 ring-primary/60',
+        drag.springing && 'animate-[spring-load_450ms_ease-in-out]',
+      )}
+      asChild
+    >
+      <Link
+        to={folderUrl(entry.id, rootFolderId)}
+        {...transitionLinkProps('back')}
+        draggable={false}
+        {...dropTargetProps(entry)}
+      >
+        {isRoot && <HardDrive />}
+        <span className="truncate">{entry.name}</span>
+      </Link>
+    </Button>
   )
 }
 

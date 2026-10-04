@@ -3,6 +3,7 @@ import { Link } from 'react-router'
 import { Progress } from '@/components/ui/progress'
 import { useCurrentUser } from '@/features/auth/session'
 import { formatBytes } from '@/lib/format'
+import { transitionLinkProps } from '@/lib/navigation'
 import { cn } from '@/lib/utils'
 
 /** Storage used against the user's quota (§5.1). */
@@ -13,6 +14,7 @@ export function QuotaMeter({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <Link
       to="/settings"
+      {...transitionLinkProps('section')}
       className="block rounded-md p-2 transition-colors outline-none hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-sidebar-ring"
       onClick={onNavigate}
     >
