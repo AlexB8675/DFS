@@ -11,14 +11,18 @@ import {
   type NodeKind,
   type NodePath,
   type Page,
+  type PublicShare,
   type SearchResult,
   type Session,
+  type SharedFolderPage,
+  type SharedNode,
   type ShareLink,
   type SortField,
   type SortOrder,
   type SyncState,
   type StorageChannel,
   type TrashItem,
+  type UpdateShareInput,
   type UploadBatchResult,
   type UploadSession,
   type UploadSessionStatus,
@@ -57,6 +61,12 @@ export interface MockNode {
 export interface MockShare {
   id: string
   nodeId: string
+  /**
+   * The link's token and password, kept in the clear because this is a mock.
+   * The real API stores only the token's SHA-256 and an argon2id hash (§7.5).
+   */
+  token: string
+  password: string | null
   createdAt: string
   expiresAt: string | null
   hasPassword: boolean
@@ -112,7 +122,7 @@ export class MockApiError extends Error {
   }
 }
 
-const STATE_VERSION = 3
+const STATE_VERSION = 4
 const STORAGE_KEY = 'dfs.mock-db'
 /** `CHUNK_SIZE` at the 10 MiB attachment limit (§7.3). */
 export const CHUNK_SIZE = 10 * 1024 * 1024 - 128 * 1024
@@ -138,6 +148,8 @@ export class MockDb {
   private derived: Derived | null = null
   private readonly listeners = new Set<(event: MockEvent) => void>()
   private readonly archiveTickets = new Map<string, { ids: string[]; expiresAt: number }>()
+  /** Share tokens unlocked with their password; the real API uses a short-lived cookie. */
+  private readonly unlockedShares = new Set<string>()
 
   constructor() {
     this.state = loadState() ?? createSeed(STATE_VERSION)
@@ -559,7 +571,7 @@ export class MockDb {
 
   shares(): Page<ShareLink> {
     const items = [...this.state.shares]
-      .filter((share) => this.state.nodes[share.nodeId])
+      .filter((share) => this.state.nodes[share.nodeId]?.ownerId === this.state.userId)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .map((share) => this.shareDto(share, null))
     return { items, nextCursor: null }
@@ -575,6 +587,9 @@ export class MockDb {
     const share: MockShare = {
       id: crypto.randomUUID(),
       nodeId: input.nodeId,
+      // 128 random bits, as hex (§7.5).
+      token: crypto.randomUUID().replaceAll('-', ''),
+      password: input.password,
       createdAt: new Date().toISOString(),
       expiresAt: input.expiresAt,
       hasPassword: input.password !== null,
@@ -584,15 +599,152 @@ export class MockDb {
     }
     this.state.shares.push(share)
     this.save()
-    const token = crypto.randomUUID().replaceAll('-', '')
-    return this.shareDto(share, `${window.location.origin}/s/${token}`)
+    return this.shareDto(share, `${window.location.origin}/s/${share.token}`)
+  }
+
+  updateShare(id: string, changes: UpdateShareInput): ShareLink {
+    const share = this.ownShare(id)
+    if (share.revokedAt) {
+      throw new MockApiError(409, 'share_revoked', 'A revoked link can’t be changed.')
+    }
+    if (changes.expiresAt !== undefined) share.expiresAt = changes.expiresAt
+    if (changes.maxDownloads !== undefined) share.maxDownloads = changes.maxDownloads
+    if (changes.password !== undefined) {
+      share.password = changes.password
+      share.hasPassword = changes.password !== null
+      // A new password locks out everyone who unlocked the old one.
+      this.unlockedShares.delete(share.token)
+    }
+    this.save()
+    return this.shareDto(share, null)
   }
 
   revokeShare(id: string): void {
-    const share = this.state.shares.find((candidate) => candidate.id === id)
-    if (!share) throw notFound()
+    const share = this.ownShare(id)
     share.revokedAt ??= new Date().toISOString()
     this.save()
+  }
+
+  private ownShare(id: string): MockShare {
+    const share = this.state.shares.find((candidate) => candidate.id === id)
+    if (!share || this.state.nodes[share.nodeId]?.ownerId !== this.state.userId) throw notFound()
+    return share
+  }
+
+  // ── Public share access (§7.5, no login) ───────────────────────────────────
+
+  /** `GET /s/:token`: nothing but "locked" until a password-protected link is unlocked. */
+  publicShare(token: string): PublicShare {
+    const { share, root } = this.liveShare(token, { requireUnlocked: false })
+    if (share.password !== null && !this.unlockedShares.has(token)) return { locked: true }
+    const owner = this.state.users.find((user) => user.id === root.ownerId)
+    return {
+      locked: false,
+      root: { ...this.sharedNode(root), parentId: null },
+      sharedBy: owner?.displayName ?? 'Someone',
+      expiresAt: share.expiresAt,
+      downloadsLeft:
+        share.maxDownloads === null ? null : Math.max(0, share.maxDownloads - share.downloadCount),
+    }
+  }
+
+  unlockShare(token: string, password: string): void {
+    const { share } = this.liveShare(token, { requireUnlocked: false })
+    if (share.password !== null && share.password !== password) {
+      throw new MockApiError(403, 'wrong_password', 'That password isn’t right.')
+    }
+    this.unlockedShares.add(token)
+  }
+
+  /** `GET /s/:token/children`: a folder inside the share, with its path from the shared folder. */
+  shareChildren(
+    token: string,
+    parentId: string | null,
+    cursor: string | null,
+    limit: number,
+  ): SharedFolderPage {
+    const { root } = this.liveShare(token)
+    const folder = parentId ? this.nodeInShare(root, parentId) : root
+    if (folder.kind !== 'folder') throw notFound()
+    const page = paginate(
+      sortNodes(this.childrenOf(folder.id), 'name', 'asc'),
+      { cursor, limit },
+      (node) => this.sharedNode(node),
+    )
+    const path = this.ancestors(folder)
+    const start = path.findIndex((node) => node.id === root.id)
+    return { ...page, path: path.slice(start).map(({ id, name }) => ({ id, name })) }
+  }
+
+  /**
+   * `GET /s/:token/files/:id/content`. Counts toward the download limit only
+   * when the request starts at byte 0, so seeking in a video doesn't use it up.
+   */
+  shareFileContent(
+    token: string,
+    id: string,
+    fromStart: boolean,
+  ): { name: string; mimeType: string; body: string } {
+    const { share, root } = this.liveShare(token)
+    const node = this.nodeInShare(root, id)
+    if (node.kind !== 'file') throw notFound()
+    if (fromStart) this.countDownload(share)
+    return { name: node.name, mimeType: 'text/plain', body: mockContent(node) }
+  }
+
+  /** `GET /s/:token/archive?nodeId`: the shared folder, or a folder inside it, as a ZIP. */
+  shareArchive(
+    token: string,
+    nodeId: string | null,
+  ): { name: string; body: Uint8Array<ArrayBuffer> } {
+    const { share, root } = this.liveShare(token)
+    const folder = nodeId ? this.nodeInShare(root, nodeId) : root
+    this.countDownload(share)
+    return { name: `${folder.name}.zip`, body: createZip(this.zipEntries([folder])) }
+  }
+
+  /** The share behind a token, if it still works: not revoked, expired or used up. */
+  private liveShare(
+    token: string,
+    { requireUnlocked = true } = {},
+  ): { share: MockShare; root: MockNode } {
+    const share = this.state.shares.find((candidate) => candidate.token === token)
+    const root = share ? this.state.nodes[share.nodeId] : undefined
+    if (!share || !root || !isVisible(root)) {
+      throw new MockApiError(404, 'share_not_found', 'This link doesn’t exist.')
+    }
+    if (share.revokedAt) {
+      throw new MockApiError(410, 'share_revoked', 'The owner turned this link off.')
+    }
+    if (share.expiresAt && new Date(share.expiresAt).getTime() <= Date.now()) {
+      throw new MockApiError(410, 'share_expired', 'This link has expired.')
+    }
+    if (share.maxDownloads !== null && share.downloadCount >= share.maxDownloads) {
+      throw new MockApiError(410, 'share_used_up', 'This link has reached its download limit.')
+    }
+    if (requireUnlocked && share.password !== null && !this.unlockedShares.has(token)) {
+      throw new MockApiError(403, 'share_locked', 'Enter the password to open this link.')
+    }
+    return { share, root }
+  }
+
+  /** A node the share reaches: the shared node itself or something below it, not in the trash. */
+  private nodeInShare(root: MockNode, id: string): MockNode {
+    const node = this.state.nodes[id]
+    if (!node || !isVisible(node) || !this.ancestors(node).some((n) => n.id === root.id)) {
+      throw notFound()
+    }
+    return node
+  }
+
+  private countDownload(share: MockShare): void {
+    share.downloadCount += 1
+    this.save()
+  }
+
+  private sharedNode(node: MockNode): SharedNode {
+    const { id, parentId, kind, name, mimeType, updatedAt } = node
+    return { id, parentId, kind, name, mimeType, updatedAt, sizeBytes: this.toDto(node).sizeBytes }
   }
 
   // ── Internals ──────────────────────────────────────────────────────────────
@@ -762,8 +914,10 @@ export class MockDb {
 
   private shareDto(share: MockShare, url: string | null): ShareLink {
     const node = this.state.nodes[share.nodeId]
+    // The token and password never leave the server.
+    const { token: _token, password: _password, ...fields } = share
     return {
-      ...share,
+      ...fields,
       nodeName: node?.name ?? 'Deleted item',
       nodeKind: node?.kind ?? 'file',
       url,

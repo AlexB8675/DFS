@@ -358,6 +358,26 @@ html[data-nav='section']::view-transition-new(page) {
   }
 }
 
+/* A wrong password: the card shakes its head, like iOS. */
+@keyframes shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-10px);
+  }
+  40% {
+    transform: translateX(8px);
+  }
+  60% {
+    transform: translateX(-5px);
+  }
+  80% {
+    transform: translateX(3px);
+  }
+}
+
 /* Bars that grow in from the left (usage breakdowns). */
 @keyframes grow-x {
   from {

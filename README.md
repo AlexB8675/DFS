@@ -4,8 +4,9 @@ A private cloud drive that stores encrypted file chunks as Discord attachments a
 keeps the real file system in PostgreSQL. See [docs/DESIGN.md](docs/DESIGN.md) for
 the full design.
 
-**Status:** the web UI is being built first, against an in-browser mock API (D14).
-The API service, bot and database come next (milestones in §18).
+**Status:** the web UI is done, built first against an in-browser mock API (D14).
+The API service, bot and database come next; see "Status and future work" (§18.1)
+in the design document.
 
 ## Requirements
 
@@ -20,8 +21,7 @@ The API service, bot and database come next (milestones in §18).
 
   If that fails because Node is installed in a protected folder, put the shims
   in a folder that is on your PATH instead, e.g. npm's global folder on Windows:
-  `corepack enable pnpm --install-directory "$env:APPDATA
-pm"` (PowerShell).
+  `corepack enable pnpm --install-directory "$env:APPDATA\npm"` (PowerShell).
 
 ## Getting started
 
@@ -33,6 +33,16 @@ pnpm dev
 Open http://localhost:5173 and choose **Continue with Discord**. In development the
 sign-in is simulated and all data lives in your browser (reset it from the account
 menu).
+
+The demo data includes share links to try, signed in or not:
+
+| Link                | What it shows                          |
+| ------------------- | -------------------------------------- |
+| `/s/demo-documents` | A folder to browse and download        |
+| `/s/demo-lisbon`    | A password-protected folder (`lisbon`) |
+| `/s/demo-resume`    | A single file with a download limit    |
+| `/s/demo-expired`   | An expired link                        |
+| `/s/demo-revoked`   | A link the owner turned off            |
 
 ## Scripts
 

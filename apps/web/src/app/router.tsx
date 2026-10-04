@@ -1,16 +1,15 @@
 import { createBrowserRouter, Navigate } from 'react-router'
 import { NotFoundPage, RouteError, SplashScreen } from '@/components/status-pages'
 import { redirectIfSignedIn, requireSession } from '@/features/auth/session'
-import { AppShell } from '@/layout/app-shell'
 
 /**
  * Creates the router. It is a function, not a module-level constant, because a
  * router starts loading the current route as soon as it exists, and that must
  * wait until the mock API is listening.
  *
- * Pages are split into their own chunks and loaded on first visit. React
- * Router fetches a page's code in parallel with the session check, so this
- * adds no waterfall.
+ * Pages, and the signed-in shell itself, are split into their own chunks
+ * and loaded on first visit. React Router fetches a route's code in parallel
+ * with its loader (the session check), so this adds no waterfall.
  */
 export function createAppRouter() {
   return createBrowserRouter([
@@ -22,9 +21,20 @@ export function createAppRouter() {
       errorElement: <RouteError />,
     },
     {
+      // Public: anyone with a share link, signed in or not (D12).
+      path: '/s/:token',
+      lazy: async () => ({
+        Component: (await import('@/features/share-view/share-page')).SharePage,
+      }),
+      hydrateFallbackElement: <SplashScreen />,
+      errorElement: <RouteError />,
+    },
+    {
       path: '/',
       loader: requireSession,
-      element: <AppShell />,
+      // The signed-in shell loads alongside the session check, so the login
+      // and public share pages don't download it.
+      lazy: async () => ({ Component: (await import('@/layout/app-shell')).AppShell }),
       hydrateFallbackElement: <SplashScreen />,
       errorElement: <RouteError />,
       children: [

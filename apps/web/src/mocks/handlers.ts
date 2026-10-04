@@ -11,8 +11,10 @@ import {
   nodeKindSchema,
   sortFieldSchema,
   sortOrderSchema,
+  unlockShareSchema,
   updateChannelSchema,
   updateNodeSchema,
+  updateShareSchema,
   updateUserSchema,
 } from '@dfs/shared'
 import { delay, http, HttpResponse, sse, type JsonBodyType } from 'msw'
@@ -32,12 +34,22 @@ interface Id {
   id: string
 }
 
+interface Token {
+  token: string
+}
+
 const listQuery = z.object({
   kind: nodeKindSchema.optional(),
   sort: sortFieldSchema.default('name'),
   order: sortOrderSchema.default('asc'),
   cursor: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(500).default(100),
+})
+
+const shareListQuery = z.object({
+  parentId: z.uuid().optional(),
+  cursor: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(500).default(200),
 })
 
 const pageQuery = z.object({
@@ -282,10 +294,73 @@ export const handlers = [
       status: 201,
     }),
   ),
+  http.patch<Id>('/api/shares/:id', ({ request, params }) =>
+    respond(request, async () =>
+      db.updateShare(params.id, updateShareSchema.parse(await request.json())),
+    ),
+  ),
   http.delete<Id>('/api/shares/:id', ({ request, params }) =>
     respondEmpty(request, () => {
       db.revokeShare(params.id)
     }),
+  ),
+
+  // ── Public share access (§7.5): no session, no CSRF token ──────────────────
+  http.get<Token>('/api/s/:token', ({ request, params }) =>
+    respond(request, () => db.publicShare(params.token), { public: true }),
+  ),
+  http.post<Token>('/api/s/:token/unlock', ({ request, params }) =>
+    respondEmpty(
+      request,
+      async () => {
+        db.unlockShare(params.token, unlockShareSchema.parse(await request.json()).password)
+      },
+      { public: true },
+    ),
+  ),
+  http.get<Token>('/api/s/:token/children', ({ request, params }) =>
+    respond(
+      request,
+      () => {
+        const query = readQuery(request, shareListQuery)
+        return db.shareChildren(
+          params.token,
+          query.parentId ?? null,
+          query.cursor ?? null,
+          query.limit,
+        )
+      },
+      { public: true },
+    ),
+  ),
+  http.get<Token & Id>('/api/s/:token/files/:id/content', ({ request, params }) =>
+    respond(
+      request,
+      () => {
+        // Only a request from byte 0 counts as a download (§7.5).
+        const range = request.headers.get('Range')
+        const fromStart = range === null || range.startsWith('bytes=0-')
+        const file = db.shareFileContent(params.token, params.id, fromStart)
+        return new HttpResponse(file.body, {
+          headers: {
+            'Content-Type': file.mimeType,
+            'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(file.name)}`,
+          },
+        })
+      },
+      { public: true },
+    ),
+  ),
+  http.get<Token>('/api/s/:token/archive', ({ request, params }) =>
+    respond(
+      request,
+      () => {
+        const nodeId = new URL(request.url).searchParams.get('nodeId')
+        const archive = db.shareArchive(params.token, nodeId)
+        return zipResponse(archive.body, archive.name)
+      },
+      { public: true },
+    ),
   ),
 
   // ── Live events (§6.1) ─────────────────────────────────────────────────────

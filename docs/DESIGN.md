@@ -1,9 +1,9 @@
 # DFS — Discord File System
-### Design Document · v0.5 (Draft)
+### Design Document · v0.6 (Draft)
 
 | | |
 |---|---|
-| **Status** | Draft, for review. All questions from v0.1/v0.2 resolved, v0.3 review findings fixed as D8–D13, and the UI-first build and its API details settled as D14–D17 (see §19) |
+| **Status** | Draft, for review. All questions from v0.1/v0.2 resolved, v0.3 review findings fixed as D8–D13, and the UI-first build and its API details settled as D14–D18 (see §19). The web UI is done against a mock API; the backend is next (§18.1) |
 | **Date** | 2026-10-04 |
 | **Stack** | TypeScript everywhere: React + Fastify + discord.js + PostgreSQL 18 |
 | **Deployment** | Docker Compose on **one Fedora Linux VPS**. Only the web UI (Caddy edge) is public; API, bot, and DB sit on an internal Docker network (§3.2, §13) |
@@ -572,7 +572,7 @@ flowchart TD
 ### 7.5 Other hardening
 
 - Downloads are served with `Content-Disposition: attachment` by default. Inline previews use a strict CSP and `X-Content-Type-Options: nosniff`, and HTML/SVG are always served as attachments, never inline.
-- Share-link tokens are 128-bit random values, and only their SHA-256 is stored. Optional password (argon2id), expiry, and download cap. A correct password (`POST /api/s/:token/unlock`) sets a short-lived cookie scoped to that share. A download counts toward the cap only when the request starts at byte 0, so seeking in a video doesn't use it up.
+- Share-link tokens are 128-bit random values, and only their SHA-256 is stored, so a link is shown once, when it is created. Optional password (argon2id), expiry, and download cap, all editable later. A password-protected link reveals nothing, not even the item's name, until a correct password (`POST /api/s/:token/unlock`) sets a short-lived cookie scoped to that share; changing the password invalidates those cookies. A download counts toward the cap only when the request starts at byte 0, so seeking in a video doesn't use it up.
 - Login/OAuth callbacks and share-link access are rate-limited.
 - An audit log records logins, uploads, deletions, shares, and admin actions.
 - Internal API→bot RPC runs only on `dfs_internal`, needs a shared `INTERNAL_RPC_SECRET`, and is blocked at the edge.
@@ -631,7 +631,7 @@ All routes are under `/api`, use JSON unless noted, and are validated with Zod s
 | `GET /folders/:id/archive` · `POST /archive` `{ids[]}` → `{url, fileName, expiresAt}` · `GET /archive/:ticket` | ZIP download. Several items get a short-lived, single-use link (D17), which the browser then downloads with a plain navigation |
 | `GET /search?q=&type=&cursor` | Name search (`pg_trgm`) |
 | `POST /shares` · `GET /shares` · `PATCH /shares/:id` (expiry, password, cap) · `DELETE /shares/:id` | Share links (owner) |
-| `GET /s/:token` · `POST /s/:token/unlock` · `GET /s/:token/children?parentId&cursor` · `GET /s/:token/files/:id/content` (Range) · `GET /s/:token/archive` | Public share access, no login. Used by the SPA page at `/s/:token`. `:id` and `parentId` must be the shared node or inside its subtree |
+| `GET /s/:token` · `POST /s/:token/unlock` `{password}` · `GET /s/:token/children?parentId&cursor` · `GET /s/:token/files/:id/content` (Range) · `GET /s/:token/archive?nodeId` | Public share access, no login. Used by the SPA page at `/s/:token`. `:id`, `parentId` and `nodeId` must be the shared node or inside its subtree. `GET /s/:token` answers `{locked: true}` for a password-protected link that isn't unlocked, otherwise the shared node, who shared it, the expiry and the downloads left. Children come with their `path` inside the share. Dead links answer `410` (`share_expired`, `share_revoked`, `share_used_up`), unknown ones `404`. A locked link or a wrong password is `403`, never `401`, which means "sign in" to the app (D18) |
 | `GET /events` (SSE) | Sync progress, background changes, quota, keep-alive pings (fed by `LISTEN/NOTIFY`; payloads in §6.1) |
 | `GET /admin/users` · `PATCH /admin/users/:id` (quota, role, disable) | Admin: users |
 | `GET /admin/users/:id/usage` · `GET /admin/nodes/:id` · `GET /admin/nodes/:id/path` · `GET /admin/nodes/:id/children` · `GET /admin/search?q=&userId=` | Admin: **read-only metadata** of any user (no content routes) |
@@ -673,8 +673,8 @@ Internal (bot), only reachable on `dfs_internal` and returning `404` at the edge
 | **Upload panel** | Docked queue showing aggregate progress (files and bytes), speed and time left, per-file two-phase progress (upload → Discord sync), pause/resume/cancel per file and for all, retry failed |
 | **Preview** | Image, video/audio (streamed with Range), PDF, text/code (with size cap), plus version history and share actions |
 | **Trash** | Restore, delete forever, empty trash |
-| **Shared links** | List, copy, revoke, and edit expiry/password |
-| **Public share page** | Minimal, unauthenticated SPA route `/s/:token` (data from `/api/s/*`): a password prompt if needed, then file preview/download, or a folder listing with per-file and ZIP download |
+| **Shared links** | List, revoke, and edit expiry, password and download limit. A new link is shown (copy, open) only when it is created |
+| **Public share page** | Minimal, unauthenticated SPA route `/s/:token` (data from `/api/s/*`), loaded without the signed-in app: a password prompt if needed (a wrong password shakes the card), then the file with a download button, or a folder to browse (breadcrumbs inside the share, per-file download, ZIP of any folder). Shows who shared it, the expiry and the downloads left, and a clear message for expired, revoked and used-up links. Previews come with the Preview screen |
 | **Settings** | Profile, quota usage bar |
 | **Admin** | Tabs: **Overview** (service status, sync backlog with speed and time left, job queue, staging and cache use, storage, scrubber progress, backups, lost blobs; refreshes every 5 s), **Users** (quotas, roles, disable; per-user usage by file type and a **read-only metadata browser**: names, tree, sizes, dates, with no open/download/preview; moderation trash with a reason), **Channels** (add, enable/disable), **Audit log**. A `requireAdmin` route loader makes the pages a 404 for everyone else |
 
@@ -895,6 +895,30 @@ flowchart LR
 
 **MVP = M0 through M3.** Users can log in, upload a large file or a folder with thousands of small files, see them sync to Discord, browse, and stream content back.
 
+### 18.1 Status and future work
+
+**Done (2026-10-04):** the web UI, built first against the mock API (D14). It covers the screens of §10.1 except Preview: drive with drag-to-move and ZIP downloads, upload panel and engine, trash, shared links, the public share page, settings, and the admin area, with live events and the motion described in §10. The mock implements the §9 contract in the browser, and its spec tests (`apps/web/src/mocks/db.test.ts`) encode the rules the real API must follow.
+
+**Next: the backend.**
+
+1. **M0 · Foundations:** `apps/api` (Fastify) and `apps/bot` (discord.js) in the monorepo, `packages/config`, the PostgreSQL schema and migrations (§5), dev compose with Postgres 18, health endpoints.
+2. **M1 · Storage engine:** frame format and crypto (§7.3), BlobStore, packer, bot uploads with rate-limit handling, a CLI for put/get.
+3. **M2 · API core:** Discord OAuth, then the §9 routes the UI already uses, Range downloads, `LISTEN/NOTIFY` live events. Port the mock's spec tests to the API as integration tests, then point the UI at it (`VITE_API_MOCKS=off`).
+4. **M4/M5:** durability (GC, compaction, scrubber, journal, backups, recovery), production compose with Caddy on Fedora.
+
+A Discord application (OAuth client and bot token) and a test server are needed from M1 on.
+
+**Web UI, still to do:**
+
+- **Preview** (§10.1): images, streamed video and audio, PDF, text and code, with version history and share actions; previews on the public share page too. Needs real content from the API.
+- **Upload resume after a reload:** upload IDs in IndexedDB (§10.2).
+- **Inline rename** in lists (a dialog today), and **select-all across pages** of a large folder (today Ctrl+A selects the loaded rows; needs a server-side "whole folder except" selection for bulk actions).
+- **Admin search** across users (`GET /admin/search`).
+- **Thumbnails** in the grid (D13).
+- **End-to-end tests** with Playwright (§17) once the API exists, including the motion and drag-and-drop flows that unit tests can't see.
+
+**Later:** the non-goals of §1.2 that are planned: WebDAV/FUSE mount, end-to-end encryption, parity blobs, deduplication, desktop sync, split hosts.
+
 ---
 
 ## 19. Decisions Log
@@ -918,5 +942,6 @@ flowchart LR
 | D15 | Live connection: SSE or WebSockets? | **SSE**, with typed payloads. Traffic is one-way (the browser talks back over plain HTTP), SSE shares the API's HTTP/2 connection through Caddy, and it fits the `LISTEN/NOTIFY` fan-out (D11). A 25 s ping catches dead connections. | §6.1, §9, §10 |
 | D16 | Drag-to-move | **A small pointer-event controller** instead of `@dnd-kit`. Folders spring open mid-drag and remount the list, so the drag must outlive the list it started in; one animation-frame loop with direct DOM writes keeps it fast without a dependency. | §10 |
 | D17 | Downloading several items | `POST /archive {ids}` returns a **short-lived, single-use link** that streams the ZIP. The browser downloads it natively (progress, no memory buffering), and state-changing requests stay JSON with a CSRF header. | §6.2, §9 |
+| D18 | Public share access | `GET /s/:token` answers `{locked: true}` until a password-protected link is unlocked, so a link reveals nothing without its password. Locked and wrong-password answers are `403`, dead links `410` with a reason, and `401` stays reserved for "sign in to the app". | §7.5, §9, §10.1 |
 
 No open questions at this time.

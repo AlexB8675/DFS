@@ -1,6 +1,6 @@
 import type { ShareLink } from '@dfs/shared'
 import { useQuery } from '@tanstack/react-query'
-import { Link2, Lock, Unlink } from 'lucide-react'
+import { Link2, Lock, Pencil, Unlink } from 'lucide-react'
 import { useState } from 'react'
 import { toast } from 'sonner'
 import { NodeIcon } from '@/components/node-icon'
@@ -23,6 +23,7 @@ import { ListSkeleton } from '@/components/list-skeleton'
 import { errorMessage } from '@/lib/api/client'
 import { formatDate, formatFullDate } from '@/lib/format'
 import { shareStatus, sharesQuery, useRevokeShare, type ShareStatus } from './api'
+import { EditShareDialog } from './edit-share-dialog'
 
 const STATUS_BADGES: Record<
   ShareStatus,
@@ -39,6 +40,7 @@ export function SharesPage() {
   const shares = useQuery(sharesQuery)
   const revoke = useRevokeShare()
   const [revoking, setRevoking] = useState<ShareLink | null>(null)
+  const [editing, setEditing] = useState<ShareLink | null>(null)
   const links = shares.data?.items ?? []
 
   async function confirmRevoke() {
@@ -86,7 +88,7 @@ export function SharesPage() {
                 <th className="hidden w-28 py-2 pl-4 text-right font-medium sm:table-cell">
                   Downloads
                 </th>
-                <th className="w-16 py-2 pr-5">
+                <th className="w-24 py-2 pr-5">
                   <span className="sr-only">Actions</span>
                 </th>
               </tr>
@@ -137,6 +139,23 @@ export function SharesPage() {
                             <Button
                               variant="ghost"
                               size="icon-sm"
+                              aria-label={`Edit link to “${link.nodeName}”`}
+                              onClick={() => {
+                                setEditing(link)
+                              }}
+                            >
+                              <Pencil />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Edit expiry, password and limit</TooltipContent>
+                        </Tooltip>
+                      )}
+                      {status !== 'revoked' && (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
                               aria-label={`Revoke link to “${link.nodeName}”`}
                               onClick={() => {
                                 setRevoking(link)
@@ -155,6 +174,15 @@ export function SharesPage() {
             </tbody>
           </table>
         </div>
+      )}
+
+      {editing && (
+        <EditShareDialog
+          link={editing}
+          onClose={() => {
+            setEditing(null)
+          }}
+        />
       )}
 
       <AlertDialog

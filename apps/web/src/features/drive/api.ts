@@ -11,8 +11,8 @@ import {
 } from '@dfs/shared'
 import { infiniteQueryOptions, queryOptions, useMutation } from '@tanstack/react-query'
 import { queryClient } from '@/app/query-client'
-import { apiFetch, apiGet, apiSend } from '@/lib/api/client'
-import { mocksEnabled } from '@/lib/env'
+import { apiGet, apiSend } from '@/lib/api/client'
+import { downloadFromApi } from '@/lib/download'
 import { usePreferences } from '@/lib/preferences'
 import {
   invalidateListings,
@@ -205,9 +205,9 @@ export async function downloadNodes(nodes: DriveNode[]): Promise<void> {
   const [first] = nodes
   if (!first) return
   if (nodes.length === 1 && first.kind === 'file') {
-    await save(`/files/${first.id}/content`, first.name)
+    await downloadFromApi(`/files/${first.id}/content`, first.name)
   } else if (nodes.length === 1) {
-    await save(`/folders/${first.id}/archive`, `${first.name}.zip`)
+    await downloadFromApi(`/folders/${first.id}/archive`, `${first.name}.zip`)
   } else {
     const ticket = await apiSend(
       'POST',
@@ -215,35 +215,11 @@ export async function downloadNodes(nodes: DriveNode[]): Promise<void> {
       { ids: nodes.map((node) => node.id) },
       archiveTicketSchema,
     )
-    await save(ticket.url.slice('/api'.length), ticket.fileName)
+    await downloadFromApi(ticket.url.slice('/api'.length), ticket.fileName)
   }
 }
 
 /** Whether downloading these nodes builds a ZIP. */
 export function isArchiveDownload(nodes: DriveNode[]): boolean {
   return nodes.length > 1 || nodes[0]?.kind === 'folder'
-}
-
-/**
- * Saves `/api{path}`. The mock API cannot intercept a download navigation,
- * so mock mode fetches the bytes and saves them from memory.
- */
-async function save(path: string, fileName: string): Promise<void> {
-  if (!mocksEnabled) {
-    saveAs(`/api${path}`, fileName)
-    return
-  }
-  const response = await apiFetch(path)
-  const objectUrl = URL.createObjectURL(await response.blob())
-  saveAs(objectUrl, fileName)
-  window.setTimeout(() => {
-    URL.revokeObjectURL(objectUrl)
-  }, 10_000)
-}
-
-function saveAs(href: string, fileName: string): void {
-  const link = document.createElement('a')
-  link.href = href
-  link.download = fileName
-  link.click()
 }

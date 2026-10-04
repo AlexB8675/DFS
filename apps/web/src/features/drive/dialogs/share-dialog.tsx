@@ -1,5 +1,5 @@
 import type { DriveNode, ShareLink } from '@dfs/shared'
-import { Check, Copy, ShieldAlert } from 'lucide-react'
+import { Check, Copy, ExternalLink, ShieldAlert } from 'lucide-react'
 import { useActionState, useState } from 'react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -16,16 +16,9 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Spinner } from '@/components/ui/spinner'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
-import { useCreateShare } from '@/features/shares/api'
+import { EXPIRY_OPTIONS, expiryFromChoice, useCreateShare } from '@/features/shares/api'
 import { errorMessage } from '@/lib/api/client'
 import { formText } from '@/lib/form-data'
-
-const EXPIRY_OPTIONS = [
-  { value: 'never', label: 'Never' },
-  { value: '1', label: '1 day' },
-  { value: '7', label: '7 days' },
-  { value: '30', label: '30 days' },
-] as const
 
 interface ShareDialogProps {
   node: DriveNode
@@ -50,10 +43,7 @@ export function ShareDialog({ node, onClose }: ShareDialogProps) {
       try {
         const link = await createShare.mutateAsync({
           nodeId: node.id,
-          expiresAt:
-            expiry === 'never'
-              ? null
-              : new Date(Date.now() + Number(expiry) * 86_400_000).toISOString(),
+          expiresAt: expiryFromChoice(expiry),
           password: password || null,
           maxDownloads: limit ? Number(limit) : null,
         })
@@ -179,9 +169,12 @@ function CreatedLink({ url, onDone }: { url: string; onDone: () => void }) {
         Copy it now. DFS only keeps a fingerprint of the link, so it cannot show it again.
       </p>
       <DialogFooter>
-        <Button variant="outline" onClick={onDone}>
-          Done
+        <Button variant="outline" asChild>
+          <a href={url} target="_blank" rel="noreferrer">
+            <ExternalLink /> Open link
+          </a>
         </Button>
+        <Button onClick={onDone}>Done</Button>
       </DialogFooter>
     </div>
   )

@@ -321,9 +321,13 @@ export function createSeed(version: number): MockState {
   })
 
   // ── Share links ───────────────────────────────────────────────────────────
-  const share = (nodeId: string, fields: Partial<MockShare>): MockShare => ({
+  // Readable tokens, so the demo links can be tried: /s/demo-lisbon (password
+  // "lisbon"), /s/demo-resume, and the expired and revoked ones.
+  const share = (nodeId: string, token: string, fields: Partial<MockShare>): MockShare => ({
     id: makeUuid(random),
     nodeId,
+    token,
+    password: null,
     createdAt: ago(between(2, 20) * DAY),
     expiresAt: null,
     hasPassword: false,
@@ -334,14 +338,16 @@ export function createSeed(version: number): MockState {
   })
   const budget = Object.values(nodes).find((node) => node.name === 'Budget 2026.xlsx')?.id ?? root
   const shares = [
-    share(lisbon, {
+    share(lisbon, 'demo-lisbon', {
       expiresAt: new Date(now + 7 * DAY).toISOString(),
+      password: 'lisbon',
       hasPassword: true,
       downloadCount: 3,
     }),
-    share(resume, { maxDownloads: 10, downloadCount: 4 }),
-    share(budget, { revokedAt: ago(2 * DAY) }),
-    share(wedding, { expiresAt: ago(DAY), downloadCount: 12 }),
+    share(resume, 'demo-resume', { maxDownloads: 10, downloadCount: 4 }),
+    share(budget, 'demo-revoked', { revokedAt: ago(2 * DAY) }),
+    share(wedding, 'demo-expired', { expiresAt: ago(DAY), downloadCount: 12 }),
+    share(documents, 'demo-documents', {}),
   ]
 
   // ── Other users (for the admin pages) ─────────────────────────────────────

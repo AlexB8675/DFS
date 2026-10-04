@@ -3,6 +3,7 @@ import {
   shareLinkSchema,
   type CreateShareInput,
   type ShareLink,
+  type UpdateShareInput,
 } from '@dfs/shared'
 import { queryOptions, useMutation } from '@tanstack/react-query'
 import { queryClient } from '@/app/query-client'
@@ -20,6 +21,27 @@ export function useCreateShare() {
     mutationFn: (input: CreateShareInput) => apiSend('POST', '/shares', input, shareLinkSchema),
     onSettled: refreshShares,
   })
+}
+
+export function useUpdateShare() {
+  return useMutation({
+    mutationFn: ({ id, changes }: { id: string; changes: UpdateShareInput }) =>
+      apiSend('PATCH', `/shares/${id}`, changes, shareLinkSchema),
+    onSettled: refreshShares,
+  })
+}
+
+/** Expiry choices for a link, in days from now. */
+export const EXPIRY_OPTIONS = [
+  { value: 'never', label: 'Never' },
+  { value: '1', label: '1 day' },
+  { value: '7', label: '7 days' },
+  { value: '30', label: '30 days' },
+] as const
+
+/** The expiry timestamp for one of the choices above. */
+export function expiryFromChoice(choice: string, now = Date.now()): string | null {
+  return choice === 'never' ? null : new Date(now + Number(choice) * 86_400_000).toISOString()
 }
 
 export function useRevokeShare() {

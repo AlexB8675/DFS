@@ -264,4 +264,71 @@ describe('mock API database', () => {
       code: 'last_channel',
     })
   })
+
+  describe('public share links', () => {
+    it('reveals nothing behind a password until it is unlocked', () => {
+      expect(db.publicShare('demo-lisbon')).toEqual({ locked: true })
+      expect(apiError(() => db.shareChildren('demo-lisbon', null, null, 50))).toEqual({
+        status: 403,
+        code: 'share_locked',
+      })
+      expect(
+        apiError(() => {
+          db.unlockShare('demo-lisbon', 'wrong')
+        }),
+      ).toEqual({ status: 403, code: 'wrong_password' })
+
+      db.unlockShare('demo-lisbon', 'lisbon')
+      expect(db.publicShare('demo-lisbon')).toMatchObject({
+        locked: false,
+        root: { name: 'Summer trip – Lisbon', parentId: null },
+        sharedBy: 'Demo User',
+      })
+    })
+
+    it('turns away expired, revoked and unknown links', () => {
+      const error = (token: string) => apiError(() => db.publicShare(token))
+      expect(error('demo-expired')).toEqual({ status: 410, code: 'share_expired' })
+      expect(error('demo-revoked')).toEqual({ status: 410, code: 'share_revoked' })
+      expect(error('nope')).toEqual({ status: 404, code: 'share_not_found' })
+    })
+
+    it('browses only inside the shared folder', () => {
+      const root = db.shareChildren('demo-documents', null, null, 50)
+      const taxes = root.items.find((node) => node.name === 'Taxes')
+      if (!taxes) throw new Error('No Taxes folder')
+      expect(
+        db.shareChildren('demo-documents', taxes.id, null, 50).path.map((e) => e.name),
+      ).toEqual(['Documents', 'Taxes'])
+      // My Drive is above the shared folder: out of reach.
+      expect(apiError(() => db.shareChildren('demo-documents', rootId(), null, 50))).toEqual({
+        status: 404,
+        code: 'not_found',
+      })
+    })
+
+    it('counts downloads from byte 0 only, and stops at the limit', () => {
+      const resume = db.publicShare('demo-resume')
+      if (resume.locked) throw new Error('Unexpectedly locked')
+      expect(resume.downloadsLeft).toBe(6)
+
+      db.shareFileContent('demo-resume', resume.root.id, false)
+      expect(db.publicShare('demo-resume')).toMatchObject({ downloadsLeft: 6 })
+      for (let i = 0; i < 6; i += 1) db.shareFileContent('demo-resume', resume.root.id, true)
+      expect(apiError(() => db.publicShare('demo-resume'))).toEqual({
+        status: 410,
+        code: 'share_used_up',
+      })
+    })
+
+    it('locks the link again when its password changes, and never lists tokens', () => {
+      db.unlockShare('demo-lisbon', 'lisbon')
+      const link = db.shares().items.find((share) => share.hasPassword && !share.revokedAt)
+      if (!link) throw new Error('No password-protected link')
+      db.updateShare(link.id, { password: 'new-secret' })
+
+      expect(db.publicShare('demo-lisbon')).toEqual({ locked: true })
+      expect(JSON.stringify(db.shares())).not.toContain('demo-lisbon')
+    })
+  })
 })

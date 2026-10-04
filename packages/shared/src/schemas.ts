@@ -241,6 +241,56 @@ export const createShareSchema = z.object({
 })
 export type CreateShareInput = z.infer<typeof createShareSchema>
 
+/** `PATCH /shares/:id`: fields left out stay as they are; `password: null` removes it. */
+export const updateShareSchema = z.object({
+  expiresAt: timestamp.nullable().optional(),
+  password: z.string().min(4).nullable().optional(),
+  maxDownloads: z.number().int().positive().nullable().optional(),
+})
+export type UpdateShareInput = z.infer<typeof updateShareSchema>
+
+// ── Public share access (`/api/s/:token/*`, no login, §7.5) ─────────────────
+
+/**
+ * A node as a share page sees it: what is needed to browse and download, and
+ * nothing about the owner's drive. The shared node's `parentId` is `null`.
+ */
+export const sharedNodeSchema = nodeSchema.pick({
+  id: true,
+  parentId: true,
+  kind: true,
+  name: true,
+  mimeType: true,
+  sizeBytes: true,
+  updatedAt: true,
+})
+export type SharedNode = z.infer<typeof sharedNodeSchema>
+
+/**
+ * `GET /s/:token`. A password-protected link reveals nothing until it is
+ * unlocked (`POST /s/:token/unlock`, which sets a short-lived cookie for it).
+ */
+export const publicShareSchema = z.discriminatedUnion('locked', [
+  z.object({ locked: z.literal(true) }),
+  z.object({
+    locked: z.literal(false),
+    root: sharedNodeSchema,
+    sharedBy: z.string(),
+    expiresAt: timestamp.nullable(),
+    /** `null` when the link has no download limit. */
+    downloadsLeft: z.number().int().min(0).nullable(),
+  }),
+])
+export type PublicShare = z.infer<typeof publicShareSchema>
+
+export const unlockShareSchema = z.object({ password: z.string().min(1).max(200) })
+
+/** `GET /s/:token/children?parentId`: a page of a shared folder, with its path inside the share. */
+export const sharedFolderPageSchema = pageSchema(sharedNodeSchema).extend({
+  path: z.array(sharedNodeSchema.pick({ id: true, name: true })),
+})
+export type SharedFolderPage = z.infer<typeof sharedFolderPageSchema>
+
 // ── Admin (§9, read-only metadata per D4) ────────────────────────────────────
 
 const count = z.number().int().min(0)
