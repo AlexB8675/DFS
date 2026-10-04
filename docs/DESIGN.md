@@ -572,7 +572,7 @@ flowchart TD
 ### 7.5 Other hardening
 
 - Downloads are served with `Content-Disposition: attachment` by default. Inline previews use a strict CSP and `X-Content-Type-Options: nosniff`, and HTML/SVG are always served as attachments, never inline.
-- Share-link tokens are 128-bit random values, and only their SHA-256 is stored, so a link is shown once, when it is created. Optional password (argon2id), expiry, and download cap, all editable later. A password-protected link reveals nothing, not even the item's name, until a correct password (`POST /api/s/:token/unlock`) sets a short-lived cookie scoped to that share; changing the password invalidates those cookies. A download counts toward the cap only when the request starts at byte 0, so seeking in a video doesn't use it up.
+- Share-link tokens are 128-bit random values, and only their SHA-256 is stored, so a link is shown once, when it is created. Optional password (argon2id), expiry, and download cap, all editable later. A password-protected link reveals nothing, not even the item's name, until a correct password (`POST /api/s/:token/unlock`) sets a short-lived cookie scoped to that share; changing the password invalidates those cookies. The share routes have no session, so `POST /api/s/:token/unlock` is exempt from the CSRF token check (§7.1); it is protected instead by rate limiting, an `Origin` check, and a `SameSite=Strict` cookie whose path is `/api/s/:token`. A file download counts toward the cap only when the request starts at byte 0, so seeking in a video doesn't use it up; a ZIP (`GET /api/s/:token/archive`) counts as one download.
 - Login/OAuth callbacks and share-link access are rate-limited.
 - An audit log records logins, uploads, deletions, shares, and admin actions.
 - Internal API→bot RPC runs only on `dfs_internal`, needs a shared `INTERNAL_RPC_SECRET`, and is blocked at the edge.
@@ -914,6 +914,7 @@ A Discord application (OAuth client and bot token) and a test server are needed 
 - **Upload resume after a reload:** upload IDs in IndexedDB (§10.2).
 - **Inline rename** in lists (a dialog today), and **select-all across pages** of a large folder (today Ctrl+A selects the loaded rows; needs a server-side "whole folder except" selection for bulk actions).
 - **Admin search** across users (`GET /admin/search`).
+- **Downloads left on the share page:** it refetches the count right after a download starts, which against the real API can be before the server counted it; decrement it optimistically instead.
 - **Thumbnails** in the grid (D13).
 - **End-to-end tests** with Playwright (§17) once the API exists, including the motion and drag-and-drop flows that unit tests can't see.
 
