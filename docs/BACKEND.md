@@ -19,14 +19,14 @@ Settled for this plan and recorded in [DESIGN.md §19](DESIGN.md#19-decisions-lo
 |---|---|---|
 | D19 | **API first, Discord later.** | After M0 comes M2 on local storage, so the UI runs against a real server early. M1 (Discord storage and the bot) follows (§2). |
 | D20 | **An upload onto an existing file's name creates a new version** of that file. | New rules in DESIGN §6.1, a small contract change (§4.2), and mock and UI updates (§7). |
-| D21 | **Dev-only sign-in** without Discord. | `DEV_LOGIN=1` in development enables `POST /api/auth/dev-login`; the API refuses to start with it in production. |
+| D21 | **Superseded by D27:** there is no dev-only sign-in. | Development signs in with a password like production; `dfs owner` makes the first account. |
 | D22 | **Node runs the TypeScript sources directly** (type stripping). | No build step for api, bot and packages; rules and checks in §3.2. |
 | D23 | **First deployment once Discord storage works**, test data only until M4. | A deployment step between M1 and M4 (§2). |
 | D24 | **Old versions count toward the quota** until purged. | Quota reservation and pruning rules in DESIGN §5.1 and §6.1. |
 | D25 | **One Discord server and bot for development and production.** Development uses its own `DFS Dev` channels and no gateway connection. | Config for the category and the gateway (§6); `dfs setup` in the CLI arrives with M1, since development can't use slash commands; load tests stay off Discord. |
 | D26 | **Private GitHub repository, no CI.** | `pnpm check` in M0; the VPS pulls with a deploy key (§4.4). |
-| D27 | **Access is a list kept in DFS:** an admin adds people by Discord user ID; the Discord server is private to the owner. | Sign-in checks the list, not guild or roles; an "Add user" admin action (§4.2, §7). |
-| D28 | **Admins are set in DFS;** the owner (`OWNER_DISCORD_ID`) is always an admin. | Owner protections in the admin routes; no role sync in the bot (§4.3). |
+| D27 | **Username and password accounts, made by an admin** with a temporary password; no Discord accounts. Users choose their own password at first sign-in. | Password sign-in, the limited first session, and creating users and resetting passwords on the admin side (§4.2, §7). |
+| D28 | **Admins are set in DFS;** the owner, made on the server with `dfs owner`, is always an admin. | The `dfs owner` command and the owner protections in the admin routes (§4.2). |
 
 The Discord server and application already exist and serve both environments; §6 lists what to configure. The VPS is available, with more than 150 GB of disk (§4.4).
 
@@ -103,7 +103,7 @@ M0 proves this with a smoke test before anything else is built on it (§4.1), be
 
 ### 3.3 API conventions
 
-- **Fastify 5 plugins, in order:** request ID and pino logger; config; database; trusted-proxy client IP; session (cookie → user); CSRF check on state-changing routes, except the public share routes (DESIGN §7.5); rate limits; error handler.
+- **Fastify 5 plugins, in order:** request ID and pino logger; config; database; trusted-proxy client IP; session (cookie → user, and the limited session that can only choose a password, DESIGN §7.1); CSRF check on state-changing routes, except `POST /auth/login` and the public share routes, which check `Origin` instead (DESIGN §7.1, §7.5); rate limits; error handler.
 - **One error shape:** `{ error: { code, message } }` (the shared `apiErrorSchema`), with the codes the mock already uses (`name_conflict`, `invalid_move`, `quota_exceeded`, `share_locked`, …). Unknown errors become `500 internal_error` with the request ID in the log, never a stack trace in the response.
 - **Validation from the shared schemas:** routes declare their bodies, queries and replies with the Zod schemas of `@dfs/shared` through the Zod type provider, so the API and the UI can't drift.
 - **Routes are thin:** a route parses, authorizes and calls a service function (`nodes`, `uploads`, `content`, `shares`, `admin`, `events`) that takes a transaction.
@@ -121,7 +121,7 @@ Each step lists its tasks and how to check it is done. "Done" means the command 
 **Tasks**
 
 - [ ] **Node runs TypeScript (do first):** `apps/api` with a `src/main.ts` that imports `@dfs/shared` and `@dfs/config` and serves `/api/health`. Check `node src/main.ts` and `node --watch`, and a NodeNext typecheck. If the pnpm symlinks break type stripping, decide between `--preserve-symlinks` and a different workspace link mode before going on.
-- [ ] `packages/config`: Zod env schema for DESIGN §15, derived sizes, startup checks, `DEV_LOGIN` refused when `NODE_ENV=production`, `DISCORD_*` optional when `BLOB_STORE=local`.
+- [ ] `packages/config`: Zod env schema for DESIGN §15, derived sizes, startup checks, `DISCORD_*` optional when `BLOB_STORE=local`.
 - [ ] `docker/docker-compose.dev.yml`: Postgres 18, port 5432 on localhost only, a named volume.
 - [ ] `packages/db`: Drizzle schema for every table of DESIGN §5 (users, sessions, nodes, file_versions, chunks, blobs, storage_channels, folder_stats, share_links, upload_sessions, audit_log, journal), the indexes of §5.1 (partial and trigram indexes as SQL in the migration), `drizzle-kit` migrations committed as SQL, and a `migrate` script.
 - [ ] `apps/api` skeleton: the plugins of §3.3, `/api/health` (liveness plus a DB query), graceful shutdown.
@@ -149,21 +149,22 @@ Files are encrypted from the start: the API writes DFS1 frames to staging (DESIG
 
 **Tasks**
 
-- [ ] **Auth:** Discord OAuth with `identify` (DESIGN §7.1); sign-in only for Discord accounts an admin added (D27), with a "no access" answer otherwise; the owner from `OWNER_DISCORD_ID` created on startup if missing (D28); sessions in Postgres, CSRF tokens, `GET /auth/me`, logout; the dev-only sign-in (D21).
+- [ ] **Auth** (DESIGN §7.1, D27): `POST /auth/login` with argon2id, the dummy-hash check for unknown usernames, per-IP and per-account rate limits, and the `Origin` check; temporary passwords that expire; the limited session that can only choose a password (`403 password_change_required` everywhere else, enforced in the session plugin, not per route); activation on the first own password; `POST /auth/password`, which needs the current password otherwise and ends the other sessions; the common-password list; sessions in Postgres with a new ID on sign-in and password change, CSRF tokens, `GET /auth/me`, logout. Sign-ins, failures, changes and resets are audited.
+- [ ] **`dfs owner`** (D28): a command in `apps/api` that creates the owner with a temporary password, or gives the existing owner a new one and ends their sessions. Development uses it for its first account too.
 - [ ] **Browse and change the tree:** children with keyset pagination, path, node, folders, `folders/ensure`, rename, move with the cycle check, trash and restore, search with `pg_trgm`, folder stats.
 - [ ] **Uploads:** sessions with quota reservation, batches with per-upload results, part PUTs with SHA-256 checks and encryption, auto-complete for single parts, completion, cancel, resume status, `503` with `Retry-After` when staging is full, the 24 h janitor. Same-name uploads become versions; pruning past `VERSION_RETENTION` (D20, D24).
 - [ ] **Bot in local mode:** the `blob.upload` worker writes staged frames to `LocalBlobStore`, marks blobs and versions `stored`, and sends `nodes.synced` through `pg_notify`.
 - [ ] **Content:** streamed downloads with `Range` (from staging while syncing, from the blob store once stored), ZIP archives for folders and selections, archive tickets.
 - [ ] **Shares:** create, list, edit, revoke; the public routes with argon2id passwords, unlock cookies, subtree checks and download counting (DESIGN §7.5, D18).
-- [ ] **Admin:** adding users by Discord user ID (with their root folder), quotas, roles and disabling, never for the owner; usage, the read-only metadata browser, moderation, health, channels, audit log (DESIGN §9, D4). Every admin view and action is audited.
+- [ ] **Admin:** creating users (username, display name, temporary password, quota, role, with their root folder), resetting passwords, display names, quotas, roles and disabling, never for the owner or for yourself; usage, the read-only metadata browser, moderation, health, channels, audit log (DESIGN §9, D4). Every admin view and action is audited.
 - [ ] **Live events:** one `LISTEN` connection per API instance, SSE with typed payloads and pings (DESIGN §6.1).
 - [ ] **Web and mock (D20):** the mock turns same-name uploads into versions; the engine uses the new session state; a row that gets a new version doesn't replay its "new" animation.
-- [ ] **Switch-over:** the Vite proxy to the API, real downloads by navigation, the OAuth redirect flow.
+- [ ] **Switch-over:** the Vite proxy to the API, real downloads by navigation.
 
 **Done when**
 
 - The contract suite (§5) passes against both the MSW handlers and the real API.
-- With `VITE_API_MOCKS=off`, the UI signs in (dev sign-in and Discord), uploads a folder of 1,000 small files and a 1 GB file, shows them syncing then stored, downloads them back byte for byte, and shares a folder that opens in a private window.
+- With `VITE_API_MOCKS=off`, the UI signs in with a password (a first sign-in with a temporary password, too), uploads a folder of 1,000 small files and a 1 GB file, shows them syncing then stored, downloads them back byte for byte, and shares a folder that opens in a private window.
 - The upload engine's retry and resume paths pass against the real API with the `ChaosBlobStore` and an injected network failure.
 
 ### 4.3 M1 · Discord storage and the bot
@@ -190,7 +191,7 @@ Files are encrypted from the start: the API writes DFS1 frames to staging (DESIG
 **Tasks**
 
 - [ ] Dockerfiles for api, bot and the web build; `docker-compose.yml` with caddy, api, bot, postgres and the one-shot `migrate`; the Caddyfile with the route allowlist and streaming settings (DESIGN §3.2, §13.2).
-- [ ] Secrets in `/etc/dfs/secrets`, the master key generated and backed up outside the VPS, `PUBLIC_BASE_URL` and the production OAuth redirect.
+- [ ] Secrets in `/etc/dfs/secrets`, the master key generated and backed up outside the VPS, `PUBLIC_BASE_URL`, and `dfs owner` to make your account.
 - [ ] Getting the code: a read-only deploy key for the GitHub repository; updates stay `git pull && docker compose up -d --build` (DESIGN §13.2).
 - [ ] Sizes for this VPS (more than 150 GB of disk): `STAGING_MAX_BYTES=50GiB` and `CACHE_MAX_BYTES=20GiB`, leaving room for Postgres, images and the OS. Check them against the real disk size and the DB estimate of DESIGN §12.2 before going live.
 - [ ] Host setup: Docker, firewalld, SSH keys only, automatic security updates.
@@ -198,7 +199,7 @@ Files are encrypted from the start: the API writes DFS1 frames to staging (DESIG
 **Done when**
 
 - The site answers over HTTPS on the VPS domain, `/internal/*` answers 404 from outside, and only Caddy publishes ports.
-- Sign-in with Discord works, and the M2 checks pass against the deployed instance, with test data only.
+- Sign-in works over HTTPS, and the M2 checks pass against the deployed instance, with test data only.
 
 ### 4.5 M4 · Durability
 
@@ -242,15 +243,16 @@ pnpm --filter @dfs/db migrate
 pnpm dev                                                # web :5173, api :3000, bot :3001
 ```
 
-- `.env` from `.env.example`; with `DEV_LOGIN=1` and `BLOB_STORE=local`, nothing needs Discord.
+- `.env` from `.env.example`; with `BLOB_STORE=local`, nothing needs Discord.
+- `pnpm --filter @dfs/api dfs owner` makes your first local account and prints its temporary password.
 - `VITE_API_MOCKS=off` points the UI at the API; without it, the UI keeps using the mock.
 
 **Discord: what to configure** (the server and application exist)
 
-- **Application → OAuth2:** both redirect URIs on the one application, `http://localhost:5173/api/auth/discord/callback` and, at deployment, `https://<domain>/api/auth/discord/callback`; scope `identify` only.
+- **Application → OAuth2:** nothing to set up. DFS doesn't use Discord sign-in (D27), so the client secret isn't used anywhere.
 - **Application → Bot:** no privileged intents are needed (D27). The bot is already in the server; it needs *View Channels*, *Send Messages*, *Attach Files*, *Read Message History* and *Manage Messages*, plus *Manage Channels* and *Manage Roles* for `dfs setup` (they can be removed once both categories exist; DESIGN §4).
 - **Server:** private to you; users never join it, and no roles are needed (D27). Your existing text channel becomes production's first storage channel: keep it visible only to you and the bot, and register it on the Admin → Channels page at the first deployment. The private categories and their channels (`#storage-00` to `#storage-03`, `#dfs-journal`, `#dfs-backups`, `#dfs-log`) don't need creating by hand: `dfs setup` makes the `DFS Dev` set for development, and `/dfs setup` the `DFS` set in production (M1).
-- **Into `.env`:** `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET`, `DISCORD_BOT_TOKEN`, `DISCORD_GUILD_ID`, `OWNER_DISCORD_ID` (your own Discord user ID: Settings → Advanced → Developer Mode, then right-click your name → Copy User ID).
+- **Into `.env`:** `DISCORD_BOT_TOKEN` and `DISCORD_GUILD_ID`.
 - **Development `.env`:** the same token and IDs as production, plus `DISCORD_CATEGORY_NAME=DFS Dev` and `DISCORD_GATEWAY=off`. Never point development at the `DFS` category.
 
 ---
@@ -259,12 +261,10 @@ pnpm dev                                                # web :5173, api :3000, 
 
 | When | Change |
 |---|---|
+| Done | Password sign-in, choosing a password after a temporary one, password change in Settings, and creating users and resetting passwords on the Users page, in the UI and the mock (D27, D28). |
 | M2 | Same-name uploads become versions in the mock; the contract suite covers it (D20). |
 | M2 | The upload engine checks the session's `state` on a retry, and stops checking the node's sync state. |
 | M2 | Rows that get a new version don't replay their "new" animation. |
-| M2 | Sign-in goes through the Discord redirect, except with `DEV_LOGIN`. |
-| M2 | The login page explains "not added to DFS" instead of the old Discord role (D27). |
-| M2 | Users page: an "Add user" dialog (Discord user ID, quota, role); the owner is marked and can't be edited (D28). The mock follows. |
 | M2 | Downloads use plain navigation with the real API (already built; first exercised here). |
 | M2 | The mock's demo channels use the names of DESIGN §4 (`storage-00` …) instead of `dfs-data-N`. |
 | M5 | Preview and version history screens; the share page shows previews. |
@@ -287,4 +287,4 @@ pnpm dev                                                # web :5173, api :3000, 
 
 ## 9. Open questions
 
-1. **The domain.** There is none yet; it is decided before the first deployment, which needs it for TLS and the production OAuth redirect. Nothing before that depends on it.
+1. **The domain.** There is none yet; it is decided before the first deployment, which needs it for TLS, share links and the sign-in `Origin` check. Nothing before that depends on it.

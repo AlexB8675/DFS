@@ -104,7 +104,7 @@ flowchart LR
 | Service | Tier | Replicas | Responsibility | Holds secrets |
 |---|---|---|---|---|
 | **edge (Caddy)** | Public | 1 | TLS termination, serves the static React build (including client-side routes such as the share page `/s/:token`), and reverse-proxies **only `/api/*`** to the API. It is the **only** container that publishes ports. | TLS certs |
-| **api** | Internal | 1…N (stateless) | HTTP API, authentication, sessions, the file-system metadata (tree operations), upload sessions, **encryption/decryption**, download streaming, share links, live events (SSE fed by Postgres `LISTEN/NOTIFY`). Enqueues jobs, and runs the background jobs that need keys: `journal.flush`, `backup.snapshot`, and DEK re-wrapping. | `MASTER_KEY`, OAuth client secret |
+| **api** | Internal | 1…N (stateless) | HTTP API, authentication, sessions, the file-system metadata (tree operations), upload sessions, **encryption/decryption**, download streaming, share links, live events (SSE fed by Postgres `LISTEN/NOTIFY`). Enqueues jobs, and runs the background jobs that need keys: `journal.flush`, `backup.snapshot`, and DEK re-wrapping. | `MASTER_KEY` |
 | **bot** | Internal | 1 active (+ optional standby) | The only process with the Discord token. **Packs** small-file frames into blobs, uploads and deletes blobs, compacts packs, refreshes CDN URLs, watches the gateway for tampering, and offers admin slash commands. **Outbound-only** network access to Discord. It never sees keys or plaintext. | `DISCORD_BOT_TOKEN` |
 | **postgres** | Internal | 1 | Metadata, sessions, audit log, journal outbox, and the job queue (**pg-boss**, so no Redis is needed). | — |
 
@@ -134,7 +134,7 @@ flowchart LR
 - **Route allowlist at the edge:** only `/api/*` is proxied to the API. Every other path is answered from the static SPA build, and unknown paths fall back to `index.html` so client-side routes such as `/s/:token` (public share pages) work. `/internal/*` and metrics paths get an explicit `404`. Nothing else reaches a backend service.
 - **Streaming:** request and response buffering is disabled for `/api/uploads/*/parts/*`, the content and archive routes (`/api/files/*/content`, `/api/s/*/files/*/content`, `*/archive`), and `/api/events` (SSE). The body size limit is **12 MiB** (one part plus headroom). Download and SSE routes have long timeouts.
 - **Client IP:** the API trusts `X-Forwarded-For` **only** from the Caddy container's address (`TRUSTED_PROXY_CIDRS`), for rate limiting and audit logs.
-- The **Discord OAuth redirect URI** and **share links** use the public URL (`PUBLIC_BASE_URL`).
+- **Share links** use the public URL (`PUBLIC_BASE_URL`), and the sign-in route checks `Origin` against it (§7.1).
 - *Later, optional:* the same images can be split across two hosts (edge on the VPS, core elsewhere over WireGuard/Tailscale) with `docker-compose.edge.yml` / `docker-compose.core.yml`. This is not built in v1.
 
 ---
@@ -191,8 +191,12 @@ erDiagram
 
     users {
         uuid id PK "uuidv7"
-        text discord_user_id UK
+        text username UK "lowercase"
         text display_name
+        text password_hash "argon2id"
+        timestamptz password_expires_at "set while the password is temporary"
+        timestamptz activated_at "first own password"
+        boolean is_owner "exactly one"
         enum role "admin | user"
         bigint quota_bytes
         bigint used_bytes
@@ -318,6 +322,7 @@ Supporting tables not drawn above: `journal` (outbox of metadata changes, §8), 
 - **Blob queues:** partial indexes `blobs (state) WHERE state IN ('staged','uploading','deleting')` and `chunks (id) WHERE blob_id IS NULL AND purged_at IS NULL` (frames waiting for the packer).
 - **Tree queries:** paths and breadcrumbs use recursive CTEs, which are cheap because trees are shallow. A move is one `UPDATE` plus a cycle check (the new parent must not be a descendant).
 - **Quota:** `upload_sessions` reserve bytes up front (`users.reserved_bytes`). When the upload completes, the reservation becomes `used_bytes` in one short transaction.
+- **Users:** `username` is stored lowercase with a unique index, so `Sam` and `sam` are the same account. A partial unique index `(is_owner) WHERE is_owner` allows only one owner (D28).
 - **Versions:** v1 keeps the **current version plus N previous ones** (`VERSION_RETENTION`, default 3). Older versions move to `purging`. Old versions count toward the owner's quota until they are purged, like the trash (D24).
 
 ### 5.2 Lifecycle state machines
@@ -517,13 +522,18 @@ flowchart LR
 
 ## 7. Security
 
-### 7.1 Authentication: "Log in with Discord"
+### 7.1 Authentication: usernames and passwords
 
-- Users sign in with **Discord OAuth2** (scope `identify`).
-- **Access is a list kept in DFS (D27):** an admin adds a person by their Discord user ID on the Users page, with a quota and a role. A Discord account that hasn't been added gets a clear "no access" message and no session. The Discord server is private to the owner and only holds the storage channels; users never join it. Disabling a user on the Users page ends their sessions at once.
-- **Admins are set in DFS (D28):** any admin can make a user an admin on the Users page. The **owner** (`OWNER_DISCORD_ID`) is always an admin, and nobody can demote or disable that account from the page, so there is always someone who can manage access.
-- Sessions are server-side rows in Postgres, referenced by an `HttpOnly; Secure; SameSite=Lax` cookie with a sliding 30-day expiry. Every state-changing request needs a CSRF token header.
-- **Development only (D21):** with `DEV_LOGIN=1`, `POST /api/auth/dev-login` signs in as a local admin without Discord, so API work needs no Discord application. Config parsing refuses to start the API when `DEV_LOGIN` is set and `NODE_ENV=production`.
+- **No Discord accounts (D27).** People sign in with a username and a password. Discord is only the storage layer: the server is private to the owner, and users never join it.
+- **An admin makes every account (D27).** On the Users page, an admin enters a username, a display name, a quota, a role and a **temporary password** (typed or generated), and hands the username and password to the person. There is no sign-up and no email.
+- **First sign-in:** a temporary password opens a **limited session** that can only choose a new password. Until then, the API answers every other route with `403 password_change_required`; only `GET /auth/me`, `POST /auth/password` and `POST /auth/logout` work, and the session lasts 15 minutes. Choosing a password **activates** the account (`activated_at`). A temporary password expires after `TEMP_PASSWORD_DAYS` (7); signing in with an expired one answers `403 password_expired`, and an admin sets a new one.
+- **Forgotten passwords:** an admin sets a new temporary password on the Users page. That ends all of the user's sessions, and they choose a new password at their next sign-in.
+- **The owner (D28)** is created on the server with `dfs owner`, a command in the api image that prints a temporary password. Run again, it gives the existing owner a new temporary password and ends their sessions. That is how the owner gets back in, since there is no email. The owner is a flag in the database, always an admin, and nobody can demote, disable or reset the owner from the app. Any admin can make other users admins.
+- **Passwords:** hashed with argon2id. 12 to 256 characters of any kind, with no rules about character classes. The API refuses the username itself and the 10,000 most common passwords. Changing a password needs the current one (except in the limited session above) and ends the user's other sessions.
+- **Sign-in protection:** an unknown username and a wrong password get the same `401 invalid_credentials`, and an unknown username is still checked against a dummy argon2 hash, so the response time doesn't tell them apart. `account_disabled` and `password_expired` are only answered after a correct password. Sign-in is rate-limited per IP and per account: after 10 failures in a row, the account must wait before the next try, starting at 1 minute and doubling up to 1 hour (`429` with `Retry-After`); a successful sign-in resets that. Sign-ins, failed sign-ins, password changes and resets go to the audit log.
+- **Sessions** are server-side rows in Postgres, referenced by an `HttpOnly; Secure; SameSite=Lax` cookie with a sliding 30-day expiry. Every sign-in and password change gets a new session ID. Disabling a user ends their sessions at once.
+- **CSRF:** every state-changing request needs a CSRF token header, except `POST /auth/login`, which comes before there is a session. That route accepts only requests whose `Origin` is `PUBLIC_BASE_URL`, and is rate-limited as above (like share unlock, §7.5).
+- **Development** signs in the same way; `dfs owner` makes the first local account.
 
 ### 7.2 Authorization
 
@@ -580,8 +590,8 @@ flowchart TD
 
 - Downloads are served with `Content-Disposition: attachment` by default. Inline previews use a strict CSP and `X-Content-Type-Options: nosniff`, and HTML/SVG are always served as attachments, never inline.
 - Share-link tokens are 128-bit random values, and only their SHA-256 is stored, so a link is shown once, when it is created. Optional password (argon2id), expiry, and download cap, all editable later. A password-protected link reveals nothing, not even the item's name, until a correct password (`POST /api/s/:token/unlock`) sets a short-lived cookie scoped to that share; changing the password invalidates those cookies. The share routes have no session, so `POST /api/s/:token/unlock` is exempt from the CSRF token check (§7.1); it is protected instead by rate limiting, an `Origin` check, and a `SameSite=Strict` cookie whose path is `/api/s/:token`. A file download counts toward the cap only when the request starts at byte 0, so seeking in a video doesn't use it up; a ZIP (`GET /api/s/:token/archive`) counts as one download.
-- Login/OAuth callbacks and share-link access are rate-limited.
-- An audit log records logins, uploads, deletions, shares, and admin actions.
+- Sign-in (§7.1) and share-link access are rate-limited.
+- An audit log records sign-ins, password changes and resets, uploads, deletions, shares, and admin actions.
 - Internal API→bot RPC runs only on `dfs_internal`, needs a shared `INTERNAL_RPC_SECRET`, and is blocked at the edge.
 - **Network exposure** (D2): only Caddy publishes ports. `api`, `bot`, and `postgres` publish **no** ports. Postgres is on the internal network only and has no egress.
 - Containers run as non-root, with read-only root filesystems where possible, `no-new-privileges`, and dropped capabilities.
@@ -628,7 +638,7 @@ All routes are under `/api`, use JSON unless noted, and are validated with Zod s
 
 | Method & Path | Purpose |
 |---|---|
-| `GET /auth/discord` · `GET /auth/discord/callback` · `POST /auth/logout` · `GET /auth/me` | Auth |
+| `POST /auth/login` `{username, password}` · `POST /auth/password` `{currentPassword?, newPassword}` · `POST /auth/logout` · `GET /auth/me` | Auth (§7.1). Login, password change and `me` answer `{user, csrfToken, passwordChange}`; `passwordChange` is `'activate'` or `'reset'` while the session can only choose a password, else `null` |
 | `GET /nodes/:id` · `GET /nodes/:id/children?kind&sort&order&cursor&limit` · `GET /nodes/:id/path` | Browse. `kind=folder` lists subfolders only (folder tree, move dialog). Folder nodes carry `hasChildFolders`, so the tree only shows an expand arrow where there is something to expand |
 | `POST /folders` `{parentId, name}` · `POST /folders/ensure` `{parentId, paths[]}` | Create folder / `mkdir -p` in bulk |
 | `PATCH /nodes/:id` `{name?, parentId?}` · `POST /nodes/move` `{ids[], parentId}` | Rename / move (single or bulk) |
@@ -640,7 +650,7 @@ All routes are under `/api`, use JSON unless noted, and are validated with Zod s
 | `POST /shares` · `GET /shares` · `PATCH /shares/:id` (expiry, password, cap) · `DELETE /shares/:id` | Share links (owner) |
 | `GET /s/:token` · `POST /s/:token/unlock` `{password}` · `GET /s/:token/children?parentId&cursor` · `GET /s/:token/files/:id/content` (Range) · `GET /s/:token/archive?nodeId` | Public share access, no login. Used by the SPA page at `/s/:token`. `:id`, `parentId` and `nodeId` must be the shared node or inside its subtree. `GET /s/:token` answers `{locked: true}` for a password-protected link that isn't unlocked, otherwise the shared node, who shared it, the expiry and the downloads left. Children come with their `path` inside the share. Dead links answer `410` (`share_expired`, `share_revoked`, `share_used_up`), unknown ones `404`. A locked link or a wrong password is `403`, never `401`, which means "sign in" to the app (D18) |
 | `GET /events` (SSE) | Sync progress, background changes, quota, keep-alive pings (fed by `LISTEN/NOTIFY`; payloads in §6.1) |
-| `GET /admin/users` · `POST /admin/users` `{discordUserId, quotaBytes?, role?}` · `PATCH /admin/users/:id` (quota, role, disable; never the owner) | Admin: users |
+| `GET /admin/users` · `POST /admin/users` `{username, displayName?, temporaryPassword, quotaBytes?, role?}` · `PATCH /admin/users/:id` (display name, quota, role, disable) · `POST /admin/users/:id/password` `{temporaryPassword}` | Admin: users. Nothing here changes the owner (`409 owner_protected`), and admins can't demote, disable or reset themselves (`409 self_change`) |
 | `GET /admin/users/:id/usage` · `GET /admin/nodes/:id` · `GET /admin/nodes/:id/path` · `GET /admin/nodes/:id/children` · `GET /admin/search?q=&userId=` | Admin: **read-only metadata** of any user (no content routes) |
 | `DELETE /admin/nodes/:id` `{reason}` | Admin: moderation trash (audited; the owner sees the reason in their trash) |
 | `GET /admin/health` · `GET /admin/channels` · `POST /admin/channels` · `PATCH /admin/channels/:id` `{enabled}` · `GET /admin/audit` | Admin: system. At least one channel always stays enabled. Admins can't demote or disable themselves |
@@ -675,15 +685,16 @@ Internal (bot), only reachable on `dfs_internal` and returning `404` at the edge
 
 | Screen | Key features |
 |---|---|
-| **Login** | "Continue with Discord" button, plus a clear message if the Discord account hasn't been added to DFS |
+| **Login** | Username and password; a wrong one shakes the card. Explains a disabled account or an expired temporary password |
+| **Choose a password** | Right after a sign-in with a temporary password, before anything else: a new password, typed twice. Welcomes a first sign-in; after a reset, says an admin reset it |
 | **Drive** (main) | Breadcrumbs, virtualized list/grid (file-type icons; thumbnails come later, §1.2), sort, multi-select (shift/ctrl, select-all across pages), right-click context menu, drag-drop upload (files *and* folders, onto the folder or straight onto a subfolder), drag-to-move, inline rename, keyboard shortcuts (F2, Del, Ctrl+A), sync status icon per file (syncing / stored / lost), download (one file as itself, folders and multiple items as a ZIP) |
 | **Upload panel** | Docked queue showing aggregate progress (files and bytes), speed and time left, per-file two-phase progress (upload → Discord sync), pause/resume/cancel per file and for all, retry failed |
 | **Preview** | Image, video/audio (streamed with Range), PDF, text/code (with size cap), plus version history and share actions |
 | **Trash** | Restore, delete forever, empty trash |
 | **Shared links** | List, revoke, and edit expiry, password and download limit. A new link is shown (copy, open) only when it is created |
 | **Public share page** | Minimal, unauthenticated SPA route `/s/:token` (data from `/api/s/*`), loaded without the signed-in app: a password prompt if needed (a wrong password shakes the card), then the file with a download button, or a folder to browse (breadcrumbs inside the share, per-file download, ZIP of any folder). Shows who shared it, the expiry and the downloads left, and a clear message for expired, revoked and used-up links. Previews come with the Preview screen |
-| **Settings** | Profile, quota usage bar |
-| **Admin** | Tabs: **Overview** (service status, sync backlog with speed and time left, job queue, staging and cache use, storage, scrubber progress, backups, lost blobs; refreshes every 5 s), **Users** (add a person by Discord user ID, quotas, roles, disable; the owner can't be changed; per-user usage by file type and a **read-only metadata browser**: names, tree, sizes, dates, with no open/download/preview; moderation trash with a reason), **Channels** (add, enable/disable), **Audit log**. A `requireAdmin` route loader makes the pages a 404 for everyone else |
+| **Settings** | Profile, password change, quota usage bar |
+| **Admin** | Tabs: **Overview** (service status, sync backlog with speed and time left, job queue, staging and cache use, storage, scrubber progress, backups, lost blobs; refreshes every 5 s), **Users** (add a user with a temporary password, typed or generated, and copy their sign-in details; reset a password; quotas, roles, disable; users who haven't signed in yet are marked; the owner is marked and can't be changed; per-user usage by file type and a **read-only metadata browser**: names, tree, sizes, dates, with no open/download/preview; moderation trash with a reason), **Channels** (add, enable/disable), **Audit log**. A `requireAdmin` route loader makes the pages a 404 for everyone else |
 
 ### 10.2 Client upload engine
 
@@ -700,7 +711,7 @@ Internal (bot), only reachable on `dfs_internal` and returning `404` at the edge
 
 ## 11. Bot Service
 
-- **discord.js v14**, intents: `Guilds` and `GuildMessages`. Users aren't members of the server (D27), so `GuildMembers` and its privileged intent aren't needed. Message Content intent is **not** needed, because the bot reads its own messages.
+- **discord.js v14**, intents: `Guilds` and `GuildMessages`. Users never touch Discord (D27), so `GuildMembers` and its privileged intent aren't needed. Message Content intent is **not** needed, because the bot reads its own messages.
 - **Leader election:** the bot takes a Postgres advisory lock at startup. A second instance waits as a hot standby, so only one gateway connection and one packer exist at a time.
 - **Job workers (pg-boss queues):**
   | Queue | Priority | Notes |
@@ -759,7 +770,7 @@ Expected profile (D7): **few users (≤ ~20), many files.** The design targets *
 | Node.js 24 LTS + **pnpm** (via Corepack) | Native on Windows. `pnpm` itself must be on the PATH (`corepack enable pnpm`), because Turborepo calls it; `corepack pnpm …` alone is not enough |
 | PostgreSQL 18 | `docker compose -f docker/docker-compose.dev.yml up -d` (Docker Desktop). Port `5432` is published to **localhost only** |
 | api (`:3000`), bot (`:3001`), web (`:5173`) | `pnpm dev` (Turborepo runs all three in watch mode: `node --watch` on the TypeScript sources, D22, and Vite) |
-| Sign-in without Discord | `DEV_LOGIN=1` enables a development-only sign-in as a local admin (D21) |
+| First account | `dfs owner` creates the owner and prints a temporary password, as in production (§7.1) |
 | Web → API | The Vite dev server proxies `/api` to `localhost:3000`, so the browser sees one origin, as it will in production |
 | Discord | The production server and bot, with development's own `DFS Dev` channels and no gateway connection (D25, §4). Development never touches production's channels |
 | No-Discord mode | `BLOB_STORE=local` swaps in `LocalBlobStore` (files under `./.data/blobs`). Most work, including all of M0–M3 UI work, can happen offline |
@@ -840,11 +851,10 @@ The **`BlobStore` interface** (`put(blob) → ref`, `get(ref, range?) → stream
 | `BLOB_STORE` | `discord` | `local` for offline development and tests |
 | `LOCAL_BLOB_DIR` | `./.data/blobs` | when `BLOB_STORE=local` |
 | `DISCORD_BOT_TOKEN` | — | bot only; not needed when `BLOB_STORE=local` |
-| `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` | — | OAuth (api) |
+| `TEMP_PASSWORD_DAYS` | `7` | how long a temporary password set by an admin or `dfs owner` works (§7.1) |
 | `DISCORD_GUILD_ID` | — | |
 | `DISCORD_CATEGORY_NAME` | `DFS` | the channel category this environment uses and creates (§4); `DFS Dev` in development |
 | `DISCORD_GATEWAY` | `on` | `off` in development: REST only, no slash commands or tamper watch (D25) |
-| `OWNER_DISCORD_ID` | — | the owner's Discord user ID: always an admin, can't be demoted or disabled (D28) |
 | `DISCORD_ATTACHMENT_LIMIT` | `10485760` | 10 MiB (unboosted server). Only raise it if the server is boosted. |
 | `BLOB_MAX_BYTES` / `CHUNK_SIZE` | derived | Not set directly. Attachment limit − 64 KiB (hard cap on every attachment) / the largest multiple of 64 KiB that fits one frame under that cap (§7.3) |
 | `PACK_THRESHOLD_BYTES` | `4194304` | files smaller than this are packed |
@@ -862,11 +872,10 @@ The **`BlobStore` interface** (`put(blob) → ref`, `get(ref, range?) → stream
 | `DEFAULT_QUOTA_BYTES` | `100 GiB` | per user |
 | `INTERNAL_RPC_SECRET` | — | api ↔ bot |
 | `BOT_INTERNAL_URL` | `http://bot:3001` | used by the api |
-| `PUBLIC_BASE_URL` | — | public URL (VPS domain), used for the OAuth redirect and share links |
+| `PUBLIC_BASE_URL` | — | public URL (VPS domain), used for share links and the sign-in `Origin` check |
 | `API_PORT` / `BOT_PORT` | `3000` / `3001` | |
 | `TRUSTED_PROXY_CIDRS` | Docker network CIDR | addresses allowed to set `X-Forwarded-*` |
 | `LOG_LEVEL` | `info` | |
-| `DEV_LOGIN` | unset | `1` enables the development-only sign-in (§7.1). Refused when `NODE_ENV=production` |
 
 At startup, config parsing rejects size settings that can't work: it requires `PACK_THRESHOLD_BYTES + 38 ≤ BLOB_MAX_BYTES` (otherwise some small-file frames could never be packed) and `PACK_TARGET_BYTES ≤ BLOB_MAX_BYTES`.
 
@@ -890,7 +899,7 @@ At startup, config parsing rejects size settings that can't work: it requires `P
 | Scale | Seed 1M nodes and check that listing, search, and move latencies stay within budget (p95 < 100 ms for list and search) |
 | Discord contract | `DiscordBlobStore` against a test channel in the `DFS Dev` category (opt-in, real token; D25): upload, Range read on the CDN, URL refresh, delete |
 | Fault injection | A `ChaosBlobStore` wrapper: random 429s, 5xx, timeouts, dropped responses after a successful post (to test idempotency and the reconciler) |
-| E2E | Playwright: log in (mocked OAuth), upload a folder of 1,000 files, preview a video with seeking, share link, restore from trash |
+| E2E | Playwright: a first sign-in with a temporary password, upload a folder of 1,000 files, preview a video with seeking, share link, restore from trash |
 
 ---
 
@@ -898,7 +907,7 @@ At startup, config parsing rejects size settings that can't work: it requires `P
 
 ```mermaid
 flowchart LR
-    M0["M0 · Foundations<br/>monorepo, dev compose,<br/>DB schema + migrations,<br/>config, health endpoints"] --> M2["M2 · API core<br/>on local storage: Discord OAuth,<br/>nodes, versions, uploads,<br/>Range download, shares, live events"]
+    M0["M0 · Foundations<br/>monorepo, dev compose,<br/>DB schema + migrations,<br/>config, health endpoints"] --> M2["M2 · API core<br/>on local storage: password sign-in,<br/>nodes, versions, uploads,<br/>Range download, shares, live events"]
     M3["M3 · Web UI<br/>done against the mock API<br/>(previews later)"] -.->|"switches to the real API"| M2
     M2 --> M1["M1 · Storage engine on Discord<br/>bot, packer, CDN URLs,<br/>tamper watch"]
     M1 --> DEP["First deployment<br/>Compose + Caddy on Fedora,<br/>test data only"]
@@ -955,13 +964,13 @@ The numbers are the original milestones; the arrows are the order of work (D19):
 | D18 | Public share access | `GET /s/:token` answers `{locked: true}` until a password-protected link is unlocked, so a link reveals nothing without its password. Locked and wrong-password answers are `403`, dead links `410` with a reason, and `401` stays reserved for "sign in to the app". | §7.5, §9, §10.1 |
 | D19 | Backend build order | **API first, Discord later:** M0, then M2 on `LocalBlobStore` (files already encrypted as DFS1 frames, the bot running as a worker without Discord), then M1. The finished UI runs against a real server one milestone sooner; the Discord work is unchanged, only later. | §18, BACKEND.md |
 | D20 | Uploading onto an existing name | **A new version** of that file (matched by `name_key`), switching over only when the upload completes; a matching folder is a `409`. Renames and moves still refuse clashes. | §5.1, §6.1, §9 |
-| D21 | Signing in during development | **A development-only sign-in** (`DEV_LOGIN=1`) as a local admin; the API refuses to start with it in production. | §7.1, §13.1, §15 |
+| D21 | Signing in during development | **Superseded by D27.** Was a development-only sign-in (`DEV_LOGIN=1`) to avoid needing Discord. Password sign-in doesn't use Discord, so development signs in like production, and `dfs owner` makes its first account. | §7.1, §13.1 |
 | D22 | Running the backend's TypeScript | **Node runs the sources directly** (type stripping): no build step for api, bot and packages. Imports name their `.ts` files, there are no path aliases at runtime, and those packages are typechecked with Node's module rules. | §13, §14.1, BACKEND.md |
 | D23 | First deployment | **Once Discord storage works** (after M1), as a private instance with test data only, until the M4 recovery drill passes. | §18 |
 | D24 | Old versions and the quota | **They count** until purged, like the trash, so the quota measures everything a user keeps. | §5.1, §6.1 |
 | D25 | Discord for development | **The production server and bot**, with development in its own `DFS Dev` category, REST only (no gateway). Each environment works only in the channels registered in its own database. Rate limits are shared, so load tests never use Discord. | §4, §6.1, §13.1, §15, §17 |
 | D26 | Code hosting and checks | **A private GitHub repository, no CI.** `pnpm check` runs locally before pushing; the VPS pulls with a read-only deploy key. | §13.2, BACKEND.md |
-| D27 | Who may sign in | **People an admin added**, by Discord user ID, on the Users page. Discord only proves who someone is (`identify`); the server is private to the owner and holds only storage channels, so there are no guild or role checks. Replaces the role-gated sign-in of earlier drafts. | §7.1, §9, §10.1, §11, §15 |
-| D28 | Admins | **Set in DFS** on the Users page. The owner, named by `OWNER_DISCORD_ID`, is always an admin and can't be demoted or disabled there. | §7.1, §15 |
+| D27 | Who may sign in | **People an admin made an account for**, with a username and a temporary password. They choose their own password at their first sign-in, which activates the account. No one needs a Discord account: Discord is only storage, and the server is private to the owner. Replaces Discord sign-in (OAuth) from earlier drafts. | §5, §7.1, §9, §10.1, §15 |
+| D28 | Admins and the owner | **Set in DFS** on the Users page. The owner is created on the server with `dfs owner`, is always an admin, and can't be demoted, disabled or reset from the app; the same command recovers the owner's password. | §5.1, §7.1, §9 |
 
 No open questions at this time.
