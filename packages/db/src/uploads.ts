@@ -31,12 +31,23 @@ export async function abandonUploads(
       session.reserved_bytes::float8 AS reserved, version.version_no = 1 AS first_version,
       node.parent_id, node.current_version_id IS NOT NULL AS has_current`)
 
+  // Locks in the order of locks.ts: files, owners, then the folders that lose a file.
+  const nodeIds = [...new Set(rows.map((row) => row.node_id))].sort()
+  await tx.execute(
+    sql`SELECT id FROM nodes WHERE id = ANY(${uuidArray(nodeIds)}) ORDER BY id FOR UPDATE`,
+  )
+  for (const row of rows) await releaseReservation(tx, row.user_id, row.reserved)
+  // A file that never had a completed version goes with its upload.
+  const unfinished = (row: (typeof rows)[number]) => row.first_version && !row.has_current
+  await markFoldersDirty(
+    tx,
+    rows.filter(unfinished).flatMap((row) => row.parent_id ?? []),
+  )
+
   const staged: string[] = []
   for (const row of rows) {
-    await releaseReservation(tx, row.user_id, row.reserved)
-    if (row.first_version && !row.has_current) {
+    if (unfinished(row)) {
       staged.push(...(await purgeSubtrees(tx, row.user_id, [row.node_id])))
-      if (row.parent_id) await markFoldersDirty(tx, [row.parent_id])
     } else {
       await purgeVersions(tx, row.user_id, [row.version_id])
       staged.push(row.version_id)

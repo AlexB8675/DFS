@@ -2,7 +2,10 @@ import type { AuditEntry } from '@dfs/shared'
 import { useInfiniteQuery } from '@tanstack/react-query'
 import {
   DatabaseBackup,
+  Eye,
   Hash,
+  Link2,
+  Link2Off,
   History,
   KeyRound,
   LogIn,
@@ -35,6 +38,9 @@ const ACTIONS: Record<string, { label: string; icon: LucideIcon; tone?: string }
   'auth.login': { label: 'Signed in', icon: LogIn },
   'auth.login_failed': { label: 'Failed sign-in', icon: UserLock, tone: 'text-destructive' },
   'auth.password_changed': { label: 'Changed password', icon: KeyRound },
+  'share.created': { label: 'Shared a link', icon: Link2 },
+  'share.revoked': { label: 'Turned a link off', icon: Link2Off },
+  'admin.viewed': { label: 'Viewed a drive', icon: Eye },
   'node.moderated': { label: 'Removed content', icon: ShieldAlert, tone: 'text-destructive' },
   'channel.created': { label: 'Added channel', icon: Hash },
   'channel.enabled': { label: 'Enabled channel', icon: Hash },

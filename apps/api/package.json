@@ -9,7 +9,8 @@
     "dfs": "node --env-file-if-exists=../../.env src/cli.ts",
     "typecheck": "tsc -p tsconfig.json",
     "lint": "eslint .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "check:end-to-end": "node --env-file-if-exists=../../.env src/scripts/end-to-end.ts"
   },
   "dependencies": {
     "@dfs/config": "workspace:*",

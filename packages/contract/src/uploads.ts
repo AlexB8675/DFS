@@ -87,6 +87,18 @@ export function uploadTests({ describe, it, expect, owner, target }: SuiteContex
       expect(after - before).toBe(16)
     })
 
+    it('keeps three previous versions; older ones go, with their quota (D20, D24)', async () => {
+      const client = await owner()
+      const root = await workspace(client)
+      const before = (await client.call('GET', '/auth/me', sessionSchema)).user.usedBytes
+      for (const content of ['a', 'bb', 'ccc', 'dddd', 'eeeee']) {
+        await uploadFile(client, root.id, 'draft.txt', text(content))
+      }
+      // The current 5 bytes and the 4, 3 and 2 before them; the first is gone.
+      const after = (await client.call('GET', '/auth/me', sessionSchema)).user.usedBytes
+      expect(after - before).toBe(14)
+    })
+
     it('answers per upload in a batch: a folder’s name, an invalid name, too big', async () => {
       const client = await owner()
       const root = await workspace(client)
@@ -113,6 +125,24 @@ export function uploadTests({ describe, it, expect, owner, target }: SuiteContex
         'invalid_name',
         'quota_exceeded',
       ])
+    })
+
+    it('makes one file of a name given twice in a batch, a version each', async () => {
+      const client = await owner()
+      const root = await workspace(client)
+      const upload = (name: string) => ({
+        parentId: root.id,
+        name,
+        sizeBytes: 3,
+        mimeType: 'text/plain',
+      })
+      const { results } = await client.call('POST', '/uploads/batch', uploadBatchResultSchema, {
+        json: { uploads: [upload('twice.txt'), upload('TWICE.txt')] },
+      })
+      const sessions = results.flatMap((result) => (result.ok ? [result.session] : []))
+      expect(sessions).toHaveLength(2)
+      expect(sessions[1]?.nodeId).toBe(sessions[0]?.nodeId)
+      expect(sessions.map((session) => session.isNewVersion)).toEqual([false, true])
     })
 
     it('cancels an upload, taking a file that never completed with it', async () => {

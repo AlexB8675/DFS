@@ -12,7 +12,8 @@ import { LOCK_NAMESPACE, LOCKS } from './locks.ts'
 
 /** Notes that these folders' direct contents changed. Cheap: one row per folder until folded. */
 export async function markFoldersDirty(tx: Executor, folderIds: Iterable<string>): Promise<void> {
-  const ids = [...new Set(folderIds)]
+  // Sorted, so two transactions marking the same folders lock them in one order.
+  const ids = [...new Set(folderIds)].sort()
   if (ids.length === 0) return
   await tx.execute(sql`
     INSERT INTO folder_stats_dirty (node_id)

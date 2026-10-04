@@ -35,6 +35,10 @@ export async function purgeVersions(
     ) released
     WHERE blobs.id = released.blob_id`)
   await tx.execute(sql`DELETE FROM chunks WHERE version_id = ANY(${versions})`)
+  // Their finished uploads go too: those settled their reservations on completion.
+  // (Uploads still receiving are abandoned first, which releases theirs.)
+  await tx.execute(sql`
+    DELETE FROM upload_sessions WHERE version_id = ANY(${versions}) AND state = 'completed'`)
   await tx.execute(sql`
     UPDATE nodes SET current_version_id = NULL WHERE current_version_id = ANY(${versions})`)
   await tx.execute(sql`DELETE FROM file_versions WHERE id = ANY(${versions})`)
@@ -67,6 +71,8 @@ export async function purgeSubtrees(
     )
     SELECT id FROM below`)
   const nodeIds = uuidArray(subtree.map((row) => row.id))
+  // Nodes before the user's row, the order of locks.ts.
+  await tx.execute(sql`SELECT id FROM nodes WHERE id = ANY(${nodeIds}) ORDER BY id FOR UPDATE`)
 
   const { rows: uploads } = await tx.execute<{ reserved: number }>(sql`
     DELETE FROM upload_sessions WHERE node_id = ANY(${nodeIds})
@@ -80,8 +86,9 @@ export async function purgeSubtrees(
   await purgeVersions(tx, ownerId, versionIds)
 
   await tx.execute(sql`DELETE FROM share_links WHERE node_id = ANY(${nodeIds})`)
-  await tx.execute(sql`DELETE FROM folder_stats WHERE node_id = ANY(${nodeIds})`)
+  // Markers before stats, as folding takes them.
   await tx.execute(sql`DELETE FROM folder_stats_dirty WHERE node_id = ANY(${nodeIds})`)
+  await tx.execute(sql`DELETE FROM folder_stats WHERE node_id = ANY(${nodeIds})`)
   await tx.execute(sql`DELETE FROM nodes WHERE id = ANY(${nodeIds})`)
   await appendJournal(
     tx,

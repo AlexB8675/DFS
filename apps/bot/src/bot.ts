@@ -52,6 +52,8 @@ export function createBot({
       const queue = new PgBoss({
         connectionString: config.databaseUrl,
         application_name: 'dfs-bot-queue',
+        // Wakes workers on queues with `notify` as soon as a job arrives.
+        useListenNotify: true,
       })
       queue.on('error', (error) => {
         server.log.error({ err: error }, 'job queue error')

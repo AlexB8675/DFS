@@ -10,10 +10,14 @@ export interface BlobUploadJob {
   blobId: number
 }
 
-/** Retries with backoff: about 10 tries over a few hours, then the dead letter. */
+/**
+ * Retries with backoff: about 10 tries over a few hours. New jobs NOTIFY,
+ * so the bot starts on them at once instead of at its next poll.
+ */
 export const BLOB_UPLOAD_QUEUE = {
   retryLimit: 10,
   retryDelay: 5,
   retryBackoff: true,
   retryDelayMax: 30 * 60,
+  notify: true,
 } as const

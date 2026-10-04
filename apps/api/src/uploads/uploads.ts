@@ -8,7 +8,9 @@ import {
   nodes,
   purgeVersions,
   QUEUES,
+  textArray,
   uploadSessions,
+  uuidArray,
   uuidv7,
   type BlobUploadJob,
   type Executor,
@@ -24,7 +26,6 @@ import { eq, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { fromDrizzle } from 'pg-boss'
 import type { Auth } from '../auth/sessions.ts'
-import { isUniqueViolation } from '../db-errors.ts'
 import { ApiError } from '../errors.ts'
 import { visibleFolder } from '../nodes/read.ts'
 import { checkedName, nameConflict } from '../nodes/write.ts'
@@ -61,109 +62,235 @@ export async function createUploads(
   auth: Auth,
   inputs: CreateUploadInput[],
 ): Promise<UploadBatchResult['results']> {
-  return app.db.transaction(async (tx) => {
-    const results: UploadBatchResult['results'] = []
-    for (const input of inputs) {
-      try {
-        // A savepoint per upload: a failed one leaves the others standing.
-        const session = await tx.transaction((savepoint) =>
-          startUpload(app, savepoint, auth, input),
-        )
-        results.push({ ok: true, session })
-      } catch (error) {
-        if (!(error instanceof ApiError)) throw error
-        results.push({ ok: false, error: { code: error.code, message: error.message } })
-      }
-    }
-    return results
-  })
+  const outcomes = await app.db.transaction((tx) => startUploads(app, tx, auth, inputs))
+  return outcomes.map((outcome) =>
+    outcome instanceof ApiError
+      ? { ok: false, error: { code: outcome.code, message: outcome.message } }
+      : { ok: true, session: outcome },
+  )
 }
 
 /** `POST /uploads`. */
-export function createUpload(
+export async function createUpload(
   app: FastifyInstance,
   auth: Auth,
   input: CreateUploadInput,
 ): Promise<UploadSession> {
-  return app.db.transaction((tx) => startUpload(app, tx, auth, input))
+  const [outcome] = await app.db.transaction((tx) => startUploads(app, tx, auth, [input]))
+  if (!outcome || outcome instanceof ApiError) throw outcome ?? new Error('No upload started.')
+  return outcome
 }
 
-async function startUpload(
+/** One upload of a batch, once its name checked out. */
+interface Plan {
+  index: number
+  input: CreateUploadInput
+  name: string
+  /** Its folder and name key: uploads with the same one go to the same file. */
+  key: string
+}
+
+/**
+ * Starts a batch of uploads with a fixed handful of queries, however many
+ * files: each folder is checked once, names are looked up per folder, quota is
+ * counted against one lock of the user's row, and new files, versions and
+ * sessions are inserted together. A problem with one upload is its own answer.
+ */
+async function startUploads(
   app: FastifyInstance,
   tx: Executor,
   auth: Auth,
-  input: CreateUploadInput,
-): Promise<UploadSession> {
+  inputs: CreateUploadInput[],
+): Promise<(UploadSession | ApiError)[]> {
   const ownerId = auth.user.id
-  const name = checkedName(input.name)
-  await visibleFolder(tx, ownerId, input.parentId)
-
-  let file = await fileNamed(tx, input.parentId, name)
-  const isNewVersion = file !== null
-  const { rows: reserved } = await tx.execute(sql`
-    UPDATE users SET reserved_bytes = reserved_bytes + ${input.sizeBytes}
-    WHERE id = ${ownerId} AND used_bytes + reserved_bytes + ${input.sizeBytes} <= quota_bytes
-    RETURNING id`)
-  if (reserved.length === 0) {
-    throw new ApiError(507, 'quota_exceeded', `Not enough storage left for “${name}”.`)
+  const outcomes: (UploadSession | ApiError)[] = []
+  const fail = (index: number, error: unknown) => {
+    if (!(error instanceof ApiError)) throw error
+    outcomes[index] = error
   }
 
-  if (!file) {
+  // Folders, once each.
+  const folderProblems = new Map<string, ApiError | null>()
+  for (const parentId of new Set(inputs.map((input) => input.parentId))) {
     try {
-      // In a savepoint: if another upload just made this name, become a new version of it.
-      const [created] = await tx.transaction((savepoint) =>
-        savepoint
-          .insert(nodes)
-          .values({
-            ownerId,
-            parentId: input.parentId,
-            kind: 'file',
-            name,
-            nameKey: nameKey(name),
-            mimeType: input.mimeType || null,
-            sizeBytes: input.sizeBytes,
-          })
-          .returning(),
-      )
-      if (!created) throw new Error('Inserting a file returned nothing.')
-      await markFoldersDirty(tx, [input.parentId])
-      await appendJournal(tx, [nodeRecord(created)])
-      file = { id: created.id }
+      await visibleFolder(tx, ownerId, parentId)
+      folderProblems.set(parentId, null)
     } catch (error) {
-      if (!isUniqueViolation(error, 'nodes_unique_name')) throw error
-      file = await fileNamed(tx, input.parentId, name)
-      if (!file) throw nameConflict(name)
+      if (!(error instanceof ApiError)) throw error
+      folderProblems.set(parentId, error)
+    }
+  }
+  const plans: Plan[] = []
+  for (const [index, input] of inputs.entries()) {
+    const problem = folderProblems.get(input.parentId)
+    if (problem) {
+      fail(index, problem)
+      continue
+    }
+    try {
+      const name = checkedName(input.name)
+      plans.push({ index, input, name, key: `${input.parentId}/${nameKey(name)}` })
+    } catch (error) {
+      fail(index, error)
     }
   }
 
-  // Locking the file makes concurrent uploads onto it number their versions in turn.
-  await tx.execute(sql`SELECT id FROM nodes WHERE id = ${file.id} FOR UPDATE`)
-  const { rows: numbers } = await tx.execute<{ next: number }>(sql`
-    SELECT coalesce(max(version_no), 0) + 1 AS next FROM file_versions WHERE node_id = ${file.id}`)
-  const versionId = uuidv7()
+  // The user's row before the names (see locks.ts): quota is counted against it,
+  // and while it's held no other upload can add or number this user's files.
+  const { rows: quota } = await tx.execute<{ free: number }>(sql`
+    SELECT (quota_bytes - used_bytes - reserved_bytes)::float8 AS free
+    FROM users WHERE id = ${ownerId} FOR UPDATE`)
+  let free = quota[0]?.free ?? 0
+  const existing = await namesInFolders(tx, plans)
+  const accepted: Plan[] = []
+  for (const plan of plans) {
+    if (existing.get(plan.key)?.kind === 'folder') {
+      fail(plan.index, nameConflict(plan.name))
+    } else if (plan.input.sizeBytes > free) {
+      fail(
+        plan.index,
+        new ApiError(507, 'quota_exceeded', `Not enough storage left for “${plan.name}”.`),
+      )
+    } else {
+      free -= plan.input.sizeBytes
+      accepted.push(plan)
+    }
+  }
+
+  // New files, in one insert. Names repeated in the batch share one file, a version each.
+  const firstOfKey = new Map<string, Plan>()
+  for (const plan of accepted) {
+    if (!existing.has(plan.key) && !firstOfKey.has(plan.key)) firstOfKey.set(plan.key, plan)
+  }
+  const created =
+    firstOfKey.size === 0
+      ? []
+      : await tx
+          .insert(nodes)
+          .values(
+            [...firstOfKey.values()].map(({ input, name }) => ({
+              ownerId,
+              parentId: input.parentId,
+              kind: 'file' as const,
+              name,
+              nameKey: nameKey(name),
+              mimeType: input.mimeType || null,
+              sizeBytes: input.sizeBytes,
+            })),
+          )
+          .onConflictDoNothing({
+            target: [nodes.parentId, nodes.nameKey],
+            where: sql`deleted_at IS NULL`,
+          })
+          .returning()
+  const fileOf = new Map<string, string>()
+  for (const [key, found] of existing) if (found.kind === 'file') fileOf.set(key, found.id)
+  for (const node of created) fileOf.set(`${node.parentId ?? ''}/${node.nameKey}`, node.id)
+  // A name taken meanwhile (a folder made, a file renamed): become a version of that file, or clash with a folder.
+  const raced = [...firstOfKey.values()].filter((plan) => !fileOf.has(plan.key))
+  if (raced.length > 0) {
+    for (const [key, found] of await namesInFolders(tx, raced)) {
+      if (found.kind === 'file') fileOf.set(key, found.id)
+    }
+  }
+  const newFileIds = new Set(created.map((node) => node.id))
+
+  // Versions, numbered per file in turn: only starting an upload makes them.
+  const fileIds = [...new Set(accepted.flatMap((plan) => fileOf.get(plan.key) ?? []))]
+  const nextNumber = new Map<string, number>()
+  if (fileIds.length > 0) {
+    const { rows } = await tx.execute<{ node_id: string; last: number }>(sql`
+      SELECT node_id, max(version_no) AS last FROM file_versions
+      WHERE node_id = ANY(${uuidArray(fileIds)}) GROUP BY node_id`)
+    for (const row of rows) nextNumber.set(row.node_id, row.last)
+  }
+
   const chunkSize = app.config.sizes.chunkSize
-  const chunkCount = Math.ceil(input.sizeBytes / chunkSize)
-  await tx.insert(fileVersions).values({
-    id: versionId,
-    nodeId: file.id,
-    versionNo: numbers[0]?.next ?? 1,
-    sizeBytes: input.sizeBytes,
-    chunkSize,
-    chunkCount,
-    wrappedDek: Buffer.from(await app.keys.wrapDek(generateDek(), uuidBytes(versionId))),
-    keyId: app.keys.currentId,
-    createdBy: ownerId,
+  const expiresAt = new Date(Date.now() + SESSION_LIFETIME_MS)
+  const starting = accepted.flatMap((plan) => {
+    const nodeId = fileOf.get(plan.key)
+    if (!nodeId) {
+      fail(plan.index, nameConflict(plan.name))
+      return []
+    }
+    const versionNo = (nextNumber.get(nodeId) ?? 0) + 1
+    nextNumber.set(nodeId, versionNo)
+    return [{ plan, nodeId, versionNo, versionId: uuidv7(), uploadId: uuidv7() }]
   })
-  const uploadId = uuidv7()
-  await tx.insert(uploadSessions).values({
-    id: uploadId,
-    userId: ownerId,
-    nodeId: file.id,
-    versionId,
-    reservedBytes: input.sizeBytes,
-    expiresAt: new Date(Date.now() + SESSION_LIFETIME_MS),
-  })
-  return { uploadId, nodeId: file.id, versionId, isNewVersion, chunkSize, chunkCount }
+  if (starting.length > 0) {
+    const wrapped = await Promise.all(
+      starting.map(({ versionId }) => app.keys.wrapDek(generateDek(), uuidBytes(versionId))),
+    )
+    await tx.insert(fileVersions).values(
+      starting.map(({ plan, nodeId, versionNo, versionId }, i) => ({
+        id: versionId,
+        nodeId,
+        versionNo,
+        sizeBytes: plan.input.sizeBytes,
+        chunkSize,
+        chunkCount: Math.ceil(plan.input.sizeBytes / chunkSize),
+        wrappedDek: Buffer.from(wrapped[i] ?? new Uint8Array()),
+        keyId: app.keys.currentId,
+        createdBy: ownerId,
+      })),
+    )
+    await tx.insert(uploadSessions).values(
+      starting.map(({ plan, nodeId, versionId, uploadId }) => ({
+        id: uploadId,
+        userId: ownerId,
+        nodeId,
+        versionId,
+        reservedBytes: plan.input.sizeBytes,
+        expiresAt,
+      })),
+    )
+    const reserved = starting.reduce((total, { plan }) => total + plan.input.sizeBytes, 0)
+    await tx.execute(sql`
+      UPDATE users SET reserved_bytes = reserved_bytes + ${reserved} WHERE id = ${ownerId}`)
+  }
+  for (const { plan, nodeId, versionNo, versionId, uploadId } of starting) {
+    outcomes[plan.index] = {
+      uploadId,
+      nodeId,
+      versionId,
+      isNewVersion: !(newFileIds.has(nodeId) && versionNo === 1),
+      chunkSize,
+      chunkCount: Math.ceil(plan.input.sizeBytes / chunkSize),
+    }
+  }
+
+  // New files count toward their folders' sizes.
+  await markFoldersDirty(
+    tx,
+    created.flatMap((node) => node.parentId ?? []),
+  )
+  await appendJournal(tx, created.map(nodeRecord))
+  return outcomes
+}
+
+/** What these uploads' names already are in their folders: a file, or a folder in the way. */
+async function namesInFolders(
+  tx: Executor,
+  plans: Plan[],
+): Promise<Map<string, { id: string; kind: 'file' | 'folder' }>> {
+  const found = new Map<string, { id: string; kind: 'file' | 'folder' }>()
+  const keysByFolder = new Map<string, string[]>()
+  for (const plan of plans) {
+    const keys = keysByFolder.get(plan.input.parentId) ?? []
+    keys.push(nameKey(plan.name))
+    keysByFolder.set(plan.input.parentId, keys)
+  }
+  for (const [parentId, keys] of keysByFolder) {
+    const { rows } = await tx.execute<{
+      id: string
+      kind: 'file' | 'folder'
+      name_key: string
+    }>(sql`
+      SELECT id, kind, name_key FROM nodes
+      WHERE parent_id = ${parentId} AND name_key = ANY(${textArray(keys)}) AND deleted_at IS NULL`)
+    for (const row of rows) found.set(`${parentId}/${row.name_key}`, { id: row.id, kind: row.kind })
+  }
+  return found
 }
 
 /** `GET /uploads/:id`: the parts already here, also after completion. */
@@ -302,11 +429,6 @@ export async function completeUpload(
       .where(eq(nodes.id, upload.node_id))
       .returning()
     if (!node) throw new ApiError(404, 'upload_not_found', 'This upload has expired.')
-    await tx.execute(sql`
-      UPDATE users SET
-        used_bytes = used_bytes + ${upload.size_bytes},
-        reserved_bytes = greatest(0, reserved_bytes - ${upload.reserved_bytes})
-      WHERE id = ${auth.user.id}`)
     await tx
       .update(uploadSessions)
       .set({ state: 'completed' })
@@ -322,11 +444,18 @@ export async function completeUpload(
     const prunedIds = old.map((row) => row.id)
     await purgeVersions(tx, auth.user.id, prunedIds)
 
-    if (upload.parent_id) await markFoldersDirty(tx, [upload.parent_id])
     if (blobs.length > 0) {
       const jobs = blobs.map((blob) => ({ data: { blobId: blob.id } satisfies BlobUploadJob }))
       await queue.insert(QUEUES.blobUpload, jobs, { db: fromDrizzle(tx, sql) })
     }
+    // The user's row as late as the order of locks.ts allows: completions for
+    // one user queue on it until they commit, and this keeps that short.
+    await tx.execute(sql`
+      UPDATE users SET
+        used_bytes = used_bytes + ${upload.size_bytes},
+        reserved_bytes = greatest(0, reserved_bytes - ${upload.reserved_bytes})
+      WHERE id = ${auth.user.id}`)
+    if (upload.parent_id) await markFoldersDirty(tx, [upload.parent_id])
     await appendJournal(tx, [nodeRecord(node)])
     return prunedIds
   })
@@ -378,21 +507,4 @@ function toSession(upload: UploadRow): UploadSession {
     chunkSize: upload.chunk_size,
     chunkCount: upload.chunk_count,
   }
-}
-
-/** The file in a folder with this name, if any; a folder there is a conflict. */
-async function fileNamed(
-  tx: Executor,
-  parentId: string,
-  name: string,
-): Promise<{ id: string } | null> {
-  const [existing] = await tx
-    .select({ id: nodes.id, kind: nodes.kind })
-    .from(nodes)
-    .where(
-      sql`${nodes.parentId} = ${parentId} AND ${nodes.nameKey} = ${nameKey(name)} AND ${nodes.deletedAt} IS NULL`,
-    )
-  if (!existing) return null
-  if (existing.kind === 'folder') throw nameConflict(name)
-  return { id: existing.id }
 }

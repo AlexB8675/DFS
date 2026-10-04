@@ -33,12 +33,25 @@ export async function startLeaderWork(options: {
   const { config, db, boss, log } = options
   const staging = new Staging(config.stagingDir)
   await boss.createQueue(QUEUES.blobUpload, BLOB_UPLOAD_QUEUE)
+  // A queue made by an older version keeps its options unless they are updated.
+  const { retryDelayMax: _fixed, ...changeable } = BLOB_UPLOAD_QUEUE
+  await boss.updateQueue(QUEUES.blobUpload, changeable)
 
   if (config.blobStore === 'local') {
     const deps = { db, staging, store: new LocalBlobStore(config.localBlobDir) }
-    await boss.work<BlobUploadJob, unknown, { batchSize: number; perJobResults: true }>(
+    await boss.work<
+      BlobUploadJob,
+      unknown,
+      {
+        batchSize: number
+        burstWhenBatchFull: boolean
+        localConcurrency: number
+        perJobResults: true
+      }
+    >(
       QUEUES.blobUpload,
-      { batchSize: 8, perJobResults: true },
+      // Full batches mean more is waiting: fetch again at once, two batches at a time.
+      { batchSize: 8, burstWhenBatchFull: true, localConcurrency: 2, perJobResults: true },
       async (jobs): Promise<JobResult[]> => {
         const failures = await storeBlobs(
           deps,

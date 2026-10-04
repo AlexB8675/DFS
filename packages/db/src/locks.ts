@@ -1,5 +1,12 @@
 // Postgres advisory locks used across services. The two-key form keeps them
 // in a namespace of their own: pg_advisory_lock(NAMESPACE, key).
+//
+// Transactions that write take their locks in one order, so none can wait on
+// another in a circle: the drive's tree lock, upload sessions, nodes (by id),
+// the user's row, dirty-folder markers (by id), and the journal lock last.
+// Starting uploads is the exception: it takes the user's row first, and after
+// it only the key-share locks of foreign keys on nodes, which updates (such as
+// completing an upload) don't block.
 
 /** "DFS" in ASCII. */
 export const LOCK_NAMESPACE = 0x444653
