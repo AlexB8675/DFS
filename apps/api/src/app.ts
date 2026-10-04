@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import cookie from '@fastify/cookie'
 import type { Config } from '@dfs/config'
+import type { MasterKeys } from '@dfs/crypto'
 import { createDatabase, createPool, type Database } from '@dfs/db'
 import { Staging } from '@dfs/storage'
 import Fastify, { LogController, type FastifyInstance, type FastifyServerOptions } from 'fastify'
@@ -9,10 +10,14 @@ import type pg from 'pg'
 import { registerAccess } from './auth/access.ts'
 import { RateLimiter } from './auth/rate-limit.ts'
 import { registerErrorHandling } from './errors.ts'
+import { DataKeyCache, loadMasterKeys } from './keys.ts'
+import { JobQueue } from './queue.ts'
 import { adminRoutes } from './routes/admin.ts'
 import { authRoutes } from './routes/auth.ts'
 import { healthRoutes } from './routes/health.ts'
 import { nodeRoutes } from './routes/nodes.ts'
+import { uploadRoutes } from './routes/uploads.ts'
+import { StagingLimit } from './staging.ts'
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -21,8 +26,14 @@ declare module 'fastify' {
     db: Database
     /** Per-instance request limits (DESIGN.md §7.5). */
     limits: { signIn: RateLimiter }
-    /** Frames received but not yet stored (§6.1). */
+    /** Frames received but not yet stored (§6.1), and whether there is room for more. */
     staging: Staging
+    stagingLimit: StagingLimit
+    /** The master keys, and data keys unwrapped with them lately (§7.3). */
+    keys: MasterKeys
+    dataKeys: DataKeyCache
+    /** For adding jobs inside the API's transactions (§11). */
+    queue: JobQueue
   }
 }
 
@@ -58,18 +69,25 @@ export async function buildApp({ config, logger }: AppOptions): Promise<FastifyI
       app.log.warn({ err: error }, 'idle database connection failed')
     },
   })
+  const db = createDatabase(pool)
+  const queue = new JobQueue(config, app.log)
   app.decorate('config', config)
   app.decorate('pool', pool)
-  app.decorate('db', createDatabase(pool))
+  app.decorate('db', db)
+  // Failed sign-ins per client address (§7.1).
+  app.decorate('limits', { signIn: new RateLimiter(30, 10 * 60_000) })
+  app.decorate('staging', new Staging(config.stagingDir))
+  app.decorate('stagingLimit', new StagingLimit(db, config.stagingMaxBytes))
+  app.decorate('keys', await loadMasterKeys(config, app.log))
+  app.decorate('dataKeys', new DataKeyCache())
+  app.decorate('queue', queue)
   app.addHook('onClose', async () => {
+    await queue.stop()
     await pool.end()
   })
   app.addHook('onSend', async (request, reply) => {
     reply.header('x-request-id', request.id)
   })
-  // Failed sign-ins per client address (§7.1).
-  app.decorate('limits', { signIn: new RateLimiter(30, 10 * 60_000) })
-  app.decorate('staging', new Staging(config.stagingDir))
 
   await app.register(cookie)
   registerAccess(app)
@@ -78,6 +96,7 @@ export async function buildApp({ config, logger }: AppOptions): Promise<FastifyI
   await app.register(authRoutes, { prefix: '/api' })
   await app.register(adminRoutes, { prefix: '/api' })
   await app.register(nodeRoutes, { prefix: '/api' })
+  await app.register(uploadRoutes, { prefix: '/api' })
   return app
 }
 

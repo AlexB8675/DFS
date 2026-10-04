@@ -227,6 +227,10 @@ export const chunks = pgTable(
   (t) => [
     uniqueIndex('chunks_version_idx').on(t.versionId, t.idx),
     index('chunks_blob_id').on(t.blobId),
+    // What staging holds, summed often for backpressure (§6.1).
+    index('chunks_staged')
+      .on(t.frameSize)
+      .where(sql`${t.stagedPath} IS NOT NULL`),
     index('chunks_waiting_for_pack')
       .on(t.id)
       .where(sql`${t.blobId} IS NULL AND ${t.purgedAt} IS NULL`),

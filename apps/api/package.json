@@ -22,9 +22,11 @@
     "fastify": "^5.12.5",
     "fastify-type-provider-zod": "^7.0.0",
     "pg": "^8.23.1",
+    "pg-boss": "^12.36.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@dfs/bot": "workspace:*",
     "@dfs/contract": "workspace:*",
     "@types/node": "^24.19.1",
     "@types/pg": "^8.23.1",

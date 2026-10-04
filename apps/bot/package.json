@@ -3,6 +3,10 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "exports": {
+    "./uploader": "./src/uploader.ts",
+    "./leader-work": "./src/leader-work.ts"
+  },
   "scripts": {
     "dev": "node --watch --env-file-if-exists=../../.env src/main.ts",
     "start": "node src/main.ts",
@@ -13,6 +17,9 @@
   "dependencies": {
     "@dfs/config": "workspace:*",
     "@dfs/db": "workspace:*",
+    "@dfs/shared": "workspace:*",
+    "@dfs/storage": "workspace:*",
+    "drizzle-orm": "^0.45.3",
     "fastify": "^5.12.5",
     "pg": "^8.23.1",
     "pg-boss": "^12.36.0",

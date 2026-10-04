@@ -1,3 +1,5 @@
+import type { Executor } from '@dfs/db'
+import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 
 /**
@@ -15,5 +17,31 @@ export async function removeStagedVersions(
     } catch (error) {
       app.log.warn({ err: error, versionId }, 'could not remove staged frames')
     }
+  }
+}
+
+/**
+ * Whether staging holds more than `STAGING_MAX_BYTES` of frames not yet
+ * stored (§6.1). Summed from the database at most every few seconds, so a
+ * burst of parts costs one query, not one each.
+ */
+export class StagingLimit {
+  readonly #db: Executor
+  readonly #maxBytes: number
+  #checkedAt = 0
+  #full = false
+
+  constructor(db: Executor, maxBytes: number) {
+    this.#db = db
+    this.#maxBytes = maxBytes
+  }
+
+  async isFull(now = Date.now()): Promise<boolean> {
+    if (now - this.#checkedAt < 3000) return this.#full
+    this.#checkedAt = now
+    const { rows } = await this.#db.execute<{ bytes: number }>(sql`
+      SELECT coalesce(sum(frame_size), 0)::float8 AS bytes FROM chunks WHERE staged_path IS NOT NULL`)
+    this.#full = (rows[0]?.bytes ?? 0) >= this.#maxBytes
+    return this.#full
   }
 }

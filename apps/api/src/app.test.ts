@@ -1,17 +1,9 @@
-import path from 'node:path'
-import { loadConfig } from '@dfs/config'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
 import type { FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest'
 import { buildApp } from './app.ts'
 import { ApiError } from './errors.ts'
-
-function testConfig(env: Record<string, string> = {}) {
-  return loadConfig(
-    { NODE_ENV: 'test', ...env },
-    { service: 'api', rootDir: path.resolve('/repo') },
-  )
-}
+import { testConfig } from './testing/config.ts'
 
 describe('API with a database', () => {
   let database: TestDatabase
@@ -19,7 +11,8 @@ describe('API with a database', () => {
 
   beforeAll(async () => {
     database = await createTestDatabase(inject('testPostgres'))
-    app = await buildApp({ config: testConfig({ DATABASE_URL: database.url }), logger: false })
+    const { config } = await testConfig({ DATABASE_URL: database.url })
+    app = await buildApp({ config, logger: false })
   })
 
   afterAll(async () => {
@@ -40,7 +33,7 @@ describe('API without a database', () => {
 
   beforeAll(async () => {
     // Nothing listens on port 1, so connecting fails at once.
-    const config = testConfig({ DATABASE_URL: 'postgres://dfs:dfs@127.0.0.1:1/dfs' })
+    const { config } = await testConfig({ DATABASE_URL: 'postgres://dfs:dfs@127.0.0.1:1/dfs' })
     app = await buildApp({ config, logger: false })
     const open = { config: { access: 'public' as const } }
     app.get('/api/test/fails', open, () => {

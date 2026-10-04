@@ -36,6 +36,13 @@
       "when": 1791123292541,
       "tag": "0004_dirty_folders",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1791137269974,
+      "tag": "0005_staged_chunks",
+      "breakpoints": true
     }
   ]
 }

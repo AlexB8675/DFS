@@ -6,24 +6,14 @@ import {
   searchPageSchema,
   sessionSchema,
   trashPageSchema,
-  type DriveNode,
   type NodePage,
 } from '@dfs/shared'
 import type { ApiClient } from './client.ts'
 import type { SuiteContext } from './context.ts'
+import { createFolder as folder, workspace } from './files.ts'
 
 /** Browsing and changing the tree, the trash and search (DESIGN.md §5.1, §6.3, §9). */
 export function treeTests({ describe, it, expect, owner }: SuiteContext): void {
-  /** A fresh, uniquely named folder in the owner's root, so tests don't see each other. */
-  async function workspace(client: ApiClient): Promise<DriveNode> {
-    const { user } = await client.call('GET', '/auth/me', sessionSchema)
-    return folder(client, user.rootFolderId, `Test ${crypto.randomUUID().slice(0, 8)}`)
-  }
-
-  function folder(client: ApiClient, parentId: string, name: string): Promise<DriveNode> {
-    return client.call('POST', '/folders', nodeSchema, { json: { parentId, name } })
-  }
-
   async function names(client: ApiClient, folderId: string, query = ''): Promise<string[]> {
     const page = await client.call('GET', `/nodes/${folderId}/children${query}`, nodePageSchema)
     return page.items.map((node) => node.name)

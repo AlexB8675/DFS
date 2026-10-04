@@ -1,0 +1,1 @@
+CREATE INDEX "chunks_staged" ON "chunks" USING btree ("frame_size") WHERE "chunks"."staged_path" IS NOT NULL;

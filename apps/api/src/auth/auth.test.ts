@@ -1,5 +1,3 @@
-import path from 'node:path'
-import { loadConfig } from '@dfs/config'
 import { ApiClient } from '@dfs/contract'
 import { users } from '@dfs/db'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
@@ -8,6 +6,7 @@ import { eq } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest'
 import { buildApp } from '../app.ts'
+import { testConfig } from '../testing/config.ts'
 import { seedUser } from '../testing/seed.ts'
 import { hashPassword, verifyPassword } from './passwords.ts'
 
@@ -20,10 +19,7 @@ let origin: string
 
 beforeAll(async () => {
   database = await createTestDatabase(inject('testPostgres'))
-  const config = loadConfig(
-    { NODE_ENV: 'test', DATABASE_URL: database.url },
-    { service: 'api', rootDir: path.resolve('/repo') },
-  )
+  const { config } = await testConfig({ DATABASE_URL: database.url })
   app = await buildApp({ config, logger: false })
   address = await app.listen({ port: 0, host: '127.0.0.1' })
   origin = config.publicBaseUrl

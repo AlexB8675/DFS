@@ -1,7 +1,9 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
 import type { Config } from '@dfs/config'
+import { createDatabase, createPool } from '@dfs/db'
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify'
 import { PgBoss } from 'pg-boss'
+import { startLeaderWork, type LeaderWork } from './leader-work.ts'
 import { LeaderElection } from './leader.ts'
 
 // The bot (DESIGN §11): job workers on pg-boss, and later the Discord gateway
@@ -32,7 +34,15 @@ export function createBot({
   election: electionOptions,
 }: BotOptions): Bot {
   const server = Fastify({ logger: logger ?? loggerOptions(config) })
+  const pool = createPool(config.databaseUrl, {
+    applicationName: 'dfs-bot',
+    onError: (error) => {
+      server.log.warn({ err: error }, 'idle database connection failed')
+    },
+  })
+  const db = createDatabase(pool)
   let boss: PgBoss | null = null
+  let work: LeaderWork | null = null
 
   const election = new LeaderElection({
     databaseUrl: config.databaseUrl,
@@ -46,13 +56,21 @@ export function createBot({
       queue.on('error', (error) => {
         server.log.error({ err: error }, 'job queue error')
       })
-      // Creates or upgrades pg-boss's own schema on first start.
-      await queue.start()
+      try {
+        // Creates or upgrades pg-boss's own schema on first start.
+        await queue.start()
+        work = await startLeaderWork({ config, db, boss: queue, log: server.log })
+      } catch (error) {
+        await queue.stop({ graceful: false }).catch(() => undefined)
+        throw error
+      }
       boss = queue
       server.log.info('job queue started')
     },
     onLost: () => {
+      void work?.stop()
       void boss?.stop({ graceful: false }).catch(() => undefined)
+      work = null
       boss = null
       onLeadershipLost()
     },
@@ -80,10 +98,13 @@ export function createBot({
     election,
     queue: () => boss,
     stop: async () => {
+      await work?.stop()
       await boss?.stop({ graceful: true, timeout: 10_000 })
+      work = null
       boss = null
       await election.stop()
       await server.close()
+      await pool.end()
     },
   }
 }
