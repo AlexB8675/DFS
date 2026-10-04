@@ -67,6 +67,7 @@ export async function buildApp({ config, logger }: AppOptions): Promise<FastifyI
   app.addHook('onSend', async (request, reply) => {
     reply.header('x-request-id', request.id)
   })
+  // Failed sign-ins per client address (§7.1).
   app.decorate('limits', { signIn: new RateLimiter(30, 10 * 60_000) })
   app.decorate('staging', new Staging(config.stagingDir))
 

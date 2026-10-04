@@ -13,8 +13,15 @@ export class RateLimiter {
     this.#windowMs = windowMs
   }
 
-  /** Counts a hit; says how long to wait if the key is over its limit. */
-  hit(key: string, now = Date.now()): { allowed: true } | { allowed: false; retryAfterMs: number } {
+  /** How long `key` must wait, or 0 if it is under its limit. Counts nothing. */
+  waitMs(key: string, now = Date.now()): number {
+    const window = this.#windows.get(key)
+    if (!window || window.resetAt <= now || window.count < this.#limit) return 0
+    return window.resetAt - now
+  }
+
+  /** Counts one hit against `key`, such as a failed attempt. */
+  hit(key: string, now = Date.now()): void {
     let window = this.#windows.get(key)
     if (!window || window.resetAt <= now) {
       if (this.#windows.size > 10_000) this.#sweep(now)
@@ -22,9 +29,6 @@ export class RateLimiter {
       this.#windows.set(key, window)
     }
     window.count += 1
-    return window.count <= this.#limit
-      ? { allowed: true }
-      : { allowed: false, retryAfterMs: window.resetAt - now }
   }
 
   #sweep(now: number): void {

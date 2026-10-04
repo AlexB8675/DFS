@@ -30,8 +30,9 @@ export async function signIn(
   input: LoginInput,
   ip: string,
 ): Promise<SignedIn> {
-  const perIp = app.limits.signIn.hit(ip)
-  if (!perIp.allowed) throw tooManyTries(perIp.retryAfterMs)
+  // Only failures count, so a household behind one address can sign in freely.
+  const ipWait = app.limits.signIn.waitMs(ip)
+  if (ipWait > 0) throw tooManyTries(ipWait)
 
   const [user] = await app.db.select().from(users).where(eq(users.username, input.username))
   const lockedFor = user?.signInLockedUntil ? user.signInLockedUntil.getTime() - Date.now() : 0
@@ -40,6 +41,7 @@ export async function signIn(
   // An unknown username costs the same hash, so timing doesn't reveal accounts.
   const valid = await verifyPassword(user?.passwordHash ?? (await dummyHash()), input.password)
   if (!user || !valid) {
+    app.limits.signIn.hit(ip)
     if (user) await recordFailure(app, user)
     await audit(app.db, {
       actorId: null,

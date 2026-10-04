@@ -72,6 +72,12 @@ describe('sign-in protection', () => {
     expect(cookie).toMatch(/SameSite=Lax/)
   })
 
+  it('counts only failed sign-ins against an address', async () => {
+    for (let attempt = 0; attempt < 32; attempt += 1) {
+      await client().signIn('owner', 'the-owner-password')
+    }
+  })
+
   it('makes an account wait after 10 failures in a row, even for the right password', async () => {
     await seedUser(app.db, { username: 'guessed', password: 'the-real-password' })
     for (let attempt = 0; attempt < 10; attempt += 1) {
