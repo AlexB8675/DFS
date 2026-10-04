@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import cookie from '@fastify/cookie'
 import type { Config } from '@dfs/config'
 import { createDatabase, createPool, type Database } from '@dfs/db'
+import { Staging } from '@dfs/storage'
 import Fastify, { LogController, type FastifyInstance, type FastifyServerOptions } from 'fastify'
 import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod'
 import type pg from 'pg'
@@ -11,6 +12,7 @@ import { registerErrorHandling } from './errors.ts'
 import { adminRoutes } from './routes/admin.ts'
 import { authRoutes } from './routes/auth.ts'
 import { healthRoutes } from './routes/health.ts'
+import { nodeRoutes } from './routes/nodes.ts'
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -19,6 +21,8 @@ declare module 'fastify' {
     db: Database
     /** Per-instance request limits (DESIGN.md §7.5). */
     limits: { signIn: RateLimiter }
+    /** Frames received but not yet stored (§6.1). */
+    staging: Staging
   }
 }
 
@@ -64,6 +68,7 @@ export async function buildApp({ config, logger }: AppOptions): Promise<FastifyI
     reply.header('x-request-id', request.id)
   })
   app.decorate('limits', { signIn: new RateLimiter(30, 10 * 60_000) })
+  app.decorate('staging', new Staging(config.stagingDir))
 
   await app.register(cookie)
   registerAccess(app)
@@ -71,6 +76,7 @@ export async function buildApp({ config, logger }: AppOptions): Promise<FastifyI
   await app.register(healthRoutes, { prefix: '/api' })
   await app.register(authRoutes, { prefix: '/api' })
   await app.register(adminRoutes, { prefix: '/api' })
+  await app.register(nodeRoutes, { prefix: '/api' })
   return app
 }
 

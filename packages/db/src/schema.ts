@@ -150,8 +150,16 @@ export const nodes = pgTable(
     uniqueIndex('nodes_unique_name')
       .on(t.parentId, t.nameKey)
       .where(sql`${t.deletedAt} IS NULL`),
-    index('nodes_listing')
-      .on(t.parentId, t.kind, t.nameKey, t.id)
+    // One index per sort order of a folder listing, so every page is an index
+    // scan (§5.1). Names sort naturally: `file2` before `file10`.
+    index('nodes_listing_by_name')
+      .on(t.parentId, t.kind, sql`${t.nameKey} COLLATE "dfs_natural"`, t.id)
+      .where(sql`${t.deletedAt} IS NULL`),
+    index('nodes_listing_by_updated')
+      .on(t.parentId, t.kind, t.updatedAt, t.id)
+      .where(sql`${t.deletedAt} IS NULL`),
+    index('nodes_listing_by_size')
+      .on(t.parentId, t.kind, t.sizeBytes, t.id)
       .where(sql`${t.deletedAt} IS NULL`),
     uniqueIndex('nodes_one_root_per_owner')
       .on(t.ownerId)
@@ -295,13 +303,14 @@ export const folderStats = pgTable('folder_stats', {
   updatedAt: timestamptz('updated_at').notNull().defaultNow(),
 })
 
-/** Changes to a folder's direct contents, waiting to be folded into `folder_stats`. */
-export const folderStatDeltas = pgTable('folder_stat_deltas', {
-  id: identity('id').primaryKey(),
-  nodeId: uuid('node_id').notNull(),
-  fileDelta: integer('file_delta').notNull(),
-  byteDelta: bytes('byte_delta').notNull(),
-  createdAt: timestamptz('created_at').notNull().defaultNow(),
+/**
+ * Folders whose direct contents changed, waiting for `folder_stats` to be
+ * recomputed for them and their ancestors (§12.1). Recomputing from the tree
+ * stays right when a folder with pending changes is moved or trashed.
+ */
+export const folderStatsDirty = pgTable('folder_stats_dirty', {
+  nodeId: uuid('node_id').primaryKey(),
+  markedAt: timestamptz('marked_at').notNull().defaultNow(),
 })
 
 // ── Sharing and uploads ──────────────────────────────────────────────────────

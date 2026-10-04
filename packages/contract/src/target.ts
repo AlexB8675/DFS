@@ -30,6 +30,7 @@ export interface Assertion {
   toMatchObject: (expected: object) => void
   toBeNull: () => void
   toHaveLength: (length: number) => void
+  toContain: (item: unknown) => void
   toBeGreaterThan: (value: number) => void
   not: Assertion
 }

@@ -11,4 +11,13 @@ export const LOCKS = {
   botLeader: 2,
   /** Taken right before journal records are written, so `journal.id` is commit order (§8). */
   journal: 3,
+  /** Held while folder sizes are recomputed, so two recomputations never interleave. */
+  folderStats: 4,
 } as const
+
+/**
+ * A second namespace for per-owner tree locks: `pg_advisory_xact_lock(TREE_LOCK_NAMESPACE,
+ * hashtext(owner_id))` serializes moves within one drive, so two crossing moves can't
+ * make a cycle.
+ */
+export const TREE_LOCK_NAMESPACE = 0x445452

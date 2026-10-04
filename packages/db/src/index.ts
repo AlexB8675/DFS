@@ -1,4 +1,5 @@
 export * from './client.ts'
+export * from './folder-stats.ts'
 export * from './journal.ts'
 export * from './locks.ts'
 export * from './migrate.ts'

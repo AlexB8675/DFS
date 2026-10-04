@@ -24,7 +24,7 @@ describe('migrations', () => {
         )
         return { applied: Number(applied.rows[0]?.count), tables: Number(tables.rows[0]?.count) }
       })
-      expect(counts).toEqual({ applied: 2, tables: 13 })
+      expect(counts).toEqual({ applied: 5, tables: 13 })
     } finally {
       await withAdmin(adminUrl, (admin) => admin.query(`DROP DATABASE ${name} WITH (FORCE)`))
     }

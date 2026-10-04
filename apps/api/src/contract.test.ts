@@ -19,7 +19,8 @@ beforeAll(async () => {
     { NODE_ENV: 'test', DATABASE_URL: database.url, LOG_LEVEL: 'silent' },
     { service: 'api', rootDir: path.resolve('/repo') },
   )
-  app = await buildApp({ config, logger: false })
+  // Only server errors are logged: a 500 in the suite should say why.
+  app = await buildApp({ config, logger: { level: 'error' } })
   const address = await app.listen({ port: 0, host: '127.0.0.1' })
   const owner = { username: 'owner', password: 'the-owner-password' }
   await seedUser(app.db, { ...owner, role: 'admin', isOwner: true })
