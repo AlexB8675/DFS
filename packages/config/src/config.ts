@@ -46,7 +46,8 @@ export interface Config {
   tempPasswordDays: number
   internalRpcSecret: string
   botInternalUrl: string
-  publicBaseUrl: string | null
+  /** Where users reach DFS, without a trailing slash: share links and the sign-in `Origin` check. Empty only for a production bot. */
+  publicBaseUrl: string
   apiPort: number
   botPort: number
   trustedProxyCidrs: string[]
@@ -66,12 +67,15 @@ export class ConfigError extends Error {
 const DEVELOPMENT = {
   DATABASE_URL: 'postgres://dfs:dfs@localhost:5432/dfs',
   INTERNAL_RPC_SECRET: 'development-only-internal-rpc-secret',
+  PUBLIC_BASE_URL: 'http://localhost:5173',
   BOT_INTERNAL_URL: 'http://localhost:3001',
   BLOB_STORE: 'local',
   DISCORD_CATEGORY_NAME: 'DFS Dev',
   DISCORD_GATEWAY: 'off',
   STAGING_DIR: '.data/staging',
   CACHE_DIR: '.data/cache',
+  /** Created on first start if missing, in development only. */
+  MASTER_KEY_FILE: '.data/master-key.json',
 } as const
 
 const PRODUCTION = {
@@ -81,6 +85,7 @@ const PRODUCTION = {
   DISCORD_GATEWAY: 'on',
   STAGING_DIR: '/data/staging',
   CACHE_DIR: '/data/cache',
+  MASTER_KEY_FILE: '/run/secrets/dfs_master_key',
 } as const
 
 /** An unset or empty variable reads as missing, so `KEY=` in a .env file means "use the default". */
@@ -137,7 +142,7 @@ const envSchema = z.object({
   PACK_TARGET_BYTES: optionalByteSize,
   PACK_MAX_WAIT_MS: integer(5000),
   COMPACT_THRESHOLD: setting(z.coerce.number().min(0).max(1).default(0.3)),
-  MASTER_KEY_FILE: setting(z.string().default('/run/secrets/dfs_master_key')),
+  MASTER_KEY_FILE: setting(z.string().optional()),
   STAGING_DIR: setting(z.string().optional()),
   STAGING_MAX_BYTES: byteSize(20 * GiB),
   CACHE_DIR: setting(z.string().optional()),
@@ -162,7 +167,7 @@ const envSchema = z.object({
 export interface LoadOptions {
   /** Which process is starting; production checks what that process needs. */
   service: Service
-  /** Relative directories in settings resolve against this: the repository root. */
+  /** Relative paths in settings resolve against this: the repository root. */
   rootDir: string
 }
 
@@ -245,7 +250,7 @@ export function loadConfig(env: Record<string, string | undefined>, options: Loa
     },
     packMaxWaitMs: raw.PACK_MAX_WAIT_MS,
     compactThreshold: raw.COMPACT_THRESHOLD,
-    masterKeyFile: raw.MASTER_KEY_FILE,
+    masterKeyFile: directory(raw.MASTER_KEY_FILE ?? defaults.MASTER_KEY_FILE),
     stagingDir: directory(raw.STAGING_DIR ?? defaults.STAGING_DIR),
     stagingMaxBytes: raw.STAGING_MAX_BYTES,
     cacheDir: directory(raw.CACHE_DIR ?? defaults.CACHE_DIR),
@@ -261,7 +266,10 @@ export function loadConfig(env: Record<string, string | undefined>, options: Loa
     tempPasswordDays: raw.TEMP_PASSWORD_DAYS,
     internalRpcSecret,
     botInternalUrl: raw.BOT_INTERNAL_URL ?? defaults.BOT_INTERNAL_URL,
-    publicBaseUrl: raw.PUBLIC_BASE_URL ?? null,
+    publicBaseUrl: (raw.PUBLIC_BASE_URL ?? (production ? '' : DEVELOPMENT.PUBLIC_BASE_URL)).replace(
+      /\/+$/,
+      '',
+    ),
     apiPort: raw.API_PORT,
     botPort: raw.BOT_PORT,
     trustedProxyCidrs,

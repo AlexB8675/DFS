@@ -50,6 +50,8 @@ describe('loadConfig', () => {
       blobStore: 'local',
       discord: { categoryName: 'DFS Dev', gateway: false },
       stagingDir: path.join(root, '.data', 'staging'),
+      masterKeyFile: path.join(root, '.data', 'master-key.json'),
+      publicBaseUrl: 'http://localhost:5173',
       apiPort: 3000,
     })
   })
@@ -77,6 +79,7 @@ describe('loadConfig', () => {
       blobStore: 'discord',
       discord: { categoryName: 'DFS', gateway: true },
       stagingDir: path.resolve('/data/staging'),
+      masterKeyFile: path.resolve('/run/secrets/dfs_master_key'),
     })
     expect(
       problems({ ...production, INTERNAL_RPC_SECRET: 'short' }, { ...api, service: 'bot' }),
