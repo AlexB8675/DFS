@@ -305,12 +305,7 @@ export class UploadEngine {
     }
   }
 
-  private handleFailure(
-    job: Job,
-    session: UploadSession,
-    index: number,
-    error: unknown,
-  ): void {
+  private handleFailure(job: Job, session: UploadSession, index: number, error: unknown): void {
     if (job.status !== 'uploading') return
     // Sessions answer until they expire, also once complete, and a part sent
     // again is accepted (§6.1), so a lost response is simply retried. A 404
