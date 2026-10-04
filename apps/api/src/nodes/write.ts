@@ -177,26 +177,39 @@ export async function trashNodes(app: FastifyInstance, auth: Auth, ids: string[]
     if (trashed.some((node) => node.parent_id === null)) {
       throw new ApiError(403, 'forbidden', 'The root folder cannot be trashed.')
     }
-    const updated = await tx
-      .update(nodes)
-      .set({ deletedAt: new Date() })
-      .where(sql`${nodes.id} = ANY(${uuidArray(ids)})`)
-      .returning()
-    await tx.execute(sql`
-      WITH RECURSIVE below AS (
-        SELECT id, id AS via FROM nodes WHERE id = ANY(${uuidArray(ids)})
-        UNION ALL
-        SELECT child.id, below.via FROM nodes child JOIN below ON child.parent_id = below.id
-      )
-      UPDATE nodes SET trashed_via = below.via
-      FROM below
-      WHERE nodes.id = below.id AND nodes.id <> below.via AND nodes.trashed_via IS NULL`)
+    const updated = await markTrashed(tx, ids)
     await markFoldersDirty(
       tx,
       trashed.flatMap((node) => node.parent_id ?? []),
     )
     await appendJournal(tx, updated.map(nodeRecord))
   })
+}
+
+/**
+ * Puts nodes in the trash: `deleted_at` on each, `trashed_via` on everything
+ * below (§6.3), and a reason if an admin did it. Returns their new state.
+ */
+export async function markTrashed(
+  tx: Executor,
+  ids: readonly string[],
+  moderationReason: string | null = null,
+): Promise<NodeState[]> {
+  const updated = await tx
+    .update(nodes)
+    .set({ deletedAt: new Date(), moderationReason })
+    .where(sql`${nodes.id} = ANY(${uuidArray(ids)})`)
+    .returning()
+  await tx.execute(sql`
+    WITH RECURSIVE below AS (
+      SELECT id, id AS via FROM nodes WHERE id = ANY(${uuidArray(ids)})
+      UNION ALL
+      SELECT child.id, below.via FROM nodes child JOIN below ON child.parent_id = below.id
+    )
+    UPDATE nodes SET trashed_via = below.via
+    FROM below
+    WHERE nodes.id = below.id AND nodes.id <> below.via AND nodes.trashed_via IS NULL`)
+  return updated
 }
 
 /**

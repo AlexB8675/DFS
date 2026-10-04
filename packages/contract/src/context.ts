@@ -12,8 +12,15 @@ export interface SuiteContext extends TestApi {
     admin: ApiClient,
     role?: 'user' | 'admin',
   ) => Promise<{ user: AdminUser; username: string; temporaryPassword: string }>
-  /** Signs in as `username` and chooses a password, as a first sign-in does. */
+  /** Signs in as `username` and chooses `chosenPassword(username)`, as a first sign-in does. */
   activated: (username: string, temporaryPassword: string) => Promise<ApiClient>
+  /** A client signed in as `username`. */
+  signIn: (username: string, password: string) => Promise<ApiClient>
+}
+
+/** The password `activated` chooses for a user, so a test can sign in as them again. */
+export function chosenPassword(username: string): string {
+  return `chosen-${username}-password`
 }
 
 export function createContext(t: TestApi, target: () => ContractTarget): SuiteContext {
@@ -39,8 +46,14 @@ export function createContext(t: TestApi, target: () => ContractTarget): SuiteCo
       const client = new ApiClient(baseUrl, origin)
       await client.signIn(username, temporaryPassword)
       await client.call('POST', '/auth/password', sessionSchema, {
-        json: { newPassword: `chosen-${crypto.randomUUID()}` },
+        json: { newPassword: chosenPassword(username) },
       })
+      return client
+    },
+    signIn: async (username, password) => {
+      const { baseUrl, origin } = target()
+      const client = new ApiClient(baseUrl, origin)
+      await client.signIn(username, password)
       return client
     },
   }

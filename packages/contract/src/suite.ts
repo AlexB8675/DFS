@@ -1,3 +1,4 @@
+import { adminTests } from './admin.ts'
 import { authTests } from './auth.ts'
 import { createContext } from './context.ts'
 import { downloadTests } from './downloads.ts'
@@ -19,4 +20,5 @@ export function defineContractSuite(t: TestApi, target: () => ContractTarget): v
   uploadTests(context)
   downloadTests(context)
   shareTests(context)
+  adminTests(context)
 }
