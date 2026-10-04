@@ -10,10 +10,12 @@ import type pg from 'pg'
 import { registerAccess } from './auth/access.ts'
 import { RateLimiter } from './auth/rate-limit.ts'
 import { registerErrorHandling } from './errors.ts'
+import { EventHub } from './events/hub.ts'
 import { DataKeyCache, loadMasterKeys } from './keys.ts'
 import { JobQueue } from './queue.ts'
 import { adminRoutes } from './routes/admin.ts'
 import { authRoutes } from './routes/auth.ts'
+import { eventRoutes } from './routes/events.ts'
 import { healthRoutes } from './routes/health.ts'
 import { nodeRoutes } from './routes/nodes.ts'
 import { uploadRoutes } from './routes/uploads.ts'
@@ -34,6 +36,8 @@ declare module 'fastify' {
     dataKeys: DataKeyCache
     /** For adding jobs inside the API's transactions (§11). */
     queue: JobQueue
+    /** Live events for the users with open streams on this instance (§6.1). */
+    events: EventHub
   }
 }
 
@@ -71,6 +75,7 @@ export async function buildApp({ config, logger }: AppOptions): Promise<FastifyI
   })
   const db = createDatabase(pool)
   const queue = new JobQueue(config, app.log)
+  const events = new EventHub(config.databaseUrl, app.log)
   app.decorate('config', config)
   app.decorate('pool', pool)
   app.decorate('db', db)
@@ -81,7 +86,14 @@ export async function buildApp({ config, logger }: AppOptions): Promise<FastifyI
   app.decorate('keys', await loadMasterKeys(config, app.log))
   app.decorate('dataKeys', new DataKeyCache())
   app.decorate('queue', queue)
+  app.decorate('events', events)
+  // Open event streams would keep the server from closing.
+  app.addHook('preClose', (done) => {
+    events.endStreams()
+    done()
+  })
   app.addHook('onClose', async () => {
+    await events.stop()
     await queue.stop()
     await pool.end()
   })
@@ -97,6 +109,7 @@ export async function buildApp({ config, logger }: AppOptions): Promise<FastifyI
   await app.register(adminRoutes, { prefix: '/api' })
   await app.register(nodeRoutes, { prefix: '/api' })
   await app.register(uploadRoutes, { prefix: '/api' })
+  await app.register(eventRoutes, { prefix: '/api' })
   return app
 }
 
