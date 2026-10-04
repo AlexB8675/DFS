@@ -1,10 +1,14 @@
-import { sessionSchema, type Session, type User } from '@dfs/shared'
+import {
+  sessionSchema,
+  type ChangePasswordInput,
+  type LoginInput,
+  type Session,
+  type User,
+} from '@dfs/shared'
 import { queryOptions, useSuspenseQuery } from '@tanstack/react-query'
-import { redirect, type LoaderFunctionArgs, type NavigateFunction } from 'react-router'
+import { redirect, type LoaderFunctionArgs } from 'react-router'
 import { queryClient } from '@/app/query-client'
 import { apiGet, apiSend, isUnauthorized, setCsrfToken } from '@/lib/api/client'
-import { mocksEnabled } from '@/lib/env'
-import { prepareNavTransition } from '@/lib/navigation'
 
 export const sessionQuery = queryOptions({
   queryKey: ['session'],
@@ -26,44 +30,77 @@ export function useCurrentUser(): User {
   return useSession().user
 }
 
-/** Route loader: sends visitors without a session to the login page. */
+/**
+ * Route loader: sends visitors without a session to the login page, and a
+ * session opened with a temporary password to choose a new one first (§7.1).
+ */
 export async function requireSession({ request }: LoaderFunctionArgs): Promise<null> {
+  const { pathname, search } = new URL(request.url)
+  const next = pathname + search
+  const query = next === '/' ? '' : `?next=${encodeURIComponent(next)}`
+  let session: Session
   try {
     // A cached session is used as-is; it is only fetched on the first load.
-    await queryClient.query({ ...sessionQuery, staleTime: 'static' })
-    return null
+    session = await queryClient.query({ ...sessionQuery, staleTime: 'static' })
   } catch (error) {
     if (!isUnauthorized(error)) throw error
-    const { pathname, search } = new URL(request.url)
-    const next = pathname + search
-    throw redirect(next === '/' ? '/login' : `/login?next=${encodeURIComponent(next)}`)
+    throw redirect(`/login${query}`)
   }
+  if (session.passwordChange) throw redirect(`/choose-password${query}`)
+  return null
 }
 
 /** Route loader for the login page: skips it when already signed in. */
 export async function redirectIfSignedIn({ request }: LoaderFunctionArgs): Promise<null> {
+  let session: Session
   try {
-    await queryClient.query(sessionQuery)
+    session = await queryClient.query(sessionQuery)
   } catch {
     return null
   }
-  throw redirect(safeNextPath(new URL(request.url).searchParams.get('next')))
+  const { search } = new URL(request.url)
+  throw redirect(session.passwordChange ? `/choose-password${search}` : afterSignIn(search))
+}
+
+/** Route loader for `/choose-password`: only for a session that must choose one. */
+export async function requirePasswordChange({ request }: LoaderFunctionArgs): Promise<null> {
+  const { search } = new URL(request.url)
+  let session: Session
+  try {
+    session = await queryClient.query({ ...sessionQuery, staleTime: 'static' })
+  } catch (error) {
+    if (!isUnauthorized(error)) throw error
+    throw redirect(`/login${search}`)
+  }
+  if (!session.passwordChange) throw redirect(afterSignIn(search))
+  return null
+}
+
+/** Where to go once signed in, from a `?next=` in `search`. */
+function afterSignIn(search: string): string {
+  return safeNextPath(new URLSearchParams(search).get('next'))
 }
 
 /**
- * Starts "Log in with Discord" (§7.1). The real flow is a full-page redirect
- * through Discord's OAuth screen, which a mocked API cannot intercept, so mock
- * mode signs in with a local request instead.
+ * Signs in (§7.1). A temporary password gives a session that can only
+ * choose a new password: check `passwordChange` on the result.
  */
-export async function signIn(next: string, navigate: NavigateFunction): Promise<void> {
-  if (!mocksEnabled) {
-    window.location.assign(`/api/auth/discord?next=${encodeURIComponent(next)}`)
-    return
-  }
-  await apiSend('POST', '/auth/dev-login')
-  queryClient.removeQueries({ queryKey: sessionQuery.queryKey })
-  // The drive zooms in as the sign-in page fades out.
-  await navigate(next, { replace: true, viewTransition: prepareNavTransition('section') })
+export async function signIn(credentials: LoginInput): Promise<Session> {
+  const session = await apiSend('POST', '/auth/login', credentials, sessionSchema)
+  acceptSession(session)
+  return session
+}
+
+/** Changes the password. The API renews this session and ends every other one. */
+export async function changePassword(input: ChangePasswordInput): Promise<Session> {
+  const session = await apiSend('POST', '/auth/password', input, sessionSchema)
+  acceptSession(session)
+  return session
+}
+
+function acceptSession(session: Session): void {
+  setCsrfToken(session.csrfToken)
+  queryClient.setQueryData(sessionQuery.queryKey, session)
 }
 
 export async function signOut(): Promise<void> {

@@ -1,17 +1,26 @@
+import { passwordSchema } from '@dfs/shared'
+import { useMutation } from '@tanstack/react-query'
 import { LogOut, Monitor, Moon, Sun } from 'lucide-react'
-import type { ReactNode } from 'react'
+import { useRef, useState, type SubmitEvent, type ReactNode } from 'react'
+import { toast } from 'sonner'
 import { PageHeader } from '@/components/page-header'
+import { PasswordInput } from '@/components/password-input'
+import { PasswordRequirements } from '@/components/password-requirements'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Label } from '@/components/ui/label'
 import { Progress } from '@/components/ui/progress'
+import { Spinner } from '@/components/ui/spinner'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
-import { signOut, useCurrentUser } from '@/features/auth/session'
+import { changePassword, signOut, useCurrentUser } from '@/features/auth/session'
 import { UserAvatar } from '@/layout/user-menu'
+import { errorMessage } from '@/lib/api/client'
 import { formatBytes } from '@/lib/format'
+import { shake } from '@/lib/motion'
 import { useThemeStore, type Theme } from '@/lib/theme'
 
-/** `/settings`: profile, appearance and storage. */
+/** `/settings`: profile, password, appearance and storage. */
 export function SettingsPage() {
   const user = useCurrentUser()
   const theme = useThemeStore((state) => state.theme)
@@ -27,9 +36,7 @@ export function SettingsPage() {
           <Card>
             <CardHeader>
               <CardTitle>Profile</CardTitle>
-              <CardDescription>
-                Your name and picture come from Discord and update when you sign in.
-              </CardDescription>
+              <CardDescription>An admin sets your name and username.</CardDescription>
             </CardHeader>
             <CardContent className="flex items-center gap-4">
               <UserAvatar user={user} className="size-14 text-lg" />
@@ -38,12 +45,12 @@ export function SettingsPage() {
                   {user.displayName}
                   <Badge variant="secondary">{user.role === 'admin' ? 'Admin' : 'User'}</Badge>
                 </p>
-                <p className="font-mono text-xs text-muted-foreground">
-                  Discord ID {user.discordUserId}
-                </p>
+                <p className="font-mono text-xs text-muted-foreground">{user.username}</p>
               </div>
             </CardContent>
           </Card>
+
+          <PasswordCard />
 
           <Card>
             <CardHeader>
@@ -101,6 +108,125 @@ export function SettingsPage() {
         </div>
       </div>
     </div>
+  )
+}
+
+/** Changing the password needs the current one, and signs out every other session (§7.1). */
+function PasswordCard() {
+  const user = useCurrentUser()
+  const change = useMutation({ mutationFn: changePassword })
+  const [current, setCurrent] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirmation, setConfirmation] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const formRef = useRef<HTMLFormElement>(null)
+
+  function fail(message: string) {
+    setError(message)
+    shake(formRef.current)
+  }
+
+  async function handleSubmit(event: SubmitEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!current) {
+      fail('Enter your current password.')
+      return
+    }
+    const parsed = passwordSchema.safeParse(password)
+    if (!parsed.success) {
+      fail(parsed.error.issues[0]?.message ?? 'Choose a longer password.')
+      return
+    }
+    if (password !== confirmation) {
+      fail('The two new passwords don’t match.')
+      return
+    }
+    try {
+      await change.mutateAsync({ currentPassword: current, newPassword: parsed.data })
+      setError(null)
+      setCurrent('')
+      setPassword('')
+      setConfirmation('')
+      toast.success('Password changed', {
+        description: 'Your other devices were signed out.',
+      })
+    } catch (failure) {
+      fail(errorMessage(failure))
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Password</CardTitle>
+        <CardDescription>Changing it signs you out on your other devices.</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form
+          ref={formRef}
+          className="grid max-w-sm gap-4"
+          noValidate
+          onSubmit={(event) => void handleSubmit(event)}
+        >
+          {/* Lets password managers save the new password under the right account. */}
+          <input
+            type="text"
+            name="username"
+            autoComplete="username"
+            value={user.username}
+            readOnly
+            hidden
+          />
+          <div className="grid gap-2">
+            <Label htmlFor="current-password">Current password</Label>
+            <PasswordInput
+              id="current-password"
+              autoComplete="current-password"
+              value={current}
+              onChange={(event) => {
+                setCurrent(event.target.value)
+              }}
+            />
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="new-password">New password</Label>
+            <PasswordInput
+              id="new-password"
+              autoComplete="new-password"
+              value={password}
+              onChange={(event) => {
+                setPassword(event.target.value)
+              }}
+            />
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="confirm-password">Type it again</Label>
+            <PasswordInput
+              id="confirm-password"
+              autoComplete="new-password"
+              value={confirmation}
+              onChange={(event) => {
+                setConfirmation(event.target.value)
+              }}
+            />
+          </div>
+          {password && <PasswordRequirements password={password} confirmation={confirmation} />}
+          {error && (
+            <p
+              role="alert"
+              className="animate-in text-sm text-destructive fade-in-0 slide-in-from-top-1 motion-spring"
+            >
+              {error}
+            </p>
+          )}
+          <div>
+            <Button type="submit" disabled={change.isPending}>
+              {change.isPending && <Spinner />} Change password
+            </Button>
+          </div>
+        </form>
+      </CardContent>
+    </Card>
   )
 }
 

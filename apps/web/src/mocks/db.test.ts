@@ -23,7 +23,20 @@ const db = new AdminMockDb()
 // These tests double as a spec for the real API: they encode the rules of
 // DESIGN.md §5–§6 that the mock imitates.
 
+const DAY = 24 * 60 * 60_000
+
 const rootId = () => db.session().user.rootFolderId
+
+function signInAs(username: string, password: string) {
+  db.signOut()
+  return db.signIn({ username, password })
+}
+
+function userNamed(username: string) {
+  const user = db.adminUsers().items.find((candidate) => candidate.username === username)
+  if (!user) throw new Error(`No user ${username}`)
+  return user
+}
 
 function list(parentId: string, limit = 500) {
   return db.children(parentId, { sort: 'name', order: 'asc', limit }).items
@@ -244,10 +257,117 @@ describe('mock API database', () => {
   })
 
   it('doesn’t let admins demote or disable themselves', () => {
+    signInAs('priya', 'priya-password')
     const me = db.session().user
     expect(apiError(() => db.updateUser(me.id, { role: 'user' }))).toEqual({
       status: 409,
       code: 'self_change',
+    })
+  })
+
+  describe('accounts and sign-in (§7.1)', () => {
+    it('signs in with a username and password, and answers alike for a wrong one or an unknown user', () => {
+      db.signOut()
+      expect(db.signIn({ username: 'demo', password: 'demo-password' })).toMatchObject({
+        user: { username: 'demo' },
+        passwordChange: null,
+      })
+      const wrong = { status: 401, code: 'invalid_credentials' }
+      expect(apiError(() => db.signIn({ username: 'demo', password: 'nope' }))).toEqual(wrong)
+      expect(apiError(() => db.signIn({ username: 'nobody', password: 'nope' }))).toEqual(wrong)
+    })
+
+    it('tells of a disabled account or an expired password only after the right password', () => {
+      const attempt = (username: string, password: string) =>
+        apiError(() => db.signIn({ username, password }))
+      expect(attempt('jordan', 'wrong')).toEqual({ status: 401, code: 'invalid_credentials' })
+      expect(attempt('jordan', 'jordan-password')).toEqual({
+        status: 403,
+        code: 'account_disabled',
+      })
+      expect(attempt('morgan', 'wrong')).toEqual({ status: 401, code: 'invalid_credentials' })
+      expect(attempt('morgan', 'welcome-morgan')).toEqual({
+        status: 403,
+        code: 'password_expired',
+      })
+    })
+
+    it('limits a first sign-in to choosing a password, which activates the account', () => {
+      expect(signInAs('taylor', 'welcome-taylor').passwordChange).toBe('activate')
+      expect(db.mustChangePassword).toBe(true)
+
+      const session = db.changePassword({ newPassword: 'taylor’s own password' })
+      expect(session.passwordChange).toBeNull()
+      expect(db.mustChangePassword).toBe(false)
+
+      signInAs('demo', 'demo-password')
+      expect(userNamed('taylor')).toMatchObject({ temporaryPasswordExpiresAt: null })
+      expect(userNamed('taylor').activatedAt).not.toBeNull()
+    })
+
+    it('needs the current password to change it, and refuses weak choices', () => {
+      const change = (currentPassword: string, newPassword: string) =>
+        apiError(() => db.changePassword({ currentPassword, newPassword }))
+      expect(change('wrong', 'a fine new password')).toEqual({
+        status: 403,
+        code: 'wrong_password',
+      })
+      const rejected = { status: 400, code: 'password_rejected' }
+      expect(change('demo-password', 'demo-password')).toEqual(rejected)
+      expect(change('demo-password', 'password1234')).toEqual(rejected)
+
+      db.changePassword({ currentPassword: 'demo-password', newPassword: 'a fine new password' })
+      db.signOut()
+      expect(signInAs('demo', 'a fine new password').passwordChange).toBeNull()
+    })
+
+    it('creates users with a temporary password, keeping usernames unique', () => {
+      const casey = db.createUser({ username: 'casey', temporaryPassword: 'casey-temporary' })
+      expect(casey).toMatchObject({
+        displayName: 'casey',
+        role: 'user',
+        isOwner: false,
+        activatedAt: null,
+      })
+      expect(casey).not.toHaveProperty('password')
+      expect(Date.parse(casey.temporaryPasswordExpiresAt ?? '') - Date.now()).toBe(7 * DAY)
+      expect(
+        apiError(() => db.createUser({ username: 'sam', temporaryPassword: 'whatever-password' })),
+      ).toEqual({ status: 409, code: 'username_taken' })
+
+      db.signOut()
+      expect(signInAs('casey', 'casey-temporary').passwordChange).toBe('activate')
+      expect(list(rootId())).toEqual([])
+    })
+
+    it('resets a password, signing in to a session that must choose a new one', () => {
+      const sam = userNamed('sam')
+      db.resetPassword(sam.id, { temporaryPassword: 'sam-new-temporary' })
+      expect(userNamed('sam').temporaryPasswordExpiresAt).not.toBeNull()
+
+      db.signOut()
+      expect(apiError(() => db.signIn({ username: 'sam', password: 'sam-password' }))).toEqual({
+        status: 401,
+        code: 'invalid_credentials',
+      })
+      expect(signInAs('sam', 'sam-new-temporary').passwordChange).toBe('reset')
+    })
+
+    it('never changes the owner from the app, and admins don’t reset themselves', () => {
+      const owner = userNamed('demo')
+      expect(owner.isOwner).toBe(true)
+      signInAs('priya', 'priya-password')
+      const protectedOwner = { status: 409, code: 'owner_protected' }
+      expect(
+        apiError(() => db.resetPassword(owner.id, { temporaryPassword: 'take-over-password' })),
+      ).toEqual(protectedOwner)
+      expect(apiError(() => db.updateUser(owner.id, { role: 'user' }))).toEqual(protectedOwner)
+      expect(apiError(() => db.updateUser(owner.id, { disabled: true }))).toEqual(protectedOwner)
+
+      const priya = userNamed('priya')
+      expect(
+        apiError(() => db.resetPassword(priya.id, { temporaryPassword: 'priya-temporary' })),
+      ).toEqual({ status: 409, code: 'self_change' })
     })
   })
 

@@ -1,6 +1,6 @@
 import { createBrowserRouter, Navigate } from 'react-router'
 import { NotFoundPage, RouteError, SplashScreen } from '@/components/status-pages'
-import { redirectIfSignedIn, requireSession } from '@/features/auth/session'
+import { redirectIfSignedIn, requirePasswordChange, requireSession } from '@/features/auth/session'
 
 /**
  * Creates the router. It is a function, not a module-level constant, because a
@@ -17,6 +17,16 @@ export function createAppRouter() {
       path: '/login',
       loader: redirectIfSignedIn,
       lazy: async () => ({ Component: (await import('@/features/auth/login-page')).LoginPage }),
+      hydrateFallbackElement: <SplashScreen />,
+      errorElement: <RouteError />,
+    },
+    {
+      // After a sign-in with a temporary password, before anything else (§7.1).
+      path: '/choose-password',
+      loader: requirePasswordChange,
+      lazy: async () => ({
+        Component: (await import('@/features/auth/choose-password-page')).ChoosePasswordPage,
+      }),
       hydrateFallbackElement: <SplashScreen />,
       errorElement: <RouteError />,
     },

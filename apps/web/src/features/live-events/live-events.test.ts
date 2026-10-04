@@ -136,11 +136,11 @@ describe('startLiveEvents', () => {
   it('sets the quota use straight from the event', () => {
     queryClient.setQueryData<Session>(['session'], {
       csrfToken: 'token',
+      passwordChange: null,
       user: {
         id: crypto.randomUUID(),
-        discordUserId: '1',
+        username: 'demo',
         displayName: 'Demo',
-        avatarUrl: null,
         role: 'user',
         rootFolderId: crypto.randomUUID(),
         quotaBytes: 100,

@@ -30,9 +30,10 @@ pnpm install
 pnpm dev
 ```
 
-Open http://localhost:5173 and choose **Continue with Discord**. In development the
-sign-in is simulated and all data lives in your browser (reset it from the account
-menu).
+Open http://localhost:5173 and sign in with one of the demo accounts listed under
+the form; clicking one fills it in. `demo` is the owner and an admin, and `taylor`
+shows a first sign-in, where a new user chooses their own password. In development
+all data lives in your browser (reset it from the account menu).
 
 The demo data includes share links to try, signed in or not:
 

@@ -36,6 +36,7 @@ import {
   useModerateNode,
   userUsageQuery,
 } from './api'
+import { UserBadges } from './user-badges'
 
 const ROW_HEIGHT = 40
 
@@ -101,10 +102,11 @@ function UserSummary({ user, usage }: { user: AdminUser; usage: UserUsage | unde
           <p className="flex items-center gap-2 font-medium">
             <span className="truncate">{user.displayName}</span>
             {user.role === 'admin' && <Badge>Admin</Badge>}
-            {user.disabled && <Badge variant="outline">Disabled</Badge>}
+            <UserBadges user={user} />
           </p>
           <p className="text-xs text-muted-foreground tabular-nums">
-            {formatBytes(user.usedBytes)} of {formatBytes(user.quotaBytes)}
+            <span className="font-mono">{user.username}</span> · {formatBytes(user.usedBytes)} of{' '}
+            {formatBytes(user.quotaBytes)}
             {usage &&
               ` · ${usage.fileCount.toLocaleString()} files in ${usage.folderCount.toLocaleString()} folders · ${formatBytes(usage.trashBytes)} in trash`}
           </p>

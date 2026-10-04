@@ -9,6 +9,7 @@ import {
   systemHealthSchema,
   userUsageSchema,
   type CreateChannelInput,
+  type CreateUserInput,
   type StorageChannel,
   type UpdateUserInput,
 } from '@dfs/shared'
@@ -99,6 +100,30 @@ export function useUpdateUser() {
         queryClient.invalidateQueries({ queryKey: ['session'] }),
       ]),
   })
+}
+
+/** `POST /admin/users` (D27). The caller shows the temporary password once. */
+export function useCreateUser() {
+  return useMutation({
+    mutationFn: (input: CreateUserInput) => apiSend('POST', '/admin/users', input, adminUserSchema),
+    onSettled: invalidateUsers,
+  })
+}
+
+/** A new temporary password, which signs the user out everywhere (§7.1). */
+export function useResetPassword() {
+  return useMutation({
+    mutationFn: ({ id, temporaryPassword }: { id: string; temporaryPassword: string }) =>
+      apiSend('POST', `/admin/users/${id}/password`, { temporaryPassword }, adminUserSchema),
+    onSettled: invalidateUsers,
+  })
+}
+
+async function invalidateUsers(): Promise<void> {
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: ['admin', 'users'] }),
+    queryClient.invalidateQueries({ queryKey: ['admin', 'audit'] }),
+  ])
 }
 
 export function useModerateNode() {

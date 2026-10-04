@@ -36,11 +36,41 @@ export interface Page<T> {
 export const roleSchema = z.enum(['admin', 'user'])
 export type Role = z.infer<typeof roleSchema>
 
+/** Password length limits (§7.1). The maximum also caps the work argon2 does per attempt. */
+export const PASSWORD_MIN_LENGTH = 12
+export const PASSWORD_MAX_LENGTH = 256
+
+/** Stored lowercase, so signing in ignores case (§5.1). */
+export const usernameSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .min(3, 'A username has at least 3 characters.')
+  .max(32, 'A username has at most 32 characters.')
+  .regex(
+    /^[a-z0-9][a-z0-9._-]*$/,
+    'Use letters, digits, dots, dashes and underscores, starting with a letter or digit.',
+  )
+
+export const displayNameSchema = z
+  .string()
+  .trim()
+  .min(1, 'Enter a name.')
+  .max(64, 'A name has at most 64 characters.')
+
+/**
+ * A new password (§7.1): any characters, no rules about character classes.
+ * The API also refuses the username itself and the most common passwords.
+ */
+export const passwordSchema = z
+  .string()
+  .min(PASSWORD_MIN_LENGTH, `Use at least ${String(PASSWORD_MIN_LENGTH)} characters.`)
+  .max(PASSWORD_MAX_LENGTH, `Use at most ${String(PASSWORD_MAX_LENGTH)} characters.`)
+
 export const userSchema = z.object({
   id,
-  discordUserId: z.string(),
+  username: z.string(),
   displayName: z.string(),
-  avatarUrl: z.url().nullable(),
   role: roleSchema,
   rootFolderId: id,
   quotaBytes: byteCount,
@@ -48,12 +78,42 @@ export const userSchema = z.object({
 })
 export type User = z.infer<typeof userSchema>
 
+/** Why a session must choose a new password first (§7.1): a first sign-in, or an admin's reset. */
+export const passwordChangeSchema = z.enum(['activate', 'reset'])
+export type PasswordChange = z.infer<typeof passwordChangeSchema>
+
+/** Answered by `GET /auth/me`, `POST /auth/login` and `POST /auth/password`. */
 export const sessionSchema = z.object({
   user: userSchema,
   /** Sent back in the `X-CSRF-Token` header on every state-changing request (§7.1). */
   csrfToken: z.string(),
+  /**
+   * Set while the session was opened with a temporary password: it can only
+   * choose a new one, and every other route answers `403 password_change_required`.
+   */
+  passwordChange: passwordChangeSchema.nullable(),
 })
 export type Session = z.infer<typeof sessionSchema>
+
+/**
+ * `POST /auth/login`. Not checked against `usernameSchema`: a malformed
+ * username gets the same answer as a wrong one.
+ */
+export const loginSchema = z.object({
+  username: z.string().trim().toLowerCase().min(1).max(64),
+  password: z.string().min(1).max(PASSWORD_MAX_LENGTH),
+})
+export type LoginInput = z.infer<typeof loginSchema>
+
+/**
+ * `POST /auth/password`. `currentPassword` may only be left out by a session
+ * that must choose a password; the change ends the user's other sessions.
+ */
+export const changePasswordSchema = z.object({
+  currentPassword: z.string().max(PASSWORD_MAX_LENGTH).optional(),
+  newPassword: passwordSchema,
+})
+export type ChangePasswordInput = z.infer<typeof changePasswordSchema>
 
 // ── Nodes ────────────────────────────────────────────────────────────────────
 
@@ -296,7 +356,13 @@ export type SharedFolderPage = z.infer<typeof sharedFolderPageSchema>
 const count = z.number().int().min(0)
 
 export const adminUserSchema = userSchema.extend({
+  /** The account `dfs owner` made: always an admin, never changed from the app (D28). */
+  isOwner: z.boolean(),
   disabled: z.boolean(),
+  /** When they first chose their own password; `null` until their first sign-in (§7.1). */
+  activatedAt: timestamp.nullable(),
+  /** Set while their password is a temporary one from an admin, which stops working then. */
+  temporaryPasswordExpiresAt: timestamp.nullable(),
   fileCount: count,
   createdAt: timestamp,
   lastSeenAt: timestamp.nullable(),
@@ -304,7 +370,23 @@ export const adminUserSchema = userSchema.extend({
 export type AdminUser = z.infer<typeof adminUserSchema>
 export const adminUserPageSchema = pageSchema(adminUserSchema)
 
+/** `POST /admin/users`: the admin hands the username and temporary password to the person (D27). */
+export const createUserSchema = z.object({
+  username: usernameSchema,
+  /** Defaults to the username. */
+  displayName: displayNameSchema.optional(),
+  temporaryPassword: passwordSchema,
+  quotaBytes: byteCount.optional(),
+  role: roleSchema.optional(),
+})
+export type CreateUserInput = z.infer<typeof createUserSchema>
+
+/** `POST /admin/users/:id/password`: a new temporary password. Ends the user's sessions. */
+export const resetPasswordSchema = z.object({ temporaryPassword: passwordSchema })
+export type ResetPasswordInput = z.infer<typeof resetPasswordSchema>
+
 export const updateUserSchema = z.object({
+  displayName: displayNameSchema.optional(),
   quotaBytes: byteCount.optional(),
   role: roleSchema.optional(),
   disabled: z.boolean().optional(),

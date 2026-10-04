@@ -1,14 +1,18 @@
 import {
+  changePasswordSchema,
   createChannelSchema,
   createFolderSchema,
   createShareSchema,
   createUploadBatchSchema,
   createUploadSchema,
+  createUserSchema,
   ensureFoldersSchema,
+  loginSchema,
   moderationSchema,
   moveNodesSchema,
   nodeIdsSchema,
   nodeKindSchema,
+  resetPasswordSchema,
   sortFieldSchema,
   sortOrderSchema,
   unlockShareSchema,
@@ -22,6 +26,7 @@ import { z, ZodError } from 'zod'
 import { AdminMockDb } from './admin-db'
 import { MockApiError, type MockEvent } from './db'
 import { MOCK_RESPONSE_HEADER } from './marker'
+import { DEMO_ACCOUNTS } from './seed'
 
 // Mocks the HTTP API of DESIGN.md §9 on top of the in-memory database.
 
@@ -59,22 +64,39 @@ const pageQuery = z.object({
 })
 
 export const handlers = [
-  // ── Auth ───────────────────────────────────────────────────────────────────
-  http.get('/api/auth/me', ({ request }) => respond(request, () => db.session())),
-  http.post('/api/auth/logout', ({ request }) =>
-    respondEmpty(request, () => {
-      db.signOut()
-    }),
+  // ── Auth (§7.1) ────────────────────────────────────────────────────────────
+  // A session opened with a temporary password reaches only these three
+  // routes until it chooses a new password (`limited`).
+  http.get('/api/auth/me', ({ request }) =>
+    respond(request, () => db.session(), { limited: true }),
   ),
-  // Mock-only stand-in for the Discord OAuth round trip (§7.1).
-  http.post('/api/auth/dev-login', ({ request }) =>
+  http.post('/api/auth/logout', ({ request }) =>
     respondEmpty(
       request,
       () => {
-        db.signIn()
+        db.signOut()
       },
-      { public: true },
+      { limited: true },
     ),
+  ),
+  http.post('/api/auth/password', ({ request }) =>
+    respond(
+      request,
+      async () => db.changePassword(changePasswordSchema.parse(await request.json())),
+      {
+        limited: true,
+      },
+    ),
+  ),
+  // No session yet, so no CSRF token: the real API checks `Origin` instead.
+  http.post('/api/auth/login', ({ request }) =>
+    respond(request, async () => db.signIn(loginSchema.parse(await request.json())), {
+      public: true,
+    }),
+  ),
+  // Mock only: the demo sign-ins the login page offers.
+  http.get('/api/dev/accounts', ({ request }) =>
+    respond(request, () => DEMO_ACCOUNTS, { public: true }),
   ),
   http.post('/api/dev/reset', ({ request }) =>
     respondEmpty(
@@ -244,6 +266,16 @@ export const handlers = [
 
   // ── Admin (§9) ─────────────────────────────────────────────────────────────
   http.get('/api/admin/users', ({ request }) => respond(request, () => db.adminUsers())),
+  http.post('/api/admin/users', ({ request }) =>
+    respond(request, async () => db.createUser(createUserSchema.parse(await request.json())), {
+      status: 201,
+    }),
+  ),
+  http.post<Id>('/api/admin/users/:id/password', ({ request, params }) =>
+    respond(request, async () =>
+      db.resetPassword(params.id, resetPasswordSchema.parse(await request.json())),
+    ),
+  ),
   http.patch<Id>('/api/admin/users/:id', ({ request, params }) =>
     respond(request, async () =>
       db.updateUser(params.id, updateUserSchema.parse(await request.json())),
@@ -365,7 +397,7 @@ export const handlers = [
 
   // ── Live events (§6.1) ─────────────────────────────────────────────────────
   sse<Record<MockEvent['type'] | 'ping', string>>('/api/events', ({ client, request }) => {
-    if (!db.signedIn) {
+    if (!db.signedIn || db.mustChangePassword) {
       client.error()
       return
     }
@@ -393,6 +425,8 @@ interface RespondOptions {
   status?: number
   /** Skip the session and CSRF checks. */
   public?: boolean
+  /** Also open to a session that must choose a new password first (§7.1). */
+  limited?: boolean
 }
 
 type WorkResult = JsonBodyType | Response
@@ -409,7 +443,7 @@ async function respond(
   await delay(60 + Math.random() * 160)
   let response: Response
   try {
-    if (!options.public) authorize(request)
+    if (!options.public) authorize(request, options.limited ?? false)
     const result = await work()
     response =
       result instanceof Response
@@ -438,8 +472,15 @@ function respondEmpty(
   )
 }
 
-function authorize(request: Request): void {
+function authorize(request: Request, limited: boolean): void {
   if (!db.signedIn) throw new MockApiError(401, 'unauthenticated', 'Sign in to continue.')
+  if (!limited && db.mustChangePassword) {
+    throw new MockApiError(
+      403,
+      'password_change_required',
+      'Choose a new password before you continue.',
+    )
+  }
   const changesState = request.method !== 'GET' && request.method !== 'HEAD'
   if (changesState && request.headers.get('X-CSRF-Token') !== db.csrfToken) {
     throw new MockApiError(403, 'csrf_failed', 'The request is missing a valid CSRF token.')

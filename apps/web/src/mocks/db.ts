@@ -6,11 +6,14 @@ import {
   type AdminUser,
   type ArchiveTicket,
   type AuditEntry,
+  type ChangePasswordInput,
   type CreateUploadInput,
   type DriveNode,
+  type LoginInput,
   type NodeKind,
   type NodePath,
   type Page,
+  type PasswordChange,
   type PublicShare,
   type SearchResult,
   type Session,
@@ -83,7 +86,10 @@ interface MockUpload {
   receivedParts: number[]
 }
 
-export type MockUser = Omit<AdminUser, 'usedBytes' | 'fileCount'>
+export type MockUser = Omit<AdminUser, 'usedBytes' | 'fileCount'> & {
+  /** In the clear because this is a mock; the real API keeps an argon2id hash (§7.1). */
+  password: string
+}
 
 export type MockChannel = Pick<
   StorageChannel,
@@ -94,7 +100,7 @@ export type MockAuditEntry = AuditEntry
 
 export interface MockState {
   version: number
-  /** The signed-in user. */
+  /** The signed-in user, or the last one while signed out. */
   userId: string
   users: MockUser[]
   signedIn: boolean
@@ -122,7 +128,7 @@ export class MockApiError extends Error {
   }
 }
 
-const STATE_VERSION = 4
+const STATE_VERSION = 5
 const STORAGE_KEY = 'dfs.mock-db'
 /** `CHUNK_SIZE` at the 10 MiB attachment limit (§7.3). */
 export const CHUNK_SIZE = 10 * 1024 * 1024 - 128 * 1024
@@ -173,7 +179,7 @@ export class MockDb {
     this.save()
   }
 
-  // ── Session ────────────────────────────────────────────────────────────────
+  // ── Session (§7.1) ─────────────────────────────────────────────────────────
 
   get signedIn(): boolean {
     return this.state.signedIn
@@ -183,9 +189,40 @@ export class MockDb {
     return CSRF_TOKEN
   }
 
-  signIn(): void {
+  /** Signed in with a temporary password: the session can only choose a new one. */
+  get mustChangePassword(): boolean {
+    return this.state.signedIn && this.currentUser().temporaryPasswordExpiresAt !== null
+  }
+
+  signIn({ username, password }: LoginInput): Session {
+    const user = this.state.users.find((candidate) => candidate.username === username)
+    if (user?.password !== password) {
+      this.audit('auth.login_failed', `@${username}`, null, 'Unknown')
+      this.save()
+      throw new MockApiError(401, 'invalid_credentials', 'Wrong username or password.')
+    }
+    // Only someone with the right password learns these.
+    if (user.disabled) {
+      throw new MockApiError(
+        403,
+        'account_disabled',
+        'This account is disabled. Ask an admin if you need it back.',
+      )
+    }
+    const expiresAt = user.temporaryPasswordExpiresAt
+    if (expiresAt !== null && Date.parse(expiresAt) <= Date.now()) {
+      throw new MockApiError(
+        403,
+        'password_expired',
+        'This temporary password has expired. Ask an admin for a new one.',
+      )
+    }
+    this.state.userId = user.id
     this.state.signedIn = true
+    user.lastSeenAt = new Date().toISOString()
+    this.audit('auth.login', user.displayName)
     this.save()
+    return this.session()
   }
 
   signOut(): void {
@@ -193,8 +230,34 @@ export class MockDb {
     this.save()
   }
 
+  /**
+   * `POST /auth/password`. A session opened with a temporary password needs
+   * no current password; choosing one activates a new account (§7.1).
+   */
+  changePassword({ currentPassword, newPassword }: ChangePasswordInput): Session {
+    const user = this.currentUser()
+    const temporary = user.temporaryPasswordExpiresAt !== null
+    if (!temporary && currentPassword !== user.password) {
+      throw new MockApiError(403, 'wrong_password', 'Your current password isn’t right.')
+    }
+    const problem = passwordProblem(newPassword, user)
+    if (problem) throw new MockApiError(400, 'password_rejected', problem)
+
+    user.password = newPassword
+    user.temporaryPasswordExpiresAt = null
+    user.activatedAt ??= new Date().toISOString()
+    this.audit('auth.password_changed', user.displayName)
+    this.save()
+    return this.session()
+  }
+
   session(): Session {
-    return { user: this.publicUser(this.currentUser()), csrfToken: CSRF_TOKEN }
+    const user = this.currentUser()
+    return {
+      user: this.publicUser(user),
+      csrfToken: CSRF_TOKEN,
+      passwordChange: pendingPasswordChange(user),
+    }
   }
 
   protected currentUser(): MockUser {
@@ -204,17 +267,32 @@ export class MockDb {
   }
 
   protected publicUser(user: MockUser): User {
-    const { id, discordUserId, displayName, avatarUrl, role, rootFolderId, quotaBytes } = user
+    const { id, username, displayName, role, rootFolderId, quotaBytes } = user
     return {
       id,
-      discordUserId,
+      username,
       displayName,
-      avatarUrl,
       role,
       rootFolderId,
       quotaBytes,
       usedBytes: this.usedBytes(id),
     }
+  }
+
+  protected audit(
+    action: string,
+    target: string,
+    details: string | null = null,
+    actorName = this.currentUser().displayName,
+  ): void {
+    this.state.audit.unshift({
+      id: crypto.randomUUID(),
+      at: new Date().toISOString(),
+      actorName,
+      action,
+      target,
+      details,
+    })
   }
 
   reset(): void {
@@ -749,7 +827,7 @@ export class MockDb {
 
   // ── Internals ──────────────────────────────────────────────────────────────
 
-  private insert(
+  protected insert(
     fields: Pick<MockNode, 'parentId' | 'kind' | 'name'> & Partial<MockNode>,
   ): MockNode {
     const now = new Date().toISOString()
@@ -1004,6 +1082,33 @@ function checkedName(raw: string): string {
   const problem = validateName(name)
   if (problem) throw new MockApiError(400, 'invalid_name', problem)
   return name
+}
+
+/** Why a session must choose a password before anything else, if it must. */
+function pendingPasswordChange(user: MockUser): PasswordChange | null {
+  if (user.temporaryPasswordExpiresAt === null) return null
+  return user.activatedAt === null ? 'activate' : 'reset'
+}
+
+/** A small stand-in for the API's list of the 10,000 most common passwords (§7.1). */
+const COMMON_PASSWORDS = new Set([
+  '123456789012',
+  'password1234',
+  'qwertyuiopas',
+  'iloveyou1234',
+  'passwordpassword',
+  'letmein12345',
+  'welcome12345',
+])
+
+/** The API's rules for a new password beyond its length (§7.1). */
+export function passwordProblem(password: string, user: MockUser): string | null {
+  if (password === user.password) return 'That’s the current password. Choose a new one.'
+  if (password.toLowerCase() === user.username) return 'A password can’t be the username.'
+  if (COMMON_PASSWORDS.has(password.toLowerCase())) {
+    return 'That password is too common. Choose another.'
+  }
+  return null
 }
 
 export function notFound(): MockApiError {

@@ -48,6 +48,15 @@ interface FileOptions {
   syncCompletesAt?: number | null
 }
 
+/** Sign-ins to try, offered on the login page in demo mode (`GET /api/dev/accounts`). */
+export const DEMO_ACCOUNTS = [
+  { username: 'demo', password: 'demo-password', label: 'Owner and admin' },
+  { username: 'sam', password: 'sam-password', label: 'A regular user' },
+  { username: 'taylor', password: 'welcome-taylor', label: 'First sign-in' },
+  { username: 'morgan', password: 'welcome-morgan', label: 'Temporary password expired' },
+  { username: 'jordan', password: 'jordan-password', label: 'Disabled account' },
+]
+
 export function createSeed(version: number): MockState {
   const random = mulberry32(20261003)
   const now = Date.now()
@@ -351,39 +360,52 @@ export function createSeed(version: number): MockState {
   ]
 
   // ── Other users (for the admin pages) ─────────────────────────────────────
+  // The ones to try are listed in DEMO_ACCOUNTS.
   const demoUser: MockUser = {
     id: demoUserId,
-    discordUserId: '123456789012345678',
+    username: 'demo',
+    password: 'demo-password',
     displayName: 'Demo User',
-    avatarUrl: null,
     role: 'admin',
+    isOwner: true,
     rootFolderId: root,
     quotaBytes: 200 * GB,
     disabled: false,
+    activatedAt: ago(420 * DAY),
+    temporaryPasswordExpiresAt: null,
     createdAt: ago(420 * DAY),
     lastSeenAt: ago(MINUTE),
   }
   const users = [demoUser]
 
-  function user(fields: Pick<MockUser, 'displayName' | 'role' | 'quotaBytes'> & Partial<MockUser>) {
+  function user(
+    fields: Pick<MockUser, 'username' | 'displayName' | 'role' | 'quotaBytes'> & Partial<MockUser>,
+  ) {
     const id = makeUuid(random)
     owner = id
     const userRoot = folder(null, 'My Drive')
+    const createdAt = ago(between(30, 400) * DAY)
     users.push({
       id,
-      discordUserId:
-        String(between(100_000_000, 999_999_999)) + String(between(100_000_000, 999_999_999)),
-      avatarUrl: null,
+      password: `${fields.username}-password`,
+      isOwner: false,
       rootFolderId: userRoot,
       disabled: false,
-      createdAt: ago(between(30, 400) * DAY),
+      activatedAt: createdAt,
+      temporaryPasswordExpiresAt: null,
+      createdAt,
       lastSeenAt: ago(between(1, 72) * 60 * MINUTE),
       ...fields,
     })
     return userRoot
   }
 
-  const sam = user({ displayName: 'Sam Rivera', role: 'user', quotaBytes: 100 * GB })
+  const sam = user({
+    username: 'sam',
+    displayName: 'Sam Rivera',
+    role: 'user',
+    quotaBytes: 100 * GB,
+  })
   photos(folder(sam, 'Photos'), 140, 1, 20 * DAY)
   const samWork = folder(sam, 'Work')
   file(samWork, 'Quarterly report.pdf', 4.2 * MB)
@@ -393,7 +415,12 @@ export function createSeed(version: number): MockState {
   file(games, 'cracked-launcher.exe', 64 * MB, { age: 2 * DAY })
   file(games, 'saves.zip', 380 * MB)
 
-  const priya = user({ displayName: 'Priya Patel', role: 'admin', quotaBytes: 500 * GB })
+  const priya = user({
+    username: 'priya',
+    displayName: 'Priya Patel',
+    role: 'admin',
+    quotaBytes: 500 * GB,
+  })
   const research = folder(priya, 'Research')
   for (let i = 1; i <= 24; i += 1)
     file(research, `Paper ${String(i).padStart(2, '0')}.pdf`, between(1 * MB, 9 * MB))
@@ -404,6 +431,7 @@ export function createSeed(version: number): MockState {
   for (let i = 1; i <= 12; i += 1) file(lectures, `Week ${i}.mp4`, between(400 * MB, 1200 * MB))
 
   const jordan = user({
+    username: 'jordan',
     displayName: 'Jordan Lee',
     role: 'user',
     quotaBytes: 20 * GB,
@@ -414,11 +442,41 @@ export function createSeed(version: number): MockState {
   file(oldStuff, 'notes.txt', 3 * KB)
   file(oldStuff, 'scan.pdf', 2.4 * MB)
 
-  const alex = user({ displayName: 'Alex Kim', role: 'user', quotaBytes: 50 * GB })
+  const alex = user({
+    username: 'alex',
+    displayName: 'Alex Kim',
+    role: 'user',
+    quotaBytes: 50 * GB,
+  })
   const alexBackups = folder(alex, 'Backups')
   file(alexBackups, 'desktop-full.tar.gz', 38 * GB)
   file(alexBackups, 'photos-2025.zip', 7.5 * GB)
   file(folder(alex, 'Documents'), 'Taxes 2025.pdf', 1.1 * MB)
+
+  // Accounts that haven't signed in yet: one waiting, one whose temporary
+  // password ran out (§7.1).
+  user({
+    username: 'taylor',
+    password: 'welcome-taylor',
+    displayName: 'Taylor Brooks',
+    role: 'user',
+    quotaBytes: 100 * GB,
+    activatedAt: null,
+    temporaryPasswordExpiresAt: new Date(now + 6 * DAY).toISOString(),
+    createdAt: ago(DAY),
+    lastSeenAt: null,
+  })
+  user({
+    username: 'morgan',
+    password: 'welcome-morgan',
+    displayName: 'Morgan Diaz',
+    role: 'user',
+    quotaBytes: 50 * GB,
+    activatedAt: null,
+    temporaryPasswordExpiresAt: ago(2 * DAY),
+    createdAt: ago(9 * DAY),
+    lastSeenAt: null,
+  })
 
   // ── Storage channels and the audit log ────────────────────────────────────
   const channel = (name: string, enabled: boolean, age: number): MockChannel => ({
@@ -454,7 +512,9 @@ export function createSeed(version: number): MockState {
     'free-movies.exe (Demo User)',
     'Executable files are not allowed on this server.',
   )
+  log(DAY, 'Demo User', 'user.created', 'Taylor Brooks', '@taylor · 100 GB · User')
   log(2 * DAY, 'Priya Patel', 'user.updated', 'Sam Rivera', 'Quota 50 GB → 100 GB')
+  log(9 * DAY, 'Demo User', 'user.created', 'Morgan Diaz', '@morgan · 50 GB · User')
   log(3 * DAY, 'System', 'scrub.completed', 'All channels', 'Checked 41,208 blobs, 1 lost')
   log(9 * DAY, 'System', 'blob.lost', 'dfs-data-1', 'Old camcorder tape 1998.avi')
   log(45 * DAY, 'Demo User', 'channel.created', 'dfs-data-3', null)

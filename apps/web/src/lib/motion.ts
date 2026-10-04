@@ -17,10 +17,23 @@ export function canUseViewTransitions(): boolean {
 }
 
 /** Reads a spring curve from the theme (`--ease-spring` etc.), for Web Animations. */
-export function themeEasing(name: 'glide' | 'spring' | 'bounce' | 'exit'): string {
+export function themeEasing(name: 'smooth' | 'glide' | 'spring' | 'bounce' | 'exit'): string {
   const value = getComputedStyle(document.documentElement).getPropertyValue(`--ease-${name}`)
   return value.trim() || 'ease-out'
 }
 
 /** Durations that match the curves above (see index.css). */
 export const MOTION_MS = { glide: 350, spring: 430, bounce: 580, exit: 150 } as const
+
+/**
+ * Shakes an element side to side, as iOS does for a wrong password (the
+ * `shake` keyframes in index.css). Unlike remounting with a CSS animation,
+ * this keeps focus and whatever else the element holds.
+ */
+export function shake(element: Element | null): void {
+  if (!element || prefersReducedMotion()) return
+  element.animate(
+    [0, -10, 8, -5, 3, 0].map((x) => ({ transform: `translateX(${String(x)}px)` })),
+    { duration: 420, easing: themeEasing('smooth') },
+  )
+}

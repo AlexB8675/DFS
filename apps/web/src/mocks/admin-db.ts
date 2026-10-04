@@ -2,9 +2,11 @@ import type {
   AdminUser,
   AuditEntry,
   CreateChannelInput,
+  CreateUserInput,
   DriveNode,
   NodePath,
   Page,
+  ResetPasswordInput,
   StorageChannel,
   SystemHealth,
   UpdateUserInput,
@@ -20,6 +22,7 @@ import {
   MockDb,
   notFound,
   paginate,
+  passwordProblem,
   sortNodes,
   type ListOptions,
   type MockNode,
@@ -27,6 +30,10 @@ import {
 } from './db'
 
 const GB = 1024 ** 3
+const DAY = 24 * 60 * 60_000
+/** `DEFAULT_QUOTA_BYTES` and `TEMP_PASSWORD_DAYS` (§15). */
+const DEFAULT_QUOTA_BYTES = 100 * GB
+const TEMP_PASSWORD_DAYS = 7
 const STAGING_MAX_BYTES = 100 * GB
 const CACHE_MAX_BYTES = 5 * GB
 /** How the seeded data is spread over the seeded channels, by name. */
@@ -67,15 +74,87 @@ export class AdminMockDb extends MockDb {
     return { items, nextCursor: null }
   }
 
+  /** `POST /admin/users` (D27): the account and its root folder; active once they choose a password. */
+  createUser(input: CreateUserInput): AdminUser {
+    this.requireAdmin()
+    if (this.state.users.some((user) => user.username === input.username)) {
+      throw new MockApiError(409, 'username_taken', `The username “${input.username}” is taken.`)
+    }
+    const now = new Date()
+    const id = crypto.randomUUID()
+    const root = this.insert({ parentId: null, kind: 'folder', name: 'My Drive', ownerId: id })
+    const user: MockUser = {
+      id,
+      username: input.username,
+      password: input.temporaryPassword,
+      displayName: input.displayName ?? input.username,
+      role: input.role ?? 'user',
+      isOwner: false,
+      rootFolderId: root.id,
+      quotaBytes: input.quotaBytes ?? DEFAULT_QUOTA_BYTES,
+      disabled: false,
+      activatedAt: null,
+      temporaryPasswordExpiresAt: temporaryPasswordExpiry(now),
+      createdAt: now.toISOString(),
+      lastSeenAt: null,
+    }
+    this.state.users.push(user)
+    this.audit(
+      'user.created',
+      user.displayName,
+      `@${user.username} · ${formatBytes(user.quotaBytes)} · ${user.role === 'admin' ? 'Admin' : 'User'}`,
+    )
+    this.changed()
+    return this.adminUser(user)
+  }
+
+  /**
+   * `POST /admin/users/:id/password`: a new temporary password, which signs
+   * them out everywhere. Never the owner, whose way back is `dfs owner` (D28).
+   */
+  resetPassword(id: string, { temporaryPassword }: ResetPasswordInput): AdminUser {
+    const admin = this.requireAdmin()
+    const user = this.findUser(id)
+    if (user.isOwner) {
+      throw new MockApiError(
+        409,
+        'owner_protected',
+        'The owner’s password can only be reset on the server, with dfs owner.',
+      )
+    }
+    if (user.id === admin.id) {
+      throw new MockApiError(409, 'self_change', 'Change your own password in Settings.')
+    }
+    const problem = passwordProblem(temporaryPassword, user)
+    if (problem) throw new MockApiError(400, 'password_rejected', problem)
+
+    user.password = temporaryPassword
+    user.temporaryPasswordExpiresAt = temporaryPasswordExpiry(new Date())
+    this.audit('user.password_reset', user.displayName)
+    this.save()
+    return this.adminUser(user)
+  }
+
   updateUser(id: string, changes: UpdateUserInput): AdminUser {
     const admin = this.requireAdmin()
-    const user = this.state.users.find((candidate) => candidate.id === id)
-    if (!user) throw notFound()
-    if (id === admin.id && (changes.role === 'user' || changes.disabled === true)) {
+    const user = this.findUser(id)
+    const demotes = changes.role === 'user' || changes.disabled === true
+    if (user.isOwner && demotes) {
+      throw new MockApiError(
+        409,
+        'owner_protected',
+        'The owner is always an admin and can’t be disabled.',
+      )
+    }
+    if (id === admin.id && demotes) {
       throw new MockApiError(409, 'self_change', 'You can’t demote or disable your own account.')
     }
 
     const details: string[] = []
+    if (changes.displayName !== undefined && changes.displayName !== user.displayName) {
+      details.push(`Name ${user.displayName} → ${changes.displayName}`)
+      user.displayName = changes.displayName
+    }
     if (changes.quotaBytes !== undefined && changes.quotaBytes !== user.quotaBytes) {
       details.push(`Quota ${formatBytes(user.quotaBytes)} → ${formatBytes(changes.quotaBytes)}`)
       user.quotaBytes = changes.quotaBytes
@@ -95,8 +174,7 @@ export class AdminMockDb extends MockDb {
 
   userUsage(id: string): UserUsage {
     this.requireAdmin()
-    const user = this.state.users.find((candidate) => candidate.id === id)
-    if (!user) throw notFound()
+    const user = this.findUser(id)
     const categories = new Map<UsageCategory, { bytes: number; count: number }>()
     let fileCount = 0
     let folderCount = 0
@@ -308,25 +386,24 @@ export class AdminMockDb extends MockDb {
     return user
   }
 
+  private findUser(id: string): MockUser {
+    const user = this.state.users.find((candidate) => candidate.id === id)
+    if (!user) throw notFound()
+    return user
+  }
+
   private adminUser(user: MockUser): AdminUser {
     let fileCount = 0
     for (const node of Object.values(this.state.nodes)) {
       if (node.ownerId === user.id && node.kind === 'file' && isVisible(node)) fileCount += 1
     }
-    return { ...user, usedBytes: this.usedBytes(user.id), fileCount }
+    const { password: _password, ...fields } = user
+    return { ...fields, usedBytes: this.usedBytes(user.id), fileCount }
   }
+}
 
-  private audit(action: string, target: string, details: string | null = null): void {
-    const actorName = this.currentUser().displayName
-    this.state.audit.unshift({
-      id: crypto.randomUUID(),
-      at: new Date().toISOString(),
-      actorName,
-      action,
-      target,
-      details,
-    })
-  }
+function temporaryPasswordExpiry(from: Date): string {
+  return new Date(from.getTime() + TEMP_PASSWORD_DAYS * DAY).toISOString()
 }
 
 /** Blob and pack counts as the real store would have them: big files solo, small ones packed (§6.6). */

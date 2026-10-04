@@ -4,11 +4,15 @@ import {
   DatabaseBackup,
   Hash,
   History,
+  KeyRound,
+  LogIn,
   ScanSearch,
   ShieldAlert,
   TriangleAlert,
   UserCheck,
   UserCog,
+  UserLock,
+  UserPlus,
   UserX,
   type LucideIcon,
 } from 'lucide-react'
@@ -23,9 +27,14 @@ const ROW_HEIGHT = 56
 
 /** Known actions; others show their code as-is. */
 const ACTIONS: Record<string, { label: string; icon: LucideIcon; tone?: string }> = {
+  'user.created': { label: 'Added user', icon: UserPlus },
   'user.updated': { label: 'Updated user', icon: UserCog },
+  'user.password_reset': { label: 'Reset password', icon: KeyRound, tone: 'text-amber-500' },
   'user.disabled': { label: 'Disabled user', icon: UserX, tone: 'text-amber-500' },
   'user.enabled': { label: 'Enabled user', icon: UserCheck },
+  'auth.login': { label: 'Signed in', icon: LogIn },
+  'auth.login_failed': { label: 'Failed sign-in', icon: UserLock, tone: 'text-destructive' },
+  'auth.password_changed': { label: 'Changed password', icon: KeyRound },
   'node.moderated': { label: 'Removed content', icon: ShieldAlert, tone: 'text-destructive' },
   'channel.created': { label: 'Added channel', icon: Hash },
   'channel.enabled': { label: 'Enabled channel', icon: Hash },

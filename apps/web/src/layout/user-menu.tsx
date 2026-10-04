@@ -2,7 +2,7 @@ import type { User } from '@dfs/shared'
 import { LogOut, RotateCcw, Settings } from 'lucide-react'
 import { Link } from 'react-router'
 import { toast } from 'sonner'
-import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
+import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -33,6 +33,7 @@ export function UserMenu() {
           <UserAvatar user={user} />
           <span className="min-w-0">
             <span className="block truncate font-medium text-foreground">{user.displayName}</span>
+            <span className="block truncate font-mono text-xs">{user.username}</span>
             {user.role === 'admin' && (
               <Badge variant="secondary" className="mt-0.5">
                 Admin
@@ -60,10 +61,10 @@ export function UserMenu() {
   )
 }
 
+/** The user's initials in a circle. */
 export function UserAvatar({ user, className }: { user: User; className?: string }) {
   return (
     <Avatar className={className}>
-      {user.avatarUrl && <AvatarImage src={user.avatarUrl} alt="" />}
       <AvatarFallback className="bg-primary/20 font-medium text-primary">
         {initials(user.displayName)}
       </AvatarFallback>
