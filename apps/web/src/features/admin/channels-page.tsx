@@ -178,7 +178,7 @@ function AddChannelDialog({ onClose }: { onClose: () => void }) {
           </DialogHeader>
           <div className="grid gap-2">
             <Label htmlFor="name">Name</Label>
-            <Input id="name" name="name" defaultValue={state.name} placeholder="dfs-data-4" />
+            <Input id="name" name="name" defaultValue={state.name} placeholder="storage-04" />
           </div>
           <div className="grid gap-2">
             <Label htmlFor="discordChannelId">Discord channel ID</Label>

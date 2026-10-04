@@ -324,7 +324,7 @@ erDiagram
     }
 ```
 
-Supporting tables not drawn above: `journal` (outbox of metadata changes, §8), `backups` (snapshots and their manifests, §8, added with M4), `folder_stat_deltas` (§12.1), and pg-boss's own schema. The Drizzle schema in `packages/db` is the exact definition; this diagram shows its shape. A received upload part is its chunk row, so upload sessions don't list parts separately. Storage channels have their own ID, so a Discord channel ID appears once, in `storage_channels`.
+Supporting tables not drawn above: `journal` (outbox of metadata changes, §8), `backups` (snapshots and their manifests, §8, added with M4), `folder_stats_dirty` (§12.1), `archive_tickets` (single-use ZIP links, §9), and pg-boss's own schema. The Drizzle schema in `packages/db` is the exact definition; this diagram shows its shape. A received upload part is its chunk row, so upload sessions don't list parts separately. Storage channels have their own ID, so a Discord channel ID appears once, in `storage_channels`.
 
 ### 5.1 Key rules and indexes
 
@@ -604,7 +604,7 @@ flowchart TD
 ### 7.5 Other hardening
 
 - Downloads are served with `Content-Disposition: attachment` by default. Inline previews use a strict CSP and `X-Content-Type-Options: nosniff`, and HTML/SVG are always served as attachments, never inline.
-- Share-link tokens are 128-bit random values, and only their SHA-256 is stored, so a link is shown once, when it is created. Optional password (argon2id), expiry, and download cap, all editable later. A password-protected link reveals nothing, not even the item's name, until a correct password (`POST /api/s/:token/unlock`) sets a short-lived cookie scoped to that share; changing the password invalidates those cookies. The share routes have no session, so `POST /api/s/:token/unlock` is exempt from the CSRF token check (§7.1); it is protected instead by rate limiting, an `Origin` check, and a `SameSite=Strict` cookie whose path is `/api/s/:token`. A file download counts toward the cap only when the request starts at byte 0, so seeking in a video doesn't use it up; a ZIP (`GET /api/s/:token/archive`) counts as one download.
+- Share-link tokens are 128-bit random values, and only their SHA-256 is stored, so a link is shown once, when it is created. Optional password (argon2id), expiry, and download cap, all editable later. A password-protected link reveals nothing, not even the item's name, until a correct password (`POST /api/s/:token/unlock`) sets a short-lived cookie scoped to that share, HMAC-signed with a key derived from the master key and bound to the share's password version, so changing the password invalidates those cookies. The share routes have no session, so `POST /api/s/:token/unlock` is exempt from the CSRF token check (§7.1); it is protected instead by rate limiting, an `Origin` check, and a `SameSite=Strict` cookie whose path is `/api/s/:token`. A file download counts toward the cap only when the request starts at byte 0, so seeking in a video doesn't use it up; a ZIP (`GET /api/s/:token/archive`) counts as one download.
 - Sign-in (§7.1) and share-link access are rate-limited.
 - An audit log records sign-ins, password changes and resets, uploads, deletions, shares, and admin actions.
 - Internal API→bot RPC runs only on `dfs_internal`, needs a shared `INTERNAL_RPC_SECRET`, and is blocked at the edge.
@@ -623,7 +623,7 @@ The design aims to survive **losing the VPS** (DB plus disks), as long as the Di
    - `version.stored` (version metadata, wrapped DEK and `key_id`, and each chunk's blob ID, offset, size, and hashes), `version.purged`
    - `blob.relocated` (compaction: the new blob ID and offset of every moved chunk, written only after the new pack's `blob.stored`, §6.6)
 
-   Derived values (`live_bytes`, `used_bytes`, `folder_stats`, channel counters) are not journaled. Recovery recomputes them.
+   Derived values (`live_bytes`, `used_bytes`, `folder_stats`, `nodes.trashed_via`, channel counters) are not journaled. Recovery recomputes them.
 2. **Commit order.** A transaction writes its journal records last, right after taking a transaction-scoped advisory lock (`pg_advisory_xact_lock`), so `journal.id` order is commit order. Without this, a transaction that took a lower ID but committed later could be skipped by both the flusher and a snapshot's high-water mark. The cost is that journaled commits are serialized, at about one fsync each, so they top out near 1 ÷ fsync latency (hundreds to a few thousand per second on an SSD). That is fine at this scale, because bulk work is journaled once per batch or per pack, not once per file.
 3. **Journal batches.** A singleton job (`journal.flush`, in the API because it needs the master key) runs every `JOURNAL_FLUSH_INTERVAL_MS` (60 s) or after 5,000 records. It takes the unflushed records in ID order, compresses them, and seals them as one encrypted object (§7.3, AAD type `0x03`). A batch is also cut at about 8 MiB so it always fits in one attachment. A single record too large for that (only a `version.stored` for a multi-terabyte file) is split across consecutive batches. The bot posts each batch to `#dfs-journal` (`journal.upload`, message format in §4). This adds **one message per batch, not one per file**, which matters when there are millions of files.
 4. **DB snapshots.** A nightly `backup.snapshot` job runs in the API (it holds the keys, and its image ships `pg_dump` 18):
@@ -732,7 +732,7 @@ Internal (bot), only reachable on `dfs_internal` and returning `404` at the edge
 - **Job workers (pg-boss queues):**
   | Queue | Priority | Notes |
   |---|---|---|
-  | `blob.upload` | high | concurrency per channel; retries with backoff; dead-letter after N attempts → affected versions `failed` |
+  | `blob.upload` | high | new jobs `NOTIFY` the leader, which takes them in batches of 8, two batches at a time, fetching again at once while batches come back full; concurrency per channel; retries with backoff; dead-letter after N attempts → affected versions `failed` |
   | `pack.seal` | high | packer loop (§6.6); also triggered by timer |
   | `journal.upload` | high | uploads encrypted journal batches staged by the API, and posts backup pointers with their manifests to `#dfs-backups` (§8) |
   | `blob.delete` | low | GC |
@@ -756,7 +756,7 @@ Expected profile (D7): **few users (≤ ~20), many files.** The design targets *
 | **Discord message count** (rate limits) | Small-file packing (§6.6), batched journal (§8), batched URL refresh (50 blobs/call), more storage channels as needed. |
 | **Discord upload throughput** | Parallel uploads across channels. Measure real per-channel throughput in M1 and size `UPLOAD_CHANNEL_CONCURRENCY` and the channel count from that. |
 | **Postgres row counts** | Compact bigint keys on the high-volume tables. Every hot query is index-only or keyset-paginated, with no `OFFSET` or `COUNT(*)`. With 10M nodes, about 15M chunks, and a few million blobs, the DB stays in the tens of GB, comfortable on a single PG instance. `chunks` can be hash-partitioned by `version_id` later if needed (the schema allows it without app changes). |
-| **Hot rows** (folder sizes, quota) | **Folder sizes are eventually consistent**: writes append to `folder_stat_deltas`, and a periodic job folds them up the ancestor chain in batches, so bulk uploads don't contend on the root folder's row. Quota uses short per-user transactions; with few users this is fine. There are two deliberate serialization points: the journal's commit-order lock (§8) and Postgres's serialization of commits that `NOTIFY` (§6.1). Bulk work hits both once per batch or pack, not once per file. Single actions, such as one upload or a rename, cost one serialized commit each. |
+| **Hot rows** (folder sizes, quota) | **Folder sizes are eventually consistent**: a write marks its folder dirty (`folder_stats_dirty`, one row per folder however many writes), and a loop in the bot recomputes dirty folders and their ancestors from the tree every 2 s, children before parents, a level per statement. Bulk uploads never contend on the root folder's row, and a recompute can't drift the way summed deltas can. Quota is a per-user row: completions take it last, so they hold it only until commit, and every writer takes its locks in one order (`packages/db/src/locks.ts`), so concurrent uploads can't deadlock. There are two deliberate serialization points: the journal's commit-order lock (§8) and Postgres's serialization of commits that `NOTIFY` (§6.1). Bulk work hits both once per batch or pack, not once per file. Single actions, such as one upload or a rename, cost one serialized commit each. |
 | **Huge folders** | Keyset pagination plus virtualized rendering. No "load all children" code paths. |
 | **Bulk operations** (trash or move 100k items) | Moves are O(1) (only the parent changes). Trash and restore of very large subtrees run as batched background jobs (§6.3). |
 | **API CPU/IO** (encryption, streaming) | The API is **stateless**: sessions live in PG, staging is a shared volume, the cache is per instance, and live events fan out through Postgres `LISTEN/NOTIFY` (§6.1), so any instance can serve any user's SSE stream. Scale with `docker compose up --scale api=N`; Caddy load-balances. |
@@ -864,7 +864,7 @@ The **`BlobStore` interface** (`put(blob) → ref`, `get(ref, range?) → stream
 |---|---|---|
 | `NODE_ENV` | `development` | |
 | `DATABASE_URL` | — | |
-| `BLOB_STORE` | `discord` | `local` for offline development and tests |
+| `BLOB_STORE` | `discord` | `local` for offline development and tests; `chaos` (development only) is `local` with the bot's writes failing now and then, to exercise retries (§17) |
 | `LOCAL_BLOB_DIR` | `./.data/blobs` | when `BLOB_STORE=local` |
 | `DISCORD_BOT_TOKEN` | — | bot only; not needed when `BLOB_STORE=local` |
 | `TEMP_PASSWORD_DAYS` | `7` | how long a temporary password set by an admin or `dfs owner` works (§7.1) |
@@ -916,7 +916,8 @@ At startup, config parsing rejects size settings that can't work: it requires `P
 | Integration | API + Postgres (Testcontainers) + `LocalBlobStore`: full upload/download/trash/purge flows, packing and compaction, quota accounting, concurrent renames, SSE events across two API instances, and a **recovery drill**: rebuild an empty DB from the blob store alone (snapshot + journal) and diff it against the source DB |
 | Scale | Seed 1M nodes and check that listing, search, and move latencies stay within budget (p95 < 100 ms for list and search) |
 | Discord contract | `DiscordBlobStore` against a test channel in the `DFS Dev` category (opt-in, real token; D25): upload, Range read on the CDN, URL refresh, delete |
-| Fault injection | A `ChaosBlobStore` wrapper: random 429s, 5xx, timeouts, dropped responses after a successful post (to test idempotency and the reconciler) |
+| Fault injection | A `ChaosBlobStore` wrapper: random 429s, 5xx, timeouts, dropped responses after a successful post (to test idempotency and the reconciler). `BLOB_STORE=chaos` runs the bot on it, and `check:engine` (in `apps/web`) drives the real upload engine against that stack while failing requests, losing answers and cutting the connection mid-file |
+| Stack checks | `check:end-to-end` (in `apps/api`), against a running stack: 1,000 small files and a 1 GB file up, synced and back byte for byte, then 12 clients uploading versions of the same names at once |
 | E2E | Playwright: a first sign-in with a temporary password, upload a folder of 1,000 files, preview a video with seeking, share link, restore from trash |
 
 ---
@@ -942,7 +943,9 @@ The numbers are the original milestones; the arrows are the order of work (D19):
 
 **Done (2026-10-04):** the web UI, built first against the mock API (D14). It covers the screens of §10.1 except Preview: drive with drag-to-move and ZIP downloads, upload panel and engine, trash, shared links, the public share page, settings, and the admin area, with live events and the motion described in §10. The mock implements the §9 contract in the browser, and its spec tests (`apps/web/src/mocks/db.test.ts`) encode the rules the real API must follow.
 
-**Next: the backend**, in the order above. [BACKEND.md](BACKEND.md) is the build plan: packages, conventions, the tasks of each milestone and how each is checked.
+**Done (2026-10-04):** M0 and M2. The API runs the whole §9 contract on local storage, the bot moves encrypted frames into the local blob store, and the web app works end to end against it (`VITE_API_MOCKS=off`). [BACKEND.md](BACKEND.md) §4.2 says how it was checked.
+
+**Next: M1**, Discord storage and the bot, then the rest in the order above. [BACKEND.md](BACKEND.md) is the build plan: packages, conventions, the tasks of each milestone and how each is checked.
 
 **Web UI, still to do:**
 

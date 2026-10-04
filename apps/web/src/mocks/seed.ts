@@ -489,9 +489,9 @@ export function createSeed(version: number): MockState {
   })
   const channels = [
     channel('dfs-legacy', false, 400 * DAY),
-    channel('dfs-data-1', true, 300 * DAY),
-    channel('dfs-data-2', true, 300 * DAY),
-    channel('dfs-data-3', true, 45 * DAY),
+    channel('storage-00', true, 300 * DAY),
+    channel('storage-01', true, 300 * DAY),
+    channel('storage-02', true, 45 * DAY),
   ]
 
   const audit: MockAuditEntry[] = []
@@ -516,8 +516,8 @@ export function createSeed(version: number): MockState {
   log(2 * DAY, 'Priya Patel', 'user.updated', 'Sam Rivera', 'Quota 50 GB → 100 GB')
   log(9 * DAY, 'Demo User', 'user.created', 'Morgan Diaz', '@morgan · 50 GB · User')
   log(3 * DAY, 'System', 'scrub.completed', 'All channels', 'Checked 41,208 blobs, 1 lost')
-  log(9 * DAY, 'System', 'blob.lost', 'dfs-data-1', 'Old camcorder tape 1998.avi')
-  log(45 * DAY, 'Demo User', 'channel.created', 'dfs-data-3', null)
+  log(9 * DAY, 'System', 'blob.lost', 'storage-00', 'Old camcorder tape 1998.avi')
+  log(45 * DAY, 'Demo User', 'channel.created', 'storage-02', null)
   log(60 * DAY, 'Demo User', 'channel.disabled', 'dfs-legacy', null)
   log(90 * DAY, 'Priya Patel', 'user.disabled', 'Jordan Lee', null)
   for (let day = 4; day <= 40; day += 1) {

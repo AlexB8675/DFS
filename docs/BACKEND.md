@@ -151,23 +151,31 @@ Files are encrypted from the start: the API writes DFS1 frames to staging (DESIG
 
 **Tasks**
 
-- [ ] **Auth** (DESIGN §7.1, D27): `POST /auth/login` with argon2id, the dummy-hash check for unknown usernames, per-IP and per-account rate limits, and the `Origin` check; temporary passwords that expire; the limited session that can only choose a password (`403 password_change_required` everywhere else, enforced in the session plugin, not per route); activation on the first own password; `POST /auth/password`, which needs the current password otherwise and ends the other sessions; the common-password list; sessions in Postgres with a new ID on sign-in and password change, CSRF tokens, `GET /auth/me`, logout. Sign-ins, failures, changes and resets are audited.
-- [ ] **`dfs owner`** (D28): a command in `apps/api` that creates the owner with a temporary password, or gives the existing owner a new one and ends their sessions. Development uses it for its first account too.
-- [ ] **Browse and change the tree:** children with keyset pagination, path, node, folders, `folders/ensure`, rename, move with the cycle check, trash and restore, search with `pg_trgm`, folder stats.
-- [ ] **Uploads:** sessions with quota reservation, batches with per-upload results, part PUTs with SHA-256 checks and encryption, auto-complete for single parts, completion, cancel, resume status, `503` with `Retry-After` when staging is full, the 24 h janitor. Same-name uploads become versions; pruning past `VERSION_RETENTION` (D20, D24).
-- [ ] **Bot in local mode:** the `blob.upload` worker writes staged frames to `LocalBlobStore`, marks blobs and versions `stored`, and sends `nodes.synced` through `pg_notify`.
-- [ ] **Content:** streamed downloads with `Range` (from staging while syncing, from the blob store once stored), ZIP archives for folders and selections, archive tickets.
-- [ ] **Shares:** create, list, edit, revoke; the public routes with argon2id passwords, unlock cookies, subtree checks and download counting (DESIGN §7.5, D18).
-- [ ] **Admin:** creating users (username, display name, temporary password, quota, role, with their root folder), resetting passwords, display names, quotas, roles and disabling, never for the owner or for yourself; usage, the read-only metadata browser, moderation, health, channels, audit log (DESIGN §9, D4). Every admin view and action is audited.
-- [ ] **Live events:** one `LISTEN` connection per API instance, SSE with typed payloads and pings (DESIGN §6.1).
-- [ ] **Web and mock (D20):** the mock turns same-name uploads into versions; the engine uses the new session state; a row that gets a new version doesn't replay its "new" animation.
-- [ ] **Switch-over:** the Vite proxy to the API, real downloads by navigation.
+- [x] **Auth** (DESIGN §7.1, D27): `POST /auth/login` with argon2id, the dummy-hash check for unknown usernames, per-IP and per-account rate limits, and the `Origin` check; temporary passwords that expire; the limited session that can only choose a password (`403 password_change_required` everywhere else, enforced in the session plugin, not per route); activation on the first own password; `POST /auth/password`, which needs the current password otherwise and ends the other sessions; the common-password list; sessions in Postgres with a new ID on sign-in and password change, CSRF tokens, `GET /auth/me`, logout. Sign-ins, failures, changes and resets are audited.
+- [x] **`dfs owner`** (D28): a command in `apps/api` that creates the owner with a temporary password, or gives the existing owner a new one and ends their sessions. Development uses it for its first account too.
+- [x] **Browse and change the tree:** children with keyset pagination, path, node, folders, `folders/ensure`, rename, move with the cycle check, trash and restore, search with `pg_trgm`, folder stats.
+- [x] **Uploads:** sessions with quota reservation, batches with per-upload results, part PUTs with SHA-256 checks and encryption, auto-complete for single parts, completion, cancel, resume status, `503` with `Retry-After` when staging is full, the 24 h janitor. Same-name uploads become versions; pruning past `VERSION_RETENTION` (D20, D24).
+- [x] **Bot in local mode:** the `blob.upload` worker writes staged frames to `LocalBlobStore`, marks blobs and versions `stored`, and sends `nodes.synced` through `pg_notify`.
+- [x] **Content:** streamed downloads with `Range` (from staging while syncing, from the blob store once stored), ZIP archives for folders and selections, archive tickets.
+- [x] **Shares:** create, list, edit, revoke; the public routes with argon2id passwords, unlock cookies, subtree checks and download counting (DESIGN §7.5, D18).
+- [x] **Admin:** creating users (username, display name, temporary password, quota, role, with their root folder), resetting passwords, display names, quotas, roles and disabling, never for the owner or for yourself; usage, the read-only metadata browser, moderation, health, channels, audit log (DESIGN §9, D4). Every admin view and action is audited.
+- [x] **Live events:** one `LISTEN` connection per API instance, SSE with typed payloads and pings (DESIGN §6.1).
+- [x] **Web and mock (D20):** the mock turns same-name uploads into versions; the engine uses the new session state; a row that gets a new version doesn't replay its "new" animation.
+- [x] **Switch-over:** the Vite proxy to the API, real downloads by navigation.
 
 **Done when**
 
 - The contract suite (§5) passes against both the MSW handlers and the real API.
 - With `VITE_API_MOCKS=off`, the UI signs in with a password (a first sign-in with a temporary password, too), uploads a folder of 1,000 small files and a 1 GB file, shows them syncing then stored, downloads them back byte for byte, and shares a folder that opens in a private window.
 - The upload engine's retry and resume paths pass against the real API with the `ChaosBlobStore` and an injected network failure.
+
+**How it was checked**
+
+- The contract suite runs in `pnpm check` against both targets (41 tests).
+- In the browser, against the real API: the first sign-in with a temporary password, choosing a password, uploads that sync to stored live, byte-identical downloads (also ranges across a chunk boundary and ZIPs), a share opened signed out and a password share unlocked, and every page of the drive, shares, trash, settings and admin.
+- The 1,000 files and the 1 GB file go through `pnpm --filter @dfs/api check:end-to-end` instead, which makes the web app's requests against the running stack (picking 1,000 files in a browser can't be scripted): 1,000 files in about 12 s from first request to all stored and read back, 1 GB in about 14 s. It also has 12 clients upload versions of the same names at once, which found two bugs: deadlocks between starting and completing uploads, and pruning that failed on finished upload sessions.
+- `pnpm --filter @dfs/web check:engine` runs the real upload engine against the stack with `BLOB_STORE=chaos`: upload requests fail, answers are lost, and an outage fails a file part-way, which is then resumed; everything comes back byte for byte and the quota counts each file once.
+- Not yet: the common-password list is a short embedded one; the full list is a decision for later.
 
 ### 4.3 M1 · Discord storage and the bot
 
@@ -265,11 +273,11 @@ pnpm dev                                                # web :5173, api :3000, 
 | When | Change |
 |---|---|
 | Done | Password sign-in, choosing a password after a temporary one, password change in Settings, and creating users and resetting passwords on the Users page, in the UI and the mock (D27, D28). |
-| M2 | Same-name uploads become versions in the mock; the contract suite covers it (D20). |
-| M2 | The upload engine checks the session's `state` on a retry, and stops checking the node's sync state. |
-| M2 | Rows that get a new version don't replay their "new" animation. |
-| M2 | Downloads use plain navigation with the real API (already built; first exercised here). |
-| M2 | The mock's demo channels use the names of DESIGN §4 (`storage-00` …) instead of `dfs-data-N`. |
+| Done | Same-name uploads become versions in the mock; the contract suite covers it (D20). |
+| Done | The upload engine checks the session's `state` on a retry, and stops checking the node's sync state. |
+| Done | Rows that get a new version don't replay their "new" animation. |
+| Done | Downloads use plain navigation with the real API (already built; first exercised here). |
+| Done | The mock's demo channels use the names of DESIGN §4 (`storage-00` …) instead of `dfs-data-N`. |
 | M5 | Preview and version history screens; the share page shows previews. |
 
 ---

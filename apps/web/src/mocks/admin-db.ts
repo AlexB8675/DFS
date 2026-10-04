@@ -39,9 +39,9 @@ const CACHE_MAX_BYTES = 5 * GB
 /** How the seeded data is spread over the seeded channels, by name. */
 const CHANNEL_SHARES: Record<string, number> = {
   'dfs-legacy': 0.1,
-  'dfs-data-1': 0.35,
-  'dfs-data-2': 0.35,
-  'dfs-data-3': 0.2,
+  'storage-00': 0.35,
+  'storage-01': 0.35,
+  'storage-02': 0.2,
 }
 
 const USAGE_CATEGORIES: Record<FileCategory, UsageCategory> = {
@@ -308,7 +308,7 @@ export class AdminMockDb extends MockDb {
       backups: { lastBackupAt: ago(2 * 3_600_000), lastJournalFlushAt: ago(40_000) },
       lostBlobs: lost.map((node) => ({
         blobId: node.id,
-        channelName: 'dfs-data-1',
+        channelName: 'storage-00',
         detectedAt: ago(9 * 24 * 3_600_000),
         affectedFiles: 1,
       })),
