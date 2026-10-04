@@ -1,5 +1,5 @@
 {
-  "name": "@dfs/api",
+  "name": "@dfs/bot",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -13,9 +13,9 @@
   "dependencies": {
     "@dfs/config": "workspace:*",
     "@dfs/db": "workspace:*",
-    "@dfs/shared": "workspace:*",
     "fastify": "^5.12.5",
-    "fastify-type-provider-zod": "^7.0.0",
+    "pg": "^8.23.1",
+    "pg-boss": "^12.36.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {

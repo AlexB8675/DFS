@@ -1,3 +1,12 @@
 packages:
   - apps/*
   - packages/*
+
+# Install scripts DFS doesn't need: esbuild ships its binary as an optional
+# dependency (drizzle-kit runs without the check), and ssh2/cpu-features only
+# serve Docker over SSH in Testcontainers.
+ignoredBuiltDependencies:
+  - cpu-features
+  - esbuild
+  - protobufjs
+  - ssh2

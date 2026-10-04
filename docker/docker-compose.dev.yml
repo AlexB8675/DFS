@@ -1,0 +1,27 @@
+# Local development: PostgreSQL 18 only (DESIGN §13.1). The app runs on the
+# host with `pnpm dev`. The port is published on localhost only.
+#
+#   docker compose -f docker/docker-compose.dev.yml up -d
+name: dfs-dev
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: dfs
+      POSTGRES_PASSWORD: dfs
+      POSTGRES_DB: dfs
+    ports:
+      - '127.0.0.1:5432:5432'
+    volumes:
+      # From PostgreSQL 18 the image keeps its data under /var/lib/postgresql/18,
+      # so the volume goes one level up, where pg_upgrade can reach both versions.
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U dfs -d dfs']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  postgres-data:
