@@ -301,16 +301,16 @@ export class UploadEngine {
       this.recordSpeed(bytes.byteLength)
       this.publish(job)
     } catch (error) {
-      if (!controller.signal.aborted) await this.handleFailure(job, session, index, error)
+      if (!controller.signal.aborted) this.handleFailure(job, session, index, error)
     }
   }
 
-  private async handleFailure(
+  private handleFailure(
     job: Job,
     session: UploadSession,
     index: number,
     error: unknown,
-  ): Promise<void> {
+  ): void {
     if (job.status !== 'uploading') return
     // Sessions answer until they expire, also once complete, and a part sent
     // again is accepted (§6.1), so a lost response is simply retried. A 404
