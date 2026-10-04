@@ -58,9 +58,10 @@ pnpm dev
 ```
 
 Without the database, both still start: `/api/health` answers 503 and the bot
-retries until Postgres is up. Settings go in a `.env` file at the root (copy
-`.env.example`); in development every one of them has a working default. To run
-only the web app, use `pnpm --filter @dfs/web dev`.
+retries until Postgres is up. If the database restarts while the bot leads, the
+bot stops on purpose (another instance could take over); restart `pnpm dev` to
+bring it back. The database itself comes back on its own when Docker Desktop
+restarts.
 
 The UI still uses its mock API; it switches to the real one in M2.
 

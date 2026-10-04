@@ -618,7 +618,7 @@ The design aims to survive **losing the VPS** (DB plus disks), as long as the Di
 
 1. **Metadata journal (outbox pattern).** Every metadata change that matters for recovery is inserted into a `journal` table **in the same transaction** as the change. Records carry the entity's full state after the change, so replaying a record twice is harmless:
    - `user.upsert`, `node.upsert` (create, rename, move, trash, restore), `node.purge`
-   - `blob.stored` (blob ID, kind, size, SHA-256, and its Discord location: `channel_id`, `message_id`, `attachment_id`), `blob.deleted`
+   - `blob.stored` (blob ID, kind, size, SHA-256, and its Discord location: the Discord channel ID, `message_id`, `attachment_id`), `blob.deleted`. Records name channels by their Discord ID, not by the database's own `storage_channels.id`, so they stay meaningful without the database.
    - `version.stored` (version metadata, wrapped DEK and `key_id`, and each chunk's blob ID, offset, size, and hashes), `version.purged`
    - `blob.relocated` (compaction: the new blob ID and offset of every moved chunk, written only after the new pack's `blob.stored`, §6.6)
 
@@ -632,6 +632,7 @@ The design aims to survive **losing the VPS** (DB plus disks), as long as the Di
    - The newest `BACKUP_RETENTION` (default 7) snapshots are kept. Older dumps are purged like any file, and their pointer messages are deleted. Journal batches are kept forever, so a full replay stays possible.
 5. **Recovery tool:** `dfs recover --guild <id> --key-file <…>`, where the key file holds every `key_id`, current and retired:
    1. Read the newest pointer in `#dfs-backups`, decrypt its manifest, download and verify the dump straight from the listed messages, and `pg_restore` it.
+      Channels that the journal names but the restored database doesn't know (or all of them, with no snapshot) are registered again in `storage_channels` from their Discord IDs.
    2. Read `#dfs-journal` and replay, in order, every record above the snapshot's high-water mark. Batch numbers are contiguous, so a missing batch is reported, not silently skipped.
    3. If a batch is missing, the blob locations it held can still be rebuilt by scanning the data channels for `dfs1 b=…` messages (§4). The node and version changes it held are lost.
    4. Recompute derived values, and mark versions that were still `uploading` or `syncing` as `failed` (their bytes were only in staging).
@@ -888,7 +889,7 @@ The **`BlobStore` interface** (`put(blob) → ref`, `get(ref, range?) → stream
 | `BOT_INTERNAL_URL` | `http://bot:3001` | used by the api |
 | `PUBLIC_BASE_URL` | — | public URL (VPS domain), used for share links and the sign-in `Origin` check |
 | `API_PORT` / `BOT_PORT` | `3000` / `3001` | |
-| `TRUSTED_PROXY_CIDRS` | Docker network CIDR | addresses allowed to set `X-Forwarded-*` |
+| `TRUSTED_PROXY_CIDRS` | `127.0.0.1/32,::1/128` | addresses allowed to set `X-Forwarded-*`. Production sets the subnet of the Compose network Caddy is on; otherwise every request seems to come from Caddy |
 | `LOG_LEVEL` | `info` | |
 
 **Development defaults:** with `NODE_ENV` set to `development` (the default) or `test`, every setting has a default that works with `docker/docker-compose.dev.yml`: `DATABASE_URL` points at it, `INTERNAL_RPC_SECRET` has a fixed development value, `BOT_INTERNAL_URL` is `http://localhost:3001`, `BLOB_STORE` is `local`, `DISCORD_CATEGORY_NAME` is `DFS Dev`, `DISCORD_GATEWAY` is `off` (D25), and staging and the cache live under `./.data`. Relative directories resolve against the repository root. Production has no defaults for the database and the secrets, and requires `INTERNAL_RPC_SECRET` to be at least 32 characters.

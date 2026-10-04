@@ -194,6 +194,7 @@ Files are encrypted from the start: the API writes DFS1 frames to staging (DESIG
 
 - [ ] Dockerfiles for api, bot and the web build; `docker-compose.yml` with caddy, api, bot, postgres and the one-shot `migrate`; the Caddyfile with the route allowlist and streaming settings (DESIGN §3.2, §13.2).
 - [ ] Secrets in `/etc/dfs/secrets`, the master key generated and backed up outside the VPS, `PUBLIC_BASE_URL`, and `dfs owner` to make your account.
+- [ ] `NODE_ENV=production` in the images, so no development default applies (DESIGN §15); a fixed subnet for the internal Compose network, with `TRUSTED_PROXY_CIDRS` set to it, so sign-in limits and the audit log see real client addresses.
 - [ ] Getting the code: a read-only deploy key for the GitHub repository; updates stay `git pull && docker compose up -d --build` (DESIGN §13.2).
 - [ ] Sizes for this VPS (more than 150 GB of disk): `STAGING_MAX_BYTES=50GiB` and `CACHE_MAX_BYTES=20GiB`, leaving room for Postgres, images and the OS. Check them against the real disk size and the DB estimate of DESIGN §12.2 before going live.
 - [ ] Host setup: Docker, firewalld, SSH keys only, automatic security updates.

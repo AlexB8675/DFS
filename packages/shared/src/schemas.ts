@@ -451,7 +451,13 @@ export const systemHealthSchema = z.object({
     lastJournalFlushAt: timestamp.nullable(),
   }),
   lostBlobs: z.array(
-    z.object({ blobId: id, channelName: z.string(), detectedAt: timestamp, affectedFiles: count }),
+    z.object({
+      /** A bigint identity in the database, sent as a string so it stays exact. */
+      blobId: z.string(),
+      channelName: z.string(),
+      detectedAt: timestamp,
+      affectedFiles: count,
+    }),
   ),
 })
 export type SystemHealth = z.infer<typeof systemHealthSchema>
@@ -478,7 +484,8 @@ export type CreateChannelInput = z.infer<typeof createChannelSchema>
 export const updateChannelSchema = z.object({ enabled: z.boolean() })
 
 export const auditEntrySchema = z.object({
-  id,
+  /** A bigint identity in the database, sent as a string so it stays exact; also the page cursor. */
+  id: z.string(),
   at: timestamp,
   actorName: z.string(),
   action: z.string(),
