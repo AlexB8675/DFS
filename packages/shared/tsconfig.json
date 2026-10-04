@@ -1,5 +1,7 @@
 {
-  "extends": "../../tsconfig.base.json",
+  // Node's module rules, since the API runs this package directly (D22);
+  // no Node types, since the browser uses it too.
+  "extends": "../../tsconfig.node.json",
   "compilerOptions": {
     "types": []
   },
