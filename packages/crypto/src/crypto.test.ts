@@ -99,6 +99,18 @@ describe('master keys and wrapped DEKs', () => {
   })
 })
 
+describe('signing', () => {
+  it('verifies its own signatures, and nothing else', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'dfs-keys-'))
+    await MasterKeys.createFile(path.join(dir, 'keys.json'))
+    const keys = await MasterKeys.fromFile(path.join(dir, 'keys.json'))
+    const mac = await keys.sign('share:1:0')
+    expect(await keys.verify('share:1:0', mac)).toBe(true)
+    expect(await keys.verify('share:1:1', mac)).toBe(false)
+    await rm(dir, { recursive: true, force: true })
+  })
+})
+
 describe('hashing', () => {
   it('matches the SHA-256 of a known input', async () => {
     const digest = await sha256(new TextEncoder().encode('abc'))

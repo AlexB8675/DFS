@@ -34,21 +34,39 @@ const keyFileSchema = z
 export class MasterKeys {
   readonly currentId: string
   readonly #keys: ReadonlyMap<string, AesKey>
+  /** For signing short-lived tokens such as share unlock cookies; derived, never stored. */
+  readonly #macKey: AesKey
 
-  private constructor(currentId: string, keys: ReadonlyMap<string, AesKey>) {
+  private constructor(currentId: string, keys: ReadonlyMap<string, AesKey>, macKey: AesKey) {
     this.currentId = currentId
     this.#keys = keys
+    this.#macKey = macKey
   }
 
   static async fromFile(file: string): Promise<MasterKeys> {
     const parsed = keyFileSchema.parse(JSON.parse(await readFile(file, 'utf8')))
     const keys = new Map<string, AesKey>()
+    let macKey: AesKey | null = null
     for (const [id, encoded] of Object.entries(parsed.keys)) {
       const raw = Buffer.from(encoded, 'base64')
       if (raw.length !== KEY_BYTES) throw new Error(`Master key "${id}" is not 256 bits.`)
       keys.set(id, await importAesKey(raw))
+      if (id === parsed.current) macKey = await deriveMacKey(raw)
     }
-    return new MasterKeys(parsed.current, keys)
+    if (!macKey) throw new Error('The current master key is missing.')
+    return new MasterKeys(parsed.current, keys, macKey)
+  }
+
+  /** An HMAC-SHA-256 of `data`, with a key derived from the current master key. */
+  async sign(data: string): Promise<Uint8Array> {
+    return new Uint8Array(
+      await crypto.subtle.sign('HMAC', this.#macKey, new TextEncoder().encode(data)),
+    )
+  }
+
+  /** Whether `mac` is `sign(data)`, compared in constant time. */
+  async verify(data: string, mac: Uint8Array): Promise<boolean> {
+    return crypto.subtle.verify('HMAC', this.#macKey, mac, new TextEncoder().encode(data))
   }
 
   /** Writes a new key file with one random key. Development only: production keys are made and backed up by hand. */
@@ -101,6 +119,23 @@ export function generateDek(): Uint8Array {
 
 export function importAesKey(raw: Uint8Array): Promise<AesKey> {
   return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt'])
+}
+
+/** HKDF from a master key to an HMAC key, so signing never uses the encryption key itself. */
+async function deriveMacKey(raw: Uint8Array): Promise<AesKey> {
+  const base = await crypto.subtle.importKey('raw', raw, 'HKDF', false, ['deriveKey'])
+  return crypto.subtle.deriveKey(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt: new Uint8Array(32),
+      info: new TextEncoder().encode('dfs1-mac'),
+    },
+    base,
+    { name: 'HMAC', hash: 'SHA-256', length: 256 },
+    false,
+    ['sign', 'verify'],
+  )
 }
 
 function wrapAad(keyId: string, binding: Uint8Array): Uint8Array {

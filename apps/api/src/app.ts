@@ -19,6 +19,7 @@ import { contentRoutes } from './routes/content.ts'
 import { eventRoutes } from './routes/events.ts'
 import { healthRoutes } from './routes/health.ts'
 import { nodeRoutes } from './routes/nodes.ts'
+import { shareRoutes } from './routes/shares.ts'
 import { uploadRoutes } from './routes/uploads.ts'
 import { StagingLimit } from './staging.ts'
 
@@ -28,7 +29,7 @@ declare module 'fastify' {
     pool: pg.Pool
     db: Database
     /** Per-instance request limits (DESIGN.md §7.5). */
-    limits: { signIn: RateLimiter }
+    limits: { signIn: RateLimiter; shareUnlock: RateLimiter }
     /** Frames received but not yet stored (§6.1), and whether there is room for more. */
     staging: Staging
     stagingLimit: StagingLimit
@@ -82,8 +83,11 @@ export async function buildApp({ config, logger }: AppOptions): Promise<FastifyI
   app.decorate('config', config)
   app.decorate('pool', pool)
   app.decorate('db', db)
-  // Failed sign-ins per client address (§7.1).
-  app.decorate('limits', { signIn: new RateLimiter(30, 10 * 60_000) })
+  // Failed sign-ins per client address (§7.1), and wrong share passwords per address and link (§7.5).
+  app.decorate('limits', {
+    signIn: new RateLimiter(30, 10 * 60_000),
+    shareUnlock: new RateLimiter(10, 10 * 60_000),
+  })
   app.decorate('staging', new Staging(config.stagingDir))
   app.decorate('stagingLimit', new StagingLimit(db, config.stagingMaxBytes))
   app.decorate('keys', await loadMasterKeys(config, app.log))
@@ -115,6 +119,7 @@ export async function buildApp({ config, logger }: AppOptions): Promise<FastifyI
   await app.register(uploadRoutes, { prefix: '/api' })
   await app.register(eventRoutes, { prefix: '/api' })
   await app.register(contentRoutes, { prefix: '/api' })
+  await app.register(shareRoutes, { prefix: '/api' })
   return app
 }
 
