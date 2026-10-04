@@ -289,7 +289,7 @@ pnpm dev                                                # web :5173, api :3000, 
 | Type stripping and pnpm's symlinked workspace packages | The M0 smoke test: works as is | Done (M0) |
 | The Zod type provider supporting Zod 4 | `fastify-type-provider-zod` 7 (Zod 4.2+), used by `/api/health` | Done (M0) |
 | Drizzle with PG 18 features (`uuidv7()` defaults, partial and trigram indexes) | The first migration and the schema tests | Done (M0) |
-| argon2's native build on Windows and in the Alpine/Debian image | Install in dev and in the Dockerfile | M2, deployment |
+| argon2's native build on Windows and in the Alpine/Debian image | None needed: the API uses Node's built-in `crypto.argon2` | Done (M2) |
 | Discord rate limits with many small files | The 10,000-file check with packing | M1 |
 | Development and production sharing one bot (D25) | The side-by-side check of M1; load tests stay on `LocalBlobStore` | M1 onwards |
 | CDN URL expiry during long streams | A slow download across a refresh | M1 |
@@ -299,3 +299,4 @@ pnpm dev                                                # web :5173, api :3000, 
 ## 9. Open questions
 
 1. **The domain.** There is none yet; it is decided before the first deployment, which needs it for TLS, share links and the sign-in `Origin` check. Nothing before that depends on it.
+2. **The common-password list.** Sign-in refuses a short embedded list of common passwords today. The SecLists top 10,000 (MIT, about 80 KB) would catch far more; decide before real users arrive.
