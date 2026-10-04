@@ -42,10 +42,11 @@ describe('API without a database', () => {
     // Nothing listens on port 1, so connecting fails at once.
     const config = testConfig({ DATABASE_URL: 'postgres://dfs:dfs@127.0.0.1:1/dfs' })
     app = await buildApp({ config, logger: false })
-    app.get('/api/test/fails', () => {
+    const open = { config: { access: 'public' as const } }
+    app.get('/api/test/fails', open, () => {
       throw new Error('boom: a secret detail')
     })
-    app.get('/api/test/refuses', () => {
+    app.get('/api/test/refuses', open, () => {
       throw new ApiError(507, 'quota_exceeded', 'Not enough space.')
     })
   })

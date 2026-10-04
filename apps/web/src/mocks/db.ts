@@ -316,6 +316,17 @@ export class MockDb {
     this.scheduleSyncCompletions()
   }
 
+  /** Tests only: every file still syncing is stored now, as the real bot would get to. */
+  finishSyncs(): void {
+    for (const node of Object.values(this.state.nodes)) {
+      if (node.syncState === 'syncing') {
+        node.syncState = 'stored'
+        node.syncCompletesAt = null
+      }
+    }
+    this.save()
+  }
+
   // ── Events (feeds the mocked SSE stream) ───────────────────────────────────
 
   subscribe(listener: (event: MockEvent) => void): () => void {

@@ -1,0 +1,136 @@
+import path from 'node:path'
+import { createInterface } from 'node:readline/promises'
+import { parseArgs } from 'node:util'
+import { ConfigError, loadConfig, type Config } from '@dfs/config'
+import {
+  appendJournal,
+  createDatabase,
+  createPool,
+  userRecord,
+  users,
+  type Database,
+} from '@dfs/db'
+import { generatePassword, usernameSchema } from '@dfs/shared'
+import { eq } from 'drizzle-orm'
+import { audit } from './audit.ts'
+import { hashPassword } from './auth/passwords.ts'
+import { endUserSessions } from './auth/sessions.ts'
+import { createUser } from './users/users.ts'
+
+// `dfs`: admin commands run on the server (DESIGN.md §7.1).
+//
+//   pnpm dfs owner [--username <name>]
+//
+// `owner` creates the owner account with a temporary password, or, when the
+// owner exists, gives it a new one and signs it out everywhere: the way back
+// in for the owner, since there is no email.
+
+const USAGE = 'Usage: dfs owner [--username <name>]'
+const DAY_MS = 24 * 60 * 60_000
+const rootDir = path.resolve(import.meta.dirname, '../../..')
+
+const { positionals, values } = parseArgs({
+  allowPositionals: true,
+  options: { username: { type: 'string' } },
+})
+
+if (positionals[0] !== 'owner' || positionals.length !== 1) {
+  console.error(USAGE)
+  process.exit(1)
+}
+
+let config: Config
+try {
+  config = loadConfig(process.env, { service: 'cli', rootDir })
+} catch (error) {
+  console.error(error instanceof ConfigError ? error.message : error)
+  process.exit(1)
+}
+
+const pool = createPool(config.databaseUrl, {
+  applicationName: 'dfs-cli',
+  onError: () => undefined,
+})
+try {
+  await owner(createDatabase(pool), config, values.username)
+} catch (error) {
+  console.error(error instanceof Error ? error.message : error)
+  process.exitCode = 1
+} finally {
+  await pool.end()
+}
+
+async function owner(
+  db: Database,
+  config: Config,
+  givenUsername: string | undefined,
+): Promise<void> {
+  const temporaryPassword = generatePassword()
+  const passwordHash = await hashPassword(temporaryPassword)
+  const passwordExpiresAt = new Date(Date.now() + config.tempPasswordDays * DAY_MS)
+  const [existing] = await db.select().from(users).where(eq(users.isOwner, true))
+
+  let username: string
+  if (existing) {
+    username = existing.username
+    await db.transaction(async (tx) => {
+      const [updated] = await tx
+        .update(users)
+        .set({
+          passwordHash,
+          passwordExpiresAt,
+          disabledAt: null,
+          failedSignIns: 0,
+          signInLockedUntil: null,
+        })
+        .where(eq(users.id, existing.id))
+        .returning()
+      if (!updated) throw new Error('The owner account disappeared.')
+      await endUserSessions(tx, existing.id)
+      await audit(tx, {
+        actorId: null,
+        action: 'user.password_reset',
+        target: existing.displayName,
+        details: 'dfs owner',
+      })
+      await appendJournal(tx, [userRecord(updated)])
+    })
+    console.log(
+      `Gave the owner, ${username}, a new temporary password and signed them out everywhere.`,
+    )
+  } else {
+    username = usernameSchema.parse(
+      givenUsername ?? (await ask('Username for the owner account: ')),
+    )
+    await db.transaction((tx) =>
+      createUser(tx, {
+        username,
+        displayName: username,
+        passwordHash,
+        passwordExpiresAt,
+        role: 'admin',
+        quotaBytes: config.defaultQuotaBytes,
+        isOwner: true,
+      }),
+    )
+    console.log(`Created the owner account, ${username}.`)
+  }
+
+  console.log(`
+  Sign in at:          ${config.publicBaseUrl}/login
+  Username:            ${username}
+  Temporary password:  ${temporaryPassword}
+  Works until:         ${passwordExpiresAt.toLocaleString()}
+
+You'll choose your own password when you sign in.`)
+}
+
+async function ask(question: string): Promise<string> {
+  if (!process.stdin.isTTY) throw new Error(`No terminal to ask in. ${USAGE}`)
+  const prompt = createInterface({ input: process.stdin, output: process.stdout })
+  try {
+    return await prompt.question(question)
+  } finally {
+    prompt.close()
+  }
+}

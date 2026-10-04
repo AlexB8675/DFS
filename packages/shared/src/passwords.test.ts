@@ -1,6 +1,6 @@
-import { passwordSchema } from '@dfs/shared'
 import { describe, expect, it } from 'vitest'
-import { generatePassword } from './password'
+import { generatePassword } from './passwords.ts'
+import { passwordSchema } from './schemas.ts'
 
 describe('generatePassword', () => {
   it('makes four groups of four unambiguous characters', () => {

@@ -30,6 +30,7 @@
   },
   "devDependencies": {
     "@babel/core": "^7.29.7",
+    "@dfs/contract": "workspace:*",
     "@rolldown/plugin-babel": "^0.2.4",
     "@tailwindcss/vite": "^4.3.3",
     "@types/babel__core": "^7.20.5",

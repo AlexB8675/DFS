@@ -1,10 +1,15 @@
 import { randomUUID } from 'node:crypto'
+import cookie from '@fastify/cookie'
 import type { Config } from '@dfs/config'
 import { createDatabase, createPool, type Database } from '@dfs/db'
 import Fastify, { LogController, type FastifyInstance, type FastifyServerOptions } from 'fastify'
 import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod'
 import type pg from 'pg'
+import { registerAccess } from './auth/access.ts'
+import { RateLimiter } from './auth/rate-limit.ts'
 import { registerErrorHandling } from './errors.ts'
+import { adminRoutes } from './routes/admin.ts'
+import { authRoutes } from './routes/auth.ts'
 import { healthRoutes } from './routes/health.ts'
 
 declare module 'fastify' {
@@ -12,6 +17,8 @@ declare module 'fastify' {
     config: Config
     pool: pg.Pool
     db: Database
+    /** Per-instance request limits (DESIGN.md §7.5). */
+    limits: { signIn: RateLimiter }
   }
 }
 
@@ -56,8 +63,14 @@ export async function buildApp({ config, logger }: AppOptions): Promise<FastifyI
   app.addHook('onSend', async (request, reply) => {
     reply.header('x-request-id', request.id)
   })
+  app.decorate('limits', { signIn: new RateLimiter(30, 10 * 60_000) })
+
+  await app.register(cookie)
+  registerAccess(app)
 
   await app.register(healthRoutes, { prefix: '/api' })
+  await app.register(authRoutes, { prefix: '/api' })
+  await app.register(adminRoutes, { prefix: '/api' })
   return app
 }
 

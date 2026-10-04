@@ -1,4 +1,10 @@
-import { createUserSchema, resetPasswordSchema, type AdminUser, type Role } from '@dfs/shared'
+import {
+  createUserSchema,
+  generatePassword,
+  resetPasswordSchema,
+  type AdminUser,
+  type Role,
+} from '@dfs/shared'
 import { Check, Copy, RefreshCw, ShieldAlert, UserCheck } from 'lucide-react'
 import { useActionState, useState, type ReactNode } from 'react'
 import { toast } from 'sonner'
@@ -20,7 +26,6 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { useCurrentUser } from '@/features/auth/session'
 import { errorMessage } from '@/lib/api/client'
 import { formatBytes, formatFullDate } from '@/lib/format'
-import { generatePassword } from '@/lib/password'
 import { useCreateUser, useResetPassword, useUpdateUser } from './api'
 
 const GB = 1024 ** 3

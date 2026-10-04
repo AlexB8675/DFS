@@ -10,20 +10,21 @@ const healthSchema = z.object({
 
 /** `GET /api/health`: the API is up, and whether it can reach Postgres. */
 export function healthRoutes(app: FastifyInstance, _options: object, done: () => void): void {
-  app
-    .withTypeProvider<ZodTypeProvider>()
-    .get(
-      '/health',
-      { schema: { response: { 200: healthSchema, 503: healthSchema } } },
-      async (request, reply) => {
-        const reachable = await canQuery(app.pool)
-        if (!reachable) request.log.warn('health check: database unreachable')
-        return reply.code(reachable ? 200 : 503).send({
-          status: reachable ? 'ok' : 'degraded',
-          database: reachable ? 'ok' : 'unreachable',
-        })
-      },
-    )
+  app.withTypeProvider<ZodTypeProvider>().get(
+    '/health',
+    {
+      config: { access: 'public' },
+      schema: { response: { 200: healthSchema, 503: healthSchema } },
+    },
+    async (request, reply) => {
+      const reachable = await canQuery(app.pool)
+      if (!reachable) request.log.warn('health check: database unreachable')
+      return reply.code(reachable ? 200 : 503).send({
+        status: reachable ? 'ok' : 'degraded',
+        database: reachable ? 'ok' : 'unreachable',
+      })
+    },
+  )
   done()
 }
 

@@ -32,6 +32,13 @@ import { DEMO_ACCOUNTS } from './seed'
 
 export const db = new AdminMockDb()
 
+/** A realistic delay before each answer; the contract suite turns it off for speed. */
+let responseDelay = true
+
+export function setResponseDelay(enabled: boolean): void {
+  responseDelay = enabled
+}
+
 /** The real API pings every 25 s so clients notice dead connections (§6.1). */
 const PING_INTERVAL_MS = 25_000
 
@@ -440,7 +447,7 @@ async function respond(
   work: () => WorkResult | Promise<WorkResult>,
   options: RespondOptions = {},
 ): Promise<Response> {
-  await delay(60 + Math.random() * 160)
+  if (responseDelay) await delay(60 + Math.random() * 160)
   let response: Response
   try {
     if (!options.public) authorize(request, options.limited ?? false)
