@@ -312,15 +312,10 @@ export class UploadEngine {
     error: unknown,
   ): Promise<void> {
     if (job.status !== 'uploading') return
+    // Sessions answer until they expire, also once complete, and a part sent
+    // again is accepted (§6.1), so a lost response is simply retried. A 404
+    // means the session expired.
     if (isNotFound(error)) {
-      // A single-part upload completes as soon as its part arrives. If that
-      // response was lost, the retry finds the session gone, though the file
-      // made it: check before calling it a failure.
-      if (session.chunkCount === 1 && (await this.landed(session.nodeId))) {
-        job.doneParts.add(index)
-        job.uploadedBytes = job.file.size
-        return
-      }
       resetSession(job)
       this.fail(job, 'The upload expired. Retry to start it again.')
       return
@@ -341,15 +336,6 @@ export class UploadEngine {
       return
     }
     this.fail(job, errorMessage(error))
-  }
-
-  private async landed(nodeId: string): Promise<boolean> {
-    try {
-      const node = await this.transport.node(nodeId)
-      return node !== null && node.syncState !== 'uploading'
-    } catch {
-      return false
-    }
   }
 
   private async finish(job: Job): Promise<void> {
@@ -419,7 +405,12 @@ export class UploadEngine {
         // A job paused meanwhile keeps its session for when it resumes.
       })
       // The new files show up in their folders right away, marked as uploading.
-      markFresh(batch.flatMap((job) => (job.session ? [job.session.nodeId] : [])))
+      // New files pop in; a new version of a file already listed doesn't (D20).
+      markFresh(
+        batch.flatMap((job) =>
+          job.session && !job.session.isNewVersion ? [job.session.nodeId] : [],
+        ),
+      )
       for (const job of batch) this.refreshFolder(job.parentId)
     } catch (error) {
       for (const job of batch) if (job.status === 'queued') this.fail(job, errorMessage(error))

@@ -59,6 +59,8 @@ export interface MockNode {
   /** Set on descendants of a trashed folder: the ID of that folder. */
   trashedVia: string | null
   moderationReason: string | null
+  /** Sizes of the previous versions kept (D20); they count toward the quota (D24). */
+  previousVersionBytes?: number[]
 }
 
 export interface MockShare {
@@ -81,9 +83,16 @@ export interface MockShare {
 interface MockUpload {
   id: string
   nodeId: string
+  versionId: string
+  /** The upload makes a new version of an existing file (D20). */
+  isNewVersion: boolean
+  sizeBytes: number
+  mimeType: string
   chunkSize: number
   chunkCount: number
-  receivedParts: number[]
+  /** Part index → the SHA-256 it arrived with, so a part sent again is recognized. */
+  receivedParts: Record<number, string | null>
+  state: 'receiving' | 'completed'
 }
 
 export type MockUser = Omit<AdminUser, 'usedBytes' | 'fileCount'> & {
@@ -128,13 +137,15 @@ export class MockApiError extends Error {
   }
 }
 
-const STATE_VERSION = 5
+const STATE_VERSION = 6
 const STORAGE_KEY = 'dfs.mock-db'
 /** `CHUNK_SIZE` at the 10 MiB attachment limit (§7.3). */
 export const CHUNK_SIZE = 10 * 1024 * 1024 - 128 * 1024
 const CSRF_TOKEN = 'mock-csrf-token'
 /** Archive links from `POST /archive` work once, for a minute (§9). */
 const ARCHIVE_TICKET_MS = 60_000
+/** `VERSION_RETENTION` (§15): previous versions kept after a new one completes. */
+const VERSION_RETENTION = 3
 
 export interface ListOptions {
   kind?: NodeKind
@@ -173,7 +184,9 @@ export class MockDb {
     if (uploads.length === 0) return
     for (const upload of uploads) {
       const node = this.state.nodes[upload.nodeId]
-      if (node?.syncState === 'uploading') Reflect.deleteProperty(this.state.nodes, node.id)
+      if (upload.state === 'receiving' && !upload.isNewVersion && node?.syncState === 'uploading') {
+        Reflect.deleteProperty(this.state.nodes, node.id)
+      }
     }
     this.state.uploads = {}
     this.save()
@@ -552,6 +565,11 @@ export class MockDb {
     })
   }
 
+  /**
+   * `POST /uploads`. A name that matches a file in the folder makes a new
+   * version of it (D20): the node keeps its ID and name, and readers get the
+   * old version until the upload completes. A matching folder is a conflict.
+   */
   createUpload(
     parentId: string,
     rawName: string,
@@ -559,48 +577,49 @@ export class MockDb {
     mimeType: string,
   ): UploadSession {
     this.requireFolder(parentId)
+    const name = checkedName(rawName)
+    const existing = this.childrenOf(parentId).find((node) => nameKey(node.name) === nameKey(name))
+    if (existing?.kind === 'folder') throw nameConflict(name)
     const user = this.currentUser()
     if (this.usedBytes(user.id) + sizeBytes > user.quotaBytes) {
       throw new MockApiError(507, 'quota_exceeded', `Not enough storage left for “${rawName}”.`)
     }
-    const name = this.freeName(parentId, checkedName(rawName))
-    const node = this.insert({
-      parentId,
-      kind: 'file',
-      name,
-      mimeType,
-      sizeBytes,
-      syncState: 'uploading',
-    })
+    const node =
+      existing ??
+      this.insert({ parentId, kind: 'file', name, mimeType, sizeBytes, syncState: 'uploading' })
     const upload: MockUpload = {
       id: crypto.randomUUID(),
       nodeId: node.id,
+      versionId: crypto.randomUUID(),
+      isNewVersion: existing !== undefined,
+      sizeBytes,
+      mimeType,
       chunkSize: CHUNK_SIZE,
       chunkCount: Math.ceil(sizeBytes / CHUNK_SIZE),
-      receivedParts: [],
+      receivedParts: {},
+      state: 'receiving',
     }
     this.state.uploads[upload.id] = upload
     this.changed()
-    return {
-      uploadId: upload.id,
-      nodeId: node.id,
-      chunkSize: upload.chunkSize,
-      chunkCount: upload.chunkCount,
-    }
+    return this.uploadSession(upload)
   }
 
-  /** `GET /uploads/:id`: which parts arrived, for resuming. */
+  /** `GET /uploads/:id`: which parts arrived, for resuming; also after completion. */
   uploadStatus(uploadId: string): UploadSessionStatus {
     const upload = this.upload(uploadId)
     return {
-      uploadId: upload.id,
-      nodeId: upload.nodeId,
-      chunkSize: upload.chunkSize,
-      chunkCount: upload.chunkCount,
-      receivedParts: upload.receivedParts.toSorted((a, b) => a - b),
+      ...this.uploadSession(upload),
+      state: upload.state,
+      receivedParts: Object.keys(upload.receivedParts)
+        .map(Number)
+        .toSorted((a, b) => a - b),
     }
   }
 
+  /**
+   * `PUT /uploads/:id/parts/:index`. Sending a part again is harmless, also
+   * after completion, so a client whose response was lost can simply retry.
+   */
   async receivePart(
     uploadId: string,
     index: number,
@@ -614,7 +633,11 @@ export class MockDb {
     if (sha256 && sha256 !== (await sha256Hex(body))) {
       throw new MockApiError(400, 'hash_mismatch', 'The part was corrupted in transit.')
     }
-    if (!upload.receivedParts.includes(index)) upload.receivedParts.push(index)
+    if (upload.state === 'completed') {
+      if (upload.receivedParts[index] === sha256) return
+      throw new MockApiError(409, 'upload_completed', 'This upload is already complete.')
+    }
+    upload.receivedParts[index] = sha256
     // A single-part upload completes on its own (§6.1), saving a request per small file.
     if (upload.chunkCount === 1) this.completeUpload(uploadId)
     else this.save()
@@ -622,27 +645,42 @@ export class MockDb {
 
   completeUpload(uploadId: string): void {
     const upload = this.upload(uploadId)
-    if (upload.receivedParts.length !== upload.chunkCount) {
+    if (upload.state === 'completed') return
+    if (Object.keys(upload.receivedParts).length !== upload.chunkCount) {
       throw new MockApiError(409, 'incomplete_upload', 'Some parts have not been uploaded yet.')
     }
     const node = this.state.nodes[upload.nodeId]
     if (node) {
+      if (upload.isNewVersion) {
+        node.previousVersionBytes = [node.sizeBytes, ...(node.previousVersionBytes ?? [])].slice(
+          0,
+          VERSION_RETENTION,
+        )
+        node.sizeBytes = upload.sizeBytes
+        node.mimeType = upload.mimeType
+      }
       node.syncState = 'syncing'
       node.syncCompletesAt = Date.now() + 2000 + Math.random() * 4000
       node.updatedAt = new Date().toISOString()
       this.scheduleSyncCompletion(node)
     }
+    upload.state = 'completed'
+    this.changed()
+  }
+
+  /** `DELETE /uploads/:id`. A completed upload stays: its file is in the drive now. */
+  cancelUpload(uploadId: string): void {
+    const upload = this.state.uploads[uploadId]
+    if (!upload || upload.state === 'completed') return
+    const node = this.state.nodes[upload.nodeId]
+    if (node && !upload.isNewVersion) this.remove(node)
     Reflect.deleteProperty(this.state.uploads, uploadId)
     this.changed()
   }
 
-  cancelUpload(uploadId: string): void {
-    const upload = this.state.uploads[uploadId]
-    if (!upload) return
-    const node = this.state.nodes[upload.nodeId]
-    if (node) this.remove(node)
-    Reflect.deleteProperty(this.state.uploads, uploadId)
-    this.changed()
+  private uploadSession(upload: MockUpload): UploadSession {
+    const { id, nodeId, versionId, isNewVersion, chunkSize, chunkCount } = upload
+    return { uploadId: id, nodeId, versionId, isNewVersion, chunkSize, chunkCount }
   }
 
   // ── Share links ────────────────────────────────────────────────────────────
@@ -960,10 +998,18 @@ export class MockDb {
   }
 
   protected usedBytes(userId: string): number {
-    // Trashed files still count until they are purged (§6.4).
+    // Trashed files and previous versions count until they are purged (§6.4, D24).
     let total = 0
     for (const node of Object.values(this.state.nodes)) {
-      if (node.ownerId === userId && node.kind === 'file') total += node.sizeBytes
+      if (node.ownerId !== userId || node.kind !== 'file') continue
+      total += node.sizeBytes
+      for (const bytes of node.previousVersionBytes ?? []) total += bytes
+    }
+    // A new version reserves its full size while it uploads.
+    for (const upload of Object.values(this.state.uploads)) {
+      if (upload.isNewVersion && upload.state === 'receiving') {
+        if (this.state.nodes[upload.nodeId]?.ownerId === userId) total += upload.sizeBytes
+      }
     }
     return total
   }

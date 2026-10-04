@@ -44,6 +44,8 @@ function fakeApi() {
           const session = {
             uploadId: crypto.randomUUID(),
             nodeId: crypto.randomUUID(),
+            versionId: crypto.randomUUID(),
+            isNewVersion: false,
             chunkSize: CHUNK,
             chunkCount: Math.ceil(upload.sizeBytes / CHUNK),
           }
@@ -90,7 +92,8 @@ function fakeApi() {
       const session = sessions.get(uploadId)
       if (!session) return Promise.reject(new ApiError(404, 'upload_not_found', 'Gone'))
       const { parts, ...rest } = session
-      return Promise.resolve({ ...rest, receivedParts: [...parts] })
+      const state = parts.size === rest.chunkCount ? 'completed' : 'receiving'
+      return Promise.resolve({ ...rest, state, receivedParts: [...parts] })
     },
     cancel: vi.fn<UploadTransport['cancel']>(() => Promise.resolve()),
     node: vi.fn<UploadTransport['node']>(() => Promise.resolve(null)),
@@ -194,19 +197,26 @@ describe('UploadEngine', () => {
     expect(api.sent.slice(before).map((put) => put.index)).toEqual([2])
   })
 
-  it('counts a single-part upload as done when a retry finds it already completed', async () => {
+  it('retries a part whose response was lost; the server accepts it again (§6.1)', async () => {
     const { api, transport } = fakeApi()
-    // The first response is lost; the retry finds the session gone because the part completed it.
-    api.failPart = (_uploadId, _index, attempt) =>
-      attempt === 1 ? busy() : new ApiError(404, 'upload_not_found', 'Gone')
-    vi.mocked(transport.node).mockImplementation((nodeId) =>
-      Promise.resolve(driveNode(nodeId, 'syncing')),
-    )
+    api.failPart = (_uploadId, _index, attempt) => (attempt === 1 ? busy() : null)
     const engine = new UploadEngine(transport)
     await engine.enqueue('folder', [file('note.txt', 3)])
 
     await vi.waitFor(() => {
       expect(item('note.txt').status).toBe('done')
+    })
+    expect(api.sent).toHaveLength(2)
+  })
+
+  it('fails an upload whose session expired', async () => {
+    const { api, transport } = fakeApi()
+    api.failPart = () => new ApiError(404, 'upload_not_found', 'Gone')
+    const engine = new UploadEngine(transport)
+    await engine.enqueue('folder', [file('late.txt', 3)])
+
+    await vi.waitFor(() => {
+      expect(item('late.txt').status).toBe('failed')
     })
   })
 

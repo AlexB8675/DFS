@@ -209,6 +209,10 @@ export type CreateUploadInput = z.infer<typeof createUploadSchema>
 export const uploadSessionSchema = z.object({
   uploadId: id,
   nodeId: id,
+  /** The file version this upload creates (D20). */
+  versionId: id,
+  /** True when the name matched an existing file, which gets this as a new version. */
+  isNewVersion: z.boolean(),
   chunkSize: z.number().int().positive(),
   chunkCount: z.number().int().min(0),
 })
@@ -233,8 +237,12 @@ export const uploadBatchResultSchema = z.object({
 })
 export type UploadBatchResult = z.infer<typeof uploadBatchResultSchema>
 
-/** `GET /uploads/:id`: the parts the server already has, so a resumed upload sends only the rest. */
+/**
+ * `GET /uploads/:id`: the parts the server already has, so a resumed upload
+ * sends only the rest. Answers until the session expires, also once completed.
+ */
 export const uploadStatusSchema = uploadSessionSchema.extend({
+  state: z.enum(['receiving', 'completed']),
   receivedParts: z.array(z.number().int().min(0)),
 })
 export type UploadSessionStatus = z.infer<typeof uploadStatusSchema>

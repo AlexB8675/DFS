@@ -205,6 +205,49 @@ describe('mock API database', () => {
     })
   })
 
+  it('makes a new version when an upload’s name matches a file (D20)', async () => {
+    const text = (value: string) => new TextEncoder().encode(value).buffer
+    const usedBefore = db.session().user.usedBytes
+    const first = db.createUpload(rootId(), 'Notes.txt', 5, 'text/plain')
+    await db.receivePart(first.uploadId, 0, text('first'), null)
+
+    const second = db.createUpload(rootId(), 'notes.TXT', 11, 'text/plain')
+    expect(second).toMatchObject({ nodeId: first.nodeId, isNewVersion: true })
+    expect(second.versionId).not.toBe(first.versionId)
+    // Readers get the old version until the new one completes.
+    expect(db.node(first.nodeId)).toMatchObject({ name: 'Notes.txt', sizeBytes: 5 })
+
+    await db.receivePart(second.uploadId, 0, text('second take'), null)
+    expect(db.node(first.nodeId)).toMatchObject({ name: 'Notes.txt', sizeBytes: 11 })
+    // The previous version still counts (D24).
+    expect(db.session().user.usedBytes - usedBefore).toBe(16)
+    expect(list(rootId()).filter((node) => node.name === 'Notes.txt')).toHaveLength(1)
+  })
+
+  it('refuses an upload named like a folder', () => {
+    db.createFolder(rootId(), 'Taken')
+    expect(apiError(() => db.createUpload(rootId(), 'taken', 1, 'text/plain'))).toEqual({
+      status: 409,
+      code: 'name_conflict',
+    })
+  })
+
+  it('keeps answering for a completed upload, and accepts a part sent again', async () => {
+    const bytes = new TextEncoder().encode('once').buffer
+    const hash = await sha256Hex(bytes)
+    const upload = db.createUpload(rootId(), 'once.txt', bytes.byteLength, 'text/plain')
+    await db.receivePart(upload.uploadId, 0, bytes, hash)
+
+    expect(db.uploadStatus(upload.uploadId)).toMatchObject({
+      state: 'completed',
+      receivedParts: [0],
+    })
+    // The response was lost and the client sends the part again.
+    await db.receivePart(upload.uploadId, 0, bytes, hash)
+    db.completeUpload(upload.uploadId)
+    expect(db.node(upload.nodeId).syncState).toBe('syncing')
+  })
+
   it('zips a folder with its subfolders, empty ones included', async () => {
     const folder = db.createFolder(rootId(), 'Zip test')
     db.createFolder(folder.id, 'Empty')

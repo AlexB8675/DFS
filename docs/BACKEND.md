@@ -145,9 +145,9 @@ Files are encrypted from the start: the API writes DFS1 frames to staging (DESIG
 
 **Contract change for versions (D20)**
 
-- `uploadSessionSchema` gains `versionId`.
-- `GET /uploads/:id` keeps answering until the session expires, also after completion: `uploadStatusSchema` gains `state: 'receiving' | 'completed'`.
-- The upload engine's retry check uses that state instead of the node's sync state. With versions, the node already exists and its current version is `stored`, so the old check would report a lost upload as done.
+- [x] `uploadSessionSchema` gains `versionId` and `isNewVersion`.
+- [x] `GET /uploads/:id` keeps answering until the session expires, also after completion: `uploadStatusSchema` gains `state: 'receiving' | 'completed'`.
+- [x] Retried parts and completions are accepted (DESIGN §6.1), so the upload engine no longer guesses from the node's sync state whether a lost upload landed; a `404` means the session expired. The mock does the same, and new versions don't replay the "new" animation.
 
 **Tasks**
 
