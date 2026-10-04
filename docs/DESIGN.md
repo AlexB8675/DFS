@@ -203,6 +203,10 @@ erDiagram
         bigint reserved_bytes "in-flight uploads"
         uuid root_node_id FK
         timestamptz disabled_at
+        int failed_sign_ins "sign-in throttling"
+        timestamptz sign_in_locked_until
+        timestamptz created_at
+        timestamptz last_seen_at
     }
     nodes {
         uuid id PK "uuidv7"
@@ -216,6 +220,7 @@ erDiagram
         bigint size_bytes
         timestamptz deleted_at "set on the trashed node"
         uuid trashed_via "set on descendants of a trashed folder"
+        text moderation_reason "set when an admin trashed it"
         timestamptz created_at
         timestamptz updated_at
     }
@@ -232,6 +237,7 @@ erDiagram
         bytea wrapped_dek
         text key_id
         uuid created_by FK
+        timestamptz created_at
     }
     chunks {
         bigint id PK "identity"
@@ -254,7 +260,7 @@ erDiagram
         int live_bytes "bytes of non-purged frames"
         int frame_count
         bytea sha256
-        text channel_id FK
+        uuid channel_id FK
         text message_id
         text attachment_id
         text cdn_url
@@ -264,9 +270,12 @@ erDiagram
         text last_error
         timestamptz stored_at
         timestamptz last_verified_at
+        timestamptz lost_at
     }
     storage_channels {
-        text id PK "Discord snowflake"
+        uuid id PK
+        text discord_channel_id UK
+        text name
         enum kind "data | journal | backup | log"
         bool enabled
         bigint blob_count
@@ -281,9 +290,11 @@ erDiagram
     share_links {
         uuid id PK
         uuid node_id FK
-        bytea token_hash
+        bytea token_hash UK
+        timestamptz created_at
         timestamptz expires_at
         text password_hash
+        int password_version "bumped on change: unlock cookies lapse"
         int max_downloads
         int download_count
         timestamptz revoked_at
@@ -291,13 +302,16 @@ erDiagram
     upload_sessions {
         uuid id PK
         uuid user_id FK
+        uuid node_id FK
         uuid version_id FK
+        enum state "receiving | completed"
         bigint reserved_bytes
         timestamptz expires_at
     }
     sessions {
-        text id PK
+        text id PK "SHA-256 of the cookie token"
         uuid user_id FK
+        text csrf_token
         timestamptz expires_at
     }
     audit_log {
@@ -310,7 +324,7 @@ erDiagram
     }
 ```
 
-Supporting tables not drawn above: `journal` (outbox of metadata changes, §8), `backups` (snapshots and their manifests, §8), `folder_stat_deltas` (§12.1), and pg-boss's own schema.
+Supporting tables not drawn above: `journal` (outbox of metadata changes, §8), `backups` (snapshots and their manifests, §8, added with M4), `folder_stat_deltas` (§12.1), and pg-boss's own schema. The Drizzle schema in `packages/db` is the exact definition; this diagram shows its shape. A received upload part is its chunk row, so upload sessions don't list parts separately. Storage channels have their own ID, so a Discord channel ID appears once, in `storage_channels`.
 
 ### 5.1 Key rules and indexes
 
@@ -768,7 +782,7 @@ Expected profile (D7): **few users (≤ ~20), many files.** The design targets *
 | Piece | How it runs locally |
 |---|---|
 | Node.js 24 LTS + **pnpm** (via Corepack) | Native on Windows. `pnpm` itself must be on the PATH (`corepack enable pnpm`), because Turborepo calls it; `corepack pnpm …` alone is not enough |
-| PostgreSQL 18 | `docker compose -f docker/docker-compose.dev.yml up -d` (Docker Desktop). Port `5432` is published to **localhost only** |
+| PostgreSQL 18 | `pnpm db:up` (Docker Desktop), then `pnpm db:migrate`. Port `5432` is published to **localhost only** |
 | api (`:3000`), bot (`:3001`), web (`:5173`) | `pnpm dev` (Turborepo runs all three in watch mode: `node --watch` on the TypeScript sources, D22, and Vite) |
 | First account | `dfs owner` creates the owner and prints a temporary password, as in production (§7.1) |
 | Web → API | The Vite dev server proxies `/api` to `localhost:3000`, so the browser sees one origin, as it will in production |
@@ -876,6 +890,8 @@ The **`BlobStore` interface** (`put(blob) → ref`, `get(ref, range?) → stream
 | `API_PORT` / `BOT_PORT` | `3000` / `3001` | |
 | `TRUSTED_PROXY_CIDRS` | Docker network CIDR | addresses allowed to set `X-Forwarded-*` |
 | `LOG_LEVEL` | `info` | |
+
+**Development defaults:** with `NODE_ENV` set to `development` (the default) or `test`, every setting has a default that works with `docker/docker-compose.dev.yml`: `DATABASE_URL` points at it, `INTERNAL_RPC_SECRET` has a fixed development value, `BOT_INTERNAL_URL` is `http://localhost:3001`, `BLOB_STORE` is `local`, `DISCORD_CATEGORY_NAME` is `DFS Dev`, `DISCORD_GATEWAY` is `off` (D25), and staging and the cache live under `./.data`. Relative directories resolve against the repository root. Production has no defaults for the database and the secrets, and requires `INTERNAL_RPC_SECRET` to be at least 32 characters.
 
 At startup, config parsing rejects size settings that can't work: it requires `PACK_THRESHOLD_BYTES + 38 ≤ BLOB_MAX_BYTES` (otherwise some small-file frames could never be packed) and `PACK_TARGET_BYTES ≤ BLOB_MAX_BYTES`.
 

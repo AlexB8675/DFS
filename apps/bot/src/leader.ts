@@ -90,7 +90,7 @@ export class LeaderElection {
       if (this.#isStopped()) return
       this.#failures += 1
       const delay = this.#backoffDelay()
-      log.warn({ err: error, retryInMs: delay }, 'database unreachable; retrying')
+      log.warn({ reason: describe(error), retryInMs: delay }, 'database unreachable; retrying')
       await this.#dropClient()
       this.#state = 'connecting'
       this.#schedule(delay)
@@ -185,4 +185,11 @@ export class LeaderElection {
     // Up to 20% jitter, so several bots don't retry in step.
     return Math.round(exponential * (0.8 + Math.random() * 0.2))
   }
+}
+
+/** A one-line reason for a retry log, such as `ECONNREFUSED`, instead of a stack trace. */
+function describe(error: unknown): string {
+  if (!(error instanceof Error)) return String(error)
+  const code = (error as { code?: unknown }).code
+  return typeof code === 'string' ? code : error.message
 }

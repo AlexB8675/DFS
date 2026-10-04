@@ -1,13 +1,23 @@
 {
   "$schema": "https://turborepo.com/schema.json",
   "tasks": {
+    "transit": {
+      "dependsOn": ["^transit"]
+    },
     "build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**"]
     },
-    "typecheck": {},
-    "lint": {},
-    "test": {},
+    "typecheck": {
+      "dependsOn": ["transit"]
+    },
+    "lint": {
+      "dependsOn": ["transit"]
+    },
+    "test": {
+      "dependsOn": ["transit"],
+      "passThroughEnv": ["DOCKER_*", "TESTCONTAINERS_*", "TEST_DATABASE_URL"]
+    },
     "dev": {
       "cache": false,
       "persistent": true

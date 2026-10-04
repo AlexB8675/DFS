@@ -12,8 +12,12 @@
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
+    "check": "prettier --check . && turbo run typecheck lint test",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "db:up": "docker compose -f docker/docker-compose.dev.yml up -d --wait",
+    "db:down": "docker compose -f docker/docker-compose.dev.yml down",
+    "db:migrate": "pnpm --filter @dfs/db migrate"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

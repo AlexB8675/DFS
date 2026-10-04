@@ -7,6 +7,8 @@ name: dfs-dev
 services:
   postgres:
     image: postgres:18-alpine
+    # Comes back after Docker Desktop restarts, until `pnpm db:down`.
+    restart: unless-stopped
     environment:
       POSTGRES_USER: dfs
       POSTGRES_PASSWORD: dfs
