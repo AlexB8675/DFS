@@ -10,9 +10,12 @@ import { httpTransport } from './upload-transport'
 // and HTTP transport, with upload requests failing on the way, answers lost on
 // the way back, and an outage long enough to fail uploads, which are then
 // resumed. The bot stores blobs through the ChaosBlobStore, so syncing retries
-// too. Skipped unless DFS_API is set:
+// too. Skipped unless DFS_API is set.
 //
-//   BLOB_STORE=chaos pnpm dev
+// Put `BLOB_STORE=chaos` in the root `.env` before `pnpm dev` (turbo hands
+// `dev` tasks no other variables from the shell); the bot then logs a
+// `BLOB_STORE=chaos` warning. Take it out afterwards. Then:
+//
 //   DFS_API=http://127.0.0.1:3000 DFS_USERNAME=… DFS_PASSWORD=… pnpm --filter @dfs/web check:engine
 //
 // DFS_ORIGIN is the web app's address (default http://localhost:5173), and
