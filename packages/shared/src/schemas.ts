@@ -434,8 +434,20 @@ export type ModerationInput = z.infer<typeof moderationSchema>
 export const serviceStatusSchema = z.enum(['ok', 'degraded', 'down'])
 export type ServiceStatus = z.infer<typeof serviceStatusSchema>
 
+/** Something that needs an admin's attention (§16). */
+export const systemAlertSchema = z.object({
+  /** Stable, for telling alerts apart: `bot_down`, `lost_blobs`, `staging_full`… */
+  code: z.string(),
+  level: z.enum(['warning', 'critical']),
+  title: z.string(),
+  detail: z.string(),
+})
+export type SystemAlert = z.infer<typeof systemAlertSchema>
+
 export const systemHealthSchema = z.object({
   checkedAt: timestamp,
+  /** What needs attention now, critical first. */
+  alerts: z.array(systemAlertSchema),
   services: z.array(
     z.object({ name: z.string(), status: serviceStatusSchema, detail: z.string() }),
   ),

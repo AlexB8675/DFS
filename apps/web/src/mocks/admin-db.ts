@@ -4,6 +4,8 @@ import type {
   CreateChannelInput,
   CreateUserInput,
   DriveNode,
+  MetricSeries,
+  MetricsQuery,
   NodePath,
   Page,
   ResetPasswordInput,
@@ -28,6 +30,7 @@ import {
   type MockNode,
   type MockUser,
 } from './db'
+import { mockMetrics } from './metrics'
 
 const GB = 1024 ** 3
 const DAY = 24 * 60 * 60_000
@@ -263,9 +266,30 @@ export class AdminMockDb extends MockDb {
     const { blobCount, packCount, storedBytes } = storageStats(files)
     const jitter = (min: number, max: number) => min + Math.random() * (max - min)
     const ago = (ms: number) => new Date(now - ms).toISOString()
+    const failed = files.filter((node) => node.syncState === 'failed').length
+    const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? '' : 's'}`
+    // The same alerts the API raises for these figures (apps/api/src/admin/alerts.ts).
+    const alerts: SystemHealth['alerts'] = []
+    if (lost.length > 0) {
+      alerts.push({
+        code: 'lost_blobs',
+        level: 'critical',
+        title: plural(lost.length, 'lost blob'),
+        detail: `${plural(lost.length, 'file')} can’t be downloaded: their messages were deleted in Discord.`,
+      })
+    }
+    if (failed > 0) {
+      alerts.push({
+        code: 'uploads_failed',
+        level: 'warning',
+        title: 'Storing in Discord gave up',
+        detail: `${plural(failed, 'blob')} failed every try and won’t be retried on their own.`,
+      })
+    }
 
     return {
       checkedAt: new Date(now).toISOString(),
+      alerts,
       services: [
         { name: 'API', status: 'ok', detail: 'v0.5 · up 3 days' },
         { name: 'Bot', status: 'ok', detail: `Gateway ${Math.round(jitter(38, 95))} ms` },
@@ -281,7 +305,7 @@ export class AdminMockDb extends MockDb {
       ],
       queue: {
         pendingJobs: syncing.length,
-        failedJobs: files.filter((node) => node.syncState === 'failed').length,
+        failedJobs: failed,
         oldestPendingSeconds: syncing.length > 0 ? Math.round(jitter(40, 140)) : 0,
       },
       sync: {
@@ -313,6 +337,28 @@ export class AdminMockDb extends MockDb {
         affectedFiles: 1,
       })),
     }
+  }
+
+  /** Made-up history that ends at the mock's figures today (§16). */
+  metrics(query: MetricsQuery): MetricSeries {
+    this.requireAdmin()
+    const files = Object.values(this.state.nodes).filter((node) => node.kind === 'file')
+    const syncing = files.filter((node) => node.syncState === 'syncing')
+    const { blobCount, packCount, storedBytes } = storageStats(files)
+    return mockMetrics(query, {
+      'storage.bytes': storedBytes,
+      'storage.live_bytes': Math.round(storedBytes * 0.96),
+      'storage.blobs': blobCount,
+      'storage.packs': packCount,
+      'files.count': files.length,
+      'files.bytes': sum(files.map((node) => node.sizeBytes)),
+      'users.count': this.state.users.length,
+      'sync.files': syncing.length,
+      'sync.bytes': sum(syncing.map((node) => node.sizeBytes)),
+      'staging.bytes': Math.min(sum(syncing.map((node) => node.sizeBytes)), STAGING_MAX_BYTES),
+      'blobs.lost': files.filter((node) => node.syncState === 'lost').length,
+      'queue.failed': files.filter((node) => node.syncState === 'failed').length,
+    })
   }
 
   channels(): StorageChannel[] {

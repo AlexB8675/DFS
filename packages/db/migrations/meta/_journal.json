@@ -64,6 +64,13 @@
       "when": 1791213636434,
       "tag": "0008_lost_blobs",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1791227256476,
+      "tag": "0009_metrics",
+      "breakpoints": true
     }
   ]
 }

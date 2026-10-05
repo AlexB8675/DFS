@@ -9,6 +9,7 @@ import {
   ensureFoldersSchema,
   loginSchema,
   lookupNodesSchema,
+  metricsQuerySchema,
   moderationSchema,
   moveNodesSchema,
   nodeIdsSchema,
@@ -304,6 +305,9 @@ export const handlers = [
     }),
   ),
   http.get('/api/admin/health', ({ request }) => respond(request, () => db.health())),
+  http.get('/api/admin/metrics', ({ request }) =>
+    respond(request, () => db.metrics(readQuery(request, metricsQuerySchema))),
+  ),
   http.get('/api/admin/channels', ({ request }) => respond(request, () => db.channels())),
   http.post('/api/admin/channels', ({ request }) =>
     respond(

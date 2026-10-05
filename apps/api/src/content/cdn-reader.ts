@@ -1,3 +1,4 @@
+import type { Metrics } from '@dfs/db'
 import { refreshedUrlsSchema } from '@dfs/shared'
 import {
   BlobStoreError,
@@ -19,20 +20,34 @@ export class CdnBlobReader implements BlobReader {
   readonly #botUrl: string
   readonly #secret: string
   readonly #fetch: typeof fetch
+  readonly #metrics: Metrics | undefined
   /** Signing in flight, by blob, so readers of the same pack share one request. */
   readonly #signing = new Map<number, Promise<CdnUrl | null>>()
 
-  constructor(options: { botUrl: string; secret: string; fetch?: typeof fetch }) {
+  constructor(options: {
+    botUrl: string
+    secret: string
+    fetch?: typeof fetch
+    metrics?: Metrics
+  }) {
     this.#botUrl = options.botUrl
     this.#secret = options.secret
     this.#fetch = options.fetch ?? fetch
+    this.#metrics = options.metrics
   }
 
-  read(blob: StoredBlob, offset: number, length: number): Promise<Uint8Array> {
-    return readBlobFromCdn(this.#fetch, blob, offset, length, async (unsigned) => {
-      const urls = await this.signUrls([unsigned])
-      return urls.get(unsigned.id) ?? null
-    })
+  async read(blob: StoredBlob, offset: number, length: number): Promise<Uint8Array> {
+    try {
+      const data = await readBlobFromCdn(this.#fetch, blob, offset, length, async (unsigned) => {
+        const urls = await this.signUrls([unsigned])
+        return urls.get(unsigned.id) ?? null
+      })
+      this.#metrics?.record('cdn.reads', data.length)
+      return data
+    } catch (error) {
+      this.#metrics?.record('cdn.failures')
+      throw error
+    }
   }
 
   async signUrls(blobs: readonly StoredBlob[]): Promise<Map<number, CdnUrl>> {

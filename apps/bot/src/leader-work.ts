@@ -3,10 +3,13 @@ import {
   abandonUploads,
   BLOB_UPLOAD_QUEUE,
   foldAllFolderStats,
+  pruneMetrics,
   QUEUES,
+  sampleSystem,
   textArray,
   type BlobUploadJob,
   type Database,
+  type Metrics,
 } from '@dfs/db'
 import { channelsInCategory, Staging } from '@dfs/storage'
 import { sql } from 'drizzle-orm'
@@ -32,6 +35,8 @@ const COLLECT_EVERY_MS = 2000
 const COLLECT_WHILE_UPLOADING = 1
 const COLLECT_WHILE_IDLE = 20
 const RECONCILE_EVERY_MS = 60 * 60_000
+/** The system's figures, for the admin's graphs (§16). */
+const SAMPLE_EVERY_MS = 60_000
 /** A pack file nothing refers to after this long was left by a crash while sealing. */
 const STRAY_PACK_MS = 60 * 60_000
 /**
@@ -52,9 +57,10 @@ export async function startLeaderWork(options: {
   db: Database
   boss: PgBoss
   storage: BotStorage
+  metrics?: Metrics
   log: FastifyBaseLogger
 }): Promise<LeaderWork> {
-  const { config, db, boss, storage, log } = options
+  const { config, db, boss, storage, metrics, log } = options
   const { store, discord } = storage
   const staging = new Staging(config.stagingDir)
   await boss.createQueue(QUEUES.blobUpload, BLOB_UPLOAD_QUEUE)
@@ -65,7 +71,7 @@ export async function startLeaderWork(options: {
   if (config.blobStore === 'chaos') {
     log.warn('BLOB_STORE=chaos: storing blobs will fail now and then, on purpose')
   }
-  const deps = { db, staging, store, log }
+  const deps = { db, staging, store, log, metrics }
   await boss.work<
     BlobUploadJob,
     unknown,
@@ -89,6 +95,7 @@ export async function startLeaderWork(options: {
         jobs.map((job) => job.data.blobId),
         UPLOAD_BATCH,
       )
+      if (failures.size > 0) metrics?.record('discord.post_failures', failures.size)
       return jobs.map((job) => {
         const error = failures.get(job.data.blobId)
         if (error === undefined) return { id: job.id, status: 'completed' }
@@ -114,16 +121,22 @@ export async function startLeaderWork(options: {
   })
   const loops = [
     repeat(PACK_EVERY_MS, log, 'packing small files', async () => {
-      await packer.sealDue()
+      const sealed = await packer.sealDue()
+      if (sealed > 0) metrics?.record('packs.sealed', sealed)
     }),
     // Uploads come first, but deleting never stops altogether.
     repeat(COLLECT_EVERY_MS, log, 'deleting released blobs', async () => {
       const limit = (await uploadsWaiting(db)) ? COLLECT_WHILE_UPLOADING : COLLECT_WHILE_IDLE
-      await collectGarbage({ db, store, staging, log }, limit)
+      const deleted = await collectGarbage({ db, store, staging, log }, limit)
+      if (deleted > 0) metrics?.record('discord.deleted', deleted)
     }),
     repeat(FOLD_EVERY_MS, log, 'folding folder sizes', () => foldAllFolderStats(db)),
     repeat(JANITOR_EVERY_MS, log, 'cleaning up', () => cleanUp(db, staging)),
   ]
+  // The leader alone samples them, so the figures aren't counted once per bot.
+  if (metrics) {
+    loops.push(repeat(SAMPLE_EVERY_MS, log, 'sampling the system', () => sampleSystem(db, metrics)))
+  }
   const { guildId, categoryName } = config.discord
   if (discord && guildId) {
     loops.push(
@@ -135,7 +148,10 @@ export async function startLeaderWork(options: {
           inCategory: await channelsInCategory(discord, guildId, categoryName),
           log,
         })
-        if (report.deleted > 0) log.info(report, 'deleted orphan messages')
+        if (report.deleted > 0) {
+          metrics?.record('orphans.deleted', report.deleted)
+          log.info(report, 'deleted orphan messages')
+        }
       }),
     )
   }
@@ -152,14 +168,16 @@ export async function startLeaderWork(options: {
 }
 
 /**
- * Gives up uploads past their 24 hours, forgets ended sessions, and removes
- * pack files a crash left before their pack was recorded.
+ * Gives up uploads past their 24 hours, forgets ended sessions, removes
+ * pack files a crash left before their pack was recorded, and drops metrics
+ * past their keeping.
  */
 export async function cleanUp(db: Database, staging: Staging, now = Date.now()): Promise<void> {
   await db.execute(
     sql`DELETE FROM upload_sessions WHERE expires_at <= now() AND state = 'completed'`,
   )
   await db.execute(sql`DELETE FROM sessions WHERE expires_at <= now()`)
+  await pruneMetrics(db, now)
   const versions = await db.transaction(async (tx) => {
     const { rows } = await tx.execute<{ id: string }>(sql`
       SELECT id FROM upload_sessions

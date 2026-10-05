@@ -76,6 +76,7 @@ export function uploadRoutes(app: FastifyInstance, _options: object, done: () =>
         body,
         typeof hash === 'string' ? hash : undefined,
       )
+      app.metrics.record('uploads.bytes', body.length)
       return reply.code(204).send(null)
     },
   )

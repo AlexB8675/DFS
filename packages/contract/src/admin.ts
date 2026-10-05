@@ -1,5 +1,7 @@
 import {
   auditPageSchema,
+  METRICS,
+  metricSeriesSchema,
   nodePageSchema,
   storageChannelListSchema,
   storageChannelSchema,
@@ -102,6 +104,49 @@ export function adminTests({
     it('reports the system’s health', async () => {
       const health = await (await owner()).call('GET', '/admin/health', systemHealthSchema)
       expect(health.services.length).toBeGreaterThan(0)
+    })
+
+    it('reads metrics as series, one point per bucket of the range (§16)', async () => {
+      const admin = await owner()
+      const ids = ['http.requests:rate', 'http.ms:p95', 'storage.bytes:avg']
+      const day = await admin.call(
+        'GET',
+        `/admin/metrics?range=24h&series=${ids.join(',')}`,
+        metricSeriesSchema,
+      )
+      expect(day.bucketSeconds).toBe(300)
+      expect(day.times).toHaveLength(288)
+      const steps = day.times.slice(1).map((time, index) => time - (day.times[index] ?? 0))
+      expect(new Set(steps)).toEqual(new Set([300_000]))
+      expect(day.series.map((series) => series.id)).toEqual(ids)
+      for (const series of day.series) expect(series.values).toHaveLength(288)
+
+      // Unknown metrics, readings a metric doesn't offer, and too many series are refused.
+      for (const series of ['nope:rate', 'http.requests:p95', 'http.requests']) {
+        expect(await admin.error('GET', `/admin/metrics?series=${series}`)).toEqual({
+          status: 400,
+          code: 'invalid_request',
+        })
+      }
+      const readings = { counter: 'rate', gauge: 'avg', timing: 'p95' } as const
+      const all = Object.entries(METRICS).map(([name, info]) => `${name}:${readings[info.kind]}`)
+      expect(
+        await admin.error('GET', `/admin/metrics?series=${all.slice(0, 25).join(',')}`),
+      ).toEqual({ status: 400, code: 'invalid_request' })
+      // A series asked for twice comes once.
+      const twice = await admin.call(
+        'GET',
+        '/admin/metrics?series=http.requests:rate,http.requests:rate',
+        metricSeriesSchema,
+      )
+      expect(twice.series).toHaveLength(1)
+
+      const { username, temporaryPassword } = await newUser(admin)
+      const user = await activated(username, temporaryPassword)
+      expect(await user.error('GET', '/admin/metrics?series=http.requests:rate')).toEqual({
+        status: 403,
+        code: 'forbidden',
+      })
     })
   })
 }

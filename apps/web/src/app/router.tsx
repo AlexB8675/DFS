@@ -85,6 +85,12 @@ export function createAppRouter() {
               }),
             },
             {
+              path: 'monitoring',
+              lazy: async () => ({
+                Component: (await import('@/features/admin/monitoring-page')).MonitoringPage,
+              }),
+            },
+            {
               path: 'users',
               lazy: async () => ({
                 Component: (await import('@/features/admin/users-page')).UsersPage,

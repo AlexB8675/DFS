@@ -1,4 +1,11 @@
-import { appendJournal, notifySynced, uuidArray, type Database, type JournalRecord } from '@dfs/db'
+import {
+  appendJournal,
+  notifySynced,
+  uuidArray,
+  type Database,
+  type JournalRecord,
+  type Metrics,
+} from '@dfs/db'
 import type { BlobStore, Staging } from '@dfs/storage'
 import { sql } from 'drizzle-orm'
 import type { FastifyBaseLogger } from 'fastify'
@@ -12,6 +19,7 @@ export interface UploaderDeps {
   staging: Staging
   store: BlobStore
   log?: Pick<FastifyBaseLogger, 'warn'>
+  metrics?: Metrics
 }
 
 interface StagedBlob extends Record<string, unknown> {
@@ -137,6 +145,7 @@ async function storeBlob(
     { id: blobId, kind: blob.kind, frameCount: blob.frame_count },
     read,
   )
+  deps.metrics?.record('discord.posted', blob.size_bytes)
 
   /** Versions this blob finished: nothing of theirs is left in staging. */
   const storedVersions: string[] = []

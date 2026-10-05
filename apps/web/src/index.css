@@ -16,6 +16,10 @@
   --color-sidebar-primary: var(--sidebar-primary);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar: var(--sidebar);
+  --color-status-good: var(--status-good);
+  --color-status-warning: var(--status-warning);
+  --color-status-serious: var(--status-serious);
+  --color-status-critical: var(--status-critical);
   --color-chart-5: var(--chart-5);
   --color-chart-4: var(--chart-4);
   --color-chart-3: var(--chart-3);
@@ -233,11 +237,20 @@
   --border: oklch(0.905 0.006 270);
   --input: oklch(0.89 0.007 270);
   --ring: oklch(0.62 0.12 277);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
+  /*
+   * Graphs (admin): series take these in this order, never cycled; the order
+   * keeps neighbours apart for colour-blind readers, checked against the card
+   * in both themes. Status colours mean good to critical and nothing else.
+   */
+  --chart-1: #2a78d6;
+  --chart-2: #eb6834;
+  --chart-3: #1baf7a;
+  --chart-4: #eda100;
+  --chart-5: #e87ba4;
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
   --sidebar: oklch(0.968 0.004 270);
   --sidebar-foreground: oklch(0.29 0.012 270);
   --sidebar-primary: oklch(0.53 0.16 277);
@@ -275,11 +288,15 @@
   --border: oklch(1 0 0 / 8%);
   --input: oklch(1 0 0 / 12%);
   --ring: oklch(0.66 0.1 277);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
+  --chart-1: #3987e5;
+  --chart-2: #d95926;
+  --chart-3: #199e70;
+  --chart-4: #c98500;
+  --chart-5: #d55181;
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
   --sidebar: oklch(0.19 0.006 270);
   --sidebar-foreground: oklch(0.905 0.006 270);
   --sidebar-primary: oklch(0.72 0.11 277);

@@ -1,4 +1,4 @@
-import type { SortField, SortOrder } from '@dfs/shared'
+import type { MetricRange, SortField, SortOrder } from '@dfs/shared'
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
@@ -12,10 +12,13 @@ interface PreferencesState {
   sortField: SortField
   sortOrder: SortOrder
   sidebarWidth: number
+  /** The time range of the admin's graphs (§16), the same on every admin page. */
+  metricRange: MetricRange
   setViewMode: (viewMode: ViewMode) => void
   /** Sorts by `field`; choosing the current field again flips the order. */
   sortBy: (field: SortField) => void
   setSidebarWidth: (width: number) => void
+  setMetricRange: (range: MetricRange) => void
 }
 
 /** Per-browser UI preferences, persisted in localStorage. */
@@ -26,6 +29,7 @@ export const usePreferences = create<PreferencesState>()(
       sortField: 'name',
       sortOrder: 'asc',
       sidebarWidth: 264,
+      metricRange: '24h',
       setViewMode: (viewMode) => {
         set({ viewMode })
       },
@@ -42,6 +46,9 @@ export const usePreferences = create<PreferencesState>()(
       },
       setSidebarWidth: (width) => {
         set({ sidebarWidth: Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, width)) })
+      },
+      setMetricRange: (metricRange) => {
+        set({ metricRange })
       },
     }),
     { name: 'dfs.preferences', version: 1 },

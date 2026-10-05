@@ -4,6 +4,7 @@ import { PageHeader } from '@/components/page-header'
 
 const TABS = [
   { to: '/admin', label: 'Overview', end: true },
+  { to: '/admin/monitoring', label: 'Monitoring' },
   { to: '/admin/users', label: 'Users' },
   { to: '/admin/channels', label: 'Channels' },
   { to: '/admin/audit', label: 'Audit log' },
@@ -21,7 +22,7 @@ export function AdminLayout() {
       <title>Admin – DFS</title>
       <PageHeader
         title="Admin"
-        description="System health, users and storage. Admins see file names and sizes, never contents."
+        description="Health, graphs, users and storage. Admins see file names and sizes, never contents."
       />
       <NavTabs label="Admin sections" tabs={TABS} />
       <div

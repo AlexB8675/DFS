@@ -100,10 +100,12 @@ export async function* readVersion(
         current.giveBack()
       }
       const chunkStart = current.chunk.idx * chunkSize
-      yield plaintext.subarray(
+      const piece = plaintext.subarray(
         Math.max(0, start - chunkStart),
         Math.min(plaintext.length, end - chunkStart + 1),
       )
+      app.metrics.record('downloads.bytes', piece.length)
+      yield piece
       ahead = Math.min(MAX_READ_AHEAD, ahead + 1)
     }
   } finally {

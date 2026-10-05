@@ -43,6 +43,7 @@ export async function signIn(
   const valid = await verifyPassword(user?.passwordHash ?? (await dummyHash()), input.password)
   if (!user || !valid) {
     app.limits.signIn.hit(ip)
+    app.metrics.record('auth.failed_sign_ins')
     if (user) await recordFailure(app, user)
     await audit(app.db, {
       actorId: null,
@@ -53,7 +54,7 @@ export async function signIn(
     throw new ApiError(401, 'invalid_credentials', 'Wrong username or password.')
   }
 
-  return app.db.transaction(async (tx) => {
+  const signedIn = await app.db.transaction(async (tx) => {
     // Hashing takes time. Lock and recheck before opening the session, so a
     // password reset or account change cannot be bypassed by an older check.
     const [checked] = await tx.select().from(users).where(eq(users.id, user.id)).for('update')
@@ -92,6 +93,8 @@ export async function signIn(
     })
     return { user: current, session }
   })
+  app.metrics.record('auth.sign_ins')
+  return signedIn
 }
 
 /**

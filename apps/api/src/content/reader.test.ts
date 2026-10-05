@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { setImmediate } from 'node:timers/promises'
 import { chunkContext, generateDek, importAesKey, sealFrame, sha256 } from '@dfs/crypto'
-import type { Executor } from '@dfs/db'
+import { Metrics, type Executor } from '@dfs/db'
 import type { BlobStore, Staging } from '@dfs/storage'
 import type { FastifyInstance } from 'fastify'
 import { describe, expect, it, vi } from 'vitest'
@@ -55,6 +55,7 @@ async function fixture() {
     blobStore: { read: blobRead },
     dataKeys: new DataKeyCache(),
     keys: { unwrapDek: () => Promise.resolve(key) },
+    metrics: new Metrics(),
   } as unknown as FastifyInstance
   const version: ReadableVersion = {
     version_id: versionId,

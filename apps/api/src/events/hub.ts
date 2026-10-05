@@ -50,6 +50,13 @@ export class EventHub {
     }
   }
 
+  /** Event streams open on this instance. */
+  get streams(): number {
+    let open = 0
+    for (const set of this.#subscribers.values()) open += set.size
+    return open
+  }
+
   /** Ends every open stream, so a shutting-down server isn't held open by them. */
   endStreams(): void {
     for (const set of this.#subscribers.values()) for (const subscriber of set) subscriber.onLost()

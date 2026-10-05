@@ -31,8 +31,8 @@ describe('migrations', () => {
       })
       // One instance ID, made once (DESIGN §4).
       expect(counts).toEqual({
-        applied: 9,
-        tables: 15,
+        applied: 10,
+        tables: 16,
         instance: [expect.stringMatching(/^[0-9a-f]{12}$/)],
       })
     } finally {

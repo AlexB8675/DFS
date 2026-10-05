@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import cookie from '@fastify/cookie'
 import type { Config } from '@dfs/config'
 import type { MasterKeys } from '@dfs/crypto'
-import { createDatabase, createPool, type Database } from '@dfs/db'
+import { createDatabase, createPool, Metrics, recordProcess, type Database } from '@dfs/db'
 import { LocalBlobStore, Staging, type BlobReader } from '@dfs/storage'
 import Fastify, { LogController, type FastifyInstance, type FastifyServerOptions } from 'fastify'
 import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod'
@@ -48,6 +48,8 @@ declare module 'fastify' {
     frameCache: FrameCache | null
     /** Memory for frames read ahead of what downloads have sent (§6.2). */
     readBudget: MemoryBudget | null
+    /** What this instance does, for the admin's graphs (§16). */
+    metrics: Metrics
   }
 }
 
@@ -57,6 +59,20 @@ declare module 'fastify' {
  * at a time instead.
  */
 const READ_AHEAD_BYTES = 256 * 1024 * 1024
+
+/**
+ * Routes that stay open or take as long as the bytes they move: counted, but
+ * not timed, so response times say how quick the API answers.
+ */
+const UNTIMED_ROUTES = new Set([
+  '/api/events',
+  '/api/files/:id/content',
+  '/api/folders/:id/archive',
+  '/api/archive/:token',
+  '/api/uploads/:id/parts/:index',
+  '/api/s/:token/files/:id/content',
+  '/api/s/:token/archive',
+])
 
 export interface AppOptions {
   config: Config
@@ -99,6 +115,10 @@ export async function buildApp({
   const db = createDatabase(pool)
   const queue = new JobQueue(config, app.log)
   const events = new EventHub(config.databaseUrl, app.log)
+  const metrics = new Metrics()
+  const stopWatchingProcess = recordProcess(metrics, 'api')
+  metrics.gauge('events.streams', () => events.streams)
+  app.decorate('metrics', metrics)
   app.decorate('config', config)
   app.decorate('pool', pool)
   app.decorate('db', db)
@@ -113,16 +133,22 @@ export async function buildApp({
   app.decorate('dataKeys', new DataKeyCache())
   app.decorate('queue', queue)
   app.decorate('events', events)
-  const reader = blobStore ?? blobStoreFor(config)
+  const reader = blobStore ?? blobStoreFor(config, metrics)
   app.decorate('blobStore', reader)
   // Reading local files needs no cache of its own.
-  app.decorate(
-    'frameCache',
+  const frameCache =
     reader instanceof LocalBlobStore
       ? null
-      : new FrameCache({ dir: config.cacheDir, maxBytes: config.cacheMaxBytes, log: app.log }),
-  )
+      : new FrameCache({
+          dir: config.cacheDir,
+          maxBytes: config.cacheMaxBytes,
+          log: app.log,
+          metrics,
+        })
+  app.decorate('frameCache', frameCache)
+  if (frameCache) metrics.gauge('cache.bytes', () => frameCache.bytes)
   app.decorate('readBudget', new MemoryBudget(READ_AHEAD_BYTES))
+  const savingMetrics = metrics.start(db, app.log)
   // Open event streams would keep the server from closing.
   app.addHook('preClose', (done) => {
     events.endStreams()
@@ -131,10 +157,23 @@ export async function buildApp({
   app.addHook('onClose', async () => {
     await events.stop()
     await queue.stop()
+    await savingMetrics.stop()
+    stopWatchingProcess()
     await pool.end()
   })
   app.addHook('onSend', async (request, reply) => {
     reply.header('x-request-id', request.id)
+  })
+  app.addHook('onResponse', (request, reply, done) => {
+    const route = request.routeOptions.url
+    // Container health checks would drown out what people do.
+    if (route !== '/api/health') {
+      metrics.record('http.requests')
+      if (reply.statusCode >= 500) metrics.record('http.server_errors')
+      else if (reply.statusCode >= 400) metrics.record('http.client_errors')
+      if (!UNTIMED_ROUTES.has(route ?? '')) metrics.time('http.ms', reply.elapsedTime)
+    }
+    done()
   })
 
   await app.register(cookie)
@@ -152,10 +191,14 @@ export async function buildApp({
 }
 
 /** The API only reads blobs; the bot stores them (DESIGN.md §3.1). */
-function blobStoreFor(config: Config): BlobReader {
+function blobStoreFor(config: Config, metrics: Metrics): BlobReader {
   // Chaos troubles only the bot's writes; the API reads the local store as is.
   if (config.blobStore !== 'discord') return new LocalBlobStore(config.localBlobDir)
-  return new CdnBlobReader({ botUrl: config.botInternalUrl, secret: config.internalRpcSecret })
+  return new CdnBlobReader({
+    botUrl: config.botInternalUrl,
+    secret: config.internalRpcSecret,
+    metrics,
+  })
 }
 
 function loggerOptions(config: Config): FastifyServerOptions['logger'] {

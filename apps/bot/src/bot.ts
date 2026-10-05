@@ -1,6 +1,6 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
 import type { Config } from '@dfs/config'
-import { createDatabase, createPool } from '@dfs/db'
+import { createDatabase, createPool, Metrics, recordProcess } from '@dfs/db'
 import { refreshUrlsSchema } from '@dfs/shared'
 import { adoptChannel, BlobStoreError, ChannelRefusedError, discordProblem } from '@dfs/storage'
 import { z } from 'zod'
@@ -49,7 +49,11 @@ export function createBot({
     },
   })
   const db = createDatabase(pool)
-  const storage = givenStorage ?? botStorage(config, db, server.log)
+  // Every instance records what it does; the leader also samples the system (DESIGN.md §16).
+  const metrics = new Metrics()
+  const stopWatchingProcess = recordProcess(metrics, 'bot')
+  const savingMetrics = metrics.start(db, server.log)
+  const storage = givenStorage ?? botStorage(config, db, server.log, metrics)
   const { store } = storage
   let boss: PgBoss | null = null
   let work: LeaderWork | null = null
@@ -79,6 +83,7 @@ export function createBot({
             db,
             boss: queue,
             storage,
+            metrics,
             log: server.log,
           })
         if (stopped) {
@@ -157,7 +162,9 @@ export function createBot({
         .send({ error: { code: 'invalid_request', message: 'Expected 1 to 200 blob IDs.' } })
     }
     try {
-      return refreshedUrls(await refreshBlobUrls(db, store, input.data.blobIds))
+      const signed = await refreshBlobUrls(db, store, input.data.blobIds)
+      if (signed.size > 0) metrics.record('discord.signed', signed.size)
+      return refreshedUrls(signed)
     } catch (error) {
       if (!(error instanceof BlobStoreError)) throw error
       request.log.warn({ err: error }, 'signing CDN URLs failed')
@@ -181,6 +188,8 @@ export function createBot({
       boss = null
       await election.stop()
       await server.close()
+      await savingMetrics.stop()
+      stopWatchingProcess()
       await pool.end()
     },
   }

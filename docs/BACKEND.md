@@ -24,11 +24,11 @@ Settled for this plan and recorded in [DESIGN.md §19](DESIGN.md#19-decisions-lo
 | D23 | **First deployment once Discord storage works**, test data only until M4. | A deployment step between M1 and M4 (§2). |
 | D24 | **Old versions count toward the quota** until purged. | Quota reservation and pruning rules in DESIGN §5.1 and §6.1. |
 | D25 | **One Discord server and bot for development and production.** Development uses its own `DFS Dev` channels and no gateway connection. | Config for the category and the gateway (§6); `dfs setup` in the CLI arrives with M1, since development can't use slash commands; load tests stay off Discord. |
-| D26 | **Private GitHub repository, no CI.** | `pnpm check` in M0; the VPS pulls with a deploy key (§4.4). |
+| D26 | **Private GitHub repository, no CI.** | `pnpm check` in M0; the VPS pulls with a deploy key (§4.5). |
 | D27 | **Username and password accounts, made by an admin** with a temporary password; no Discord accounts. Users choose their own password at first sign-in. | Password sign-in, the limited first session, and creating users and resetting passwords on the admin side (§4.2, §7). |
 | D28 | **Admins are set in DFS;** the owner, made on the server with `dfs owner`, is always an admin. | The `dfs owner` command and the owner protections in the admin routes (§4.2). |
 
-The Discord server and application already exist and serve both environments; §6 lists what to configure. The VPS is available, with more than 150 GB of disk (§4.4).
+The Discord server and application already exist and serve both environments; §6 lists what to configure. The VPS is available, with more than 150 GB of disk (§4.5).
 
 ---
 
@@ -40,7 +40,8 @@ The design's milestone numbers stay; only their order changes (D19).
 flowchart LR
     M0["M0 · Foundations"] --> M2["M2 · API core<br/>on local storage"]
     M2 --> M1["M1 · Discord storage<br/>and the bot"]
-    M1 --> DEP["First deployment<br/>test data only"]
+    M1 --> ADM["Admin console<br/>metrics, dashboards,<br/>control"]
+    ADM --> DEP["First deployment<br/>test data only"]
     DEP --> M4["M4 · Durability"]
     M4 --> M5["M5 · Finish<br/>real data"]
     M3["M3 · Web UI<br/>(done, except previews)"] -.->|"switches to the real API"| M2
@@ -51,6 +52,7 @@ flowchart LR
 | **M0 · Foundations** | Workspace packages, config, Postgres in Docker, schema and migrations, health endpoints; TypeScript runs directly in Node. |
 | **M2 · API core on local storage** | The UI works end to end against the real API (`VITE_API_MOCKS=off`): sign-in, browsing, uploads with versions, downloads, shares, admin, live events. Files are encrypted frames in a local blob store. |
 | **M1 · Discord storage and the bot** | Blobs go to Discord, small files are packed, CDN URLs are refreshed, deletions in Discord are noticed. |
+| **Admin console** | Everything about the running system can be seen and done from the admin pages: graphs of what it does, its health, and the actions that needed the command line. |
 | **First deployment** | DFS runs on the Fedora VPS behind Caddy, privately, with test data. |
 | **M4 · Durability** | GC, compaction, scrubber, metadata journal, nightly backups, and a recovery drill that passes. Real data is allowed from here. |
 | **M5 · Finish** | Previews and version history in the UI (the rest of M3), admin search, slash commands, hardening. |
@@ -197,7 +199,25 @@ Files are encrypted from the start: the API writes DFS1 frames to staging (DESIG
 - A development instance and a production instance run side by side against the same server, and neither reads, deletes or adopts the other's messages (a test that plants a foreign `dfs1` message in an unregistered channel).
 - A 2 GB file streams with seeking from Discord, with the frame cache warm and cold.
 
-### 4.4 First deployment (from M5, D23)
+### 4.4 Admin console
+
+The admin pages grow from a status page into the place to watch and run DFS, before the first deployment, so that deployment is watched from them. Five steps, each committed on its own.
+
+**Tasks**
+
+- [x] **1 · Metrics** (DESIGN §16, D29): the API and the bot record what they do and add it to the `metrics` table every 10 s, in minute and hour buckets; the leading bot samples the system's figures once a minute and drops old rows; `GET /admin/metrics` reads series over a range. The overview's cache card shows the real frame cache, and its figures no longer scan pg-boss's job table.
+- [x] **2 · Dashboards:** graphs on the overview with a time range, alerts for what needs attention (worked out by the API, with the health), and a Monitoring tab for traffic, Discord, reading back, storage, the processes and people. Graphs are the web app's own SVG, with a crosshair, keyboard reading and a table view.
+- [ ] **3 · Storage control:** create channels in the category through the bot, see failing uploads and deletions with their errors and retry them, lost blobs with the files they affect, and run the packer, the reconciler and `dfs setup` now. Actions that only the leading bot can do go to it through the job queue.
+- [ ] **4 · People and access:** signed-in sessions per user, signed out by an admin; every share link, revocable, without its token; uploads in progress; audit log filters. The owner and self rules of password resets apply.
+- [ ] **5 · System:** the settings in effect, from a list of keys that are safe to show; the Discord layout; maintenance such as clearing the frame cache.
+
+**Done when**
+
+- With a stack running, the graphs show its traffic, Discord's answers and the storage growing, and agree with the overview's figures.
+- Every task that needed the command line after setup (except creating the owner) can be done from the admin pages, and each is in the audit log.
+- The mock API serves every new route, and the contract suite checks both.
+
+### 4.5 First deployment (from M5, D23)
 
 **Tasks**
 
@@ -213,7 +233,7 @@ Files are encrypted from the start: the API writes DFS1 frames to staging (DESIG
 - The site answers over HTTPS on the VPS domain, `/internal/*` answers 404 from outside, and only Caddy publishes ports.
 - Sign-in works over HTTPS, and the M2 checks pass against the deployed instance, with test data only.
 
-### 4.5 M4 · Durability
+### 4.6 M4 · Durability
 
 **Tasks**
 
@@ -226,7 +246,7 @@ Files are encrypted from the start: the API writes DFS1 frames to staging (DESIG
 - The recovery drill rebuilds an empty database from Discord and the key file alone, and the rebuilt metadata matches the original.
 - After that drill passes on the deployed instance, real data is allowed.
 
-### 4.6 M5 · Finish
+### 4.7 M5 · Finish
 
 Previews and version history (the rest of M3), admin search, slash commands, the remaining items of [DESIGN §18.1](DESIGN.md#181-status-and-future-work), and hardening from running it.
 

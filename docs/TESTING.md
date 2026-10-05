@@ -141,6 +141,16 @@ Use disposable folders and files for these checks:
    with a download limit of one.
 8. As an admin, moderate a disposable folder while its owner has it open. Check
    that it moves to the owner's trash and that the reason appears there.
+9. Open Admin → Overview while uploading. Within a minute the history graphs
+   show the bytes received and posted to Discord; switch the range between
+   1 h and 24 h and check that the graphs keep their place while the new range
+   loads. Point at a graph, then focus it with Tab and use the arrow keys: the
+   readout lists every line at that time. The table button shows the same
+   values. Stop the bot (Ctrl+C in its terminal, or end `pnpm dev` and start
+   only the API): within a few seconds the overview says the bot isn't
+   answering, and the alert goes once the bot is back.
+10. Open Admin → Monitoring. Every section loads in one request each; graphs
+    for things that haven't happened yet are flat, never broken.
 
 For an exact round-trip comparison, compare the SHA-256 hashes of the original
 and downloaded files:

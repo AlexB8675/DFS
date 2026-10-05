@@ -1,12 +1,13 @@
 import {
   formatBytes,
+  METRIC_STEPS,
   type AuditEntry,
   type CreateChannelInput,
   type Page,
   type StorageChannel,
   type SystemHealth,
 } from '@dfs/shared'
-import { storageChannels } from '@dfs/db'
+import { storageChannels, systemFigures } from '@dfs/db'
 import { eq, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
@@ -14,44 +15,56 @@ import { audit } from '../audit.ts'
 import type { Auth } from '../auth/sessions.ts'
 import { isUniqueViolation } from '../db-errors.ts'
 import { ApiError } from '../errors.ts'
+import { FAILING_DELETE_ATTEMPTS, healthAlerts } from './alerts.ts'
 
 // The admin overview, storage channels and the audit log (DESIGN.md §9).
 
 const startedAt = Date.now()
 
-/** `GET /admin/health`: services, queue, sync backlog, staging, storage and lost blobs. */
+/**
+ * `GET /admin/health`: alerts, services, queue, sync backlog, staging, cache,
+ * storage and lost blobs.
+ */
 export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> {
-  const [bot, database, queue, figures, lost] = await Promise.all([
+  const [bot, figures, recent, troubles, lost] = await Promise.all([
     botHealth(app),
-    app.db.execute<{ size: number }>(
-      sql`SELECT pg_database_size(current_database())::float8 AS size`,
-    ),
-    queueFigures(app),
+    systemFigures(app.db),
+    // From the metrics: what reached Discord lately, the cache's hits this
+    // last hour, and the failures of the last hour that make alerts.
     app.db.execute<{
-      backlog_files: number
-      backlog_bytes: number
-      recent_bytes: number
-      staged_bytes: number
-      blobs: number
-      packs: number
-      stored_bytes: number
-      live_bytes: number
-      lost: number
+      posted: number
+      seconds: number
+      hits: number
+      misses: number
+      rate_limited: number
+      server_errors: number
+      cdn_failures: number
+      post_failures: number
     }>(sql`
       SELECT
-        (SELECT count(*)::int FROM file_versions WHERE state = 'syncing') AS backlog_files,
-        (SELECT coalesce(sum(size_bytes), 0)::float8 FROM file_versions WHERE state = 'syncing')
-          AS backlog_bytes,
-        (SELECT coalesce(sum(size_bytes), 0)::float8 FROM blobs
-          WHERE state = 'stored' AND stored_at > now() - interval '1 minute') AS recent_bytes,
-        (SELECT coalesce(sum(frame_size), 0)::float8 FROM chunks WHERE staged_path IS NOT NULL)
-          AS staged_bytes,
-        count(*) FILTER (WHERE state = 'stored')::int AS blobs,
-        count(*) FILTER (WHERE state = 'stored' AND kind = 'pack')::int AS packs,
-        coalesce(sum(size_bytes) FILTER (WHERE state = 'stored'), 0)::float8 AS stored_bytes,
-        coalesce(sum(live_bytes) FILTER (WHERE state = 'stored'), 0)::float8 AS live_bytes,
-        count(*) FILTER (WHERE state = 'lost')::int AS lost
-      FROM blobs`),
+        coalesce(sum(sum) FILTER (WHERE name = 'discord.posted'
+          AND at >= date_trunc('minute', now()) - interval '4 minutes'), 0)::float8 AS posted,
+        extract(epoch FROM now() - date_trunc('minute', now()) + interval '4 minutes')::float8
+          AS seconds,
+        coalesce(sum(count) FILTER (WHERE name = 'cache.hits'), 0)::float8 AS hits,
+        coalesce(sum(count) FILTER (WHERE name = 'cache.misses'), 0)::float8 AS misses,
+        coalesce(sum(sum) FILTER (WHERE name = 'discord.429'), 0)::float8 AS rate_limited,
+        coalesce(sum(sum) FILTER (WHERE name = 'http.server_errors'), 0)::float8 AS server_errors,
+        coalesce(sum(sum) FILTER (WHERE name = 'cdn.failures'), 0)::float8 AS cdn_failures,
+        coalesce(sum(sum) FILTER (WHERE name = 'discord.post_failures'), 0)::float8
+          AS post_failures
+      FROM metrics
+      WHERE step = ${METRIC_STEPS.minute} AND at >= now() - interval '1 hour'
+        AND name IN ('discord.posted', 'cache.hits', 'cache.misses', 'discord.429',
+          'http.server_errors', 'cdn.failures', 'discord.post_failures')`),
+    // Both read the blobs waiting to be deleted (an index) or those lost (rare).
+    app.db.execute<{ failing_deletions: number; lost_files: number }>(sql`
+      SELECT
+        (SELECT count(*)::int FROM blobs
+          WHERE state = 'deleting' AND attempts >= ${FAILING_DELETE_ATTEMPTS}) AS failing_deletions,
+        (SELECT count(DISTINCT chunk.version_id)::int
+          FROM blobs blob JOIN chunks chunk ON chunk.blob_id = blob.id
+          WHERE blob.state = 'lost') AS lost_files`),
     app.db.execute<{
       id: string
       channel: string | null
@@ -63,46 +76,70 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
       FROM blobs blob LEFT JOIN storage_channels channel ON channel.id = blob.channel_id
       WHERE blob.state = 'lost' ORDER BY blob.lost_at DESC NULLS LAST LIMIT 50`),
   ])
-  const numbers = figures.rows[0]
   const local = app.config.blobStore !== 'discord'
+  const latest = recent.rows[0]
+  const cacheReads = (latest?.hits ?? 0) + (latest?.misses ?? 0)
   return {
     checkedAt: new Date().toISOString(),
+    alerts: healthAlerts({
+      bot,
+      lostBlobs: figures.lostBlobs,
+      lostFiles: troubles.rows[0]?.lost_files ?? 0,
+      failedJobs: figures.failedJobs,
+      oldestPendingSeconds: figures.oldestPendingSeconds,
+      stagedBytes: figures.stagedBytes,
+      stagingMaxBytes: app.config.stagingMaxBytes,
+      failingDeletions: troubles.rows[0]?.failing_deletions ?? 0,
+      lastHour: {
+        rateLimited: latest?.rate_limited ?? 0,
+        serverErrors: latest?.server_errors ?? 0,
+        cdnFailures: latest?.cdn_failures ?? 0,
+        postFailures: latest?.post_failures ?? 0,
+      },
+    }),
     services: [
       { name: 'API', status: 'ok', detail: `up ${uptime()}` },
       bot,
       {
         name: 'Database',
         status: 'ok',
-        detail: `PostgreSQL · ${formatBytes(database.rows[0]?.size ?? 0)}`,
+        detail: `PostgreSQL · ${formatBytes(figures.databaseBytes)}`,
       },
       {
         name: local ? 'Blob store' : 'Discord',
-        status: (numbers?.lost ?? 0) > 0 ? 'degraded' : 'ok',
+        status: figures.lostBlobs > 0 ? 'degraded' : 'ok',
         detail:
-          (numbers?.lost ?? 0) > 0
-            ? `${String(numbers?.lost)} lost ${numbers?.lost === 1 ? 'blob' : 'blobs'}`
+          figures.lostBlobs > 0
+            ? `${String(figures.lostBlobs)} lost ${figures.lostBlobs === 1 ? 'blob' : 'blobs'}`
             : local
               ? 'Local files'
               : 'Connected',
       },
     ],
-    queue,
-    sync: {
-      backlogFiles: numbers?.backlog_files ?? 0,
-      backlogBytes: numbers?.backlog_bytes ?? 0,
-      bytesPerSecond: (numbers?.recent_bytes ?? 0) / 60,
+    queue: {
+      pendingJobs: figures.pendingJobs,
+      failedJobs: figures.failedJobs,
+      oldestPendingSeconds: figures.oldestPendingSeconds,
     },
-    staging: { usedBytes: numbers?.staged_bytes ?? 0, maxBytes: app.config.stagingMaxBytes },
-    // The frame cache arrives with Discord storage (M1).
-    cache: { usedBytes: 0, maxBytes: app.config.cacheMaxBytes, hitRate: 0 },
+    sync: {
+      backlogFiles: figures.syncFiles,
+      backlogBytes: figures.syncBytes,
+      bytesPerSecond: (latest?.posted ?? 0) / Math.max(1, latest?.seconds ?? 0),
+    },
+    staging: { usedBytes: figures.stagedBytes, maxBytes: app.config.stagingMaxBytes },
+    cache: {
+      usedBytes: app.frameCache?.bytes ?? 0,
+      maxBytes: app.config.cacheMaxBytes,
+      hitRate: cacheReads === 0 ? 0 : (latest?.hits ?? 0) / cacheReads,
+    },
     storage: {
-      blobCount: numbers?.blobs ?? 0,
-      packCount: numbers?.packs ?? 0,
-      storedBytes: numbers?.stored_bytes ?? 0,
-      liveBytes: numbers?.live_bytes ?? 0,
+      blobCount: figures.blobs,
+      packCount: figures.packs,
+      storedBytes: figures.storedBytes,
+      liveBytes: figures.liveBytes,
     },
     // The scrubber, journal flushes and backups arrive with M4.
-    scrubber: { lastRunAt: null, checkedBlobs: 0, totalBlobs: numbers?.blobs ?? 0, problems: 0 },
+    scrubber: { lastRunAt: null, checkedBlobs: 0, totalBlobs: figures.blobs, problems: 0 },
     backups: { lastBackupAt: null, lastJournalFlushAt: null },
     lostBlobs: lost.rows.map((row) => ({
       blobId: row.id,
@@ -167,27 +204,6 @@ async function botHealth(app: FastifyInstance): Promise<SystemHealth['services']
     }
   } catch {
     return { name: 'Bot', status: 'down', detail: 'Not answering' }
-  }
-}
-
-/** pg-boss's own table; it exists once the bot has started once. */
-async function queueFigures(app: FastifyInstance): Promise<SystemHealth['queue']> {
-  try {
-    const { rows } = await app.db.execute<{ pending: number; failed: number; oldest: number }>(sql`
-      SELECT
-        count(*) FILTER (WHERE state IN ('created', 'retry'))::int AS pending,
-        count(*) FILTER (WHERE state = 'failed')::int AS failed,
-        coalesce(extract(epoch FROM now() - min(created_on) FILTER (WHERE state IN ('created', 'retry'))), 0)::int
-          AS oldest
-      FROM pgboss.job`)
-    const [row] = rows
-    return {
-      pendingJobs: row?.pending ?? 0,
-      failedJobs: row?.failed ?? 0,
-      oldestPendingSeconds: row?.oldest ?? 0,
-    }
-  } catch {
-    return { pendingJobs: 0, failedJobs: 0, oldestPendingSeconds: 0 }
   }
 }
 

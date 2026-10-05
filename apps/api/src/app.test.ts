@@ -1,4 +1,5 @@
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
+import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest'
 import { buildApp } from './app.ts'
@@ -25,6 +26,20 @@ describe('API with a database', () => {
     expect(response.statusCode).toBe(200)
     expect(response.json()).toEqual({ status: 'ok', database: 'ok' })
     expect(response.headers['x-request-id']).toMatch(/^[0-9a-f-]{36}$/)
+  })
+
+  it('counts and times what it answers, leaving health checks out (§16)', async () => {
+    await app.inject({ method: 'GET', url: '/api/health' })
+    expect((await app.inject({ method: 'GET', url: '/api/auth/me' })).statusCode).toBe(401)
+    await app.metrics.flush(app.db)
+    const { rows } = await app.db.execute<{ name: string; sum: number; count: number }>(sql`
+      SELECT name, sum(sum)::float8 AS sum, sum(count)::float8 AS count
+      FROM metrics WHERE step = 60 GROUP BY name`)
+    const recorded = new Map(rows.map((row) => [row.name, row]))
+    expect(recorded.get('http.requests')?.sum).toBe(1)
+    expect(recorded.get('http.client_errors')?.sum).toBe(1)
+    expect(recorded.get('http.ms')?.count).toBe(1)
+    expect(recorded.get('api.rss')?.sum).toBeGreaterThan(0)
   })
 })
 

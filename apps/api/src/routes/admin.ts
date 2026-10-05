@@ -4,6 +4,8 @@ import {
   auditPageSchema,
   createChannelSchema,
   createUserSchema,
+  metricSeriesSchema,
+  metricsQuerySchema,
   moderationSchema,
   nodeKindSchema,
   nodePageSchema,
@@ -19,6 +21,7 @@ import {
   updateUserSchema,
   userUsageSchema,
 } from '@dfs/shared'
+import { readMetrics } from '@dfs/db'
 import type { FastifyInstance } from 'fastify'
 import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
@@ -140,6 +143,15 @@ export function adminRoutes(app: FastifyInstance, _options: object, done: () => 
     '/admin/health',
     { config: admin, schema: { response: { 200: systemHealthSchema } } },
     () => systemHealth(app),
+  )
+
+  routes.get(
+    '/admin/metrics',
+    {
+      config: admin,
+      schema: { querystring: metricsQuerySchema, response: { 200: metricSeriesSchema } },
+    },
+    (request) => readMetrics(app.db, request.query.range, request.query.series),
   )
 
   routes.get(

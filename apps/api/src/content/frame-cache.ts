@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { sha256 } from '@dfs/crypto'
+import type { Metrics } from '@dfs/db'
 import type { FastifyBaseLogger } from 'fastify'
 
 // The frame cache (DESIGN.md §6.2): frames read back from Discord, kept on the
@@ -43,6 +44,7 @@ export class FrameCache {
   readonly #dir: string
   readonly #maxBytes: number
   readonly #log: Pick<FastifyBaseLogger, 'warn'> | undefined
+  readonly #metrics: Metrics | undefined
   /** Frames on disk, by SHA-256 in hex, least recently used first, with their sizes. */
   readonly #entries = new Map<string, number>()
   #bytes = 0
@@ -56,10 +58,16 @@ export class FrameCache {
   /** Since start, for measuring. */
   readonly stats = { hits: 0, misses: 0 }
 
-  constructor(options: { dir: string; maxBytes: number; log?: Pick<FastifyBaseLogger, 'warn'> }) {
+  constructor(options: {
+    dir: string
+    maxBytes: number
+    log?: Pick<FastifyBaseLogger, 'warn'>
+    metrics?: Metrics
+  }) {
     this.#dir = options.dir
     this.#maxBytes = options.maxBytes
     this.#log = options.log
+    this.#metrics = options.metrics
     // Finds what earlier runs cached, in the background: until then, it misses.
     this.#ready = this.#scan().catch((error: unknown) => {
       this.#log?.warn({ err: error }, 'could not read the frame cache; starting it empty')
@@ -69,6 +77,11 @@ export class FrameCache {
   /** Resolves once the frames earlier runs cached are known. */
   ready(): Promise<void> {
     return this.#ready
+  }
+
+  /** Bytes of frames on disk. */
+  get bytes(): number {
+    return this.#bytes
   }
 
   /** Whether a frame is cached, as far as the cache knows without reading it. */
@@ -92,11 +105,13 @@ export class FrameCache {
     if (cached) {
       if (Buffer.from(await sha256(cached)).equals(frameSha256)) {
         this.stats.hits += 1
+        this.#metrics?.record('cache.hits')
         return cached
       }
       this.#forget(key)
     }
     this.stats.misses += 1
+    this.#metrics?.record('cache.misses')
     let loading = this.#loading.get(key)
     if (!loading) {
       loading = fetch()

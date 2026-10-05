@@ -4,11 +4,13 @@ import {
   boolean,
   check,
   customType,
+  doublePrecision,
   index,
   integer,
   jsonb,
   pgEnum,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   uniqueIndex,
@@ -442,4 +444,25 @@ export const journal = pgTable(
       .on(t.id)
       .where(sql`${t.batchNo} IS NULL`),
   ],
+)
+
+// ── Metrics (§16) ────────────────────────────────────────────────────────────
+
+/**
+ * What the processes recorded, summed per bucket of `step` seconds (a minute
+ * or an hour) starting at `at`, across processes. Each flush adds to the
+ * bucket's row; the leading bot drops old rows. Its migration leaves room in
+ * each page, so those updates stay HOT.
+ */
+export const metrics = pgTable(
+  'metrics',
+  {
+    name: text('name').notNull(),
+    step: integer('step').notNull(),
+    at: timestamptz('at').notNull(),
+    sum: doublePrecision('sum').notNull(),
+    count: doublePrecision('count').notNull(),
+    max: doublePrecision('max').notNull(),
+  },
+  (t) => [primaryKey({ name: 'metrics_pkey', columns: [t.name, t.step, t.at] })],
 )

@@ -1,5 +1,6 @@
+import { RESTEvents } from '@discordjs/rest'
 import type { Config } from '@dfs/config'
-import { bigintArray, type Database } from '@dfs/db'
+import { bigintArray, type Database, type Metrics } from '@dfs/db'
 import {
   channelsInCategory,
   ChaosBlobStore,
@@ -32,11 +33,13 @@ export function botStorage(
   config: Config,
   db: Database,
   log?: Pick<FastifyBaseLogger, 'warn'>,
+  metrics?: Metrics,
 ): BotStorage {
   if (config.blobStore === 'discord') {
     // Config refuses BLOB_STORE=discord for the bot without a token and a server.
     const { botToken, guildId, categoryName } = config.discord
     const rest = createDiscordRest(botToken ?? '', { timeoutMs: DISCORD_TIMEOUT_MS })
+    if (metrics) countDiscordRequests(rest, metrics)
     const store = new DiscordBlobStore({
       rest,
       channels: () => placeableChannels(db, rest, guildId ?? '', categoryName, log),
@@ -48,6 +51,22 @@ export function botStorage(
   }
   const local = new LocalBlobStore(config.localBlobDir)
   return { store: config.blobStore === 'chaos' ? new ChaosBlobStore(local) : local, discord: null }
+}
+
+/**
+ * Every call to Discord goes through this one client, the gateway's too, so
+ * it sees every answer: 429s included, which it retries on its own, and the
+ * waits it chooses to stay inside the rate limits (DESIGN.md §16).
+ */
+function countDiscordRequests(rest: DiscordRestClient, metrics: Metrics): void {
+  rest.on(RESTEvents.Response, (_request, response) => {
+    metrics.record('discord.requests')
+    if (response.status === 429) metrics.record('discord.429')
+    else if (response.status >= 500) metrics.record('discord.server_errors')
+  })
+  rest.on(RESTEvents.RateLimited, (limit) => {
+    metrics.record('discord.waits', limit.timeToReset)
+  })
 }
 
 /** This database's name for itself, which its Discord messages carry (DESIGN.md §4). */
