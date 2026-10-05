@@ -145,6 +145,14 @@ $env:DFS_SMALL_FILES = '100'
 $env:DFS_LARGE_MB = '64'
 ```
 
+A failing check names the step and the request that failed. If one stops
+partway with no message at all, read the exit code pnpm reports: a Windows
+exception code such as `3221225477` (0xC0000005) or `3221225725` (0xC00000FD)
+means the Node.js process running the check crashed, not the stack it was
+checking. Run it again; uploads it left open are released after 24 hours. Run
+the checks through pnpm as shown: started directly from Git Bash, a crash
+loses that exit code.
+
 For the upload engine's fault check, set `BLOB_STORE=chaos` in the root `.env`,
 restart `pnpm dev`, and run in the second terminal:
 
