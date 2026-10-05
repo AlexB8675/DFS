@@ -151,7 +151,9 @@ exception code such as `3221225477` (0xC0000005) or `3221225725` (0xC00000FD)
 means the Node.js process running the check crashed, not the stack it was
 checking. Run it again; uploads it left open are released after 24 hours. Run
 the checks through pnpm as shown: started directly from Git Bash, a crash
-loses that exit code.
+loses that exit code. Record any such stop in
+[BACKEND.md §8.1](BACKEND.md#81-unexplained-failures-to-watch-for), which keeps
+the failures nobody has explained yet.
 
 For the upload engine's fault check, set `BLOB_STORE=chaos` in the root `.env`,
 restart `pnpm dev`, and run in the second terminal:

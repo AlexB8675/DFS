@@ -293,6 +293,27 @@ pnpm dev                                                # web :5173, api :3000, 
 | Discord rate limits with many small files | The 10,000-file check with packing | M1 |
 | Development and production sharing one bot (D25) | The side-by-side check of M1; load tests stay on `LocalBlobStore` | M1 onwards |
 | CDN URL expiry during long streams | A slow download across a refresh | M1 |
+| A check's client stopping or failing for no known reason (§8.1) | Run the stack checks through pnpm, and if it happens again, record what §8.1 asks for | Whenever the stack checks run |
+
+### 8.1 Unexplained failures to watch for
+
+Neither of these could be reproduced or explained. Neither touched the data: the API kept serving, and its quota totals stayed exact.
+
+**The end-to-end client stopped without a message (2026-10-05).**
+
+- **What happened:** one `check:end-to-end` run, against a freshly started API and bot on their own database, stopped about 0.3 s into "12 clients uploading versions of the same names at once" and printed nothing more. It left 24 upload sessions without parts (three batches of 8, created within 28 ms); the janitor releases them after 24 hours.
+- **Known:** the same API process served the next runs and logged nothing; no Windows event log has an entry at that time; the client had been started from Git Bash through `timeout … | grep | tail`, which loses a crashed process's exit code, so there is none.
+- **Ruled out:** an error in the script or the contract client (every failure path prints); an `await` that never settles (Node warns and exits with 13); the output pipe breaking on its own (the step writes nothing until it ends); the server.
+- **Not reproduced in:** 63 full runs afterwards (piped, to files, with the servers restarted before each, each one's exit traced from inside the process); 864,000 concurrent WebCrypto digests of one buffer; about 520,000 requests in the step's pattern against a trivial server; 60 rounds of a 1 GiB download followed at once by the burst.
+- **Left:** a native crash of the client's `node.exe` (Node 24.14.1 on Windows), or the process being ended from outside. Both leave no message and no Windows event: Node turns off Windows crash reporting.
+- **If it happens again:** note the exit code pnpm reports (`ELIFECYCLE … exit code 3221225477` is 0xC0000005, an access violation; see `docs/TESTING.md`), the step it stopped in, the Node version, and whether the API logged anything at that moment. A Windows exception code points at Node itself (then try a newer Node 24 release); any other code, at whatever ended the process.
+
+**The end-to-end client's connection was reset (2026-10-04).**
+
+- **What happened:** once, against the `pnpm dev` stack, right after three stress runs, the client failed with `read ECONNRESET` (errno -4077): the connection it was reading was reset.
+- **Known:** the server's log had already scrolled out of view; Postgres logged no error; five runs right after passed.
+- **Since:** it hasn't recurred in about 75 runs, on code that has changed a lot since (among others, fixes for a late duplicate part racing completion and for an unhandled error when a download's client disconnects).
+- **If it happens again:** the check now names the request that failed. Look in the API's log at that moment for an aborted response or an error while reading content.
 
 ---
 
