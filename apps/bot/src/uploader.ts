@@ -1,6 +1,7 @@
 import { appendJournal, notifySynced, uuidArray, type Database, type JournalRecord } from '@dfs/db'
 import type { BlobStore, Staging } from '@dfs/storage'
 import { sql } from 'drizzle-orm'
+import type { FastifyBaseLogger } from 'fastify'
 
 // Storing staged blobs (DESIGN.md §6.1): read the blob from staging, put it
 // in the blob store, then mark it stored, count its frames toward their
@@ -10,6 +11,7 @@ export interface UploaderDeps {
   db: Database
   staging: Staging
   store: BlobStore
+  log?: Pick<FastifyBaseLogger, 'warn'>
 }
 
 interface StagedBlob extends Record<string, unknown> {
@@ -22,7 +24,7 @@ interface StagedBlob extends Record<string, unknown> {
 }
 
 /**
- * Stores these blobs, one after the other, then notifies once per owner for
+ * Stores these blobs with bounded concurrency, then notifies once per owner for
  * the whole batch. A blob that is no longer staged (stored by an earlier
  * attempt, or purged) is skipped, so retries and duplicates are harmless.
  * Returns the blobs that failed, with why, so only those are retried.
@@ -30,19 +32,42 @@ interface StagedBlob extends Record<string, unknown> {
 export async function storeBlobs(
   deps: UploaderDeps,
   blobIds: readonly number[],
+  concurrency = 2,
 ): Promise<Map<number, Error>> {
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1) {
+    throw new RangeError('Blob upload concurrency must be a positive integer.')
+  }
+  // Duplicate jobs must not race to read or replace the same staged blob.
+  const ids = [...new Set(blobIds)]
+  const results = new Array<Awaited<ReturnType<typeof storeBlob>> | Error>(ids.length)
+  let next = 0
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, ids.length) }, async () => {
+      for (let index = next++; index < ids.length; index = next++) {
+        const blobId = ids[index]
+        if (blobId === undefined) continue
+        try {
+          results[index] = await storeBlob(deps, blobId)
+        } catch (error) {
+          results[index] =
+            error instanceof Error ? error : new Error('Storing failed.', { cause: error })
+        }
+      }
+    }),
+  )
   const failures = new Map<number, Error>()
   const synced = new Map<string, { id: string; parentId: string }[]>()
-  for (const blobId of blobIds) {
-    try {
-      for (const file of await storeBlob(deps, blobId)) {
-        synced.set(file.userId, [...(synced.get(file.userId) ?? []), file])
-      }
-    } catch (error) {
-      failures.set(
-        blobId,
-        error instanceof Error ? error : new Error('Storing failed.', { cause: error }),
-      )
+  for (const [index, blobId] of ids.entries()) {
+    const result = results[index]
+    if (result === undefined) continue
+    if (result instanceof Error) {
+      failures.set(blobId, result)
+      continue
+    }
+    for (const file of result) {
+      const files = synced.get(file.userId)
+      if (files) files.push(file)
+      else synced.set(file.userId, [file])
     }
   }
   if (synced.size > 0) {
@@ -97,6 +122,11 @@ async function storeBlob(
     throw new Error(
       `Staged blob ${String(blobId)} is ${String(data.length)} bytes, not ${String(blob.size_bytes)}.`,
     )
+  }
+  if (blob.sha256) {
+    // Hash on the thread pool, keeping the bot responsive for other jobs.
+    const hash = Buffer.from(await crypto.subtle.digest('SHA-256', data))
+    if (!hash.equals(blob.sha256)) throw new Error(`Staged blob ${String(blobId)} is corrupt.`)
   }
   const location = await store.put(blobId, data)
 
@@ -157,7 +187,14 @@ async function storeBlob(
     return files
   })
 
-  await staging.remove(blob.staged_path)
+  // Storage and the version's completion have committed. A cleanup failure
+  // must not hide that completion from the batch's notifications.
+  await staging.remove(blob.staged_path).catch((error: unknown) => {
+    deps.log?.warn(
+      { err: error, blobId, stagedPath: blob.staged_path },
+      'could not remove a staged file after storing its blob',
+    )
+  })
   return finished
 }
 

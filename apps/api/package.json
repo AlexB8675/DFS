@@ -4,13 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --watch --env-file-if-exists=../../.env src/main.ts",
+    "dev": "node --watch --import=@dfs/config/load-env src/main.ts",
     "start": "node src/main.ts",
-    "dfs": "node --env-file-if-exists=../../.env src/cli.ts",
+    "dfs": "node --import=@dfs/config/load-env src/cli.ts",
     "typecheck": "tsc -p tsconfig.json",
     "lint": "eslint .",
     "test": "vitest run",
-    "check:end-to-end": "node --env-file-if-exists=../../.env src/scripts/end-to-end.ts"
+    "check:end-to-end": "node --import=@dfs/config/load-env src/scripts/end-to-end.ts",
+    "check:performance": "node --expose-gc src/scripts/performance.ts"
   },
   "dependencies": {
     "@dfs/config": "workspace:*",

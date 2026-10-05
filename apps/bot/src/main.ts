@@ -12,7 +12,7 @@ let config: Config
 try {
   config = loadConfig(process.env, { service: 'bot', rootDir })
 } catch (error) {
-  console.error(error instanceof ConfigError ? error.message : error)
+  console.error('[ERROR]', error instanceof ConfigError ? error.message : error)
   process.exit(1)
 }
 

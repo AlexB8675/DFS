@@ -58,21 +58,24 @@ export async function sealFrame(
   context: Uint8Array,
   flags = 0,
 ): Promise<Uint8Array> {
-  const frame = new Uint8Array(FRAME_OVERHEAD + plaintext.length)
-  frame.set(MAGIC, 0)
-  frame[4] = FORMAT_VERSION
-  frame[5] = flags
-  new DataView(frame.buffer).setUint32(6, plaintext.length)
-  const nonce = crypto.getRandomValues(new Uint8Array(NONCE_BYTES))
-  frame.set(nonce, HEADER_BYTES)
+  const header = new Uint8Array(HEADER_BYTES + NONCE_BYTES)
+  header.set(MAGIC, 0)
+  header[4] = FORMAT_VERSION
+  header[5] = flags
+  new DataView(header.buffer).setUint32(6, plaintext.length)
+  const nonce = crypto.getRandomValues(header.subarray(HEADER_BYTES))
 
   // WebCrypto returns the ciphertext followed by the tag: the frame's tail.
   const sealed = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv: nonce, additionalData: additionalData(frame, context) },
+    { name: 'AES-GCM', iv: nonce, additionalData: additionalData(header, context) },
     key,
     plaintext,
   )
-  frame.set(new Uint8Array(sealed), HEADER_BYTES + NONCE_BYTES)
+  // Every byte is overwritten below. Allocate only after encryption finishes,
+  // avoiding zeroing and holding another part-sized buffer while it runs.
+  const frame = Buffer.allocUnsafe(header.length + sealed.byteLength)
+  frame.set(header)
+  frame.set(new Uint8Array(sealed), header.length)
   return frame
 }
 

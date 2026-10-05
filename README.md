@@ -57,17 +57,24 @@ pnpm db:migrate
 pnpm dev
 ```
 
+Press Ctrl+C once to stop all three services. The dev scripts run in parallel
+through pnpm, which avoids Turborepo waiting on Windows batch shells after the
+servers have stopped.
+
 Without the database, both still start: `/api/health` answers 503 and the bot
 retries until Postgres is up. If the database restarts while the bot leads, the
 bot stops on purpose (another instance could take over); restart `pnpm dev` to
 bring it back. The database itself comes back on its own when Docker Desktop
 restarts.
 
-The UI still uses its mock API; it switches to the real one in M2.
+Set `VITE_API_MOCKS=off` in `apps/web/.env.local` to use the real API.
+See [docs/TESTING.md](docs/TESTING.md) for setup, browser checks, and the live
+end-to-end tests.
 
 ## Scripts
 
-Run from the repository root; Turborepo runs them in every package.
+Run from the repository root. pnpm starts the dev services in parallel;
+Turborepo runs the build and check tasks across the workspace.
 
 | Command           | What it does                                                    |
 | ----------------- | --------------------------------------------------------------- |

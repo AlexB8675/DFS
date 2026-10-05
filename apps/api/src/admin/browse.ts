@@ -19,7 +19,7 @@ import {
   VISIBLE,
   type NodeRow,
 } from '../nodes/read.ts'
-import { markTrashed } from '../nodes/write.ts'
+import { lockDrive, markTrashed } from '../nodes/write.ts'
 
 // What admins see of other users' drives (DESIGN.md D4): names, sizes, dates
 // and usage, never content; and moderation, which moves an item to its
@@ -117,6 +117,11 @@ export async function moderate(
   reason: string,
 ): Promise<void> {
   await app.db.transaction(async (tx) => {
+    const { rows: owners } = await tx.execute<{ owner_id: string }>(sql`
+      SELECT owner_id FROM nodes WHERE id = ${id}`)
+    const [owner] = owners
+    if (!owner) throw notFound()
+    await lockDrive(tx, owner.owner_id)
     const node = await anyVisibleNode(tx, id)
     if (!node.parent_id) throw new ApiError(403, 'forbidden', 'A root folder cannot be removed.')
     const updated = await markTrashed(tx, [id], reason)

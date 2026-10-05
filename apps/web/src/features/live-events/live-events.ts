@@ -186,15 +186,15 @@ function emptyPending(): Pending {
 function applyBatch(batch: Pending): void {
   if (batch.refetchAll) {
     void queryClient.invalidateQueries()
-    for (const listener of resyncListeners) listener()
-    return
   }
   if (batch.synced.size > 0) {
     const nodes = [...batch.synced.values()]
     patchNodes(new Map(nodes.map((node) => [node.id, { syncState: node.syncState }])))
     for (const listener of syncListeners) listener(nodes)
   }
-  if (batch.changedFolders.size > 0) void invalidateListings(batch.changedFolders)
+  if (!batch.refetchAll && batch.changedFolders.size > 0) {
+    void invalidateListings(batch.changedFolders)
+  }
   const { usedBytes } = batch
   if (usedBytes !== null) {
     queryClient.setQueryData<Session>(
@@ -202,6 +202,9 @@ function applyBatch(batch: Pending): void {
       (session) => session && { ...session, user: { ...session.user, usedBytes } },
     )
   }
+  // Fresh events can arrive in the same batch as the reconnect; keep them,
+  // then check whatever still needs to catch up.
+  if (batch.refetchAll) for (const listener of resyncListeners) listener()
 }
 
 function readJson(event: Event): unknown {

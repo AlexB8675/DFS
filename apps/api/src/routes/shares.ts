@@ -12,7 +12,7 @@ import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
 import { requireAuth } from '../auth/access.ts'
 import { archiveEntries } from '../content/archive.ts'
-import { sendFile, sendZip } from '../content/send.ts'
+import { parseRange, sendFile, sendZip } from '../content/send.ts'
 import {
   countDownload,
   describeShare,
@@ -111,8 +111,12 @@ export function shareRoutes(app: FastifyInstance, _options: object, done: () => 
       const node = await nodeInShare(app, root, request.params.id)
       const file = await downloadableFile(app.db, node.id)
       // Only a request from byte 0 is a download; seeking in a video isn't (§7.5).
-      const range = request.headers.range
-      if (range === undefined || range.startsWith('bytes=0-')) await countDownload(app, share)
+      const range = parseRange(request.headers.range, file.size_bytes)
+      if (
+        request.method !== 'HEAD' &&
+        (range === null || (range !== 'unsatisfiable' && range.start === 0))
+      )
+        await countDownload(app, share)
       return sendFile(app, request, reply, file)
     },
   )
@@ -128,7 +132,7 @@ export function shareRoutes(app: FastifyInstance, _options: object, done: () => 
       const node = request.query.nodeId ? await nodeInShare(app, root, request.query.nodeId) : root
       const entries = await archiveEntries(app, [node])
       // A ZIP counts as one download (§7.5).
-      await countDownload(app, share)
+      if (request.method !== 'HEAD') await countDownload(app, share)
       return sendZip(reply, `${node.name}.zip`, entries)
     },
   )

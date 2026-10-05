@@ -1,3 +1,4 @@
+import { createCipheriv, createDecipheriv } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -59,6 +60,58 @@ describe('frames (DESIGN §7.3)', () => {
     const frame = await sealFrame(key, new Uint8Array(8), context)
     const other = await importAesKey(generateDek())
     await expect(openFrame(other, frame, context)).rejects.toBeInstanceOf(FrameError)
+  })
+
+  it('keeps the existing frame format interoperable with native AES-GCM', async () => {
+    const raw = generateDek()
+    const key = await importAesKey(raw)
+    const context = chunkContext(versionId, 2)
+    const plaintext = new Uint8Array([3, 1, 4, 1, 5])
+    const header = Buffer.alloc(22)
+    header.write('DFS1')
+    header[4] = 1
+    header.writeUInt32BE(plaintext.length, 6)
+    header.fill(9, 10)
+    const aad = Buffer.concat([header.subarray(0, 10), context])
+    const cipher = createCipheriv('aes-256-gcm', raw, header.subarray(10))
+    cipher.setAAD(aad)
+    const existing = Buffer.concat([
+      header,
+      cipher.update(plaintext),
+      cipher.final(),
+      cipher.getAuthTag(),
+    ])
+    expect(await openFrame(key, existing, context)).toEqual(plaintext)
+
+    const frame = await sealFrame(key, plaintext, context)
+    const decipher = createDecipheriv('aes-256-gcm', raw, frame.subarray(10, 22))
+    decipher.setAAD(Buffer.concat([frame.subarray(0, 10), context]))
+    decipher.setAuthTag(frame.subarray(frame.length - 16))
+    expect(
+      new Uint8Array(Buffer.concat([decipher.update(frame.subarray(22, -16)), decipher.final()])),
+    ).toEqual(plaintext)
+  })
+
+  it('handles empty plaintext and sliced buffers without exposing unrelated bytes', async () => {
+    for (const size of [0, 1, 1024]) {
+      const source = new Uint8Array(size + 16).fill(0xa5)
+      const plaintext = source.subarray(7, 7 + size)
+      plaintext.fill(3)
+      const context = chunkContext(versionId, size)
+      const frame = await sealFrame(key, plaintext, context, 7)
+      expect(readFrameHeader(frame)).toMatchObject({
+        flags: 7,
+        ciphertextLength: size,
+        frameLength: size + 38,
+      })
+      const backing = new Uint8Array(frame.length + 16).fill(0x5a)
+      backing.set(frame, 5)
+      expect(await openFrame(key, backing.subarray(5, 5 + frame.length), context)).toEqual(
+        plaintext,
+      )
+      expect(backing[4]).toBe(0x5a)
+      expect(backing[frame.length + 5]).toBe(0x5a)
+    }
   })
 })
 

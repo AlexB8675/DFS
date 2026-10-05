@@ -27,8 +27,8 @@ import {
 } from './read.ts'
 
 // Changing the tree (DESIGN.md §6.3): plain SQL transactions, no storage
-// traffic. The unique index on names is the guard against races; moves take a
-// per-drive lock, so two crossing moves can't make a cycle.
+// traffic. The unique index guards names; a per-drive lock keeps visibility
+// checks valid while the tree changes, and crossing moves cannot make a cycle.
 
 type NodeState = typeof nodes.$inferSelect
 
@@ -41,6 +41,7 @@ export async function createFolder(
   const name = checkedName(rawName)
   const ownerId = auth.user.id
   const id = await app.db.transaction(async (tx) => {
+    await lockDrive(tx, ownerId, 'shared')
     await visibleFolder(tx, ownerId, parentId)
     const folder = await insertFolder(tx, ownerId, parentId, name)
     await appendJournal(tx, [nodeRecord(folder)])
@@ -61,16 +62,24 @@ export async function ensureFolders(
 ): Promise<Record<string, string>> {
   const ownerId = auth.user.id
   return app.db.transaction(async (tx) => {
+    await lockDrive(tx, ownerId, 'shared')
     await visibleFolder(tx, ownerId, parentId)
     const resolved = new Map<string, string>()
     const created: NodeState[] = []
     const result: Record<string, string> = {}
+    const ordered = paths
+      .map((path) => {
+        const names = path.split('/').filter(Boolean).map(checkedName)
+        // NUL cannot occur in a name and sorts before name characters, keeping
+        // each parent's whole subtree together in the same lock order.
+        return { path, names, key: names.map(nameKey).join('\0') }
+      })
+      .sort((left, right) => (left.key < right.key ? -1 : left.key > right.key ? 1 : 0))
 
-    for (const path of paths) {
+    for (const { path, names } of ordered) {
       let currentId = parentId
       let prefix = ''
-      for (const segment of path.split('/').filter(Boolean)) {
-        const name = checkedName(segment)
+      for (const name of names) {
         prefix += `/${nameKey(name)}`
         const known = resolved.get(prefix)
         if (known) {
@@ -82,9 +91,24 @@ export async function ensureFolders(
         if (existing) {
           currentId = existing.id
         } else {
-          const folder = await insertFolder(tx, ownerId, currentId, name)
-          created.push(folder)
-          currentId = folder.id
+          const [folder] = await tx
+            .insert(nodes)
+            .values({ ownerId, parentId: currentId, kind: 'folder', name, nameKey: nameKey(name) })
+            .onConflictDoNothing({
+              target: [nodes.parentId, nodes.nameKey],
+              where: sql`deleted_at IS NULL`,
+            })
+            .returning()
+          if (folder) {
+            created.push(folder)
+            currentId = folder.id
+          } else {
+            // The insert waits for a concurrent creator to commit. Look it up
+            // again in this statement's fresh snapshot before using it.
+            const concurrent = await childByName(tx, currentId, name)
+            if (concurrent?.kind !== 'folder') throw nameConflict(name)
+            currentId = concurrent.id
+          }
         }
         resolved.set(prefix, currentId)
       }
@@ -118,7 +142,11 @@ export async function updateNode(
     const [updated] = await guardName(name, () =>
       tx
         .update(nodes)
-        .set({ name, nameKey: nameKey(name), parentId, updatedAt: new Date() })
+        .set({
+          ...(changes.name !== undefined && { name, nameKey: nameKey(name) }),
+          ...(changes.parentId !== undefined && { parentId }),
+          updatedAt: new Date(),
+        })
         .where(eq(nodes.id, id))
         .returning(),
     )
@@ -173,6 +201,7 @@ export async function moveNodes(
 export async function trashNodes(app: FastifyInstance, auth: Auth, ids: string[]): Promise<void> {
   const ownerId = auth.user.id
   await app.db.transaction(async (tx) => {
+    await lockDrive(tx, ownerId)
     const trashed = await visibleNodes(tx, ownerId, ids)
     if (trashed.some((node) => node.parent_id === null)) {
       throw new ApiError(403, 'forbidden', 'The root folder cannot be trashed.')
@@ -237,7 +266,14 @@ export async function restoreNode(
 
     const [restored] = await tx
       .update(nodes)
-      .set({ parentId, name, nameKey: nameKey(name), deletedAt: null, moderationReason: null })
+      .set({
+        parentId,
+        name,
+        nameKey: nameKey(name),
+        deletedAt: null,
+        trashedVia: null,
+        moderationReason: null,
+      })
       .where(eq(nodes.id, id))
       .returning()
     if (!restored) throw notFound()
@@ -272,9 +308,17 @@ export async function guardName<T>(name: string, write: () => Promise<T>): Promi
   }
 }
 
-/** Serializes tree changes within one drive until the transaction ends. */
-export async function lockDrive(tx: Executor, ownerId: string): Promise<void> {
-  await tx.execute(sql`SELECT pg_advisory_xact_lock(${TREE_LOCK_NAMESPACE}, hashtext(${ownerId}))`)
+/** Creation may run concurrently; moves, trash and restoration need exclusive access. */
+export async function lockDrive(
+  tx: Executor,
+  ownerId: string,
+  mode: 'shared' | 'exclusive' = 'exclusive',
+): Promise<void> {
+  await tx.execute(
+    mode === 'shared'
+      ? sql`SELECT pg_advisory_xact_lock_shared(${TREE_LOCK_NAMESPACE}, hashtext(${ownerId}))`
+      : sql`SELECT pg_advisory_xact_lock(${TREE_LOCK_NAMESPACE}, hashtext(${ownerId}))`,
+  )
 }
 
 async function insertFolder(

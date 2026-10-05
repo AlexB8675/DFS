@@ -1,4 +1,4 @@
-import { chunkContext, openFrame, sha256, uuidBytes } from '@dfs/crypto'
+import { chunkContext, openFrame, sha256, uuidBytes, type AesKey } from '@dfs/crypto'
 import type { Executor } from '@dfs/db'
 import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
@@ -6,7 +6,7 @@ import type { FastifyInstance } from 'fastify'
 // Reading a file back (DESIGN.md §6.2): find the chunks that cover a byte
 // range, read each frame from staging (still syncing) or the blob store
 // (stored), check its SHA-256, decrypt it, and stream the requested slice.
-// The next frame is read while the current one is sent.
+// The next chunk is read, verified and decrypted while the current one is sent.
 
 /** What reading needs to know about a file version. */
 export interface ReadableVersion extends Record<string, unknown> {
@@ -65,17 +65,12 @@ export async function* readVersion(
         `Version ${versionId} is missing chunks ${String(from)}–${String(to)}.`,
       )
     }
-    let next = readFrame(app, versionId, chunks[0])
+    let next = prefetchChunk(app, versionId, key, chunks[0])
     for (let i = 0; i < chunks.length; i += 1) {
       const chunk = chunks[i]
-      const frame = await next
-      if (i + 1 < chunks.length) next = readFrame(app, versionId, chunks[i + 1])
-      if (!chunk || !frame) throw new ContentError('A chunk vanished while reading.')
-
-      if (!Buffer.from(await sha256(frame)).equals(chunk.frame_sha256)) {
-        throw new ContentError(`Chunk ${String(chunk.idx)} of ${versionId} is corrupt.`)
-      }
-      const plaintext = await openFrame(key, frame, chunkContext(versionId, chunk.idx))
+      const plaintext = await next
+      if (i + 1 < chunks.length) next = prefetchChunk(app, versionId, key, chunks[i + 1])
+      if (!chunk) throw new ContentError('A chunk vanished while reading.')
       const chunkStart = chunk.idx * chunkSize
       yield plaintext.subarray(
         Math.max(0, start - chunkStart),
@@ -83,6 +78,38 @@ export async function* readVersion(
       )
     }
   }
+}
+
+/** Keeps one chunk ahead without leaving an unhandled rejection if the stream pauses or closes. */
+function prefetchChunk(
+  app: FastifyInstance,
+  versionId: string,
+  key: AesKey,
+  chunk: ChunkLocation | undefined,
+): Promise<Uint8Array> {
+  const next = readChunk(app, versionId, key, chunk)
+  // The original promise still rejects when awaited; observe it immediately,
+  // since backpressure or a disconnected client can delay or skip that await.
+  void next.catch(() => undefined)
+  return next
+}
+
+async function readChunk(
+  app: FastifyInstance,
+  versionId: string,
+  key: AesKey,
+  chunk: ChunkLocation | undefined,
+): Promise<Uint8Array> {
+  if (!chunk) throw new ContentError('A chunk vanished while reading.')
+  const frame = await readFrame(app, versionId, chunk)
+  if (!Buffer.from(await sha256(frame)).equals(chunk.frame_sha256)) {
+    throw new ContentError(`Chunk ${String(chunk.idx)} of ${versionId} is corrupt.`)
+  }
+  const plaintext = await openFrame(key, frame, chunkContext(versionId, chunk.idx))
+  if (plaintext.length !== chunk.plain_size) {
+    throw new ContentError(`Chunk ${String(chunk.idx)} of ${versionId} has the wrong size.`)
+  }
+  return plaintext
 }
 
 async function chunkLocations(
@@ -109,9 +136,8 @@ async function chunkLocations(
 async function readFrame(
   app: FastifyInstance,
   versionId: string,
-  chunk: ChunkLocation | undefined,
-): Promise<Uint8Array | undefined> {
-  if (!chunk) return undefined
+  chunk: ChunkLocation,
+): Promise<Uint8Array> {
   if (chunk.staged_path) {
     try {
       return await app.staging.read(chunk.staged_path)

@@ -1,4 +1,5 @@
-import { chunkContext, fromSha256Hex, generateDek, sealFrame, sha256, uuidBytes } from '@dfs/crypto'
+import { randomUUID } from 'node:crypto'
+import { chunkContext, fromSha256Hex, generateDek, sha256, uuidBytes } from '@dfs/crypto'
 import {
   abandonUploads,
   appendJournal,
@@ -27,9 +28,10 @@ import type { FastifyInstance } from 'fastify'
 import { fromDrizzle } from 'pg-boss'
 import type { Auth } from '../auth/sessions.ts'
 import { ApiError } from '../errors.ts'
-import { visibleFolder } from '../nodes/read.ts'
-import { checkedName, nameConflict } from '../nodes/write.ts'
+import { notFound, VISIBLE } from '../nodes/read.ts'
+import { checkedName, lockDrive, nameConflict } from '../nodes/write.ts'
 import { removeStagedVersions } from '../staging.ts'
+import { stageFrame } from './stage-frame.ts'
 
 // Multipart uploads (DESIGN.md §6.1). A session reserves quota and creates a
 // file version; each part is encrypted into a frame and written to staging
@@ -54,6 +56,7 @@ interface UploadRow extends Record<string, unknown> {
   chunk_count: number
   wrapped_dek: Buffer
   key_id: string
+  received_hash: Buffer | null
 }
 
 /** `POST /uploads/batch`: answers per upload, so one bad name doesn't sink the rest. */
@@ -103,22 +106,27 @@ async function startUploads(
   inputs: CreateUploadInput[],
 ): Promise<(UploadSession | ApiError)[]> {
   const ownerId = auth.user.id
+  await lockDrive(tx, ownerId, 'shared')
   const outcomes: (UploadSession | ApiError)[] = []
   const fail = (index: number, error: unknown) => {
     if (!(error instanceof ApiError)) throw error
     outcomes[index] = error
   }
 
-  // Folders, once each.
+  // Validate every destination together, without fetching its stats or version.
+  const parentIds = [...new Set(inputs.map((input) => input.parentId))]
+  const { rows: destinations } = await tx.execute<{ id: string; kind: 'file' | 'folder' }>(sql`
+    SELECT n.id, n.kind FROM nodes n
+    WHERE n.id = ANY(${uuidArray(parentIds)}) AND n.owner_id = ${ownerId} AND ${VISIBLE}`)
+  const destinationKinds = new Map(destinations.map((folder) => [folder.id, folder.kind]))
   const folderProblems = new Map<string, ApiError | null>()
-  for (const parentId of new Set(inputs.map((input) => input.parentId))) {
-    try {
-      await visibleFolder(tx, ownerId, parentId)
-      folderProblems.set(parentId, null)
-    } catch (error) {
-      if (!(error instanceof ApiError)) throw error
-      folderProblems.set(parentId, error)
-    }
+  for (const parentId of parentIds) {
+    const kind = destinationKinds.get(parentId)
+    let problem: ApiError | null = null
+    if (kind === undefined) problem = notFound()
+    else if (kind !== 'folder')
+      problem = new ApiError(400, 'not_a_folder', 'The target is not a folder.')
+    folderProblems.set(parentId, problem)
   }
   const plans: Plan[] = []
   for (const [index, input] of inputs.entries()) {
@@ -274,22 +282,23 @@ async function namesInFolders(
   plans: Plan[],
 ): Promise<Map<string, { id: string; kind: 'file' | 'folder' }>> {
   const found = new Map<string, { id: string; kind: 'file' | 'folder' }>()
-  const keysByFolder = new Map<string, string[]>()
-  for (const plan of plans) {
-    const keys = keysByFolder.get(plan.input.parentId) ?? []
-    keys.push(nameKey(plan.name))
-    keysByFolder.set(plan.input.parentId, keys)
-  }
-  for (const [parentId, keys] of keysByFolder) {
-    const { rows } = await tx.execute<{
-      id: string
-      kind: 'file' | 'folder'
-      name_key: string
-    }>(sql`
-      SELECT id, kind, name_key FROM nodes
-      WHERE parent_id = ${parentId} AND name_key = ANY(${textArray(keys)}) AND deleted_at IS NULL`)
-    for (const row of rows) found.set(`${parentId}/${row.name_key}`, { id: row.id, kind: row.kind })
-  }
+  if (plans.length === 0) return found
+  const distinct = [...new Map(plans.map((plan) => [plan.key, plan])).values()]
+  const { rows } = await tx.execute<{
+    id: string
+    kind: 'file' | 'folder'
+    parent_id: string
+    name_key: string
+  }>(sql`
+    SELECT n.id, n.kind, n.parent_id, n.name_key
+    FROM unnest(
+      ${uuidArray(distinct.map((plan) => plan.input.parentId))},
+      ${textArray(distinct.map((plan) => nameKey(plan.name)))}
+    ) AS requested(parent_id, name_key)
+    JOIN nodes n ON n.parent_id = requested.parent_id AND n.name_key = requested.name_key
+    WHERE n.deleted_at IS NULL`)
+  for (const row of rows)
+    found.set(`${row.parent_id}/${row.name_key}`, { id: row.id, kind: row.kind })
   return found
 }
 
@@ -322,10 +331,12 @@ export async function receivePart(
   body: Uint8Array,
   sha256Header: string | undefined,
 ): Promise<void> {
-  const upload = await findUpload(app.db, auth, uploadId)
-  if (!Number.isInteger(index) || index < 0 || index >= upload.chunk_count) {
+  if (!Number.isInteger(index) || index < 0 || index > 0x7fffffff) {
     throw new ApiError(400, 'invalid_part', 'Part index out of range.')
   }
+  const upload = await findUpload(app.db, auth, uploadId, { partIndex: index })
+  if (index >= upload.chunk_count)
+    throw new ApiError(400, 'invalid_part', 'Part index out of range.')
   const lastSize = upload.size_bytes - upload.chunk_size * (upload.chunk_count - 1)
   if (body.length !== (index === upload.chunk_count - 1 ? lastSize : upload.chunk_size)) {
     throw new ApiError(400, 'invalid_part', 'The part has the wrong size.')
@@ -338,12 +349,14 @@ export async function receivePart(
     }
   }
 
-  if (upload.state === 'completed') {
-    const { rows } = await app.db.execute<{ plain_sha256: Buffer }>(sql`
-      SELECT plain_sha256 FROM chunks WHERE version_id = ${upload.version_id} AND idx = ${index}`)
-    if (rows[0]?.plain_sha256.equals(plainHash)) return
-    throw new ApiError(409, 'upload_completed', 'This upload is already complete.')
+  // A retry of an acknowledged part needs no encryption, fsync or staging space.
+  if (receivedPartMatches(upload.received_hash, plainHash)) {
+    if (upload.chunk_count === 1 && upload.state !== 'completed') {
+      await completeUpload(app, auth, uploadId)
+    }
+    return
   }
+  if (upload.state === 'completed') throw uploadCompleted()
   if (await app.stagingLimit.isFull()) {
     throw new ApiError(
       503,
@@ -359,21 +372,65 @@ export async function receivePart(
   const key = await app.dataKeys.get(versionId, () =>
     app.keys.unwrapDek(upload.wrapped_dek, upload.key_id, uuidBytes(versionId)),
   )
-  const frame = await sealFrame(key, body, chunkContext(versionId, index))
-  const stagedPath = app.staging.framePath(versionId, index)
-  await app.staging.write(stagedPath, frame)
-  await app.db.execute(sql`
-    INSERT INTO chunks (version_id, idx, plain_size, frame_size, plain_sha256, frame_sha256, staged_path)
-    VALUES (${versionId}, ${index}, ${body.length}, ${frame.length}, ${Buffer.from(plainHash)},
-      ${Buffer.from(await sha256(frame))}, ${stagedPath})
-    ON CONFLICT (version_id, idx) DO UPDATE SET
-      plain_size = excluded.plain_size, frame_size = excluded.frame_size,
-      plain_sha256 = excluded.plain_sha256, frame_sha256 = excluded.frame_sha256,
-      staged_path = excluded.staged_path
-    WHERE chunks.blob_id IS NULL`)
+  // Each attempt owns its file; a late or duplicate PUT cannot overwrite an
+  // accepted frame. Only publishing the chunk takes the session's row lock,
+  // so different parts can still encrypt and write in parallel.
+  const stagedPath = `${app.staging.framePath(versionId, index)}.${randomUUID()}`
+  const publication = { mayBeCommitted: false }
+  try {
+    const { frame, hash: frameHash } = await stageFrame(
+      app.staging,
+      stagedPath,
+      key,
+      body,
+      chunkContext(versionId, index),
+    )
+    await app.db.transaction(async (tx) => {
+      const current = await findUpload(tx, auth, uploadId, { lock: true })
+      if (current.state === 'receiving') {
+        const inserted = await tx.execute<{ idx: number }>(sql`
+          INSERT INTO chunks (version_id, idx, plain_size, frame_size, plain_sha256, frame_sha256, staged_path)
+          VALUES (${versionId}, ${index}, ${body.length}, ${frame.length}, ${Buffer.from(plainHash)},
+            ${Buffer.from(frameHash)}, ${stagedPath})
+          ON CONFLICT (version_id, idx) DO NOTHING RETURNING idx`)
+        if (inserted.rows.length > 0) {
+          // Keep the frame even if COMMIT's response is lost. It may already be
+          // referenced by a committed chunk, and a retry can check that receipt.
+          publication.mayBeCommitted = true
+          return
+        }
+      }
+      // Only racing retries need another lookup. Read after taking the lock:
+      // a receipt or completion may have committed while this attempt waited.
+      const { rows } = await tx.execute<{ plain_sha256: Buffer }>(sql`
+        SELECT plain_sha256 FROM chunks WHERE version_id = ${versionId} AND idx = ${index}`)
+      if (receivedPartMatches(rows[0]?.plain_sha256 ?? null, plainHash)) return
+      throw uploadCompleted()
+    })
+  } finally {
+    if (!publication.mayBeCommitted) {
+      await app.staging.remove(stagedPath).catch((error: unknown) => {
+        app.log.warn({ err: error, stagedPath }, 'could not remove an unaccepted staged frame')
+      })
+    }
+  }
 
   // A single-part upload completes on its own, saving a request per small file.
   if (upload.chunk_count === 1) await completeUpload(app, auth, uploadId)
+}
+
+function receivedPartMatches(received: Buffer | null, hash: Uint8Array): boolean {
+  if (!received) return false
+  if (!received.equals(hash)) throw uploadCompleted()
+  return true
+}
+
+function uploadCompleted(): ApiError {
+  return new ApiError(
+    409,
+    'upload_completed',
+    'This part has already been received with other bytes.',
+  )
 }
 
 /**
@@ -480,13 +537,20 @@ async function findUpload(
   db: Executor,
   auth: Auth,
   uploadId: string,
-  { lock = false } = {},
+  { lock = false, partIndex }: { lock?: boolean; partIndex?: number } = {},
 ): Promise<UploadRow> {
   const { rows } = await db.execute<UploadRow>(sql`
     SELECT session.id, session.node_id, node.parent_id, session.version_id, version.version_no,
       session.state, session.reserved_bytes::float8 AS reserved_bytes,
       version.size_bytes::float8 AS size_bytes, version.chunk_size, version.chunk_count,
-      version.wrapped_dek, version.key_id
+      version.wrapped_dek, version.key_id,
+      ${
+        partIndex === undefined
+          ? sql`NULL::bytea`
+          : sql`(
+        SELECT plain_sha256 FROM chunks WHERE version_id = session.version_id AND idx = ${partIndex}
+      )`
+      } AS received_hash
     FROM upload_sessions session
     JOIN file_versions version ON version.id = session.version_id
     JOIN nodes node ON node.id = session.node_id

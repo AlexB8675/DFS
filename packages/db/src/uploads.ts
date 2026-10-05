@@ -19,42 +19,72 @@ export async function abandonUploads(
     node_id: string
     version_id: string
     reserved: number
-    first_version: boolean
-    parent_id: string | null
-    has_current: boolean
   }>(sql`
     DELETE FROM upload_sessions session
-    USING file_versions version, nodes node
     WHERE session.id = ANY(${uuidArray(sessionIds)}) AND session.state = 'receiving'
-      AND version.id = session.version_id AND node.id = session.node_id
     RETURNING session.user_id, session.node_id, session.version_id,
-      session.reserved_bytes::float8 AS reserved, version.version_no = 1 AS first_version,
-      node.parent_id, node.current_version_id IS NOT NULL AS has_current`)
+      session.reserved_bytes::float8 AS reserved`)
+  if (rows.length === 0) return []
 
-  // Locks in the order of locks.ts: files, owners, then the folders that lose a file.
+  // Locks in the order of locks.ts: files, owners, then the folders that lose
+  // a file. Keep the file's key-share lock available to an upload that already
+  // holds the owner's quota row, so its foreign keys cannot create a deadlock.
   const nodeIds = [...new Set(rows.map((row) => row.node_id))].sort()
-  await tx.execute(
-    sql`SELECT id FROM nodes WHERE id = ANY(${uuidArray(nodeIds)}) ORDER BY id FOR UPDATE`,
+  const { rows: files } = await tx.execute<{
+    id: string
+    parent_id: string | null
+    current_version_id: string | null
+  }>(sql`
+    SELECT id, parent_id, current_version_id FROM nodes
+    WHERE id = ANY(${uuidArray(nodeIds)}) ORDER BY id FOR NO KEY UPDATE`)
+  const reservations = new Map<string, number>()
+  for (const row of rows)
+    reservations.set(row.user_id, (reservations.get(row.user_id) ?? 0) + row.reserved)
+  for (const ownerId of [...reservations.keys()].sort())
+    await releaseReservation(tx, ownerId, reservations.get(ownerId) ?? 0)
+
+  // Cancelling one version must preserve other uploads onto the same file.
+  // Read after taking the node locks: another version may have completed
+  // while cancellation waited. The quota lock also waits for newly started
+  // versions to commit before this check. A file goes only when nothing remains.
+  const { rows: remaining } = await tx.execute<{ node_id: string }>(sql`
+    SELECT DISTINCT node_id FROM file_versions
+    WHERE node_id = ANY(${uuidArray(nodeIds)})
+      AND id <> ALL(${uuidArray(rows.map((row) => row.version_id))})`)
+  const retained = new Set(remaining.map((version) => version.node_id))
+  const unfinished = new Set(
+    files
+      .filter((file) => !file.current_version_id && !retained.has(file.id))
+      .map((file) => file.id),
   )
-  for (const row of rows) await releaseReservation(tx, row.user_id, row.reserved)
-  // A file that never had a completed version goes with its upload.
-  const unfinished = (row: (typeof rows)[number]) => row.first_version && !row.has_current
   await markFoldersDirty(
     tx,
-    rows.filter(unfinished).flatMap((row) => row.parent_id ?? []),
+    files.filter((file) => unfinished.has(file.id)).flatMap((file) => file.parent_id ?? []),
   )
 
   const staged: string[] = []
   const records: JournalRecord[] = []
+  const unfinishedByOwner = new Map<string, Set<string>>()
+  const versionsByOwner = new Map<string, string[]>()
   for (const row of rows) {
-    if (unfinished(row)) {
-      const purged = await purgeSubtrees(tx, row.user_id, [row.node_id])
-      staged.push(...purged.versionIds)
-      records.push(...purged.records)
+    if (unfinished.has(row.node_id)) {
+      const ids = unfinishedByOwner.get(row.user_id)
+      if (ids) ids.add(row.node_id)
+      else unfinishedByOwner.set(row.user_id, new Set([row.node_id]))
     } else {
-      records.push(...(await purgeVersions(tx, row.user_id, [row.version_id])))
-      staged.push(row.version_id)
+      const ids = versionsByOwner.get(row.user_id)
+      if (ids) ids.push(row.version_id)
+      else versionsByOwner.set(row.user_id, [row.version_id])
     }
+  }
+  for (const [ownerId, nodeIds] of unfinishedByOwner) {
+    const purged = await purgeSubtrees(tx, ownerId, [...nodeIds])
+    staged.push(...purged.versionIds)
+    records.push(...purged.records)
+  }
+  for (const [ownerId, versionIds] of versionsByOwner) {
+    records.push(...(await purgeVersions(tx, ownerId, versionIds)))
+    staged.push(...versionIds)
   }
   await appendJournal(tx, records)
   return staged

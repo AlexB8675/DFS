@@ -42,8 +42,13 @@ export class JobQueue {
     boss.on('error', (error) => {
       this.#log.error({ err: error }, 'job queue error')
     })
-    await boss.start()
-    await boss.createQueue(QUEUES.blobUpload, BLOB_UPLOAD_QUEUE)
-    return boss
+    try {
+      await boss.start()
+      await boss.createQueue(QUEUES.blobUpload, BLOB_UPLOAD_QUEUE)
+      return boss
+    } catch (error) {
+      await boss.stop({ graceful: false }).catch(() => undefined)
+      throw error
+    }
   }
 }

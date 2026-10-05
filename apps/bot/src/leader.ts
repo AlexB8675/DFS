@@ -36,6 +36,7 @@ export class LeaderElection {
   readonly #options: Required<LeaderElectionOptions>
   #state: LeaderState = 'connecting'
   #client: pg.Client | null = null
+  #attempting: Promise<void> | null = null
   #timer: NodeJS.Timeout | null = null
   #failures = 0
   #stopped = false
@@ -54,7 +55,10 @@ export class LeaderElection {
   }
 
   start(): void {
-    void this.#attempt()
+    if (this.#stopped || this.#attempting || this.#timer) return
+    this.#attempting = this.#attempt().finally(() => {
+      this.#attempting = null
+    })
   }
 
   /** Stops trying, and gives up the lock by closing its connection. */
@@ -62,9 +66,11 @@ export class LeaderElection {
     this.#stopped = true
     this.#state = 'stopped'
     if (this.#timer) clearTimeout(this.#timer)
+    this.#timer = null
     const client = this.#client
     this.#client = null
     await client?.end().catch(() => undefined)
+    await this.#attempting
   }
 
   async #attempt(): Promise<void> {
@@ -77,7 +83,7 @@ export class LeaderElection {
         'SELECT pg_try_advisory_lock($1, $2) AS locked',
         [LOCK_NAMESPACE, LOCKS.botLeader],
       )
-      if (this.#isStopped()) return
+      if (this.#isStopped() || this.#client !== client) return
       this.#failures = 0
       if (rows[0]?.locked) {
         await this.#lead(client)
@@ -92,6 +98,7 @@ export class LeaderElection {
       const delay = this.#backoffDelay()
       log.warn({ reason: describe(error), retryInMs: delay }, 'database unreachable; retrying')
       await this.#dropClient()
+      if (this.#isStopped()) return
       this.#state = 'connecting'
       this.#schedule(delay)
     }
@@ -104,6 +111,7 @@ export class LeaderElection {
     try {
       await onLead()
     } catch (error) {
+      if (this.#isStopped()) return
       // Give the lock back, so a healthy instance can take over.
       log.error({ err: error }, 'could not start leading; giving it up')
       this.#state = 'connecting'
@@ -112,11 +120,14 @@ export class LeaderElection {
       this.#schedule(this.#backoffDelay())
       return
     }
+    if (this.#stopped || this.#client !== client) return
     const beat = async () => {
       if (this.#client !== client || this.#stopped) return
       try {
         await client.query('SELECT 1')
-        this.#timer = setTimeout(() => void beat(), heartbeatMs)
+        if (!this.#isStopped() && this.#client === client) {
+          this.#timer = setTimeout(() => void beat(), heartbeatMs)
+        }
       } catch (error) {
         this.#connectionLost(client, error)
       }
@@ -129,21 +140,28 @@ export class LeaderElection {
       connectionString: this.#options.databaseUrl,
       application_name: 'dfs-bot-leader',
       connectionTimeoutMillis: 5000,
+      query_timeout: 5000,
       keepAlive: true,
     })
+    this.#client = client
+    // pg can leave connect() pending when end() interrupts authentication.
+    const closed = Promise.withResolvers<never>()
     client.on('error', (error) => {
+      closed.reject(error)
       this.#connectionLost(client, error)
     })
     client.on('end', () => {
+      closed.reject(new Error('Leader connection ended.'))
       this.#connectionLost(client, null)
     })
     try {
-      await client.connect()
+      await Promise.race([client.connect(), closed.promise])
+      if (this.#stopped || this.#client !== client) throw new Error('Leader connection ended.')
     } catch (error) {
+      if (this.#client === client) this.#client = null
       await client.end().catch(() => undefined)
       throw error
     }
-    this.#client = client
     return client
   }
 
@@ -176,7 +194,10 @@ export class LeaderElection {
 
   #schedule(delayMs: number): void {
     if (this.#stopped) return
-    this.#timer = setTimeout(() => void this.#attempt(), delayMs)
+    this.#timer = setTimeout(() => {
+      this.#timer = null
+      this.start()
+    }, delayMs)
   }
 
   #backoffDelay(): number {

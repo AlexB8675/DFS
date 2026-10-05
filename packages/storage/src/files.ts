@@ -11,20 +11,20 @@ export async function writeFileDurably(file: string, data: Uint8Array): Promise<
   const directory = path.dirname(file)
   await mkdir(directory, { recursive: true })
   const temporary = `${file}.${randomUUID()}.tmp`
-  const handle = await open(temporary, 'wx')
   try {
-    await handle.writeFile(data)
-    await handle.sync()
-  } finally {
-    await handle.close()
-  }
-  try {
+    const handle = await open(temporary, 'wx')
+    try {
+      await handle.writeFile(data)
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
     await rename(temporary, file)
+    await syncDirectory(directory)
   } catch (error) {
-    await rm(temporary, { force: true })
+    await rm(temporary, { force: true }).catch(() => undefined)
     throw error
   }
-  await syncDirectory(directory)
 }
 
 /** Reads exactly `length` bytes at `offset`, or throws if the file is shorter. */

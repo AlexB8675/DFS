@@ -8,9 +8,10 @@ const rootDir = path.resolve(import.meta.dirname, '../../../..')
 
 try {
   const config = loadConfig(process.env, { service: 'cli', rootDir })
+  console.info('[INFO] Applying database migrations…')
   await runMigrations(config.databaseUrl)
-  console.log('Migrations are up to date.')
+  console.info('[INFO] Migrations are up to date.')
 } catch (error) {
-  console.error(error instanceof ConfigError ? error.message : error)
+  console.error('[ERROR]', error instanceof ConfigError ? error.message : error)
   process.exitCode = 1
 }

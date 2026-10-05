@@ -76,6 +76,10 @@ export async function purgeSubtrees(
     )
     SELECT id FROM below`)
   const nodeIds = uuidArray(subtree.map((row) => row.id))
+  // Uploads before nodes, as completion holds its session while updating its
+  // file. Taking the node first could deadlock with that completion.
+  await tx.execute(sql`
+    SELECT id FROM upload_sessions WHERE node_id = ANY(${nodeIds}) ORDER BY id FOR UPDATE`)
   // Nodes before the user's row, the order of locks.ts.
   await tx.execute(sql`SELECT id FROM nodes WHERE id = ANY(${nodeIds}) ORDER BY id FOR UPDATE`)
 

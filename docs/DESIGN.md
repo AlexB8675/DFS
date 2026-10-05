@@ -785,7 +785,7 @@ Expected profile (D7): **few users (≤ ~20), many files.** The design targets *
 |---|---|
 | Node.js 24 LTS + **pnpm** (via Corepack) | Native on Windows. `pnpm` itself must be on the PATH (`corepack enable pnpm`), because Turborepo calls it; `corepack pnpm …` alone is not enough |
 | PostgreSQL 18 | `pnpm db:up` (Docker Desktop), then `pnpm db:migrate`. Port `5432` is published to **localhost only** |
-| api (`:3000`), bot (`:3001`), web (`:5173`) | `pnpm dev` (Turborepo runs all three in watch mode: `node --watch` on the TypeScript sources, D22, and Vite) |
+| api (`:3000`), bot (`:3001`), web (`:5173`) | `pnpm dev` (pnpm runs all three in parallel, avoiding Windows batch-shell shutdown hangs: `node --watch` on the TypeScript sources, D22, and Vite) |
 | First account | `dfs owner` creates the owner and prints a temporary password, as in production (§7.1) |
 | Web → API | The Vite dev server proxies `/api` to `localhost:3000`, so the browser sees one origin, as it will in production |
 | Discord | The production server and bot, with development's own `DFS Dev` channels and no gateway connection (D25, §4). Development never touches production's channels |

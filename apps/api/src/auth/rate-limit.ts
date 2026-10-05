@@ -7,6 +7,7 @@ export class RateLimiter {
   readonly #limit: number
   readonly #windowMs: number
   readonly #windows = new Map<string, { count: number; resetAt: number }>()
+  #nextSweepAt = 0
 
   constructor(limit: number, windowMs: number) {
     this.#limit = limit
@@ -24,7 +25,12 @@ export class RateLimiter {
   hit(key: string, now = Date.now()): void {
     let window = this.#windows.get(key)
     if (!window || window.resetAt <= now) {
-      if (this.#windows.size > 10_000) this.#sweep(now)
+      if (this.#windows.size > 10_000 && now >= this.#nextSweepAt) {
+        this.#sweep(now)
+        // Most windows are still active during a burst. Bound full scans to
+        // once per window instead of doing one for every new key.
+        this.#nextSweepAt = now + this.#windowMs
+      }
       window = { count: 0, resetAt: now + this.#windowMs }
       this.#windows.set(key, window)
     }

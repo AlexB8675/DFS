@@ -1,6 +1,6 @@
 import type { DriveNode, Session } from '@dfs/shared'
 import type { InfiniteData } from '@tanstack/react-query'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
 import { queryClient } from '@/app/query-client'
 import {
   FLUSH_MS,
@@ -82,7 +82,7 @@ function listedSyncState() {
 }
 
 describe('startLiveEvents', () => {
-  let invalidate: ReturnType<typeof vi.spyOn>
+  let invalidate: MockInstance<typeof queryClient.invalidateQueries>
 
   beforeEach(() => {
     vi.useFakeTimers()
@@ -121,15 +121,23 @@ describe('startLiveEvents', () => {
 
   it('refetches only the folders that changed, once each', () => {
     const other = crypto.randomUUID()
+    const untouched = ['nodes', crypto.randomUUID(), 'children']
+    const otherListing = ['nodes', other, 'children']
+    seedListing()
+    queryClient.setQueryData(otherListing, { pages: [], pageParams: [] })
+    queryClient.setQueryData(untouched, { pages: [], pageParams: [] })
+    invalidate.mockRestore()
+    invalidate = vi.spyOn(queryClient, 'invalidateQueries')
     const stop = startLiveEvents()
     latest().open()
     latest().send('nodes.changed', { parentIds: [folderId, other] })
     latest().send('nodes.changed', { parentIds: [folderId] })
     vi.advanceTimersByTime(FLUSH_MS)
 
-    expect(invalidate).toHaveBeenCalledTimes(2)
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['nodes', folderId, 'children'] })
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['nodes', other, 'children'] })
+    expect(invalidate).toHaveBeenCalledTimes(1)
+    expect(queryClient.getQueryState(listingKey)?.isInvalidated).toBe(true)
+    expect(queryClient.getQueryState(otherListing)?.isInvalidated).toBe(true)
+    expect(queryClient.getQueryState(untouched)?.isInvalidated).toBe(false)
     stop()
   })
 
@@ -205,6 +213,29 @@ describe('startLiveEvents', () => {
     expect(FakeEventSource.instances).toHaveLength(2)
     expect(FakeEventSource.instances[0]?.readyState).toBe(FakeEventSource.CLOSED)
     stop()
+  })
+
+  it('delivers fresh sync events batched with a reconnect resync', () => {
+    seedListing()
+    const synced = vi.fn()
+    const unsubscribe = subscribeToSyncs(synced)
+    const stop = startLiveEvents()
+    try {
+      latest().open()
+      latest().fail()
+      vi.advanceTimersByTime(RECONNECT_MIN_MS)
+      latest().open()
+      const node = { id: fileId, parentId: folderId, syncState: 'stored' }
+      latest().send('nodes.synced', { nodes: [node] })
+      vi.advanceTimersByTime(FLUSH_MS)
+
+      expect(invalidate).toHaveBeenCalledWith()
+      expect(synced).toHaveBeenCalledWith([node])
+      expect(listedSyncState()).toBe('stored')
+    } finally {
+      unsubscribe()
+      stop()
+    }
   })
 
   it('reconnects at once when the network comes back', () => {

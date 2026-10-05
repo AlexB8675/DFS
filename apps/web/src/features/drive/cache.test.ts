@@ -1,7 +1,7 @@
 import type { DriveNode } from '@dfs/shared'
-import { QueryClient, type InfiniteData } from '@tanstack/react-query'
+import { QueryClient, QueryObserver, type InfiniteData } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { invalidateListings, patchNodes, removeFromListings } from './cache'
+import { invalidateListings, invalidateNodes, patchNodes, removeFromListings } from './cache'
 
 function node(id: string, parentId = 'folder'): DriveNode {
   return {
@@ -65,6 +65,76 @@ describe('drive cache updates', () => {
     const invalidate = vi.spyOn(client, 'invalidateQueries')
     await invalidateListings(['folder', null, 'folder'], client)
     expect(invalidate).toHaveBeenCalledTimes(1)
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['nodes', 'folder', 'children'] })
+    expect(client.getQueryState(byName)?.isInvalidated).toBe(true)
+    expect(client.getQueryState(bySize)?.isInvalidated).toBe(true)
+    expect(client.getQueryState(other)?.isInvalidated).toBe(false)
+  })
+
+  it('scans cached queries a fixed number of times for a batch of changed folders', async () => {
+    const folders = Array.from({ length: 16 }, (_, index) => `folder-${index}`)
+    for (const id of folders)
+      client.setQueryData(['nodes', id, 'children'], listing([node(`${id}-file`, id)]))
+    const scans = vi.spyOn(client.getQueryCache(), 'findAll')
+    await invalidateListings(['folder'], client)
+    const single = scans.mock.calls.length
+    scans.mockClear()
+
+    await invalidateListings(folders, client)
+
+    expect(scans.mock.calls.length).toBeLessThanOrEqual(single)
+    for (const id of folders)
+      expect(client.getQueryState(['nodes', id, 'children'])?.isInvalidated).toBe(true)
+    expect(client.getQueryState(other)?.isInvalidated).toBe(false)
+  })
+
+  it('invalidates a batch of single nodes without touching their listings or paths', async () => {
+    const ids = Array.from({ length: 16 }, (_, index) => `node-${index}`)
+    for (const id of ids) {
+      client.setQueryData(['nodes', id], node(id))
+      client.setQueryData(['nodes', id, 'path'], [{ id, name: id }])
+      client.setQueryData(['nodes', id, 'children'], listing([node(`${id}-child`, id)]))
+    }
+    const scans = vi.spyOn(client.getQueryCache(), 'findAll')
+    await invalidateNodes([ids[0] ?? ''], client)
+    const single = scans.mock.calls.length
+    scans.mockClear()
+
+    await invalidateNodes(ids, client)
+
+    expect(scans.mock.calls.length).toBeLessThanOrEqual(single)
+    for (const id of ids) {
+      expect(client.getQueryState(['nodes', id])?.isInvalidated).toBe(true)
+      expect(client.getQueryState(['nodes', id, 'path'])?.isInvalidated).toBe(false)
+      expect(client.getQueryState(['nodes', id, 'children'])?.isInvalidated).toBe(false)
+    }
+  })
+
+  it('does no cache work for an empty set of changed folders or nodes', async () => {
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+
+    await invalidateListings([null], client)
+    await invalidateNodes([], client)
+
+    expect(invalidate).not.toHaveBeenCalled()
+    expect(client.getQueryState(byName)?.isInvalidated).toBe(false)
+  })
+
+  it('waits for active listings to refetch once while leaving other folders alone', async () => {
+    const fetch = vi.fn(() => Promise.resolve(listing([node('fresh')])))
+    const observer = new QueryObserver(client, {
+      queryKey: byName,
+      queryFn: fetch,
+      staleTime: Infinity,
+    })
+    const unsubscribe = observer.subscribe(() => undefined)
+    try {
+      await invalidateListings(['folder', null, 'folder'], client)
+
+      expect(fetch).toHaveBeenCalledTimes(1)
+      expect(client.getQueryData(byName)).toEqual(listing([node('fresh')]))
+      expect(client.getQueryState(other)?.isInvalidated).toBe(false)
+    } finally {
+      unsubscribe()
+    }
   })
 })

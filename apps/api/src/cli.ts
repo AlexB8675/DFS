@@ -35,7 +35,7 @@ const { positionals, values } = parseArgs({
 })
 
 if (positionals[0] !== 'owner' || positionals.length !== 1) {
-  console.error(USAGE)
+  console.error(`[ERROR] ${USAGE}`)
   process.exit(1)
 }
 
@@ -43,7 +43,7 @@ let config: Config
 try {
   config = loadConfig(process.env, { service: 'cli', rootDir })
 } catch (error) {
-  console.error(error instanceof ConfigError ? error.message : error)
+  console.error('[ERROR]', error instanceof ConfigError ? error.message : error)
   process.exit(1)
 }
 
@@ -54,7 +54,7 @@ const pool = createPool(config.databaseUrl, {
 try {
   await owner(createDatabase(pool), config, values.username)
 } catch (error) {
-  console.error(error instanceof Error ? error.message : error)
+  console.error('[ERROR]', error instanceof Error ? error.message : error)
   process.exitCode = 1
 } finally {
   await pool.end()
@@ -95,8 +95,8 @@ async function owner(
       })
       await appendJournal(tx, [userRecord(updated)])
     })
-    console.log(
-      `Gave the owner, ${username}, a new temporary password and signed them out everywhere.`,
+    console.warn(
+      `[WARN] Gave the owner, ${username}, a new temporary password and signed them out everywhere.`,
     )
   } else {
     username = usernameSchema.parse(
@@ -113,10 +113,10 @@ async function owner(
         isOwner: true,
       }),
     )
-    console.log(`Created the owner account, ${username}.`)
+    console.info(`[INFO] Created the owner account, ${username}.`)
   }
 
-  console.log(`
+  console.info(`[INFO] Sign-in details:
   Sign in at:          ${config.publicBaseUrl}/login
   Username:            ${username}
   Temporary password:  ${temporaryPassword}

@@ -43,6 +43,7 @@ export function createBot({
   const db = createDatabase(pool)
   let boss: PgBoss | null = null
   let work: LeaderWork | null = null
+  let stopped = false
 
   const election = new LeaderElection({
     databaseUrl: config.databaseUrl,
@@ -58,18 +59,28 @@ export function createBot({
       queue.on('error', (error) => {
         server.log.error({ err: error }, 'job queue error')
       })
+      let leadingWork: LeaderWork | null = null
       try {
         // Creates or upgrades pg-boss's own schema on first start.
         await queue.start()
-        work = await startLeaderWork({ config, db, boss: queue, log: server.log })
+        if (!stopped)
+          leadingWork = await startLeaderWork({ config, db, boss: queue, log: server.log })
+        if (stopped) {
+          await leadingWork?.stop()
+          await queue.stop({ graceful: false })
+          return
+        }
       } catch (error) {
+        await leadingWork?.stop().catch(() => undefined)
         await queue.stop({ graceful: false }).catch(() => undefined)
         throw error
       }
+      work = leadingWork
       boss = queue
       server.log.info('job queue started')
     },
     onLost: () => {
+      stopped = true
       void work?.stop()
       void boss?.stop({ graceful: false }).catch(() => undefined)
       work = null
@@ -100,6 +111,7 @@ export function createBot({
     election,
     queue: () => boss,
     stop: async () => {
+      stopped = true
       await work?.stop()
       await boss?.stop({ graceful: true, timeout: 10_000 })
       work = null

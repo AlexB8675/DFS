@@ -10,7 +10,8 @@
     "typecheck": "tsc -p tsconfig.app.json && tsc -p tsconfig.node.json",
     "lint": "eslint .",
     "test": "vitest run",
-    "check:engine": "vitest run --silent=false src/features/uploads/upload-engine.stack.test.ts"
+    "check:engine": "vitest run --silent=false src/features/uploads/upload-engine.stack.test.ts",
+    "check:performance": "vitest bench --run --silent=false --no-file-parallelism src/features/uploads/upload-store.bench.ts src/features/uploads/upload-engine.bench.ts"
   },
   "dependencies": {
     "@dfs/shared": "workspace:*",

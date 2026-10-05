@@ -1,6 +1,6 @@
 import type { ChangePasswordInput, LoginInput } from '@dfs/shared'
 import { appendJournal, userRecord, users } from '@dfs/db'
-import { eq, sql } from 'drizzle-orm'
+import { and, eq, isNull, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { audit } from '../audit.ts'
 import { ApiError } from '../errors.ts'
@@ -19,6 +19,7 @@ import {
 const FREE_FAILURES = 10
 const FIRST_LOCK_MS = 60_000
 const MAX_LOCK_MS = 60 * 60_000
+const MAX_LOCK_EXPONENT = Math.ceil(Math.log2(MAX_LOCK_MS / FIRST_LOCK_MS))
 
 export interface SignedIn {
   user: UserRow
@@ -52,23 +53,30 @@ export async function signIn(
     throw new ApiError(401, 'invalid_credentials', 'Wrong username or password.')
   }
 
-  // Only someone with the right password learns these.
-  if (user.disabledAt) {
-    throw new ApiError(
-      403,
-      'account_disabled',
-      'This account is disabled. Ask an admin if you need it back.',
-    )
-  }
-  if (user.passwordExpiresAt && user.passwordExpiresAt.getTime() <= Date.now()) {
-    throw new ApiError(
-      403,
-      'password_expired',
-      'This temporary password has expired. Ask an admin for a new one.',
-    )
-  }
-
   return app.db.transaction(async (tx) => {
+    // Hashing takes time. Lock and recheck before opening the session, so a
+    // password reset or account change cannot be bypassed by an older check.
+    const [checked] = await tx.select().from(users).where(eq(users.id, user.id)).for('update')
+    if (checked?.passwordHash !== user.passwordHash) {
+      throw new ApiError(401, 'invalid_credentials', 'Wrong username or password.')
+    }
+    const wait = checked.signInLockedUntil ? checked.signInLockedUntil.getTime() - Date.now() : 0
+    if (wait > 0) throw tooManyTries(wait)
+    // Only someone with the right password learns these.
+    if (checked.disabledAt) {
+      throw new ApiError(
+        403,
+        'account_disabled',
+        'This account is disabled. Ask an admin if you need it back.',
+      )
+    }
+    if (checked.passwordExpiresAt && checked.passwordExpiresAt.getTime() <= Date.now()) {
+      throw new ApiError(
+        403,
+        'password_expired',
+        'This temporary password has expired. Ask an admin for a new one.',
+      )
+    }
     const [current] = await tx
       .update(users)
       .set({ failedSignIns: 0, signInLockedUntil: null, lastSeenAt: new Date() })
@@ -115,7 +123,14 @@ export async function changePassword(
         passwordExpiresAt: null,
         activatedAt: sql`coalesce(${users.activatedAt}, now())`,
       })
-      .where(eq(users.id, user.id))
+      // The account may have changed while the password checks and hash ran.
+      .where(
+        and(
+          eq(users.id, user.id),
+          eq(users.passwordHash, user.passwordHash),
+          isNull(users.disabledAt),
+        ),
+      )
       .returning()
     if (!updated) throw new ApiError(401, 'unauthenticated', 'Sign in to continue.')
     await endUserSessions(tx, user.id)
@@ -131,16 +146,17 @@ export async function changePassword(
 }
 
 async function recordFailure(app: FastifyInstance, user: UserRow): Promise<void> {
-  const failures = user.failedSignIns + 1
-  const lockMs =
-    failures >= FREE_FAILURES
-      ? Math.min(MAX_LOCK_MS, FIRST_LOCK_MS * 2 ** (failures - FREE_FAILURES))
-      : 0
+  // Derive both fields from the row being updated: simultaneous checks can
+  // have read the same old count before password verification finished.
+  const failures = sql`${users.failedSignIns} + 1`
   await app.db
     .update(users)
     .set({
       failedSignIns: failures,
-      signInLockedUntil: lockMs > 0 ? new Date(Date.now() + lockMs) : null,
+      signInLockedUntil: sql`CASE WHEN ${failures} >= ${FREE_FAILURES}
+        THEN now() + least(${MAX_LOCK_MS}, ${FIRST_LOCK_MS} *
+          power(2, least(${failures} - ${FREE_FAILURES}, ${MAX_LOCK_EXPONENT}))) * interval '1 millisecond'
+        ELSE NULL END`,
     })
     .where(eq(users.id, user.id))
 }

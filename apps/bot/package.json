@@ -8,7 +8,7 @@
     "./leader-work": "./src/leader-work.ts"
   },
   "scripts": {
-    "dev": "node --watch --env-file-if-exists=../../.env src/main.ts",
+    "dev": "node --watch --import=@dfs/config/load-env src/main.ts",
     "start": "node src/main.ts",
     "typecheck": "tsc -p tsconfig.json",
     "lint": "eslint .",

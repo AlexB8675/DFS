@@ -1,5 +1,6 @@
 import type { SyncState } from '@dfs/shared'
 import { create } from 'zustand'
+import { createStore, type StoreApi } from 'zustand/vanilla'
 
 export type UploadStatus = 'queued' | 'uploading' | 'paused' | 'done' | 'failed' | 'canceled'
 
@@ -23,8 +24,15 @@ export interface UploadItem {
   error: string | null
 }
 
+export interface UploadEntry {
+  id: string
+  store: StoreApi<UploadItem>
+}
+
 interface UploadState {
-  items: UploadItem[]
+  /** Stable across progress updates; each row subscribes to its own store. */
+  items: UploadEntry[]
+  summary: UploadSummary
   /** Recent upload speed, for the time-left estimate. */
   bytesPerSecond: number
   collapsed: boolean
@@ -35,32 +43,123 @@ interface UploadState {
   setCollapsed: (collapsed: boolean) => void
 }
 
-export const useUploadStore = create<UploadState>()((set) => ({
-  items: [],
-  bytesPerSecond: 0,
-  collapsed: false,
-  add: (items) => {
-    set((state) => ({ items: [...state.items, ...items], collapsed: false }))
-  },
-  apply: (changes, bytesPerSecond) => {
-    set((state) => ({
-      bytesPerSecond,
-      items:
-        changes.size === 0
-          ? state.items
-          : state.items.map((item) => {
-              const change = changes.get(item.id)
-              return change ? { ...item, ...change } : item
-            }),
-    }))
-  },
-  remove: (ids) => {
-    set((state) => ({ items: state.items.filter((item) => !ids.has(item.id)) }))
-  },
-  setCollapsed: (collapsed) => {
-    set({ collapsed })
-  },
-}))
+/** Progress costs O(changed uploads), independent of the size of the queue. */
+export function createUploadStore() {
+  const entries = new Map<string, UploadEntry>()
+  const totals: UploadTotals = {
+    totalBytes: 0,
+    uploadedBytes: 0,
+    active: 0,
+    paused: 0,
+    done: 0,
+    syncing: 0,
+    failed: 0,
+    remainingBytes: 0,
+  }
+  const summary = (): UploadSummary => ({
+    total: entries.size,
+    active: totals.active,
+    paused: totals.paused,
+    done: totals.done,
+    syncing: totals.syncing,
+    failed: totals.failed,
+    progress:
+      totals.totalBytes === 0
+        ? totals.active + totals.paused === 0
+          ? 1
+          : 0
+        : totals.uploadedBytes / totals.totalBytes,
+    remainingBytes: totals.remainingBytes,
+  })
+  return create<UploadState>()((set) => ({
+    items: [],
+    summary: summary(),
+    bytesPerSecond: 0,
+    collapsed: false,
+    add: (items) => {
+      const added: UploadEntry[] = []
+      for (const item of items) {
+        if (entries.has(item.id)) continue
+        const entry = { id: item.id, store: createStore<UploadItem>(() => item) }
+        entries.set(item.id, entry)
+        adjust(totals, item, 1)
+        added.push(entry)
+      }
+      if (added.length > 0) {
+        set((state) => ({
+          items: [...state.items, ...added],
+          summary: summary(),
+          collapsed: false,
+        }))
+      }
+    },
+    apply: (changes, bytesPerSecond) => {
+      let changed = false
+      for (const [id, change] of changes) {
+        const entry = entries.get(id)
+        if (!entry) continue
+        const previous = entry.store.getState()
+        if (
+          Object.entries(change).every(
+            ([key, value]) => previous[key as keyof UploadItem] === value,
+          )
+        )
+          continue
+        adjust(totals, previous, -1)
+        entry.store.setState(change)
+        adjust(totals, entry.store.getState(), 1)
+        changed = true
+      }
+      set((state) => ({ bytesPerSecond, summary: changed ? summary() : state.summary }))
+    },
+    remove: (ids) => {
+      let removed = false
+      for (const id of ids) {
+        const entry = entries.get(id)
+        if (!entry) continue
+        adjust(totals, entry.store.getState(), -1)
+        entries.delete(id)
+        removed = true
+      }
+      if (removed)
+        set((state) => ({
+          items: state.items.filter((item) => !ids.has(item.id)),
+          summary: summary(),
+        }))
+    },
+    setCollapsed: (collapsed) => {
+      set({ collapsed })
+    },
+  }))
+}
+
+export const useUploadStore = createUploadStore()
+
+interface UploadTotals {
+  totalBytes: number
+  uploadedBytes: number
+  active: number
+  paused: number
+  done: number
+  syncing: number
+  failed: number
+  remainingBytes: number
+}
+
+function adjust(totals: UploadTotals, item: UploadItem, direction: 1 | -1): void {
+  if (item.status === 'canceled') return
+  totals.totalBytes += direction * item.file.size
+  totals.uploadedBytes += direction * item.uploadedBytes
+  if (isActive(item.status)) totals.active += direction
+  if (item.status === 'paused') totals.paused += direction
+  if (item.status === 'done') {
+    totals.done += direction
+    if (!isSettled(item.syncState)) totals.syncing += direction
+  }
+  if (item.status === 'failed') totals.failed += direction
+  if (isPending(item.status))
+    totals.remainingBytes += direction * (item.file.size - item.uploadedBytes)
+}
 
 /** Waiting or sending. */
 export function isActive(status: UploadStatus): boolean {

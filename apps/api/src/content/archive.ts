@@ -16,6 +16,7 @@ import type { ZipEntry } from './zip.ts'
 const TICKET_LIFETIME_MS = 60_000
 
 interface TreeRow extends ReadableVersion {
+  root_id: string
   path: string
   kind: 'folder' | 'file'
   updated_at: string
@@ -30,11 +31,21 @@ export async function archiveEntries(
   roots: readonly NodeRow[],
 ): Promise<ZipEntry[]> {
   const entries: ZipEntry[] = []
+  if (roots.length === 0) return entries
+  const trees = new Map<string, TreeRow[]>()
+  for (const row of await subtrees(
+    app.db,
+    roots.map((root) => root.id),
+  )) {
+    const tree = trees.get(row.root_id)
+    if (tree) tree.push(row)
+    else trees.set(row.root_id, [row])
+  }
   const taken = new Set<string>()
   for (const root of roots) {
     const top = uniqueName(root.name, taken)
-    for (const row of await subtree(app.db, root.id)) {
-      const path = top + row.path.slice(root.name.length)
+    for (const row of trees.get(root.id) ?? []) {
+      const path = row.path ? `${top}/${row.path}` : top
       const modifiedAt = new Date(row.updated_at)
       if (row.kind === 'folder') {
         entries.push({ path: `${path}/`, modifiedAt })
@@ -109,24 +120,27 @@ async function ownedVisible(db: Executor, ownerId: string, ids: string[]): Promi
   return rows
 }
 
-/** A node and everything visible below it, with paths from the node's own name, parents first. */
-async function subtree(db: Executor, rootId: string): Promise<TreeRow[]> {
+/** Selected nodes and their visible descendants, with paths relative to each root. */
+async function subtrees(db: Executor, rootIds: string[]): Promise<TreeRow[]> {
   const { rows } = await db.execute<TreeRow>(sql`
     WITH RECURSIVE tree AS (
-      SELECT id, kind, name::text AS path, current_version_id, updated_at FROM nodes WHERE id = ${rootId}
+      SELECT id AS root_id, id, kind, ''::text AS path, current_version_id, updated_at
+      FROM nodes WHERE id = ANY(${uuidArray(rootIds)}) AND deleted_at IS NULL AND trashed_via IS NULL
       UNION ALL
-      SELECT child.id, child.kind, tree.path || '/' || child.name, child.current_version_id,
+      SELECT tree.root_id, child.id, child.kind,
+        CASE WHEN tree.path = '' THEN child.name ELSE tree.path || '/' || child.name END,
+        child.current_version_id,
         child.updated_at
       FROM nodes child JOIN tree ON child.parent_id = tree.id
       WHERE child.deleted_at IS NULL AND child.trashed_via IS NULL
     )
-    SELECT tree.path, tree.kind, tree.updated_at::text AS updated_at,
+    SELECT tree.root_id, tree.path, tree.kind, tree.updated_at::text AS updated_at,
       version.id AS version_id, version.size_bytes::float8 AS size_bytes, version.chunk_size,
       version.chunk_count, version.wrapped_dek, version.key_id
     FROM tree
     LEFT JOIN file_versions version
       ON version.id = tree.current_version_id AND version.state IN ('syncing', 'stored')
-    ORDER BY tree.path COLLATE "C"`)
+    ORDER BY tree.root_id, tree.path COLLATE "C"`)
   return rows
 }
 

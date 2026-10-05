@@ -35,7 +35,10 @@ export class DataKeyCache {
     } else {
       key = unwrap()
       // A failed unwrap isn't kept.
-      key.catch(() => this.#keys.delete(versionId))
+      const pending = key
+      key.catch(() => {
+        if (this.#keys.get(versionId) === pending) this.#keys.delete(versionId)
+      })
     }
     this.#keys.set(versionId, key)
     if (this.#keys.size > this.#capacity) {

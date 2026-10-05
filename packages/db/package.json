@@ -8,7 +8,7 @@
     "./testing": "./src/testing/index.ts"
   },
   "scripts": {
-    "migrate": "node --env-file-if-exists=../../.env src/bin/migrate.ts",
+    "migrate": "node --import=@dfs/config/load-env src/bin/migrate.ts",
     "generate": "drizzle-kit generate",
     "typecheck": "tsc -p tsconfig.json",
     "lint": "eslint .",

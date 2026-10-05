@@ -13,7 +13,7 @@ import {
 // sync to storage, and come back byte for byte. Then many clients upload new
 // versions of the same names at once, which must all go through.
 //
-//   DFS_USERNAME=… DFS_PASSWORD=… node --env-file-if-exists=../../.env src/scripts/end-to-end.ts
+//   DFS_USERNAME=… DFS_PASSWORD=… pnpm --filter @dfs/api check:end-to-end
 //
 // Options: DFS_API (default http://127.0.0.1:3000), DFS_ORIGIN (the web app's
 // address, default http://localhost:5173), DFS_SMALL_FILES, DFS_LARGE_MB.
@@ -23,7 +23,10 @@ const origin = process.env.DFS_ORIGIN ?? 'http://localhost:5173'
 const smallFiles = Number(process.env.DFS_SMALL_FILES ?? 1000)
 const largeBytes = Number(process.env.DFS_LARGE_MB ?? 1024) * 1024 * 1024
 const { DFS_USERNAME: username, DFS_PASSWORD: password } = process.env
-if (!username || !password) throw new Error('Set DFS_USERNAME and DFS_PASSWORD.')
+if (!username || !password) {
+  console.error('[ERROR] Set DFS_USERNAME and DFS_PASSWORD.')
+  process.exit(1)
+}
 
 /** When the current part of a step began, for `phase`. */
 let phaseStarted = performance.now()
@@ -31,7 +34,7 @@ let phaseStarted = performance.now()
 const client = new ApiClient(api, origin)
 await client.signIn(username, password)
 const root = await workspace(client)
-console.log(`Working in “${root.name}”.`)
+console.info(`[INFO] Working in “${root.name}”.`)
 
 await step(`${String(smallFiles)} small files`, async () => {
   const folder = await createFolder(client, root.id, 'Small files')
@@ -151,14 +154,14 @@ await step('12 clients uploading versions of the same names at once', async () =
   }
 })
 
-console.log('All checks passed.')
+console.info('[INFO] All checks passed.')
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /** Notes how long the part of a step since the last note took. */
 function phase(name: string): void {
   const now = performance.now()
-  console.log(`  ${name}: ${((now - phaseStarted) / 1000).toFixed(1)} s`)
+  console.info(`[INFO]   ${name}: ${((now - phaseStarted) / 1000).toFixed(1)} s`)
   phaseStarted = now
 }
 
@@ -169,10 +172,10 @@ async function step(name: string, work: () => Promise<void>): Promise<void> {
   try {
     await work()
   } catch (error) {
-    console.error(`✗ ${name} (after ${took()})`)
+    console.error(`[ERROR] ✗ ${name} (after ${took()})`)
     throw error
   }
-  console.log(`✓ ${name} (${took()})`)
+  console.info(`[INFO] ✓ ${name} (${took()})`)
 }
 
 async function inParallel<T>(

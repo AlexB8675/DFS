@@ -25,7 +25,8 @@ export class Staging {
   }
 
   async read(relativePath: string): Promise<Uint8Array> {
-    return new Uint8Array(await readFile(this.#resolve(relativePath)))
+    const bytes = await readFile(this.#resolve(relativePath))
+    return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   }
 
   async remove(relativePath: string): Promise<void> {

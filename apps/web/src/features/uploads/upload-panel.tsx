@@ -10,6 +10,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { useState } from 'react'
+import { useStore } from 'zustand'
 import { NodeIcon } from '@/components/node-icon'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
@@ -19,8 +20,8 @@ import { cn } from '@/lib/utils'
 import { uploadEngine } from './upload-engine'
 import {
   isSettled,
-  summarize,
   useUploadStore,
+  type UploadEntry,
   type UploadItem,
   type UploadSummary,
 } from './upload-store'
@@ -32,13 +33,13 @@ const CONFIRM_MS = 3000
 /** A docked panel with the progress of every upload in this session. */
 export function UploadPanel() {
   const items = useUploadStore((state) => state.items)
+  const summary = useUploadStore((state) => state.summary)
   const bytesPerSecond = useUploadStore((state) => state.bytesPerSecond)
   const collapsed = useUploadStore((state) => state.collapsed)
   const setCollapsed = useUploadStore((state) => state.setCollapsed)
 
   if (items.length === 0) return null
 
-  const summary = summarize(items)
   const pending = summary.active + summary.paused > 0
 
   return (
@@ -117,7 +118,7 @@ export function UploadPanel() {
             getKey={(item) => item.id}
             itemHeight={UPLOAD_ROW_HEIGHT}
             animateMoves
-            renderItem={(item) => <UploadRow item={item} />}
+            renderItem={(entry) => <UploadRow entry={entry} />}
           />
         </div>
       </div>
@@ -178,7 +179,8 @@ function CancelAllButton() {
   )
 }
 
-function UploadRow({ item }: { item: UploadItem }) {
+function UploadRow({ entry }: { entry: UploadEntry }) {
+  const item = useStore(entry.store)
   return (
     <div role="listitem" className="group/row flex h-full items-center gap-3 pr-2 pl-4">
       <NodeIcon

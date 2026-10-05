@@ -23,6 +23,7 @@ export class EventHub {
   readonly #log: FastifyBaseLogger
   readonly #subscribers = new Map<string, Set<Subscriber>>()
   #client: pg.Client | null = null
+  #opening: pg.Client | null = null
   #connecting: Promise<void> | null = null
   #retryMs = RETRY_MIN_MS
   #timer: NodeJS.Timeout | null = null
@@ -57,13 +58,16 @@ export class EventHub {
   async stop(): Promise<void> {
     this.#stopped = true
     if (this.#timer) clearTimeout(this.#timer)
-    const client = this.#client
+    this.#timer = null
+    const client = this.#client ?? this.#opening
     this.#client = null
+    this.#opening = null
     await client?.end().catch(() => undefined)
+    await this.#connecting
   }
 
   #connect(): Promise<void> {
-    if (this.#client || this.#stopped) return Promise.resolve()
+    if (this.#client || this.#stopped || this.#timer) return Promise.resolve()
     this.#connecting ??= this.#open().finally(() => {
       this.#connecting = null
     })
@@ -75,26 +79,45 @@ export class EventHub {
       connectionString: this.#databaseUrl,
       application_name: 'dfs-api-events',
       keepAlive: true,
+      connectionTimeoutMillis: 5000,
+      query_timeout: 5000,
     })
+    this.#opening = client
+    // pg can leave connect() pending when end() interrupts authentication.
+    // Ending the socket must also release the operation awaiting it.
+    const closed = Promise.withResolvers<never>()
+    const isOpening = () => !this.#stopped && this.#opening === client
     client.on('notification', (message) => {
       this.#dispatch(message.payload)
     })
     client.on('error', (error) => {
+      closed.reject(error)
+      if (client === this.#opening) this.#opening = null
       this.#dropped(client, error)
     })
     client.on('end', () => {
+      closed.reject(new Error('Live-event connection ended.'))
+      if (client === this.#opening) this.#opening = null
       this.#dropped(client, null)
     })
+    let retry = false
     try {
-      await client.connect()
-      await client.query(`LISTEN ${EVENTS_CHANNEL}`)
+      await Promise.race([client.connect(), closed.promise])
+      if (!isOpening()) return
+      await Promise.race([client.query(`LISTEN ${EVENTS_CHANNEL}`), closed.promise])
+      if (!isOpening()) return
       this.#client = client
       this.#retryMs = RETRY_MIN_MS
     } catch (error) {
-      await client.end().catch(() => undefined)
-      this.#log.warn({ err: error, retryInMs: this.#retryMs }, 'live events: cannot listen yet')
-      this.#scheduleRetry()
+      if (!this.#stopped) {
+        this.#log.warn({ err: error, retryInMs: this.#retryMs }, 'live events: cannot listen yet')
+        retry = true
+      }
+    } finally {
+      if (client === this.#opening) this.#opening = null
+      if (client !== this.#client) await client.end().catch(() => undefined)
     }
+    if (retry) this.#scheduleRetry()
   }
 
   #dispatch(payload: string | undefined): void {
@@ -120,8 +143,11 @@ export class EventHub {
   }
 
   #scheduleRetry(): void {
-    if (this.#stopped || this.#subscribers.size === 0) return
-    this.#timer = setTimeout(() => void this.#connect(), this.#retryMs)
+    if (this.#stopped || this.#subscribers.size === 0 || this.#timer) return
+    this.#timer = setTimeout(() => {
+      this.#timer = null
+      void this.#connect()
+    }, this.#retryMs)
     this.#retryMs = Math.min(RETRY_MAX_MS, this.#retryMs * 2)
   }
 }

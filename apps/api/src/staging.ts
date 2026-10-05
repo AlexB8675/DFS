@@ -28,8 +28,9 @@ export async function removeStagedVersions(
 export class StagingLimit {
   readonly #db: Executor
   readonly #maxBytes: number
-  #checkedAt = 0
+  #checkedAt = -Infinity
   #full = false
+  #checking: Promise<boolean> | null = null
 
   constructor(db: Executor, maxBytes: number) {
     this.#db = db
@@ -37,11 +38,19 @@ export class StagingLimit {
   }
 
   async isFull(now = Date.now()): Promise<boolean> {
+    if (this.#checking) return this.#checking
     if (now - this.#checkedAt < 3000) return this.#full
-    this.#checkedAt = now
+    this.#checking = this.#check(now).finally(() => {
+      this.#checking = null
+    })
+    return this.#checking
+  }
+
+  async #check(now: number): Promise<boolean> {
     const { rows } = await this.#db.execute<{ bytes: number }>(sql`
       SELECT coalesce(sum(frame_size), 0)::float8 AS bytes FROM chunks WHERE staged_path IS NOT NULL`)
     this.#full = (rows[0]?.bytes ?? 0) >= this.#maxBytes
+    this.#checkedAt = now
     return this.#full
   }
 }

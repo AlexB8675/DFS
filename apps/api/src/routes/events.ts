@@ -22,9 +22,15 @@ export function eventRoutes(app: FastifyInstance, _options: object, done: () => 
       'x-request-id': request.id,
     })
     const send = (type: string, payload: unknown) => {
-      stream.write(`event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`)
+      if (stream.destroyed || stream.writableEnded) return
+      // Events can be recovered by refetching on reconnect. Bound memory for
+      // a stalled client by closing its stream as soon as its buffer fills.
+      if (!stream.write(`event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`)) stream.destroy()
     }
-    stream.write('retry: 3000\n\n')
+    if (!stream.write('retry: 3000\n\n')) {
+      stream.destroy()
+      return
+    }
 
     const unsubscribe = app.events.subscribe(
       auth.user.id,
@@ -36,7 +42,7 @@ export function eventRoutes(app: FastifyInstance, _options: object, done: () => 
     const ping = setInterval(() => {
       send('ping', {})
     }, PING_EVERY_MS)
-    request.raw.on('close', () => {
+    stream.once('close', () => {
       clearInterval(ping)
       unsubscribe()
     })

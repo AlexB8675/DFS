@@ -4,8 +4,8 @@
 // Transactions that write take their locks in one order, so none can wait on
 // another in a circle: the drive's tree lock, upload sessions, nodes (by id),
 // the user's row, dirty-folder markers (by id), and the journal lock last.
-// Starting uploads is the exception: it takes the user's row first, and after
-// it only the key-share locks of foreign keys on nodes, which updates (such as
+// Starting uploads takes a shared tree lock, then the user's row, and after it
+// only the key-share locks of foreign keys on nodes, which updates (such as
 // completing an upload) don't block.
 
 /** "DFS" in ASCII. */
@@ -24,7 +24,8 @@ export const LOCKS = {
 
 /**
  * A second namespace for per-owner tree locks: `pg_advisory_xact_lock(TREE_LOCK_NAMESPACE,
- * hashtext(owner_id))` serializes moves within one drive, so two crossing moves can't
- * make a cycle.
+ * hashtext(owner_id))` serializes moves, trash and restoration within one drive.
+ * Creation holds the shared form to keep its destination visible until commit
+ * while allowing other creations to proceed.
  */
 export const TREE_LOCK_NAMESPACE = 0x445452

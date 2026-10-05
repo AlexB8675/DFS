@@ -43,7 +43,7 @@ export async function startLeaderWork(options: {
       store = new ChaosBlobStore(store)
       log.warn('BLOB_STORE=chaos: storing blobs will fail now and then, on purpose')
     }
-    const deps = { db, staging, store }
+    const deps = { db, staging, store, log }
     await boss.work<
       BlobUploadJob,
       unknown,
@@ -55,12 +55,13 @@ export async function startLeaderWork(options: {
       }
     >(
       QUEUES.blobUpload,
-      // Full batches mean more is waiting: fetch again at once, two batches at a time.
+      // Two batches overlap; each pipelines at most uploadChannelConcurrency blobs.
       { batchSize: 8, burstWhenBatchFull: true, localConcurrency: 2, perJobResults: true },
       async (jobs): Promise<JobResult[]> => {
         const failures = await storeBlobs(
           deps,
           jobs.map((job) => job.data.blobId),
+          config.uploadChannelConcurrency,
         )
         return jobs.map((job) => {
           const error = failures.get(job.data.blobId)

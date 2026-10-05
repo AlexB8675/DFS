@@ -62,9 +62,13 @@ export async function invalidateListings(
   client = defaultClient,
 ): Promise<void> {
   const unique = new Set([...folderIds].filter((id) => id !== null))
-  await Promise.all(
-    [...unique].map((id) => client.invalidateQueries({ queryKey: ['nodes', id, 'children'] })),
-  )
+  if (unique.size === 0) return
+  await client.invalidateQueries({
+    predicate: (query) => {
+      const [scope, id, kind] = query.queryKey
+      return scope === 'nodes' && kind === 'children' && typeof id === 'string' && unique.has(id)
+    },
+  })
 }
 
 /** Refetches single nodes (not their listings or paths). */
@@ -72,11 +76,16 @@ export async function invalidateNodes(
   ids: Iterable<string>,
   client = defaultClient,
 ): Promise<void> {
-  await Promise.all(
-    [...new Set(ids)].map((id) =>
-      client.invalidateQueries({ queryKey: ['nodes', id], exact: true }),
-    ),
-  )
+  const unique = new Set(ids)
+  if (unique.size === 0) return
+  await client.invalidateQueries({
+    predicate: (query) => {
+      const [scope, id] = query.queryKey
+      return (
+        query.queryKey.length === 2 && scope === 'nodes' && typeof id === 'string' && unique.has(id)
+      )
+    },
+  })
 }
 
 /** Refetches breadcrumbs, after a rename or move that may change a folder path. */

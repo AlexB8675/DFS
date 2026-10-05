@@ -49,8 +49,11 @@ export async function foldFolderStats(db: Database, batch = 500): Promise<number
       SELECT id, max(depth)::int AS depth FROM ranked GROUP BY id`)
 
     const byDepth = new Map<number, string[]>()
-    for (const { id, depth } of closure.rows)
-      byDepth.set(depth, [...(byDepth.get(depth) ?? []), id])
+    for (const { id, depth } of closure.rows) {
+      const ids = byDepth.get(depth)
+      if (ids) ids.push(id)
+      else byDepth.set(depth, [id])
+    }
     // Children before parents, one statement per level.
     for (const depth of [...byDepth.keys()].sort((a, b) => b - a)) {
       await tx.execute(sql`

@@ -192,7 +192,7 @@ function chaosNetwork(base: string, seed: number) {
 }
 
 function items(): UploadItem[] {
-  return useUploadStore.getState().items
+  return useUploadStore.getState().items.map((entry) => entry.store.getState())
 }
 
 function item(name: string): UploadItem | undefined {
