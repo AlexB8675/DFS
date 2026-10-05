@@ -5,6 +5,7 @@ import type { BlobStore, Staging } from '@dfs/storage'
 import type { FastifyInstance } from 'fastify'
 import { describe, expect, it, vi } from 'vitest'
 import { DataKeyCache } from '../keys.ts'
+import { MemoryBudget } from './frame-cache.ts'
 import { ContentError, readVersion, type ReadableVersion } from './reader.ts'
 
 async function fixture() {
@@ -71,33 +72,67 @@ describe('readVersion', () => {
     expect(Buffer.concat(parts)).toEqual(Buffer.from(plaintext.subarray(2, 10)))
   })
 
-  it('reads only one chunk ahead when the consumer pauses', async () => {
-    const { app, version, plaintext, read } = await fixture()
+  it('reads ahead only once the consumer keeps up, and never past the range', async () => {
+    const { app, version, plaintext, read, execute, locations } = await fixture()
     const stream = readVersion(app, version, 0, 11)
     expect((await stream.next()).value).toEqual(plaintext.subarray(0, 4))
     await setImmediate()
-    expect(read).toHaveBeenCalledTimes(2)
+    // A reader that stops here, as a seek often does, cost one chunk.
+    expect(read).toHaveBeenCalledTimes(1)
     expect((await stream.next()).value).toEqual(plaintext.subarray(4, 8))
+    // It kept up: the next chunk was read while this one was sent.
     expect(read).toHaveBeenCalledTimes(3)
+    expect((await stream.next()).value).toEqual(plaintext.subarray(8, 12))
+    expect((await stream.next()).done).toBe(true)
+    expect(read).toHaveBeenCalledTimes(3)
+
+    read.mockClear()
+    const firstTwo = locations.slice(0, 2)
+    execute.mockResolvedValueOnce({
+      rows: firstTwo,
+      rowCount: firstTwo.length,
+      command: 'SELECT',
+      fields: [],
+      oid: 0,
+    })
+    for await (const part of readVersion(app, version, 0, 7)) expect(part).toHaveLength(4)
+    expect(read).toHaveBeenCalledTimes(2)
+  })
+
+  it('reads one chunk at a time when the memory for reading ahead is taken', async () => {
+    const { app, version, read } = await fixture()
+    Object.assign(app, { readBudget: new MemoryBudget(0) })
+    const stream = readVersion(app, version, 0, 11)
+    await stream.next()
+    await stream.next()
+    expect(read).toHaveBeenCalledTimes(2)
     await stream.return(undefined)
   })
 
-  it('delivers a prefetched read failure when the consumer resumes', async () => {
+  it('delivers a read-ahead failure when the consumer resumes', async () => {
     const { app, version, frames, read } = await fixture()
     const error = new Error('Blob unavailable.')
-    read.mockResolvedValueOnce(frames[0] ?? new Uint8Array()).mockRejectedValueOnce(error)
+    read
+      .mockResolvedValueOnce(frames[0] ?? new Uint8Array())
+      .mockResolvedValueOnce(frames[1] ?? new Uint8Array())
+      .mockRejectedValueOnce(error)
     const stream = readVersion(app, version, 0, 11)
     await stream.next()
-    // Let the prefetched rejection settle while backpressure holds the generator.
+    await stream.next()
+    // Let the rejection read ahead settle while backpressure holds the generator.
     await setImmediate()
     await expect(stream.next()).rejects.toBe(error)
   })
 
-  it('handles an outstanding prefetch failure after the consumer disconnects', async () => {
+  it('handles an outstanding read-ahead failure after the consumer disconnects', async () => {
     const { app, version, frames, read } = await fixture()
     const pending = Promise.withResolvers<Uint8Array>()
-    read.mockResolvedValueOnce(frames[0] ?? new Uint8Array()).mockReturnValueOnce(pending.promise)
+    read
+      .mockResolvedValueOnce(frames[0] ?? new Uint8Array())
+      .mockResolvedValueOnce(frames[1] ?? new Uint8Array())
+      .mockReturnValueOnce(pending.promise)
     const stream = readVersion(app, version, 0, 11)
+    await stream.next()
     await stream.next()
     await stream.return(undefined)
     pending.reject(new Error('Read failed after disconnect.'))

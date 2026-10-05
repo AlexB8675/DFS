@@ -6,6 +6,7 @@ import type { FastifyInstance } from 'fastify'
 import type { Auth } from '../auth/sessions.ts'
 import { ApiError } from '../errors.ts'
 import { NODE_COLUMNS, NODE_JOINS, VISIBLE, notFound, type NodeRow } from '../nodes/read.ts'
+import { PackWarmer } from './pack-warmer.ts'
 import { readVersion, type ReadableVersion } from './reader.ts'
 import type { ZipEntry } from './zip.ts'
 
@@ -41,6 +42,12 @@ export async function archiveEntries(
     if (tree) tree.push(row)
     else trees.set(row.root_id, [row])
   }
+  // Files are read in this order; packs most of whose frames they need are fetched whole.
+  const ordered = roots.flatMap((root) => trees.get(root.id) ?? [])
+  const warmer = await PackWarmer.plan(
+    app,
+    ordered.flatMap((row) => (row.version_id ? [row.version_id] : [])),
+  )
   const taken = new Set<string>()
   for (const root of roots) {
     const top = uniqueName(root.name, taken)
@@ -54,7 +61,10 @@ export async function archiveEntries(
           path,
           modifiedAt,
           size: row.size_bytes,
-          data: () => readVersion(app, row, 0, row.size_bytes - 1),
+          data: async function* () {
+            await warmer?.before(row.version_id)
+            yield* readVersion(app, row, 0, row.size_bytes - 1)
+          },
         })
       }
     }

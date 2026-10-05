@@ -143,15 +143,20 @@ async function storeBlob(
   const finished = await db.transaction(async (tx) => {
     // Everything in it may have been purged while it was being posted: then
     // it goes straight to the GC, which deletes the message.
-    const { rows: stored } = await tx.execute<{ id: number }>(sql`
+    const { rows: stored } = await tx.execute<{
+      id: number
+      discord_channel_id: string | null
+    }>(sql`
       UPDATE blobs SET stored_at = now(), staged_path = NULL,
         state = CASE WHEN live_bytes <= 0 THEN 'deleting'::blob_state ELSE 'stored' END,
         channel_id = ${location.channelId}, message_id = ${location.messageId},
         attachment_id = ${location.attachmentId},
         cdn_url = ${url?.url ?? null}, cdn_url_expires_at = ${url?.expiresAt ?? null}
       WHERE id = ${blobId} AND state IN ('staged', 'uploading')
-      RETURNING id`)
-    if (stored.length === 0) return []
+      RETURNING id, (SELECT discord_channel_id FROM storage_channels
+        WHERE storage_channels.id = blobs.channel_id) AS discord_channel_id`)
+    const [record] = stored
+    if (!record) return []
 
     await tx.execute(sql`UPDATE chunks SET staged_path = NULL WHERE blob_id = ${blobId}`)
     // Versions in id order: once packs hold frames of several files (M1), two
@@ -184,8 +189,9 @@ async function storeBlob(
           kind: blob.kind,
           sizeBytes: blob.size_bytes,
           sha256: blob.sha256?.toString('hex') ?? null,
-          // Where it is for good; the signed URL expires, so it stays out.
-          channelId: location.channelId,
+          // Where it is for good, by Discord's IDs, which mean something
+          // without this database (§8). The signed URL expires, so it stays out.
+          discordChannelId: record.discord_channel_id,
           messageId: location.messageId,
           attachmentId: location.attachmentId,
         },

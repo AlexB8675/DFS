@@ -8,14 +8,17 @@ import {
   createPool,
   fileVersions,
   nodes,
+  storageChannels,
   users,
   type Database,
 } from '@dfs/db'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
-import { LocalBlobStore, Staging } from '@dfs/storage'
+import { DiscordBlobStore, LocalBlobStore, Staging } from '@dfs/storage'
+import { FakeDiscord } from '@dfs/storage/testing'
 import { eq, sql } from 'drizzle-orm'
 import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest'
+import { dataChannels } from './storage.ts'
 import { storeBlobs } from './uploader.ts'
 
 let database: TestDatabase
@@ -371,5 +374,29 @@ describe('staged blob integrity', () => {
     } finally {
       put.mockRestore()
     }
+  })
+
+  it('journals where a blob went by Discord’s own IDs, which mean something without the database', async () => {
+    const discord = new FakeDiscord()
+    const channel = discord.addTextChannel('storage-00')
+    await db.insert(storageChannels).values({ discordChannelId: channel.id, name: 'storage-00' })
+    const inDiscord = new DiscordBlobStore({
+      rest: discord,
+      channels: () => dataChannels(db),
+      maxBytes: 1024,
+      instanceId: () => Promise.resolve('0123456789ab'),
+      perChannel: 2,
+      fetch: discord.fetch,
+    })
+    const blob = await staged()
+    expect(await storeBlobs({ db, staging, store: inDiscord }, [blob.id])).toEqual(new Map())
+    const { rows } = await db.execute<{ record: Record<string, unknown> }>(sql`
+      SELECT record FROM journal WHERE kind = 'blob.stored' AND (record->>'id')::bigint = ${blob.id}`)
+    const [message] = discord.messages
+    expect(rows[0]?.record).toMatchObject({
+      discordChannelId: channel.id,
+      messageId: message?.id,
+      attachmentId: message?.attachments[0]?.id,
+    })
   })
 })

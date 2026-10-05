@@ -43,6 +43,8 @@ export class FakeDiscord implements DiscordRest {
   readonly cdn = new Map<string, Uint8Array>()
   /** Every request, as `METHOD /route`. */
   readonly requests: string[] = []
+  /** Requests the CDN has answered. */
+  cdnRequests = 0
   /** Stores the next message, then fails as if its answer were lost. */
   loseNextAnswer = false
   /** Keeps one byte less of the next attachment. */
@@ -165,6 +167,7 @@ export class FakeDiscord implements DiscordRest {
 
   /** The CDN: serves attachments by signed URL, with Range requests. */
   fetch = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    this.cdnRequests += 1
     const url = new URL(input instanceof Request ? input.url : input)
     const data = this.cdn.get(`${url.origin}${url.pathname}`)
     if (!data) return Promise.resolve(new Response('Not found', { status: 404 }))

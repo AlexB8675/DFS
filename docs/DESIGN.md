@@ -461,7 +461,7 @@ sequenceDiagram
 
     B->>A: GET /api/files/:id/content (Range: bytes=X-Y)
     A->>A: authz, find chunks covering [X,Y], unwrap DEK
-    loop each needed chunk (prefetch next 2)
+    loop each needed chunk (read ahead up to 2 once the reader keeps up)
         A->>C: lookup chunkId
         alt cache miss
             alt blob not yet stored
@@ -483,9 +483,11 @@ sequenceDiagram
 ```
 
 - Responds `206 Partial Content` with `Accept-Ranges: bytes`, so `<video>` seeking and resumable downloads work.
-- **Pack reads** use an HTTP `Range` request against the CDN, so reading a 50 KB file out of a 10 MiB pack moves about 50 KB. If the CDN ignores `Range` (returns `200`), the API reads the whole blob, caches every frame in it, and continues.
-- **Folder download:** `GET /api/folders/:id/archive` streams a ZIP built on the fly (ZIP64 for large archives, store-only with no compression). Frames are fetched **grouped by blob**, so a folder of 1,000 small files usually means a handful of pack downloads.
-- **The cache** holds *ciphertext* frames on local disk (LRU, `CACHE_MAX_BYTES`, default 5 GiB), so it is safe even if the disk is compromised.
+- **Pack reads** use an HTTP `Range` request against the CDN (the contract test checks it answers `206`), so reading a 50 KB file out of a 10 MiB pack moves about 50 KB. If the CDN ever ignores `Range` (returns `200`), the API cuts the frame out of the whole blob.
+- **Folder download:** `GET /api/folders/:id/archive` streams a ZIP built on the fly (ZIP64 for large archives, store-only with no compression). Before streaming, it signs the URLs of the packs it needs in one call, and fetches a pack **whole** when the round trips that saves outweigh the bytes it adds (a round trip of 40 ms against 7 MB/s, measured from the development machine: for files of 100 KB, from about a quarter of a 10 MiB pack on; measure both again from the VPS, whose faster link makes whole packs pay off earlier). Its frames go to the cache, where each file finds them, and the next pack is fetched while this one's files are sent. A folder of 1,000 small files usually means a handful of pack downloads; a second download of it, none.
+- **The cache** holds *ciphertext* frames on local disk (LRU, `CACHE_MAX_BYTES`, default 5 GiB), so it is safe even if the disk is compromised. It is keyed by each frame's SHA-256: frames never change, so an entry stays right even after compaction moves its frame. Every hit is checked again (a bad copy is dropped and fetched anew), readers of the same frame share one fetch, writes skip `fsync` (a torn file fails its check), and the index is rebuilt in the background at start. Only frames of stored blobs read from Discord go through it; the local store and staging don't need one.
+- **Read-ahead** starts at nothing and grows by one chunk per chunk the connection takes, up to 2, never past the requested range, so a whole file keeps up to 3 requests overlapping. The response stream asks for more only as its socket accepts it (Node's `Readable.from` holds one chunk), so a stalled client stalls its download; but the connection's buffers take a few MB first, so a seek costs the frames the connection accepts before the player closes it, not just one. Frames read ahead come from one budget of 256 MiB for the whole API (whole packs for archives too); a download that finds no room reads a chunk at a time. Besides that budget, each download holds about two chunks while its client is slow: one in its stream, one in the socket's write buffer. A read ahead that nobody will send finishes into the cache.
+- **Measured** from the development machine (a link of about 55 Mbit/s, which caps every cold figure) with a 256 MB file and 300 files of 100 KB: a cold seek's first byte takes 1.5–2 s (a whole 10 MiB frame has to arrive before its tag can be checked; the chunk size is the lever, at the cost of more messages), a cold full read 6.5–7.6 MB/s, a warm one 345 MB/s with first bytes in 31 ms. The ZIP of the 300 files takes 6 s cold with whole packs against 15 s reading each file's range, and 0.75 s warm. Read-ahead depths of 0 to 2 were within noise on that link; the depth of 2 is for faster ones, such as the VPS, where it should be measured again.
 
 ### 6.3 Metadata operations (no Discord traffic)
 

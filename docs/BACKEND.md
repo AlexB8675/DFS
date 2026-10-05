@@ -187,7 +187,7 @@ Files are encrypted from the start: the API writes DFS1 frames to staging (DESIG
 - [x] `dfs setup` in the CLI: create the category named by `DISCORD_CATEGORY_NAME` with the channels of DESIGN §4, hidden from everyone but the bot, and register them in `storage_channels`. Running it again changes nothing.
 - [ ] `/dfs setup` in production, with the gateway: the same, as a slash command.
 - [ ] Environment separation (D25): `DISCORD_GATEWAY=off` skips the gateway (slash commands, tamper watch); the reconciler, scrubber and GC only touch registered channels; Admin → Channels accepts only channels in this environment's category, so development can't register production's channel by its ID.
-- [ ] Frame cache on the API (DESIGN §6.2).
+- [x] Frame cache on the API (DESIGN §6.2), with read-ahead that grows as the reader keeps up, one memory budget for all downloads, and whole packs for ZIPs. Measured against Discord with a 256 MB file. Proposed: run the 2 GB check below at the first deployment, from the VPS, rather than through a home link (about 205 messages and 10 minutes of upload from here).
 - [ ] Opt-in Discord contract tests against a test channel (DESIGN §17).
 
 **Done when**

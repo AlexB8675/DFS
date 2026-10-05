@@ -6,8 +6,9 @@ import type { FastifyInstance } from 'fastify'
 
 // Reading a file back (DESIGN.md §6.2): find the chunks that cover a byte
 // range, read each frame from staging (still syncing) or the blob store
-// (stored), check its SHA-256, decrypt it, and stream the requested slice.
-// The next chunk is read, verified and decrypted while the current one is sent.
+// (stored, through the frame cache), check its SHA-256, decrypt it, and stream
+// the requested slice. Chunks are read ahead while the current one is sent,
+// more of them as the reader keeps up, never past the requested range.
 
 /** What reading needs to know about a file version. */
 export interface ReadableVersion extends Record<string, unknown> {
@@ -39,6 +40,13 @@ interface ChunkLocation extends Record<string, unknown> {
 
 /** Chunk locations are looked up this many at a time, so a huge file isn't loaded at once. */
 const LOOKUP_BATCH = 64
+/**
+ * Chunks read ahead at most, once a reader has kept up for as many: a seek
+ * that stops after one chunk costs one, and a whole file streams with this
+ * many requests overlapping (measured in DESIGN.md §6.2).
+ */
+const MAX_READ_AHEAD = 2
+const NOTHING_TO_GIVE_BACK = () => undefined
 
 export class ContentError extends Error {
   constructor(message: string) {
@@ -59,9 +67,59 @@ export async function* readVersion(
   const key = await app.dataKeys.get(versionId, () =>
     app.keys.unwrapDek(version.wrapped_dek, version.key_id, uuidBytes(versionId)),
   )
-  const first = Math.floor(start / chunkSize)
-  const last = Math.floor(end / chunkSize)
+  const locations = chunksBetween(
+    app,
+    versionId,
+    Math.floor(start / chunkSize),
+    Math.floor(end / chunkSize),
+  )
+  // The chunk to send next, then those read ahead, each with its share of
+  // the API's memory budget for reading ahead.
+  const reading: { chunk: ChunkLocation; plaintext: Promise<Uint8Array>; giveBack: () => void }[] =
+    []
+  let upcoming = await locations.next()
+  let ahead = 0
+  try {
+    for (;;) {
+      while (!upcoming.done && reading.length <= ahead) {
+        const chunk = upcoming.value
+        const giveBack =
+          reading.length === 0 || !app.readBudget
+            ? NOTHING_TO_GIVE_BACK
+            : app.readBudget.tryTake(chunk.frame_size)
+        if (!giveBack) break
+        reading.push({ chunk, plaintext: prefetchChunk(app, versionId, key, chunk), giveBack })
+        upcoming = await locations.next()
+      }
+      const current = reading.shift()
+      if (!current) return
+      let plaintext: Uint8Array
+      try {
+        plaintext = await current.plaintext
+      } finally {
+        current.giveBack()
+      }
+      const chunkStart = current.chunk.idx * chunkSize
+      yield plaintext.subarray(
+        Math.max(0, start - chunkStart),
+        Math.min(plaintext.length, end - chunkStart + 1),
+      )
+      ahead = Math.min(MAX_READ_AHEAD, ahead + 1)
+    }
+  } finally {
+    // Reads ahead that nobody will send finish into the cache, then give their memory back.
+    for (const { plaintext, giveBack } of reading) void plaintext.then(giveBack, giveBack)
+    await locations.return(undefined)
+  }
+}
 
+/** The locations of chunks `first` to `last`, a batch at a time, with fresh CDN URLs. */
+async function* chunksBetween(
+  app: FastifyInstance,
+  versionId: string,
+  first: number,
+  last: number,
+): AsyncGenerator<ChunkLocation, void, undefined> {
   for (let from = first; from <= last; from += LOOKUP_BATCH) {
     const to = Math.min(last, from + LOOKUP_BATCH - 1)
     const chunks = await chunkLocations(app.db, versionId, from, to)
@@ -71,27 +129,16 @@ export async function* readVersion(
       )
     }
     await signUrls(app.blobStore, chunks)
-    let next = prefetchChunk(app, versionId, key, chunks[0])
-    for (let i = 0; i < chunks.length; i += 1) {
-      const chunk = chunks[i]
-      const plaintext = await next
-      if (i + 1 < chunks.length) next = prefetchChunk(app, versionId, key, chunks[i + 1])
-      if (!chunk) throw new ContentError('A chunk vanished while reading.')
-      const chunkStart = chunk.idx * chunkSize
-      yield plaintext.subarray(
-        Math.max(0, start - chunkStart),
-        Math.min(plaintext.length, end - chunkStart + 1),
-      )
-    }
+    yield* chunks
   }
 }
 
-/** Keeps one chunk ahead without leaving an unhandled rejection if the stream pauses or closes. */
+/** Starts reading a chunk without leaving an unhandled rejection if the stream pauses or closes. */
 function prefetchChunk(
   app: FastifyInstance,
   versionId: string,
   key: AesKey,
-  chunk: ChunkLocation | undefined,
+  chunk: ChunkLocation,
 ): Promise<Uint8Array> {
   const next = readChunk(app, versionId, key, chunk)
   // The original promise still rejects when awaited; observe it immediately,
@@ -104,18 +151,31 @@ async function readChunk(
   app: FastifyInstance,
   versionId: string,
   key: AesKey,
-  chunk: ChunkLocation | undefined,
+  chunk: ChunkLocation,
 ): Promise<Uint8Array> {
-  if (!chunk) throw new ContentError('A chunk vanished while reading.')
-  const frame = await readFrame(app, versionId, chunk)
-  if (!Buffer.from(await sha256(frame)).equals(chunk.frame_sha256)) {
-    throw new ContentError(`Chunk ${String(chunk.idx)} of ${versionId} is corrupt.`)
-  }
+  const frame = await checkedFrame(app, versionId, chunk)
   const plaintext = await openFrame(key, frame, chunkContext(versionId, chunk.idx))
   if (plaintext.length !== chunk.plain_size) {
     throw new ContentError(`Chunk ${String(chunk.idx)} of ${versionId} has the wrong size.`)
   }
   return plaintext
+}
+
+/** A chunk's frame, checked against its SHA-256. Stored ones come through the frame cache. */
+async function checkedFrame(
+  app: FastifyInstance,
+  versionId: string,
+  chunk: ChunkLocation,
+): Promise<Uint8Array> {
+  const read = async () => {
+    const frame = await readFrame(app, versionId, chunk)
+    if (!Buffer.from(await sha256(frame)).equals(chunk.frame_sha256)) {
+      throw new ContentError(`Chunk ${String(chunk.idx)} of ${versionId} is corrupt.`)
+    }
+    return frame
+  }
+  const stored = !chunk.staged_path && !chunk.blob_staged_path && chunk.blob_state === 'stored'
+  return stored && app.frameCache ? app.frameCache.load(chunk.frame_sha256, read) : read()
 }
 
 async function chunkLocations(

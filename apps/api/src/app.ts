@@ -10,6 +10,7 @@ import type pg from 'pg'
 import { registerAccess } from './auth/access.ts'
 import { RateLimiter } from './auth/rate-limit.ts'
 import { CdnBlobReader } from './content/cdn-reader.ts'
+import { FrameCache, MemoryBudget } from './content/frame-cache.ts'
 import { registerErrorHandling } from './errors.ts'
 import { EventHub } from './events/hub.ts'
 import { DataKeyCache, loadMasterKeys } from './keys.ts'
@@ -43,8 +44,19 @@ declare module 'fastify' {
     events: EventHub
     /** Where stored blobs are read from (§6.2). */
     blobStore: BlobReader
+    /** Frames read back from Discord, on this instance's disk; none for the local store. */
+    frameCache: FrameCache | null
+    /** Memory for frames read ahead of what downloads have sent (§6.2). */
+    readBudget: MemoryBudget | null
   }
 }
+
+/**
+ * Frames in flight ahead of what downloads have sent, across all of them:
+ * about 25 frames of 10 MiB. A download that finds no room reads one frame
+ * at a time instead.
+ */
+const READ_AHEAD_BYTES = 256 * 1024 * 1024
 
 export interface AppOptions {
   config: Config
@@ -101,7 +113,16 @@ export async function buildApp({
   app.decorate('dataKeys', new DataKeyCache())
   app.decorate('queue', queue)
   app.decorate('events', events)
-  app.decorate('blobStore', blobStore ?? blobStoreFor(config))
+  const reader = blobStore ?? blobStoreFor(config)
+  app.decorate('blobStore', reader)
+  // Reading local files needs no cache of its own.
+  app.decorate(
+    'frameCache',
+    reader instanceof LocalBlobStore
+      ? null
+      : new FrameCache({ dir: config.cacheDir, maxBytes: config.cacheMaxBytes, log: app.log }),
+  )
+  app.decorate('readBudget', new MemoryBudget(READ_AHEAD_BYTES))
   // Open event streams would keep the server from closing.
   app.addHook('preClose', (done) => {
     events.endStreams()
