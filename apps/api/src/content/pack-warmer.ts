@@ -1,5 +1,5 @@
 import { sha256 } from '@dfs/crypto'
-import type { Executor } from '@dfs/db'
+import { uuidArray, type Executor } from '@dfs/db'
 import { isFresh, type CdnUrl, type StoredBlob } from '@dfs/storage'
 import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
@@ -111,9 +111,17 @@ export class PackWarmer {
 
     const stale = [...packs.values()].filter((pack) => !isFresh(pack.blob.url))
     if (stale.length > 0 && app.blobStore.signUrls) {
-      const signed: Map<number, CdnUrl> = await app.blobStore.signUrls(
-        stale.map((pack) => pack.blob),
-      )
+      let signed: Map<number, CdnUrl>
+      try {
+        signed = await app.blobStore.signUrls(stale.map((pack) => pack.blob))
+      } catch (error) {
+        // Warming is only faster: without it, each file is read on its own.
+        app.log.warn(
+          { err: error },
+          'could not sign pack URLs for a ZIP; reading its files one by one',
+        )
+        return null
+      }
       for (const pack of stale) pack.blob.url = signed.get(pack.blob.id) ?? null
     }
     const packOf = new Map<string, number>()
@@ -178,7 +186,7 @@ async function packedFrames(db: Executor, versionIds: readonly string[]): Promis
       blob.attachment_id, blob.cdn_url,
       (extract(epoch FROM blob.cdn_url_expires_at) * 1000)::float8 AS cdn_url_expires_ms
     FROM chunks chunk JOIN blobs blob ON blob.id = chunk.blob_id
-    WHERE chunk.version_id = ANY(${`{${versionIds.join(',')}}`}::uuid[])
+    WHERE chunk.version_id = ANY(${uuidArray(versionIds)})
       AND blob.kind = 'pack' AND blob.state = 'stored'`)
   return rows
 }

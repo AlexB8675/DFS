@@ -21,6 +21,7 @@ import {
 import { WebSocketManager } from '@discordjs/ws'
 import type { FastifyBaseLogger } from 'fastify'
 import { alertLost, markLost } from './lost.ts'
+import { dataChannels } from './storage.ts'
 
 // The bot's connection to Discord's gateway (DESIGN.md §11), production only
 // (D25): it watches for storage messages deleted by hand (§6.5) and answers
@@ -51,11 +52,50 @@ export const COMMANDS: RESTPutAPIApplicationGuildCommandsJSONBody = [
   },
 ]
 
+/** After a failed connection, the next try comes this much later. */
+const RECONNECT_MS = 30_000
+/** How long the registered data channels are trusted before they are read again. */
+const CHANNELS_FRESH_MS = 60_000
+
+/**
+ * Connects in the background, and tries again after a failure, so a problem
+ * with the gateway never holds up storing blobs. Once connected, the
+ * connection resumes on its own.
+ */
+export function keepGateway(deps: GatewayDeps & { rest: DiscordRestClient }): {
+  stop: () => Promise<void>
+} {
+  let stopped = false
+  let connected: { stop: () => Promise<void> } | null = null
+  let retry: NodeJS.Timeout | null = null
+  const connect = () => {
+    startGateway(deps).then(
+      async (gateway) => {
+        if (stopped) await gateway.stop()
+        else connected = gateway
+      },
+      (error: unknown) => {
+        deps.log.warn({ err: error }, 'could not connect to the gateway; trying again shortly')
+        if (!stopped) retry = setTimeout(connect, RECONNECT_MS)
+      },
+    )
+  }
+  connect()
+  return {
+    stop: async () => {
+      stopped = true
+      if (retry) clearTimeout(retry)
+      await connected?.stop()
+    },
+  }
+}
+
 export async function startGateway(
   deps: GatewayDeps & { rest: DiscordRestClient },
 ): Promise<{ stop: () => Promise<void> }> {
   const { config, rest, log } = deps
   const guildId = config.discord.guildId
+  const dataChannels = new DataChannelIds(deps.db)
   const gateway = new WebSocketManager({
     token: config.discord.botToken ?? '',
     // Message deletions need GuildMessages, but not the content intent (§11).
@@ -63,11 +103,15 @@ export async function startGateway(
     rest,
   })
   const client = new Client({ rest, gateway })
+  // Every deletion in the server arrives; only data channels can hold blobs.
+  const onDeleted = async (channelId: string, messageIds: readonly string[]) => {
+    if (await dataChannels.has(channelId)) await deleted(deps, channelId, messageIds)
+  }
   client.on(GatewayDispatchEvents.MessageDelete, ({ data }) => {
-    if (data.guild_id === guildId) void deleted(deps, data.channel_id, [data.id])
+    if (data.guild_id === guildId) void onDeleted(data.channel_id, [data.id])
   })
   client.on(GatewayDispatchEvents.MessageDeleteBulk, ({ data }) => {
-    if (data.guild_id === guildId) void deleted(deps, data.channel_id, data.ids)
+    if (data.guild_id === guildId) void onDeleted(data.channel_id, data.ids)
   })
   client.once(GatewayDispatchEvents.Ready, ({ data, api }) => {
     if (!guildId) return
@@ -90,6 +134,36 @@ export async function startGateway(
     stop: async () => {
       await gateway.destroy()
     },
+  }
+}
+
+/** The Discord IDs of the registered data channels, read again every minute. */
+class DataChannelIds {
+  readonly #db: Database
+  #ids: Promise<Set<string>> | null = null
+  #readAt = 0
+
+  constructor(db: Database) {
+    this.#db = db
+  }
+
+  async has(discordChannelId: string): Promise<boolean> {
+    if (!this.#ids || Date.now() - this.#readAt > CHANNELS_FRESH_MS) {
+      this.#readAt = Date.now()
+      this.#ids = dataChannels(this.#db).then(
+        (channels) => new Set(channels.map((channel) => channel.discordChannelId)),
+        (error: unknown) => {
+          // Read again on the next event; until then, check every deletion.
+          this.#ids = null
+          throw error
+        },
+      )
+    }
+    try {
+      return (await this.#ids).has(discordChannelId)
+    } catch {
+      return true
+    }
   }
 }
 

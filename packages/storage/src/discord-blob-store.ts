@@ -62,8 +62,11 @@ export class DiscordBlobStore implements BlobStore {
   readonly #fetch: typeof fetch
   #channels: { list: StorageChannel[]; loadedAt: number } | null = null
   readonly #inFlight = new Map<string, number>()
-  /** Posts waiting for a channel to have room. */
-  #waiting: (() => void)[] = []
+  /**
+   * Posts waiting for room, by the channel an earlier attempt ties them to,
+   * or under '' for those that can take any channel.
+   */
+  readonly #waiting = new Map<string, (() => void)[]>()
   #turn = 0
   /**
    * The channel and nonce of each blob being posted. A retry reuses both, so
@@ -200,13 +203,20 @@ export class DiscordBlobStore implements BlobStore {
         this.#attempts.set(blobId, attempt)
         return attempt
       }
-      await new Promise<void>((resolve) => this.#waiting.push(resolve))
+      const queue = known ? channel.id : ''
+      await new Promise<void>((resolve) => {
+        const waiting = this.#waiting.get(queue) ?? []
+        waiting.push(resolve)
+        this.#waiting.set(queue, waiting)
+      })
     }
   }
 
+  /** Frees a channel's turn for one waiting post: one tied to it, or else any. */
   #endTurn(channel: StorageChannel): void {
     this.#inFlight.set(channel.id, (this.#inFlight.get(channel.id) ?? 1) - 1)
-    for (const wake of this.#waiting.splice(0)) wake()
+    const next = this.#waiting.get(channel.id)?.shift() ?? this.#waiting.get('')?.shift()
+    next?.()
   }
 
   #instance(): Promise<string> {

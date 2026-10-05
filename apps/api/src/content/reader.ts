@@ -128,7 +128,7 @@ async function* chunksBetween(
         `Version ${versionId} is missing chunks ${String(from)}–${String(to)}.`,
       )
     }
-    await signUrls(app.blobStore, chunks)
+    await signUrls(app, chunks)
     yield* chunks
   }
 }
@@ -240,22 +240,35 @@ async function readFrame(
  * Signs, in one request, the CDN URLs a lookup batch is missing or that are
  * about to expire, rather than one request per chunk as they are read.
  */
-async function signUrls(reader: BlobReader, chunks: ChunkLocation[]): Promise<void> {
+async function signUrls(app: FastifyInstance, chunks: ChunkLocation[]): Promise<void> {
+  const reader: BlobReader = app.blobStore
   if (!reader.signUrls) return
+  // Frames the cache holds need no URL at all.
   const stale = chunks.filter(
-    (chunk) => chunk.blob_state === 'stored' && !chunk.staged_path && !isFresh(cdnUrlOf(chunk)),
+    (chunk) =>
+      chunk.blob_state === 'stored' &&
+      !chunk.staged_path &&
+      !isFresh(cdnUrlOf(chunk)) &&
+      !app.frameCache?.has(chunk.frame_sha256),
   )
   const blobs = new Map<number, ChunkLocation>()
   for (const chunk of stale) if (chunk.blob_id !== null) blobs.set(chunk.blob_id, chunk)
   if (blobs.size === 0) return
-  const signed = await reader.signUrls(
-    [...blobs].map(([id, chunk]) => ({
-      id,
-      channelId: chunk.channel_id,
-      messageId: chunk.message_id,
-      attachmentId: chunk.attachment_id,
-    })),
-  )
+  let signed: Map<number, CdnUrl>
+  try {
+    signed = await reader.signUrls(
+      [...blobs].map(([id, chunk]) => ({
+        id,
+        channelId: chunk.channel_id,
+        messageId: chunk.message_id,
+        attachmentId: chunk.attachment_id,
+      })),
+    )
+  } catch {
+    // Each frame read signs its own URL then: one a cache may still serve
+    // doesn't fail for want of the bot.
+    return
+  }
   for (const chunk of stale) {
     const url = chunk.blob_id === null ? undefined : signed.get(chunk.blob_id)
     if (url) {

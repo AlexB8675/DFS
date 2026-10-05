@@ -141,7 +141,7 @@ describe('two environments on one server (D25)', () => {
       inCategory: await channelsInCategory(discord, discord.guildId, dev.category),
       now: start,
     })
-    expect(devReport).toEqual({ checked: 1, deleted: 0 })
+    expect(devReport).toEqual({ checked: 1, deleted: 0, failed: 0 })
     const read = discord.requests.filter((request) => request.includes('/messages'))
     expect(read).toEqual([`GET /channels/${devChannel.id}/messages`])
 
@@ -152,7 +152,7 @@ describe('two environments on one server (D25)', () => {
       inCategory: await channelsInCategory(discord, discord.guildId, prod.category),
       now: start,
     })
-    expect(prodReport).toEqual({ checked: 2, deleted: 1 })
+    expect(prodReport).toEqual({ checked: 2, deleted: 1, failed: 0 })
     const left = discord.messages.map((message) => message.id)
     expect(left).toEqual(
       expect.arrayContaining([devStored.message, prodStored.message, devInLoose.id, devInProd.id]),

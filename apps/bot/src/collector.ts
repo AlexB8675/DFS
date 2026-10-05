@@ -15,7 +15,7 @@ export interface CollectorDeps {
   log?: Pick<FastifyBaseLogger, 'warn'>
 }
 
-/** Deletes up to `limit` released blobs, oldest first, and returns how many went. */
+/** Deletes up to `limit` released blobs, oldest first and those that kept failing last; returns how many went. */
 export async function collectGarbage(deps: CollectorDeps, limit: number): Promise<number> {
   const { db, store, staging, log } = deps
   const { rows } = await db.execute<{
@@ -26,7 +26,7 @@ export async function collectGarbage(deps: CollectorDeps, limit: number): Promis
     staged_path: string | null
   }>(sql`
     SELECT id::float8 AS id, channel_id, message_id, attachment_id, staged_path FROM blobs
-    WHERE state = 'deleting' ORDER BY id LIMIT ${limit}`)
+    WHERE state = 'deleting' ORDER BY attempts, id LIMIT ${limit}`)
   let deleted = 0
   for (const blob of rows) {
     try {
@@ -37,6 +37,11 @@ export async function collectGarbage(deps: CollectorDeps, limit: number): Promis
         attachmentId: blob.attachment_id,
       })
     } catch (error) {
+      // Counted, so a blob that keeps failing goes after the others rather
+      // than in front of them every round.
+      const reason = error instanceof Error ? error.message : String(error)
+      await db.execute(sql`
+        UPDATE blobs SET attempts = attempts + 1, last_error = ${reason} WHERE id = ${blob.id}`)
       log?.warn({ err: error, blobId: blob.id }, 'deleting a blob failed; it will be tried again')
       continue
     }

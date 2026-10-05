@@ -1,5 +1,5 @@
 import type { Config } from '@dfs/config'
-import type { Database } from '@dfs/db'
+import { bigintArray, type Database } from '@dfs/db'
 import {
   channelsInCategory,
   ChaosBlobStore,
@@ -115,7 +115,7 @@ export async function refreshBlobUrls(
     attachment_id: string | null
   }>(sql`
     SELECT id::float8 AS id, channel_id, message_id, attachment_id FROM blobs
-    WHERE id = ANY(${`{${blobIds.join(',')}}`}::bigint[]) AND state = 'stored'`)
+    WHERE id = ANY(${bigintArray(blobIds)}) AND state = 'stored'`)
   const signed = await store.signUrls(
     rows.map((row) => ({
       id: row.id,

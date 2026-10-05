@@ -110,6 +110,9 @@ export class FakeDiscord implements DiscordRest {
     }
     const listing = /^\/channels\/(\d+)\/messages$/.exec(route)
     if (listing) {
+      if (!this.channels.some((channel) => channel.id === listing[1])) {
+        return refuse(404, 10003, 'Unknown Channel', 'GET', route)
+      }
       const after = BigInt(options?.query?.get('after') ?? '0')
       const limit = Number(options?.query?.get('limit') ?? '50')
       const page = this.messages

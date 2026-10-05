@@ -13,7 +13,7 @@ import { sql } from 'drizzle-orm'
 import type { FastifyBaseLogger } from 'fastify'
 import { fromDrizzle, type JobResult, type PgBoss } from 'pg-boss'
 import { collectGarbage, uploadsWaiting } from './collector.ts'
-import { startGateway } from './gateway.ts'
+import { keepGateway } from './gateway.ts'
 import { Packer } from './packer.ts'
 import { reconcileOrphans } from './reconciler.ts'
 import { instanceId, type BotStorage } from './storage.ts'
@@ -133,6 +133,7 @@ export async function startLeaderWork(options: {
           rest: discord,
           instanceId: await instanceId(db),
           inCategory: await channelsInCategory(discord, guildId, categoryName),
+          log,
         })
         if (report.deleted > 0) log.info(report, 'deleted orphan messages')
       }),
@@ -141,7 +142,7 @@ export async function startLeaderWork(options: {
   // Production only (DISCORD_GATEWAY, D25): one connection, the leader's.
   const gateway =
     discord && guildId && config.discord.gateway
-      ? await startGateway({ config, db, rest: discord, log })
+      ? keepGateway({ config, db, rest: discord, log })
       : null
   return {
     stop: async () => {

@@ -93,4 +93,27 @@ describe('collectGarbage (DESIGN.md §6.4)', () => {
     expect(await collectGarbage({ db, staging, store }, 10)).toBe(1)
     expect(await stateOf(id)).toBe('deleted')
   })
+
+  it('tries a blob that keeps failing after the others', async () => {
+    const stuck = await staged()
+    const next = await staged()
+    await storeBlobs({ db, staging, store }, [stuck, next])
+    await db.execute(sql`UPDATE blobs SET state = 'deleting' WHERE id IN (${stuck}, ${next})`)
+    const remove = store.delete.bind(store)
+    const failing = vi.spyOn(store, 'delete').mockImplementation(async (blob) => {
+      if (blob.id === stuck) throw new Error('Missing Permissions')
+      await remove(blob)
+    })
+    try {
+      // One per round, as while uploads wait: the stuck blob mustn't hold up the next.
+      expect(await collectGarbage({ db, staging, store }, 1)).toBe(0)
+      expect(await collectGarbage({ db, staging, store }, 1)).toBe(1)
+    } finally {
+      failing.mockRestore()
+    }
+    expect(await stateOf(next)).toBe('deleted')
+    const { rows } = await db.execute<{ attempts: number; last_error: string }>(sql`
+      SELECT attempts, last_error FROM blobs WHERE id = ${stuck}`)
+    expect(rows[0]).toEqual({ attempts: 1, last_error: 'Missing Permissions' })
+  })
 })

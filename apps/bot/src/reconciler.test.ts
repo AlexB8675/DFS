@@ -51,7 +51,7 @@ describe('reconcileOrphans (DESIGN.md §6.1)', () => {
     const recent = say(`dfs1 b=777777 k=solo n=1 i=${ours}`)
 
     const first = await reconcileOrphans({ db, rest: discord, instanceId: ours, now: start })
-    expect(first).toEqual({ checked: 3 + many.length, deleted: 2 + many.length })
+    expect(first).toEqual({ checked: 3 + many.length, deleted: 2 + many.length, failed: 0 })
     const left = discord.messages.map((message) => message.id)
     expect(left).toEqual([recorded.id, otherDatabase.id, someoneElse.id, recent.id])
     expect(left).not.toContain(duplicate.id)
@@ -68,10 +68,39 @@ describe('reconcileOrphans (DESIGN.md §6.1)', () => {
       instanceId: ours,
       now: start + HOUR,
     })
-    expect(second).toEqual({ checked: 1, deleted: 1 })
+    expect(second).toEqual({ checked: 1, deleted: 1, failed: 0 })
     expect(discord.messages.map((message) => message.id)).not.toContain(recent.id)
     expect(discord.requests.filter((request) => request.startsWith('GET /channels'))).toHaveLength(
       1,
     )
+  })
+
+  it('cleans the other channels when one can’t be read', async () => {
+    await db.execute(sql`DELETE FROM storage_channels`)
+    const discord = new FakeDiscord()
+    const start = Date.now()
+    discord.clock = () => start - 2 * HOUR
+    const kept = discord.addTextChannel('storage-01')
+    // Registered, but gone from Discord: the first in ID order.
+    await db.insert(storageChannels).values([
+      {
+        id: '00000000-0000-7000-8000-000000000001',
+        discordChannelId: '100000000000000055',
+        name: 'gone',
+      },
+      { discordChannelId: kept.id, name: 'storage-01' },
+    ])
+    const orphan = discord.addMessage(kept.id, `dfs1 b=666666 k=solo n=1 i=${ours}`)
+    const warn = vi.fn()
+    const report = await reconcileOrphans({
+      db,
+      rest: discord,
+      instanceId: ours,
+      log: { warn },
+      now: start,
+    })
+    expect(report).toMatchObject({ deleted: 1, failed: 1 })
+    expect(discord.messages.map((message) => message.id)).not.toContain(orphan.id)
+    expect(warn).toHaveBeenCalledOnce()
   })
 })

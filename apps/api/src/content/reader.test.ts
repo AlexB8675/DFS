@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import { setImmediate } from 'node:timers/promises'
 import { chunkContext, generateDek, importAesKey, sealFrame, sha256 } from '@dfs/crypto'
 import type { Executor } from '@dfs/db'
@@ -5,7 +8,7 @@ import type { BlobStore, Staging } from '@dfs/storage'
 import type { FastifyInstance } from 'fastify'
 import { describe, expect, it, vi } from 'vitest'
 import { DataKeyCache } from '../keys.ts'
-import { MemoryBudget } from './frame-cache.ts'
+import { FrameCache, MemoryBudget } from './frame-cache.ts'
 import { ContentError, readVersion, type ReadableVersion } from './reader.ts'
 
 async function fixture() {
@@ -190,5 +193,42 @@ describe('readVersion', () => {
     const { app, version, execute } = await fixture()
     execute.mockResolvedValueOnce({ rows: [], rowCount: 0, command: 'SELECT', fields: [], oid: 0 })
     await expect(readVersion(app, version, 0, 11).next()).rejects.toBeInstanceOf(ContentError)
+  })
+
+  it('serves cached frames when the bot can’t sign their URLs', async () => {
+    const { app, version, plaintext, frames, locations, execute } = await fixture()
+    const dir = await mkdtemp(path.join(tmpdir(), 'dfs-reader-cache-'))
+    const cache = new FrameCache({ dir, maxBytes: 10_000 })
+    try {
+      await cache.ready()
+      locations.forEach((chunk, index) => {
+        Object.assign(chunk, {
+          staged_path: null,
+          blob_id: index + 1,
+          blob_offset: 0,
+          blob_state: 'stored',
+        })
+        const frame = frames[index]
+        if (frame) cache.put(chunk.frame_sha256, frame)
+      })
+      execute.mockResolvedValue({
+        rows: locations,
+        rowCount: locations.length,
+        command: 'SELECT',
+        fields: [],
+        oid: 0,
+      })
+      const unreachable = () => Promise.reject(new Error('The bot is restarting.'))
+      Object.assign(app, {
+        frameCache: cache,
+        blobStore: { read: unreachable, signUrls: unreachable },
+      })
+      const parts: Uint8Array[] = []
+      for await (const part of readVersion(app, version, 0, 11)) parts.push(part)
+      expect(Buffer.concat(parts)).toEqual(Buffer.from(plaintext))
+    } finally {
+      await cache.idle()
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })

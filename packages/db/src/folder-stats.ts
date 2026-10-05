@@ -93,6 +93,12 @@ export function uuidArray(ids: readonly string[]) {
   return sql`${`{${ids.join(',')}}`}::uuid[]`
 }
 
+/** A `bigint[]` parameter, of IDs such as blob IDs. */
+export function bigintArray(ids: readonly number[]) {
+  if (!ids.every(Number.isSafeInteger)) throw new RangeError('Expected integer IDs.')
+  return sql`${`{${ids.join(',')}}`}::bigint[]`
+}
+
 /** A `text[]` parameter, each value quoted the way Postgres array literals want. */
 export function textArray(values: readonly string[]) {
   const quoted = values.map((value) => `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`)

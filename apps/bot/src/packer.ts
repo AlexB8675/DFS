@@ -1,4 +1,4 @@
-import type { Database, Executor } from '@dfs/db'
+import { bigintArray, type Database, type Executor } from '@dfs/db'
 import type { Staging } from '@dfs/storage'
 import { sql } from 'drizzle-orm'
 import type { FastifyBaseLogger } from 'fastify'
@@ -32,8 +32,11 @@ interface WaitingFrame extends Record<string, unknown> {
 
 export class Packer {
   readonly #options: PackerOptions
-  /** When the packer first saw each frame it is looking at waiting. */
-  #firstSeen = new Map<number, number>()
+  /**
+   * When frames were first seen waiting: every frame up to `upTo` by `since`.
+   * One entry per look that found newer frames, so it stays short.
+   */
+  #seen: { upTo: number; since: number }[] = []
   /** Frames whose staged file is missing or wrong: logged once, then left out. */
   readonly #broken = new Set<number>()
 
@@ -58,20 +61,21 @@ export class Packer {
 
   async #sealOne(force: boolean, now: number): Promise<'sealed' | 'idle' | 'retry'> {
     const { db, staging, sizes, maxWaitMs, enqueue, log } = this.#options
-    // Whether a pack is due is decided without locks: the packer looks every second.
-    const waiting = await this.#waiting(db, false)
-    const firstSeen = new Map<number, number>()
-    for (const frame of waiting) firstSeen.set(frame.id, this.#firstSeen.get(frame.id) ?? now)
-    this.#firstSeen = firstSeen
-    const [first] = waiting
-    if (!first) return 'idle'
-    const { picked, size } = this.#pick(waiting)
+    // Whether a pack is due is decided from a summary, without locks: the
+    // packer looks every second.
+    const { frames: count, bytes, oldest, newest } = await this.#summary(db)
+    if (count === 0) {
+      this.#seen = []
+      return 'idle'
+    }
+    const latest = this.#seen.at(-1)
+    if (!latest || newest > latest.upTo) this.#seen.push({ upTo: newest, since: now })
+    while (this.#seen.length > 1 && (this.#seen[0]?.upTo ?? oldest) < oldest) this.#seen.shift()
+    const since = this.#seen.find((seen) => seen.upTo >= oldest)?.since ?? now
+    // While everything waiting fits in one blob, a pack takes it all; past
+    // BLOB_MAX_BYTES, which is at least the target, a pack is due anyway.
     const due =
-      force ||
-      size >= sizes.packTargetBytes ||
-      picked.length < waiting.length ||
-      waiting.length === WINDOW ||
-      now - (firstSeen.get(first.id) ?? now) >= maxWaitMs
+      force || bytes >= sizes.packTargetBytes || count === WINDOW || now - since >= maxWaitMs
     if (!due) return 'idle'
 
     // Set inside the transaction: the pack file written, and the frames it holds.
@@ -138,6 +142,29 @@ export class Packer {
       })
     }
     return 'sealed'
+  }
+
+  /** How many frames wait (up to the window), their bytes, and the oldest's and newest's IDs. */
+  async #summary(
+    db: Executor,
+  ): Promise<{ frames: number; bytes: number; oldest: number; newest: number }> {
+    const { rows } = await db.execute<{
+      frames: number
+      bytes: number
+      oldest: number
+      newest: number
+    }>(sql`
+      SELECT count(*)::int AS frames, coalesce(sum(frame_size), 0)::float8 AS bytes,
+        coalesce(min(id), 0)::float8 AS oldest, coalesce(max(id), 0)::float8 AS newest
+      FROM (
+        SELECT chunk.id, chunk.frame_size
+        FROM chunks chunk JOIN file_versions version ON version.id = chunk.version_id
+        WHERE chunk.blob_id IS NULL AND chunk.purged_at IS NULL
+          AND chunk.staged_path IS NOT NULL AND version.state = 'syncing'
+          AND NOT chunk.id = ANY(${bigintArray([...this.#broken])})
+        ORDER BY chunk.id LIMIT ${WINDOW}
+      ) waiting`)
+    return rows[0] ?? { frames: 0, bytes: 0, oldest: 0, newest: 0 }
   }
 
   /** Frames of completed uploads waiting for a pack, oldest first. */

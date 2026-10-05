@@ -1,4 +1,4 @@
-import { notifySynced, uuidArray, type Database } from '@dfs/db'
+import { bigintArray, notifySynced, textArray, uuidArray, type Database } from '@dfs/db'
 import type { DiscordRest } from '@dfs/storage'
 import { Routes } from 'discord-api-types/v10'
 import { sql } from 'drizzle-orm'
@@ -31,18 +31,18 @@ export async function markLost(
       FROM storage_channels channel
       WHERE blobs.channel_id = channel.id AND channel.discord_channel_id = ${discordChannelId}
         AND blobs.state = 'stored'
-        AND blobs.message_id = ANY(${`{${messageIds.join(',')}}`}::text[])
+        AND blobs.message_id = ANY(${textArray(messageIds)})
       RETURNING blobs.id::float8 AS id, channel.name AS channel`)
     const [first] = blobs
     if (!first) return null
-    const blobIds = `{${blobs.map((blob) => blob.id).join(',')}}`
+    const blobIds = bigintArray(blobs.map((blob) => blob.id))
     await tx.execute(sql`
       SELECT id FROM file_versions
-      WHERE id IN (SELECT version_id FROM chunks WHERE blob_id = ANY(${blobIds}::bigint[]))
+      WHERE id IN (SELECT version_id FROM chunks WHERE blob_id = ANY(${blobIds}))
       ORDER BY id FOR NO KEY UPDATE`)
     const { rows: versions } = await tx.execute<{ id: string }>(sql`
       UPDATE file_versions SET state = 'lost'
-      WHERE id IN (SELECT version_id FROM chunks WHERE blob_id = ANY(${blobIds}::bigint[]))
+      WHERE id IN (SELECT version_id FROM chunks WHERE blob_id = ANY(${blobIds}))
         AND state IN ('syncing', 'stored')
       RETURNING id`)
     // Only files whose current version this is show the change.
