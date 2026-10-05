@@ -48,6 +48,100 @@ const refused: ChartSpec = {
 
 export const OVERVIEW_CHARTS: ChartSpec[] = [throughput, backlog, stored, refused]
 
+const connections: ChartSpec = {
+  title: 'Database connections',
+  description: 'Connections to this database, and how many run a query.',
+  format: 'count',
+  lines: [
+    { label: 'Connections', color: 1, series: 'pg.connections:avg' },
+    { label: 'Running a query', color: 2, series: 'pg.active:avg' },
+  ],
+}
+
+const transactions: ChartSpec = {
+  title: 'Transactions',
+  description: 'Per second: transactions committed, and rolled back.',
+  format: 'perSecond',
+  lines: [
+    { label: 'Commits', color: 1, series: 'pg.commits:rate' },
+    { label: 'Rollbacks', color: 2, series: 'pg.rollbacks:rate' },
+  ],
+}
+
+const bufferHits: ChartSpec = {
+  title: 'Buffer cache hit rate',
+  description: 'Blocks found in PostgreSQL’s memory, of all it read.',
+  format: 'percent',
+  lines: [
+    {
+      label: 'Hit rate',
+      color: 1,
+      share: 'pg.cache_hits:rate',
+      of: ['pg.cache_hits:rate', 'pg.disk_reads:rate'],
+    },
+  ],
+}
+
+const databaseSize: ChartSpec = {
+  title: 'Database size',
+  description: 'The size of the PostgreSQL database on disk.',
+  format: 'bytes',
+  lines: [{ label: 'Size', color: 1, series: 'db.bytes:avg' }],
+}
+
+/** Admin → Database: PostgreSQL over time (§16). */
+export const DATABASE_CHARTS: ChartSpec[] = [
+  connections,
+  transactions,
+  bufferHits,
+  {
+    title: 'Rows read',
+    description: 'Per second, by scans and index lookups.',
+    format: 'perSecond',
+    lines: [{ label: 'Read', color: 1, series: 'pg.rows_read:rate' }],
+  },
+  {
+    title: 'Rows written',
+    description: 'Per second: inserted, updated and deleted.',
+    format: 'perSecond',
+    lines: [{ label: 'Written', color: 2, series: 'pg.rows_written:rate' }],
+  },
+  {
+    title: 'Written to disk',
+    description: 'Bytes per second of write-ahead log, and of temporary files for big sorts.',
+    format: 'bytesPerSecond',
+    lines: [
+      { label: 'WAL', color: 1, series: 'pg.wal_bytes:rate' },
+      { label: 'Temporary files', color: 2, series: 'pg.temp_bytes:rate' },
+    ],
+  },
+  {
+    title: 'Longest transaction',
+    description: 'The oldest open transaction at each sample; long ones hold back vacuum.',
+    format: 'ms',
+    lines: [{ label: 'Longest', color: 1, series: 'pg.oldest_xact_ms:max' }],
+  },
+  {
+    title: 'Lock waits',
+    description: 'Queries waiting for another’s lock, at most at each sample.',
+    format: 'count',
+    lines: [{ label: 'Waiting', color: 'warning', series: 'pg.lock_waits:max' }],
+  },
+  {
+    title: 'Deadlocks',
+    description: 'Per minute: deadlocks PostgreSQL broke by failing a transaction.',
+    format: 'perMinute',
+    lines: [{ label: 'Deadlocks', color: 'critical', series: 'pg.deadlocks:rate' }],
+  },
+  {
+    title: 'Dead rows',
+    description: 'Old row versions waiting for vacuum, in all tables.',
+    format: 'count',
+    lines: [{ label: 'Dead rows', color: 1, series: 'pg.dead_rows:avg' }],
+  },
+  databaseSize,
+]
+
 export interface DashboardSection {
   title: string
   description: string
@@ -220,13 +314,12 @@ export const MONITORING_SECTIONS: DashboardSection[] = [
         ],
       },
       backlog,
-      {
-        title: 'Database',
-        description: 'The size of the PostgreSQL database.',
-        format: 'bytes',
-        lines: [{ label: 'Size', color: 1, series: 'db.bytes:avg' }],
-      },
     ],
+  },
+  {
+    title: 'Database',
+    description: 'PostgreSQL at work; Admin → Database has the rest, and what runs now.',
+    charts: [connections, transactions, bufferHits, databaseSize],
   },
   {
     title: 'Processes',

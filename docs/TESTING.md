@@ -151,6 +151,11 @@ Use disposable folders and files for these checks:
    answering, and the alert goes once the bot is back.
 10. Open Admin → Monitoring. Every section loads in one request each; graphs
     for things that haven't happened yet are flat, never broken.
+11. Open Admin → Database. In a terminal, hold a query open:
+    `docker exec -it dfs-dev-postgres-1 psql -U dfs -d dfs -c "SELECT pg_sleep(120)"`.
+    Within 10 s it shows under Running now; Cancel query stops it (psql says
+    `canceling statement due to user request`), and the audit log records it.
+    The slowest statements list fills in as the app works.
 
 For an exact round-trip comparison, compare the SHA-256 hashes of the original
 and downloaded files:

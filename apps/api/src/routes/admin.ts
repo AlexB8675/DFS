@@ -4,6 +4,7 @@ import {
   auditPageSchema,
   createChannelSchema,
   createUserSchema,
+  databaseStatusSchema,
   metricSeriesSchema,
   metricsQuerySchema,
   moderationSchema,
@@ -26,6 +27,7 @@ import type { FastifyInstance } from 'fastify'
 import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
 import { adminNode, anyVisibleNode, moderate, userUsage } from '../admin/browse.ts'
+import { databaseStatus, signalSession } from '../admin/database.ts'
 import {
   auditLog,
   createChannel,
@@ -153,6 +155,30 @@ export function adminRoutes(app: FastifyInstance, _options: object, done: () => 
     },
     (request) => readMetrics(app.db, request.query.range, request.query.series),
   )
+
+  routes.get(
+    '/admin/database',
+    { config: admin, schema: { response: { 200: databaseStatusSchema } } },
+    () => databaseStatus(app),
+  )
+
+  const byPid = z.object({
+    pid: z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(2 ** 31 - 1),
+  })
+  for (const how of ['cancel', 'terminate'] as const) {
+    routes.post(
+      `/admin/database/sessions/:pid/${how}`,
+      { config: admin, schema: { params: byPid, response: noContent } },
+      async (request, reply) => {
+        await signalSession(app, requireAuth(request.auth), request.params.pid, how)
+        return reply.code(204).send(null)
+      },
+    )
+  }
 
   routes.get(
     '/admin/channels',

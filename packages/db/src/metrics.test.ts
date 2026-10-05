@@ -1,7 +1,9 @@
 import { sql } from 'drizzle-orm'
+import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest'
 import { createDatabase, createPool, type Database } from './client.ts'
 import { Metrics, percentile, pruneMetrics, readMetrics } from './metrics.ts'
+import { PostgresSampler } from './postgres-stats.ts'
 import { sampleSystem } from './system-figures.ts'
 import { createTestDatabase, type TestDatabase } from './testing/index.ts'
 
@@ -180,6 +182,35 @@ describe('metrics (DESIGN §16)', () => {
       ].sort(),
     )
     expect(sampled.find((row) => row.name === 'db.bytes')?.sum).toBeGreaterThan(0)
+  })
+
+  it('samples PostgreSQL: levels each time, totals as what they grew by since the last', async () => {
+    const metrics = new Metrics()
+    const sampler = new PostgresSampler()
+    await sampler.sample(db, metrics)
+    await metrics.flush(db, NOON)
+    const first = (await rows()).filter((row) => row.step === 60)
+    expect(first.map((row) => row.name).sort()).toEqual([
+      'pg.active',
+      'pg.connections',
+      'pg.dead_rows',
+      'pg.lock_waits',
+      'pg.oldest_xact_ms',
+    ])
+    expect(first.find((row) => row.name === 'pg.connections')?.sum).toBeGreaterThan(0)
+
+    // Work on a connection of its own, which flushes its statistics as it closes.
+    const worker = new pg.Client({ connectionString: database.url })
+    await worker.connect()
+    for (let index = 0; index < 3; index++) await worker.query('SELECT 1')
+    await worker.end()
+    await sampler.sample(db, metrics)
+    await metrics.flush(db)
+    const totals = (await rows()).filter(
+      (row) => row.step === 60 && !first.some((level) => level.name === row.name),
+    )
+    expect(totals.map((row) => row.name)).toContain('pg.commits')
+    for (const row of totals) expect(row.sum).toBeGreaterThan(0)
   })
 
   it('drops minutes after two days and hours after 400', async () => {

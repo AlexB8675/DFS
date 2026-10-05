@@ -3,6 +3,7 @@ import type {
   AuditEntry,
   CreateChannelInput,
   CreateUserInput,
+  DatabaseStatus,
   DriveNode,
   MetricSeries,
   MetricsQuery,
@@ -30,6 +31,7 @@ import {
   type MockNode,
   type MockUser,
 } from './db'
+import { mockDatabaseStatus } from './database'
 import { mockMetrics } from './metrics'
 
 const GB = 1024 ** 3
@@ -337,6 +339,36 @@ export class AdminMockDb extends MockDb {
         affectedFiles: 1,
       })),
     }
+  }
+
+  /** Database connections an admin cancelled or ended, gone from the made-up list. */
+  private readonly endedSessions = new Set<number>()
+
+  /** Made-up PostgreSQL figures (§16). */
+  databaseStatus(): DatabaseStatus {
+    this.requireAdmin()
+    return mockDatabaseStatus(this.endedSessions)
+  }
+
+  signalSession(pid: number, how: 'cancel' | 'terminate'): void {
+    this.requireAdmin()
+    const session = mockDatabaseStatus(this.endedSessions).sessions.find(
+      (candidate) => candidate.pid === pid,
+    )
+    if (!session) throw new MockApiError(404, 'not_found', 'No such database connection.')
+    if (how === 'cancel' && session.state !== 'active') {
+      throw new MockApiError(
+        409,
+        'not_running',
+        'That connection isn’t running a query; end the connection to close its transaction.',
+      )
+    }
+    this.endedSessions.add(pid)
+    this.audit(
+      how === 'cancel' ? 'database.query_cancelled' : 'database.session_ended',
+      `${session.application} (${String(pid)})`,
+    )
+    this.save()
   }
 
   /** Made-up history that ends at the mock's figures today (§16). */

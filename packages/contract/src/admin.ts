@@ -1,5 +1,6 @@
 import {
   auditPageSchema,
+  databaseStatusSchema,
   METRICS,
   metricSeriesSchema,
   nodePageSchema,
@@ -104,6 +105,29 @@ export function adminTests({
     it('reports the system’s health', async () => {
       const health = await (await owner()).call('GET', '/admin/health', systemHealthSchema)
       expect(health.services.length).toBeGreaterThan(0)
+    })
+
+    it('shows PostgreSQL as it is, and signals only its real connections (§16)', async () => {
+      const admin = await owner()
+      const status = await admin.call('GET', '/admin/database', databaseStatusSchema)
+      expect(status.version).toMatch(/^PostgreSQL \d+/)
+      expect(status.connections.used).toBeGreaterThan(0)
+      expect(status.connections.max >= status.connections.used).toBe(true)
+      expect(status.tables.map((table) => table.name)).toContain('nodes')
+      expect(status.settings.map((setting) => setting.name)).toContain('max_connections')
+      for (const how of ['cancel', 'terminate']) {
+        expect(await admin.error('POST', `/admin/database/sessions/2147483647/${how}`)).toEqual({
+          status: 404,
+          code: 'not_found',
+        })
+      }
+
+      const { username, temporaryPassword } = await newUser(admin)
+      const user = await activated(username, temporaryPassword)
+      expect(await user.error('GET', '/admin/database')).toEqual({
+        status: 403,
+        code: 'forbidden',
+      })
     })
 
     it('reads metrics as series, one point per bucket of the range (§16)', async () => {

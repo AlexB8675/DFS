@@ -10,7 +10,8 @@ const calm: AlertFigures = {
   stagedBytes: 10,
   stagingMaxBytes: 100,
   failingDeletions: 0,
-  lastHour: { rateLimited: 3, serverErrors: 0, cdnFailures: 0, postFailures: 0 },
+  database: { connections: 12, maxConnections: 100, oldestTransactionSeconds: 2, longLockWaits: 0 },
+  lastHour: { rateLimited: 3, serverErrors: 0, cdnFailures: 0, postFailures: 0, deadlocks: 0 },
 }
 
 describe('health alerts (DESIGN.md §16)', () => {
@@ -28,15 +29,31 @@ describe('health alerts (DESIGN.md §16)', () => {
       oldestPendingSeconds: 3700,
       stagedBytes: 85,
       failingDeletions: 4,
-      lastHour: { rateLimited: 20, serverErrors: 5, cdnFailures: 10, postFailures: 5 },
+      database: {
+        connections: 85,
+        maxConnections: 100,
+        oldestTransactionSeconds: 900,
+        longLockWaits: 1,
+      },
+      lastHour: {
+        rateLimited: 20,
+        serverErrors: 5,
+        cdnFailures: 10,
+        postFailures: 5,
+        deadlocks: 2,
+      },
     })
     expect(alerts.map((alert) => [alert.code, alert.level])).toEqual([
       ['bot_down', 'critical'],
       ['lost_blobs', 'critical'],
       ['staging_full', 'warning'],
+      ['db_connections', 'warning'],
       ['uploads_failed', 'warning'],
       ['sync_slow', 'warning'],
       ['deletions_failing', 'warning'],
+      ['db_long_transaction', 'warning'],
+      ['db_lock_waits', 'warning'],
+      ['db_deadlocks', 'warning'],
       ['posts_failing', 'warning'],
       ['rate_limited', 'warning'],
       ['cdn_failing', 'warning'],
@@ -49,6 +66,17 @@ describe('health alerts (DESIGN.md §16)', () => {
     expect(alerts.find((alert) => alert.code === 'sync_slow')?.detail).toBe(
       'The oldest blob has waited 1 h 2 min to be stored in Discord.',
     )
+    expect(alerts.find((alert) => alert.code === 'db_lock_waits')?.detail).toBe(
+      '1 query waited 30 s or more; Admin → Database shows what blocks them.',
+    )
+  })
+
+  it('makes almost no database connections left critical', () => {
+    const [alert] = healthAlerts({
+      ...calm,
+      database: { ...calm.database, connections: 96 },
+    })
+    expect(alert).toMatchObject({ code: 'db_connections', level: 'critical' })
   })
 
   it('makes a nearly full staging critical', () => {

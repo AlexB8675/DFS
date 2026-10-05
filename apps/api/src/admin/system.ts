@@ -26,7 +26,7 @@ const startedAt = Date.now()
  * storage and lost blobs.
  */
 export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> {
-  const [bot, figures, recent, troubles, lost] = await Promise.all([
+  const [bot, figures, recent, troubles, database, lost] = await Promise.all([
     botHealth(app),
     systemFigures(app.db),
     // From the metrics: what reached Discord lately, the cache's hits this
@@ -40,6 +40,7 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
       server_errors: number
       cdn_failures: number
       post_failures: number
+      deadlocks: number
     }>(sql`
       SELECT
         coalesce(sum(sum) FILTER (WHERE name = 'discord.posted'
@@ -52,11 +53,12 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
         coalesce(sum(sum) FILTER (WHERE name = 'http.server_errors'), 0)::float8 AS server_errors,
         coalesce(sum(sum) FILTER (WHERE name = 'cdn.failures'), 0)::float8 AS cdn_failures,
         coalesce(sum(sum) FILTER (WHERE name = 'discord.post_failures'), 0)::float8
-          AS post_failures
+          AS post_failures,
+        coalesce(sum(sum) FILTER (WHERE name = 'pg.deadlocks'), 0)::float8 AS deadlocks
       FROM metrics
       WHERE step = ${METRIC_STEPS.minute} AND at >= now() - interval '1 hour'
         AND name IN ('discord.posted', 'cache.hits', 'cache.misses', 'discord.429',
-          'http.server_errors', 'cdn.failures', 'discord.post_failures')`),
+          'http.server_errors', 'cdn.failures', 'discord.post_failures', 'pg.deadlocks')`),
     // Both read the blobs waiting to be deleted (an index) or those lost (rare).
     app.db.execute<{ failing_deletions: number; lost_files: number }>(sql`
       SELECT
@@ -65,6 +67,23 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
         (SELECT count(DISTINCT chunk.version_id)::int
           FROM blobs blob JOIN chunks chunk ON chunk.blob_id = blob.id
           WHERE blob.state = 'lost') AS lost_files`),
+    // PostgreSQL's connections: how many of the limit, and the stuck ones.
+    app.db.execute<{
+      connections: number
+      max_connections: number
+      oldest_transaction: number
+      long_lock_waits: number
+    }>(sql`
+      SELECT
+        (SELECT count(*)::int FROM pg_stat_activity WHERE backend_type = 'client backend')
+          AS connections,
+        current_setting('max_connections')::int AS max_connections,
+        coalesce(max(extract(epoch FROM now() - xact_start)), 0)::float8 AS oldest_transaction,
+        count(*) FILTER (WHERE wait_event_type = 'Lock'
+          AND query_start < now() - interval '30 seconds')::int AS long_lock_waits
+      FROM pg_stat_activity
+      WHERE datname = current_database() AND backend_type = 'client backend'
+        AND pid <> pg_backend_pid()`),
     app.db.execute<{
       id: string
       channel: string | null
@@ -90,11 +109,18 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
       stagedBytes: figures.stagedBytes,
       stagingMaxBytes: app.config.stagingMaxBytes,
       failingDeletions: troubles.rows[0]?.failing_deletions ?? 0,
+      database: {
+        connections: database.rows[0]?.connections ?? 0,
+        maxConnections: database.rows[0]?.max_connections ?? 0,
+        oldestTransactionSeconds: database.rows[0]?.oldest_transaction ?? 0,
+        longLockWaits: database.rows[0]?.long_lock_waits ?? 0,
+      },
       lastHour: {
         rateLimited: latest?.rate_limited ?? 0,
         serverErrors: latest?.server_errors ?? 0,
         cdnFailures: latest?.cdn_failures ?? 0,
         postFailures: latest?.post_failures ?? 0,
+        deadlocks: latest?.deadlocks ?? 0,
       },
     }),
     services: [

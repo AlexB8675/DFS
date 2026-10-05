@@ -305,6 +305,20 @@ export const handlers = [
     }),
   ),
   http.get('/api/admin/health', ({ request }) => respond(request, () => db.health())),
+  http.get('/api/admin/database', ({ request }) => respond(request, () => db.databaseStatus())),
+  http.post<{ pid: string; how: string }>(
+    '/api/admin/database/sessions/:pid/:how',
+    ({ request, params }) =>
+      respondEmpty(request, () => {
+        const { pid, how } = z
+          .object({
+            pid: z.coerce.number().int().positive(),
+            how: z.enum(['cancel', 'terminate']),
+          })
+          .parse(params)
+        db.signalSession(pid, how)
+      }),
+  ),
   http.get('/api/admin/metrics', ({ request }) =>
     respond(request, () => db.metrics(readQuery(request, metricsQuerySchema))),
   ),

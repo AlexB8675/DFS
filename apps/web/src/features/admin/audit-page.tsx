@@ -1,6 +1,7 @@
 import type { AuditEntry } from '@dfs/shared'
 import { useInfiniteQuery } from '@tanstack/react-query'
 import {
+  Database,
   DatabaseBackup,
   Eye,
   Hash,
@@ -45,6 +46,16 @@ const ACTIONS: Record<string, { label: string; icon: LucideIcon; tone?: string }
   'channel.created': { label: 'Added channel', icon: Hash },
   'channel.enabled': { label: 'Enabled channel', icon: Hash },
   'channel.disabled': { label: 'Disabled channel', icon: Hash, tone: 'text-amber-500' },
+  'database.query_cancelled': {
+    label: 'Cancelled a query',
+    icon: Database,
+    tone: 'text-amber-500',
+  },
+  'database.session_ended': {
+    label: 'Ended a database session',
+    icon: Database,
+    tone: 'text-amber-500',
+  },
   'backup.completed': { label: 'Backup completed', icon: DatabaseBackup, tone: 'text-emerald-500' },
   'scrub.completed': { label: 'Scrub completed', icon: ScanSearch },
   'blob.lost': { label: 'Blob lost', icon: TriangleAlert, tone: 'text-destructive' },

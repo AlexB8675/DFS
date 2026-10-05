@@ -17,6 +17,12 @@ const LIMITS = {
   serverErrors: 5,
   cdnFailures: 10,
   postFailures: 5,
+  deadlocks: 1,
+  /** Shares of `max_connections` in use. */
+  connectionsWarning: 0.8,
+  connectionsCritical: 0.95,
+  /** An open transaction this old holds back vacuum and may block others. */
+  transactionSeconds: 10 * 60,
 }
 
 export interface AlertFigures {
@@ -29,14 +35,27 @@ export interface AlertFigures {
   stagingMaxBytes: number
   /** Released blobs that failed to delete `LIMITS.deleteAttempts` times or more. */
   failingDeletions: number
-  lastHour: { rateLimited: number; serverErrors: number; cdnFailures: number; postFailures: number }
+  database: {
+    connections: number
+    maxConnections: number
+    oldestTransactionSeconds: number
+    /** Queries that have waited 30 s or more for a lock. */
+    longLockWaits: number
+  }
+  lastHour: {
+    rateLimited: number
+    serverErrors: number
+    cdnFailures: number
+    postFailures: number
+    deadlocks: number
+  }
 }
 
 export const FAILING_DELETE_ATTEMPTS = LIMITS.deleteAttempts
 
 export function healthAlerts(figures: AlertFigures): SystemAlert[] {
   const alerts: SystemAlert[] = []
-  const { bot, lastHour } = figures
+  const { bot, lastHour, database } = figures
 
   if (bot.status === 'down') {
     alerts.push({
@@ -71,6 +90,16 @@ export function healthAlerts(figures: AlertFigures): SystemAlert[] {
       detail: 'Uploads are refused once it is full, until the bot has stored what waits.',
     })
   }
+  const connections =
+    database.maxConnections > 0 ? database.connections / database.maxConnections : 0
+  if (connections >= LIMITS.connectionsWarning) {
+    alerts.push({
+      code: 'db_connections',
+      level: connections >= LIMITS.connectionsCritical ? 'critical' : 'warning',
+      title: 'Database connections are running out',
+      detail: `${String(database.connections)} of ${String(database.maxConnections)} are in use; past the limit, requests fail.`,
+    })
+  }
   if (figures.failedJobs > 0) {
     alerts.push({
       code: 'uploads_failed',
@@ -93,6 +122,30 @@ export function healthAlerts(figures: AlertFigures): SystemAlert[] {
       level: 'warning',
       title: 'Deleting from Discord keeps failing',
       detail: `${plural(figures.failingDeletions, 'released blob')} failed to delete ${String(LIMITS.deleteAttempts)} times or more.`,
+    })
+  }
+  if (database.oldestTransactionSeconds >= LIMITS.transactionSeconds) {
+    alerts.push({
+      code: 'db_long_transaction',
+      level: 'warning',
+      title: 'A database transaction has been open for long',
+      detail: `It has run ${minutes(database.oldestTransactionSeconds)}, holding back vacuum; Admin → Database can end its connection.`,
+    })
+  }
+  if (database.longLockWaits > 0) {
+    alerts.push({
+      code: 'db_lock_waits',
+      level: 'warning',
+      title: 'Queries are stuck waiting for locks',
+      detail: `${plural(database.longLockWaits, 'query')} waited 30 s or more; Admin → Database shows what blocks them.`,
+    })
+  }
+  if (lastHour.deadlocks >= LIMITS.deadlocks) {
+    alerts.push({
+      code: 'db_deadlocks',
+      level: 'warning',
+      title: 'The database broke deadlocks',
+      detail: `${plural(lastHour.deadlocks, 'deadlock')} in the last hour: each failed one transaction.`,
     })
   }
   if (lastHour.postFailures >= LIMITS.postFailures) {
@@ -132,7 +185,8 @@ export function healthAlerts(figures: AlertFigures): SystemAlert[] {
 }
 
 function plural(count: number, noun: string): string {
-  return `${count.toLocaleString('en')} ${noun}${count === 1 ? '' : 's'}`
+  const many = noun.endsWith('y') ? `${noun.slice(0, -1)}ies` : `${noun}s`
+  return `${count.toLocaleString('en')} ${count === 1 ? noun : many}`
 }
 
 function minutes(seconds: number): string {

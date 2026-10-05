@@ -30,6 +30,8 @@ export function formatValue(value: number, format: ValueFormat): string {
     case 'count':
       return number(value)
     case 'ms':
+      if (value >= 3_600_000) return `${(value / 3_600_000).toFixed(1)} h`
+      if (value >= 60_000) return `${String(Math.round(value / 60_000))} min`
       if (value >= 1000) return `${(value / 1000).toFixed(value >= 10_000 ? 0 : 1)} s`
       return `${value < 10 && value > 0 ? value.toFixed(1) : String(Math.round(value))} ms`
     case 'percent':
@@ -55,7 +57,11 @@ function tickUnit(format: ValueFormat, max: number): number {
     return unit
   }
   if (format === 'perMinute') return 1 / 60
-  if (format === 'ms' && max >= 1000) return 1000
+  if (format === 'ms') {
+    if (max >= 2 * 3_600_000) return 3_600_000
+    if (max >= 2 * 60_000) return 60_000
+    if (max >= 1000) return 1000
+  }
   return 1
 }
 
@@ -84,7 +90,9 @@ export function valueTicks(max: number, format: ValueFormat): number[] {
   // Nothing yet: a flat line under a top that reads as "little".
   if (!(max > 0)) return [0, EMPTY_TOP[format]]
   const unit = tickUnit(format, max)
-  const step = niceStep(max / unit / 3) * unit
+  // Counts step in whole numbers.
+  const raw = niceStep(max / unit / 3) * unit
+  const step = format === 'count' ? Math.max(1, Math.round(raw)) : raw
   const ticks = [0]
   while ((ticks.at(-1) ?? 0) < max) ticks.push(ticks.length * step)
   return ticks

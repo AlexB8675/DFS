@@ -2,6 +2,7 @@ import {
   adminUserPageSchema,
   adminUserSchema,
   auditPageSchema,
+  databaseStatusSchema,
   nodePageSchema,
   nodePathSchema,
   storageChannelListSchema,
@@ -42,6 +43,27 @@ export const healthQuery = queryOptions({
   refetchInterval: HEALTH_REFRESH_MS,
   staleTime: 0,
 })
+
+/** PostgreSQL now (§16): connections, running queries, tables. */
+export const databaseQuery = queryOptions({
+  queryKey: ['admin', 'database'],
+  queryFn: ({ signal }) => apiGet('/admin/database', databaseStatusSchema, { signal }),
+  refetchInterval: 10_000,
+  staleTime: 0,
+})
+
+/** Cancels a connection's query, or ends the connection (audited). */
+export function useSignalSession() {
+  return useMutation({
+    mutationFn: ({ pid, how }: { pid: number; how: 'cancel' | 'terminate' }) =>
+      apiSend('POST', `/admin/database/sessions/${String(pid)}/${how}`),
+    onSettled: () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: databaseQuery.queryKey }),
+        queryClient.invalidateQueries({ queryKey: ['admin', 'audit'] }),
+      ]),
+  })
+}
 
 export const adminUsersQuery = queryOptions({
   queryKey: ['admin', 'users'],

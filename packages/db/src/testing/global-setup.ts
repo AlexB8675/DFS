@@ -15,7 +15,10 @@ export default async function setup(project: TestProject): Promise<() => Promise
   let adminUrl = process.env.TEST_DATABASE_URL
   if (!adminUrl) {
     try {
-      container = await new PostgreSqlContainer(IMAGE).start()
+      // As in development, with the slowest statements kept (DESIGN §16).
+      container = await new PostgreSqlContainer(IMAGE)
+        .withCommand(['postgres', '-c', 'shared_preload_libraries=pg_stat_statements'])
+        .start()
     } catch (error) {
       throw new Error(
         'Integration tests need PostgreSQL 18: start Docker, or set TEST_DATABASE_URL to a server where this user can create databases.',

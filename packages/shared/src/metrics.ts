@@ -85,6 +85,23 @@ export const METRICS = {
   'files.count': metric('gauge', 'count', 'Files'),
   'files.bytes': metric('gauge', 'bytes', 'Used by files'),
   'sessions.count': metric('gauge', 'count', 'Signed-in sessions'),
+
+  // PostgreSQL's own statistics, sampled by the leading bot once a minute.
+  'pg.connections': metric('gauge', 'count', 'Database connections'),
+  'pg.active': metric('gauge', 'count', 'Queries running'),
+  'pg.lock_waits': metric('gauge', 'count', 'Queries waiting for locks'),
+  'pg.oldest_xact_ms': metric('gauge', 'ms', 'Longest transaction'),
+  'pg.dead_rows': metric('gauge', 'count', 'Dead rows'),
+  'pg.commits': metric('counter', 'count', 'Commits'),
+  'pg.rollbacks': metric('counter', 'count', 'Rollbacks'),
+  'pg.deadlocks': metric('counter', 'count', 'Deadlocks'),
+  /** Blocks found in shared buffers, and those read from the disk (or the OS cache). */
+  'pg.cache_hits': metric('counter', 'count', 'Blocks found in memory'),
+  'pg.disk_reads': metric('counter', 'count', 'Blocks read from disk'),
+  'pg.rows_read': metric('counter', 'count', 'Rows read'),
+  'pg.rows_written': metric('counter', 'count', 'Rows written'),
+  'pg.temp_bytes': metric('counter', 'bytes', 'Temporary files'),
+  'pg.wal_bytes': metric('counter', 'bytes', 'WAL written'),
 } as const satisfies Record<string, MetricInfo>
 
 export type MetricName = keyof typeof METRICS

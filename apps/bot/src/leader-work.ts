@@ -3,6 +3,7 @@ import {
   abandonUploads,
   BLOB_UPLOAD_QUEUE,
   foldAllFolderStats,
+  PostgresSampler,
   pruneMetrics,
   QUEUES,
   sampleSystem,
@@ -135,7 +136,11 @@ export async function startLeaderWork(options: {
   ]
   // The leader alone samples them, so the figures aren't counted once per bot.
   if (metrics) {
-    loops.push(repeat(SAMPLE_EVERY_MS, log, 'sampling the system', () => sampleSystem(db, metrics)))
+    const postgres = new PostgresSampler()
+    loops.push(
+      repeat(SAMPLE_EVERY_MS, log, 'sampling the system', () => sampleSystem(db, metrics)),
+      repeat(SAMPLE_EVERY_MS, log, 'sampling PostgreSQL', () => postgres.sample(db, metrics)),
+    )
   }
   const { guildId, categoryName } = config.discord
   if (discord && guildId) {

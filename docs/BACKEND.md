@@ -206,7 +206,7 @@ The admin pages grow from a status page into the place to watch and run DFS, bef
 **Tasks**
 
 - [x] **1 · Metrics** (DESIGN §16, D29): the API and the bot record what they do and add it to the `metrics` table every 10 s, in minute and hour buckets; the leading bot samples the system's figures once a minute and drops old rows; `GET /admin/metrics` reads series over a range. The overview's cache card shows the real frame cache, and its figures no longer scan pg-boss's job table.
-- [x] **2 · Dashboards:** graphs on the overview with a time range, alerts for what needs attention (worked out by the API, with the health), and a Monitoring tab for traffic, Discord, reading back, storage, the processes and people. Graphs are the web app's own SVG, with a crosshair, keyboard reading and a table view.
+- [x] **2 · Dashboards:** graphs on the overview with a time range, alerts for what needs attention (worked out by the API, with the health), and a Monitoring tab for traffic, Discord, reading back, storage, the database, the processes and people. Graphs are the web app's own SVG, with a crosshair, keyboard reading and a table view. A Database tab watches PostgreSQL: its statistics sampled into the metrics, what runs now (with Cancel and End), the slowest statements (`pg_stat_statements`), tables, unused indexes and settings, and alerts for connections, long transactions, lock waits and deadlocks.
 - [ ] **3 · Storage control:** create channels in the category through the bot, see failing uploads and deletions with their errors and retry them, lost blobs with the files they affect, and run the packer, the reconciler and `dfs setup` now. Actions that only the leading bot can do go to it through the job queue.
 - [ ] **4 · People and access:** signed-in sessions per user, signed out by an admin; every share link, revocable, without its token; uploads in progress; audit log filters. The owner and self rules of password resets apply.
 - [ ] **5 · System:** the settings in effect, from a list of keys that are safe to show; the Discord layout; maintenance such as clearing the frame cache.
@@ -221,7 +221,7 @@ The admin pages grow from a status page into the place to watch and run DFS, bef
 
 **Tasks**
 
-- [ ] Dockerfiles for api, bot and the web build; `docker-compose.yml` with caddy, api, bot, postgres and the one-shot `migrate`; the Caddyfile with the route allowlist and streaming settings (DESIGN §3.2, §13.2).
+- [ ] Dockerfiles for api, bot and the web build; `docker-compose.yml` with caddy, api, bot, postgres and the one-shot `migrate`; the Caddyfile with the route allowlist and streaming settings (DESIGN §3.2, §13.2). Postgres starts with `shared_preload_libraries=pg_stat_statements`, as in development, for Admin → Database.
 - [ ] Secrets in `/etc/dfs/secrets`, the master key generated and backed up outside the VPS, `PUBLIC_BASE_URL`, and `dfs owner` to make your account.
 - [ ] `NODE_ENV=production` in the images, so no development default applies (DESIGN §15); a fixed subnet for the internal Compose network, with `TRUSTED_PROXY_CIDRS` set to it, so sign-in limits and the audit log see real client addresses.
 - [ ] Getting the code: a read-only deploy key for the GitHub repository; updates stay `git pull && docker compose up -d --build` (DESIGN §13.2).

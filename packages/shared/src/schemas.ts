@@ -488,6 +488,92 @@ export const systemHealthSchema = z.object({
 })
 export type SystemHealth = z.infer<typeof systemHealthSchema>
 
+// ── PostgreSQL (§16) ─────────────────────────────────────────────────────────
+
+/** A connection doing something: running a query, or holding a transaction open. */
+export const databaseSessionSchema = z.object({
+  pid: z.number().int().positive(),
+  /** `dfs-api`, `dfs-bot`, `dfs-bot-queue`… */
+  application: z.string(),
+  /** `active`, `idle in transaction`… */
+  state: z.string(),
+  /** What it waits for, such as `Lock: transactionid`; `null` while it works. */
+  waitingFor: z.string().nullable(),
+  /** How long its query, and its transaction, have run. */
+  querySeconds: z.number().min(0),
+  transactionSeconds: z.number().min(0).nullable(),
+  /** The start of its SQL as sent: DFS's own queries carry placeholders, not values. */
+  query: z.string(),
+  /** Sessions holding the locks it waits for. */
+  blockedBy: z.array(z.number().int()),
+})
+export type DatabaseSession = z.infer<typeof databaseSessionSchema>
+
+/** `GET /admin/database`: PostgreSQL as it is now. */
+export const databaseStatusSchema = z.object({
+  checkedAt: timestamp,
+  version: z.string(),
+  startedAt: timestamp,
+  sizeBytes: byteCount,
+  /** When the counts below started; they grow until statistics are reset. */
+  statsSince: timestamp.nullable(),
+  connections: z.object({
+    /** On the whole server, against `max_connections`. */
+    used: count,
+    max: count,
+    byApplication: z.array(
+      z.object({
+        application: z.string(),
+        total: count,
+        active: count,
+        idle: count,
+        idleInTransaction: count,
+      }),
+    ),
+  }),
+  /** Blocks found in memory, of all blocks read; `null` before any read. */
+  cacheHitRatio: z.number().min(0).max(1).nullable(),
+  commits: count,
+  rollbacks: count,
+  deadlocks: count,
+  tempBytes: byteCount,
+  sessions: z.array(databaseSessionSchema),
+  /** The largest tables, with their indexes. */
+  tables: z.array(
+    z.object({
+      name: z.string(),
+      totalBytes: byteCount,
+      tableBytes: byteCount,
+      indexBytes: byteCount,
+      rows: count,
+      deadRows: count,
+      lastVacuumAt: timestamp.nullable(),
+      lastAnalyzeAt: timestamp.nullable(),
+      seqScans: count,
+      indexScans: count,
+    }),
+  ),
+  /** Indexes no query has used since statistics started, which only cost writes. */
+  unusedIndexes: z.array(z.object({ table: z.string(), name: z.string(), bytes: byteCount })),
+  /** The statements that took the most time, from `pg_stat_statements`. */
+  statements: z.object({
+    /** `null` when available; otherwise how to make them so. */
+    unavailable: z.string().nullable(),
+    items: z.array(
+      z.object({
+        query: z.string(),
+        calls: count,
+        totalMs: z.number().min(0),
+        meanMs: z.number().min(0),
+        rows: count,
+      }),
+    ),
+  }),
+  /** Settings worth knowing when tuning, as PostgreSQL shows them. */
+  settings: z.array(z.object({ name: z.string(), value: z.string() })),
+})
+export type DatabaseStatus = z.infer<typeof databaseStatusSchema>
+
 export const storageChannelSchema = z.object({
   id,
   discordChannelId: z.string(),

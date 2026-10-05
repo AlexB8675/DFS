@@ -105,6 +105,12 @@ export function createAppRouter() {
               }),
             },
             {
+              path: 'database',
+              lazy: async () => ({
+                Component: (await import('@/features/admin/database-page')).DatabasePage,
+              }),
+            },
+            {
               path: 'audit',
               lazy: async () => ({
                 Component: (await import('@/features/admin/audit-page')).AuditPage,
