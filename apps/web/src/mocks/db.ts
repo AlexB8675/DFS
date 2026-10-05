@@ -1207,7 +1207,7 @@ function pendingPasswordChange(user: MockUser): PasswordChange | null {
   return user.activatedAt === null ? 'activate' : 'reset'
 }
 
-/** A small stand-in for the API's list of the 10,000 most common passwords (§7.1). */
+/** A small stand-in for the API's list of about 30,000 common passwords (§7.1). */
 const COMMON_PASSWORDS = new Set([
   '123456789012',
   'password1234',

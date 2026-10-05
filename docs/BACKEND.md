@@ -175,7 +175,7 @@ Files are encrypted from the start: the API writes DFS1 frames to staging (DESIG
 - In the browser, against the real API: the first sign-in with a temporary password, choosing a password, uploads that sync to stored live, byte-identical downloads (also ranges across a chunk boundary and ZIPs), a share opened signed out and a password share unlocked, and every page of the drive, shares, trash, settings and admin.
 - The 1,000 files and the 1 GB file go through `pnpm --filter @dfs/api check:end-to-end` instead, which makes the web app's requests against the running stack (picking 1,000 files in a browser can't be scripted): 1,000 files in about 12 s from first request to all stored and read back, 1 GB in about 14 s. It also has 12 clients upload versions of the same names at once, which found two bugs: deadlocks between starting and completing uploads, and pruning that failed on finished upload sessions.
 - `pnpm --filter @dfs/web check:engine` runs the real upload engine against the stack with `BLOB_STORE=chaos` in the root `.env` (the bot logged its chaos warning): upload requests fail, answers are lost, and an outage fails a file part-way, which is then resumed; everything comes back byte for byte and the quota counts each file once.
-- Not yet: the common-password list is a short embedded one; the full list is a decision for later.
+- The common-password list (2026-10-05) is SecLists' million most common passwords, keeping the ~30,000 of 12 characters or more; the top 10,000 alone would have added only 10 passwords the length rule doesn't already refuse.
 
 ### 4.3 M1 · Discord storage and the bot
 
@@ -299,4 +299,3 @@ pnpm dev                                                # web :5173, api :3000, 
 ## 9. Open questions
 
 1. **The domain.** There is none yet; it is decided before the first deployment, which needs it for TLS, share links and the sign-in `Origin` check. Nothing before that depends on it.
-2. **The common-password list.** Sign-in refuses a short embedded list of common passwords today. The SecLists top 10,000 (MIT, about 80 KB) would catch far more; decide before real users arrive.
