@@ -8,7 +8,8 @@
     "./leader-work": "./src/leader-work.ts",
     "./storage": "./src/storage.ts",
     "./packer": "./src/packer.ts",
-    "./testing": "./src/testing.ts"
+    "./testing": "./src/testing.ts",
+    "./lost": "./src/lost.ts"
   },
   "scripts": {
     "dev": "node --watch --import=@dfs/config/load-env src/main.ts",
@@ -22,6 +23,10 @@
     "@dfs/db": "workspace:*",
     "@dfs/shared": "workspace:*",
     "@dfs/storage": "workspace:*",
+    "@discordjs/core": "^2.6.0",
+    "@discordjs/rest": "^2.6.3",
+    "@discordjs/ws": "^2.0.4",
+    "discord-api-types": "^0.38.56",
     "drizzle-orm": "^0.45.3",
     "fastify": "^5.12.5",
     "pg": "^8.23.1",

@@ -6,6 +6,7 @@ import {
   type APIOverwrite,
   type APIUser,
 } from 'discord-api-types/v10'
+import { DiscordAPIError } from '@discordjs/rest'
 import { BOT_CHANNEL_PERMISSIONS, type DiscordRest } from './discord.ts'
 
 // The channels `dfs setup` makes (DESIGN.md §4): one category per environment
@@ -64,18 +65,7 @@ export async function ensureDiscordLayout(
   const bot = (await rest.get(Routes.user())) as APIUser
   const existing = (await rest.get(Routes.guildChannels(guildId))) as Channel[]
   const reason = 'dfs setup'
-  // The bot's own access comes first: once @everyone is denied View Channel,
-  // the bot could no longer reach a channel to fix it. @everyone's role has
-  // the server's ID.
-  const overwrites: APIOverwrite[] = [
-    { id: bot.id, type: OverwriteType.Member, allow: String(BOT_CHANNEL_PERMISSIONS), deny: '0' },
-    {
-      id: guildId,
-      type: OverwriteType.Role,
-      allow: '0',
-      deny: String(PermissionFlagsBits.ViewChannel),
-    },
-  ]
+  const overwrites = privateTo(bot.id, guildId)
   const changes: string[] = []
 
   const categories = existing.filter(
@@ -132,6 +122,89 @@ export async function ensureDiscordLayout(
     channels.push({ discordChannelId: channel.id, name, kind })
   }
   return { categoryId, channels, changes }
+}
+
+/** A channel registered by hand that isn't one this environment may use. */
+export class ChannelRefusedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ChannelRefusedError'
+  }
+}
+
+/**
+ * Checks a channel an admin registers by its ID (Admin → Channels): a text
+ * channel of this server, inside this environment's category, so development
+ * can't take production's channels (D25). Makes it private to the bot like
+ * the channels `dfs setup` makes, and returns its name.
+ */
+export async function adoptChannel(
+  rest: DiscordRest,
+  guildId: string,
+  categoryName: string,
+  discordChannelId: string,
+): Promise<{ name: string; changes: string[] }> {
+  const channel = (await rest.get(Routes.channel(discordChannelId)).catch((error: unknown) => {
+    if (error instanceof DiscordAPIError && (error.status === 404 || error.code === 50001))
+      return null
+    throw error
+  })) as (Channel & { guild_id?: string }) | null
+  if (channel?.guild_id !== guildId || channel.type !== ChannelType.GuildText) {
+    throw new ChannelRefusedError('That isn’t a text channel of this server the bot can see.')
+  }
+  const parent = channel.parent_id
+    ? ((await rest.get(Routes.channel(channel.parent_id))) as Channel)
+    : null
+  if (parent?.type !== ChannelType.GuildCategory || parent.name !== categoryName) {
+    throw new ChannelRefusedError(
+      `That channel isn’t in the “${categoryName}” category, which this environment keeps to. Move it there first.`,
+    )
+  }
+  const bot = (await rest.get(Routes.user())) as APIUser
+  const changes: string[] = []
+  await keepPrivate(rest, channel, privateTo(bot.id, guildId), changes, 'dfs channel')
+  return { name: channel.name, changes }
+}
+
+/**
+ * The IDs of the channels inside this environment's category: the only ones
+ * it posts new blobs to, or reads history from (D25).
+ */
+export async function channelsInCategory(
+  rest: DiscordRest,
+  guildId: string,
+  categoryName: string,
+): Promise<Set<string>> {
+  const channels = (await rest.get(Routes.guildChannels(guildId))) as Channel[]
+  const categories = new Set(
+    channels
+      .filter(
+        (channel) => channel.type === ChannelType.GuildCategory && channel.name === categoryName,
+      )
+      .map((channel) => channel.id),
+  )
+  return new Set(
+    channels
+      .filter((channel) => channel.parent_id && categories.has(channel.parent_id))
+      .map((channel) => channel.id),
+  )
+}
+
+/**
+ * DFS's two overwrites (DESIGN.md §4). The bot's own access comes first: once
+ * @everyone is denied View Channel, the bot could no longer reach a channel
+ * to fix it. @everyone's role has the server's ID.
+ */
+function privateTo(botId: string, guildId: string): APIOverwrite[] {
+  return [
+    { id: botId, type: OverwriteType.Member, allow: String(BOT_CHANNEL_PERMISSIONS), deny: '0' },
+    {
+      id: guildId,
+      type: OverwriteType.Role,
+      allow: '0',
+      deny: String(PermissionFlagsBits.ViewChannel),
+    },
+  ]
 }
 
 /** Puts back any of DFS's overwrites on `channel` that were loosened, keeping other bits. */

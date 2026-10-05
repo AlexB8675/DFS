@@ -80,7 +80,7 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
         status: (numbers?.lost ?? 0) > 0 ? 'degraded' : 'ok',
         detail:
           (numbers?.lost ?? 0) > 0
-            ? `${String(numbers?.lost)} lost blobs`
+            ? `${String(numbers?.lost)} lost ${numbers?.lost === 1 ? 'blob' : 'blobs'}`
             : local
               ? 'Local files'
               : 'Connected',
@@ -111,6 +111,43 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
       affectedFiles: row.files,
     })),
   }
+}
+
+const botErrorSchema = z.object({ error: z.object({ code: z.string(), message: z.string() }) })
+
+/**
+ * Has the bot check that a channel registered by hand is in this
+ * environment's category, and make it private to the bot (D25): development
+ * must never take production's channels by their ID.
+ */
+async function adoptChannel(app: FastifyInstance, discordChannelId: string): Promise<void> {
+  let response: Response
+  try {
+    response = await fetch(`${app.config.botInternalUrl}/internal/channels/adopt`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${app.config.internalRpcSecret}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ discordChannelId }),
+      signal: AbortSignal.timeout(15_000),
+    })
+  } catch {
+    throw new ApiError(503, 'bot_unavailable', 'The bot isn’t answering; try again shortly.')
+  }
+  if (response.ok) {
+    await response.body?.cancel()
+    return
+  }
+  const refusal = botErrorSchema.safeParse(await response.json().catch(() => null))
+  if (response.status === 422 && refusal.success) {
+    throw new ApiError(422, 'channel_refused', refusal.data.error.message)
+  }
+  throw new ApiError(
+    503,
+    'bot_unavailable',
+    refusal.success ? refusal.data.error.message : 'The bot couldn’t check that channel.',
+  )
 }
 
 const botHealthSchema = z.object({ role: z.string(), queue: z.string() })
@@ -189,6 +226,7 @@ export async function createChannel(
   admin: Auth,
   input: CreateChannelInput,
 ): Promise<StorageChannel> {
+  if (app.config.blobStore === 'discord') await adoptChannel(app, input.discordChannelId)
   try {
     await app.db.insert(storageChannels).values({
       discordChannelId: input.discordChannelId,

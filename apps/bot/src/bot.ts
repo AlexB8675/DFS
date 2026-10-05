@@ -2,7 +2,8 @@ import { createHash, timingSafeEqual } from 'node:crypto'
 import type { Config } from '@dfs/config'
 import { createDatabase, createPool } from '@dfs/db'
 import { refreshUrlsSchema } from '@dfs/shared'
-import { BlobStoreError } from '@dfs/storage'
+import { adoptChannel, BlobStoreError, ChannelRefusedError, discordProblem } from '@dfs/storage'
+import { z } from 'zod'
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify'
 import { PgBoss } from 'pg-boss'
 import { startLeaderWork, type LeaderWork } from './leader-work.ts'
@@ -48,7 +49,7 @@ export function createBot({
     },
   })
   const db = createDatabase(pool)
-  const storage = givenStorage ?? botStorage(config, db)
+  const storage = givenStorage ?? botStorage(config, db, server.log)
   const { store } = storage
   let boss: PgBoss | null = null
   let work: LeaderWork | null = null
@@ -118,6 +119,35 @@ export function createBot({
     role: election.state,
     queue: boss ? 'running' : 'stopped',
   }))
+
+  // Admin → Channels (DESIGN.md §4, D25): a channel registered by hand must
+  // be in this environment's category; it is made private to the bot.
+  server.post('/internal/channels/adopt', async (request, reply) => {
+    const input = z
+      .object({ discordChannelId: z.string().regex(/^\d{17,20}$/) })
+      .safeParse(request.body)
+    if (!input.success) {
+      return reply
+        .code(400)
+        .send({ error: { code: 'invalid_request', message: 'Expected a Discord channel ID.' } })
+    }
+    const { guildId, categoryName } = config.discord
+    if (!storage.discord || !guildId) {
+      return reply
+        .code(409)
+        .send({ error: { code: 'not_discord', message: 'This bot doesn’t store in Discord.' } })
+    }
+    try {
+      return await adoptChannel(storage.discord, guildId, categoryName, input.data.discordChannelId)
+    } catch (error) {
+      if (error instanceof ChannelRefusedError) {
+        return reply.code(422).send({ error: { code: 'channel_refused', message: error.message } })
+      }
+      const problem = discordProblem(error)
+      if (!problem) throw error
+      return reply.code(503).send({ error: { code: 'discord_unavailable', message: problem } })
+    }
+  })
 
   server.post('/internal/urls/refresh', async (request, reply) => {
     const input = refreshUrlsSchema.safeParse(request.body)

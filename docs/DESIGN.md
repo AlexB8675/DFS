@@ -154,7 +154,7 @@ flowchart LR
 
 - **Permissions:** `@everyone` is denied View Channel on the category. The bot role gets View, Send Messages, Attach Files, Read Message History, and Manage Messages, plus Manage Channels and Manage Roles while `dfs setup` creates the category and sets its permissions (they can be removed afterwards). Admin users can view `#dfs-log`.
 - **Bootstrap:** `/dfs setup` (or `dfs setup` in the CLI) creates the category and channels if they are missing, then registers them in the `storage_channels` table.
-- **Environments (D25):** development shares the server and the bot with production. Production uses the `DFS` category, development a `DFS Dev` category (`DISCORD_CATEGORY_NAME`). Each environment registers only its own channels in its own `storage_channels`, and everything that reads or deletes messages (reconciler, scrubber, GC, recovery) works only in registered channels, so neither can take the other's messages for orphans. Development runs without a gateway connection (`DISCORD_GATEWAY=off`): slash commands and tamper watch belong to production, and development sets up its channels with the CLI (`dfs setup`). The two share Discord's rate limits, so load tests use `LocalBlobStore` or `ChaosBlobStore`, never Discord.
+- **Environments (D25):** development shares the server and the bot with production. Production uses the `DFS` category, development a `DFS Dev` category (`DISCORD_CATEGORY_NAME`). Each environment registers only its own channels in its own `storage_channels`, and everything that reads or deletes messages (reconciler, scrubber, GC, recovery) works only in registered channels, so neither can take the other's messages for orphans. Three more guards back that up: a channel registered by hand on Admin → Channels must be a text channel inside this environment's category (the bot checks, and makes it private); the bot posts new blobs, and the reconciler reads history, only in registered channels that are inside that category in Discord at the time, so a channel registered by mistake or moved out keeps its blobs readable but gets no more; and every data message carries its database's `i`, so even a channel both register can't mix them up. Production's first storage channel is an existing channel outside any category, so the guard refuses it as it is. Proposed (not yet agreed): move it into `DFS` once `/dfs setup` has made the category, then register it. Development runs without a gateway connection (`DISCORD_GATEWAY=off`): slash commands and tamper watch belong to production, and development sets up its channels with the CLI (`dfs setup`). The two share Discord's rate limits, so load tests use `LocalBlobStore` or `ChaosBlobStore`, never Discord.
 - **Message formats.** They leak no file names, and every attachment is encrypted:
   ```
   #storage-NN   content: dfs1 b=184467 k=pack n=212 i=3fa9c1d2e0b4   attachment: 184467.bin
@@ -347,6 +347,9 @@ stateDiagram-v2
     [*] --> uploading : upload session created
     uploading --> syncing : all parts received (readable from staging)
     syncing --> stored : every chunk's blob stored in Discord
+    stored --> lost : a blob of it deleted in Discord
+    syncing --> lost
+    lost --> purging
     uploading --> failed : session expired
     syncing --> failed : unrecoverable error
     stored --> purging : trash emptied / version pruned
@@ -513,7 +516,7 @@ Rename, move, create folder, and trash/restore are plain SQL transactions.
 | `blobs.sha256` checked by the scrubber | Corrupted or truncated blobs |
 | AES-GCM authentication tag | Tampering with a frame or its header, wrong key, swapped or reordered chunks (the AAD binds the header, object type, version, and index, §7.3). Needs no DB, so it also protects recovery. |
 | `content_hash` = SHA-256 of the ordered chunk hashes | Truncated or missing chunks |
-| Gateway `messageDelete` / `messageDeleteBulk` listener | Someone deleting storage messages → blob `lost`, every affected file flagged, alert in `#dfs-log` |
+| Gateway `messageDelete` / `messageDeleteBulk` listener | Someone deleting storage messages → blob `lost`, every version with a frame in it `lost` (the drive shows the files as lost, downloads answer `409 file_lost`, ZIPs leave them out), one alert in `#dfs-log` with counts and the channel, never file names. Only `stored` blobs become `lost`, so the bot's own deletions (GC of `deleting` blobs, and the reconciler's and uploader's deletions of messages no blob records) never count. Deletions while the bot is offline aren't replayed: the scrubber finds those. Purging a lost blob's last files moves it to `deleted`, off the admin list. |
 | **Rolling scrubber** | Silent loss. It checks blobs in order of `last_verified_at` within a fixed request budget (`SCRUB_REQUESTS_PER_HOUR`), so a full pass takes *blobs ÷ budget* hours regardless of how many files there are. It checks each blob's **message**, not just its URL: Discord keeps signing and serving a deleted message's attachment for a while (found by the contract test, M1). |
 
 A blob that is `lost` is unrecoverable unless the originals still exist somewhere. The UI flags the affected files, and the admin dashboard lists them. *(Future: optional Reed-Solomon parity blobs would let data survive the loss of k blobs.)*
@@ -729,7 +732,7 @@ Internal (bot), only reachable on `dfs_internal` and returning `404` at the edge
 
 ## 11. Bot Service
 
-- **discord.js v14**, intents: `Guilds` and `GuildMessages`. Users never touch Discord (D27), so `GuildMembers` and its privileged intent aren't needed. Message Content intent is **not** needed, because the bot reads its own messages.
+- **`@discordjs/core` and `@discordjs/ws`** (the discord.js v14 family), on the same REST client as everything else, so all calls share one set of rate-limit buckets. Intents: `Guilds` and `GuildMessages`; the deletion events carry the message IDs, so nothing is cached. Users never touch Discord (D27), so `GuildMembers` and its privileged intent aren't needed. Message Content intent is **not** needed, because the bot reads its own messages.
 - **Leader election:** the bot takes a Postgres advisory lock at startup. A second instance waits as a hot standby, so only one gateway connection and one packer exist at a time.
 - **Job workers (pg-boss queues):**
   | Queue | Priority | Notes |
@@ -742,7 +745,7 @@ Internal (bot), only reachable on `dfs_internal` and returning `404` at the edge
   | `blob.verify` | lowest | rolling scrubber, request-budgeted |
   | `reconcile.orphans` | hourly | scans channel history since the last checkpoint (`storage_channels.reconciled_through`) for this database's untracked `dfs1` messages (§6.1) |
 - **Slash commands** (admin-only): `/dfs setup`, `/dfs status` (usage, queue depth, sync backlog, throughput), `/dfs health` (lost blobs, last scrub), `/dfs channel add`.
-- **Gateway events:** `messageDelete`/`messageDeleteBulk` in storage channels → mark blobs `lost` and alert.
+- **Gateway events:** `messageDelete`/`messageDeleteBulk` in storage channels → mark blobs `lost` and alert (§6.5). Only the leading bot connects, and only with `DISCORD_GATEWAY=on`; on connecting it registers `/dfs` in the server (administrators only, checked again on every use). `/dfs setup` answers privately at once and reports what it changed when done.
 - **Rate limiting:** relies on `@discordjs/rest`'s bucket handling, plus our own per-channel concurrency limiter. Rate-limit metrics are exported to `/internal/health`.
 
 ---
@@ -852,7 +855,7 @@ The **`BlobStore` interface** (`put(blob) → ref`, `get(ref, range?) → stream
 | Database | PostgreSQL 18 | Native `uuidv7()`, async I/O, mature |
 | ORM / migrations | Drizzle ORM + drizzle-kit | SQL-first, typed, light; easy to drop to raw SQL for recursive CTEs and partial indexes |
 | Job queue | pg-boss | Postgres-backed: one less service, transactional enqueue with metadata writes |
-| Discord | discord.js v14 / @discordjs/rest | De-facto standard, built-in rate-limit handling |
+| Discord | @discordjs/rest, core and ws (the discord.js v14 family) | De-facto standard, built-in rate-limit handling; the bot needs only REST and a few gateway events, so not discord.js's cache |
 | Crypto | Node `crypto` (AES-256-GCM, HKDF), argon2 for share passwords | No exotic dependencies |
 | Logging | pino | Structured JSON, fast |
 | Testing | Vitest, Testcontainers (Postgres), Playwright (E2E), MSW (mock API) | |
@@ -870,7 +873,7 @@ The **`BlobStore` interface** (`put(blob) → ref`, `get(ref, range?) → stream
 | `LOCAL_BLOB_DIR` | `./.data/blobs` | when `BLOB_STORE=local` |
 | `DISCORD_BOT_TOKEN` | — | bot only; not needed when `BLOB_STORE=local` |
 | `TEMP_PASSWORD_DAYS` | `7` | how long a temporary password set by an admin or `dfs owner` works (§7.1) |
-| `DISCORD_GUILD_ID` | — | |
+| `DISCORD_GUILD_ID` | — | the server; the bot needs it, and the token, with `BLOB_STORE=discord` |
 | `DISCORD_CATEGORY_NAME` | `DFS` | the channel category this environment uses and creates (§4); `DFS Dev` in development |
 | `DISCORD_GATEWAY` | `on` | `off` in development: REST only, no slash commands or tamper watch (D25) |
 | `DISCORD_ATTACHMENT_LIMIT` | `10485760` | 10 MiB (unboosted server). Only raise it if the server is boosted. |

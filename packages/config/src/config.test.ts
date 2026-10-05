@@ -74,6 +74,7 @@ describe('loadConfig', () => {
       DATABASE_URL: 'postgres://dfs@postgres/dfs',
       INTERNAL_RPC_SECRET: 'x'.repeat(32),
       DISCORD_BOT_TOKEN: 'a-bot-token',
+      DISCORD_GUILD_ID: '1035095470428659723',
     }
     // Only the API serves the public URL.
     expect(loadConfig(production, { ...api, service: 'bot' })).toMatchObject({
@@ -110,13 +111,15 @@ describe('loadConfig', () => {
       DATABASE_URL: 'postgres://dfs@postgres/dfs',
       INTERNAL_RPC_SECRET: 'x'.repeat(32),
       DISCORD_BOT_TOKEN: 'a-bot-token',
+      DISCORD_GUILD_ID: '1035095470428659723',
     }
     expect(loadConfig(production, { ...api, service: 'bot' }).discord.categoryName).toBe('DFS')
   })
 
-  it('gives the bot a token when it stores in Discord, and only the bot', () => {
+  it('gives the bot a token and a server when it stores in Discord, and only the bot', () => {
     expect(problems({ BLOB_STORE: 'discord' }, { ...api, service: 'bot' })).toEqual([
       'DISCORD_BOT_TOKEN: the bot needs it to store blobs in Discord (BLOB_STORE=discord)',
+      'DISCORD_GUILD_ID: the bot needs it to store blobs in Discord (BLOB_STORE=discord)',
     ])
     expect(loadConfig({ BLOB_STORE: 'discord' }, api).blobStore).toBe('discord')
   })

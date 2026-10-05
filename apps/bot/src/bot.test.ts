@@ -68,4 +68,18 @@ describe('bot', () => {
     // A local store has no URLs to sign.
     expect((await refresh([1, 2])).json()).toEqual({ urls: [] })
   })
+
+  it('checks channels for Admin → Channels only when it stores in Discord', async () => {
+    const adopt = (discordChannelId: string) =>
+      bot.server.inject({
+        method: 'POST',
+        url: '/internal/channels/adopt',
+        headers: { authorization: `Bearer ${secret}` },
+        payload: { discordChannelId },
+      })
+    expect((await adopt('not-an-id')).statusCode).toBe(400)
+    const local = await adopt('100000000000000001')
+    expect(local.statusCode).toBe(409)
+    expect(local.json()).toMatchObject({ error: { code: 'not_discord' } })
+  })
 })

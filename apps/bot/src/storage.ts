@@ -1,6 +1,7 @@
 import type { Config } from '@dfs/config'
 import type { Database } from '@dfs/db'
 import {
+  channelsInCategory,
   ChaosBlobStore,
   createDiscordRest,
   DiscordBlobStore,
@@ -8,8 +9,10 @@ import {
   type BlobStore,
   type CdnUrl,
   type DiscordRest,
+  type DiscordRestClient,
   type StorageChannel,
 } from '@dfs/storage'
+import type { FastifyBaseLogger } from 'fastify'
 import type { RefreshedUrls } from '@dfs/shared'
 import { sql } from 'drizzle-orm'
 
@@ -21,19 +24,22 @@ const DISCORD_TIMEOUT_MS = 120_000
 
 export interface BotStorage {
   store: BlobStore
-  /** Discord's REST API when blobs go there, for the orphan reconciler. */
-  discord: DiscordRest | null
+  /** Discord's REST client when blobs go there: for the gateway, the reconciler and channel checks. */
+  discord: DiscordRestClient | null
 }
 
-export function botStorage(config: Config, db: Database): BotStorage {
+export function botStorage(
+  config: Config,
+  db: Database,
+  log?: Pick<FastifyBaseLogger, 'warn'>,
+): BotStorage {
   if (config.blobStore === 'discord') {
-    // Config refuses BLOB_STORE=discord for the bot without a token.
-    const rest = createDiscordRest(config.discord.botToken ?? '', {
-      timeoutMs: DISCORD_TIMEOUT_MS,
-    })
+    // Config refuses BLOB_STORE=discord for the bot without a token and a server.
+    const { botToken, guildId, categoryName } = config.discord
+    const rest = createDiscordRest(botToken ?? '', { timeoutMs: DISCORD_TIMEOUT_MS })
     const store = new DiscordBlobStore({
       rest,
-      channels: () => dataChannels(db),
+      channels: () => placeableChannels(db, rest, guildId ?? '', categoryName, log),
       maxBytes: config.sizes.blobMaxBytes,
       instanceId: () => instanceId(db),
       perChannel: config.uploadChannelConcurrency,
@@ -50,6 +56,34 @@ export async function instanceId(db: Database): Promise<string> {
   const id = rows[0]?.id
   if (!id) throw new Error('This database has no instance ID: run its migrations.')
   return id
+}
+
+/**
+ * The registered data channels, of which only those inside this
+ * environment's category in Discord take new blobs (D25). One registered by
+ * mistake, or moved out of the category, keeps its blobs readable.
+ */
+export async function placeableChannels(
+  db: Database,
+  rest: DiscordRest,
+  guildId: string,
+  categoryName: string,
+  log?: Pick<FastifyBaseLogger, 'warn'>,
+): Promise<StorageChannel[]> {
+  const [registered, inside] = await Promise.all([
+    dataChannels(db),
+    channelsInCategory(rest, guildId, categoryName),
+  ])
+  return registered.map((channel) => {
+    const placeable = inside.has(channel.discordChannelId)
+    if (channel.enabled && !placeable) {
+      log?.warn(
+        { discordChannelId: channel.discordChannelId, categoryName },
+        'a registered channel is outside this environment’s category; it takes no new blobs',
+      )
+    }
+    return { ...channel, enabled: channel.enabled && placeable }
+  })
 }
 
 /** This environment's registered data channels, the only ones it posts to or reads (D25). */

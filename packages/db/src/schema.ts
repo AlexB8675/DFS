@@ -46,6 +46,8 @@ export const versionStateEnum = pgEnum('version_state', [
   'failed',
   'purging',
   'purged',
+  /** A blob holding some of it was deleted in Discord (§6.5). */
+  'lost',
 ])
 export const blobKindEnum = pgEnum('blob_kind', ['solo', 'pack'])
 export const blobStateEnum = pgEnum('blob_state', [
@@ -304,6 +306,10 @@ export const blobs = pgTable(
       .on(t.state)
       .where(sql`${t.state} IN ('staged', 'uploading', 'deleting')`),
     index('blobs_channel_id').on(t.channelId),
+    // A deletion seen in Discord names its message (§6.5).
+    index('blobs_message_id')
+      .on(t.messageId)
+      .where(sql`${t.messageId} IS NOT NULL`),
   ],
 )
 

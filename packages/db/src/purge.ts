@@ -23,7 +23,7 @@ export async function purgeVersions(
   const versions = uuidArray(versionIds)
   const { rows } = await tx.execute<{ bytes: number | null }>(sql`
     SELECT sum(size_bytes)::float8 AS bytes FROM file_versions
-    WHERE id = ANY(${versions}) AND state IN ('syncing', 'stored', 'failed')`)
+    WHERE id = ANY(${versions}) AND state IN ('syncing', 'stored', 'failed', 'lost')`)
   const usedBytes = rows[0]?.bytes ?? 0
 
   // Waits for a pack being sealed with any of their frames (§6.6), so the
@@ -35,8 +35,13 @@ export async function purgeVersions(
   await tx.execute(sql`
     UPDATE blobs SET
       live_bytes = blobs.live_bytes - released.bytes,
-      state = CASE WHEN blobs.live_bytes - released.bytes <= 0 AND blobs.state = 'stored'
-        THEN 'deleting'::blob_state ELSE blobs.state END
+      -- Nothing live left: a stored blob goes to the GC; a lost one, whose
+      -- message is gone already, needs nothing more.
+      state = CASE
+        WHEN blobs.live_bytes - released.bytes > 0 THEN blobs.state
+        WHEN blobs.state = 'stored' THEN 'deleting'::blob_state
+        WHEN blobs.state = 'lost' THEN 'deleted'::blob_state
+        ELSE blobs.state END
     FROM (
       SELECT blob_id, sum(frame_size) AS bytes FROM chunks
       WHERE version_id = ANY(${versions}) AND blob_id IS NOT NULL AND purged_at IS NULL

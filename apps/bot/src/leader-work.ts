@@ -8,11 +8,12 @@ import {
   type BlobUploadJob,
   type Database,
 } from '@dfs/db'
-import { Staging } from '@dfs/storage'
+import { channelsInCategory, Staging } from '@dfs/storage'
 import { sql } from 'drizzle-orm'
 import type { FastifyBaseLogger } from 'fastify'
 import { fromDrizzle, type JobResult, type PgBoss } from 'pg-boss'
 import { collectGarbage, uploadsWaiting } from './collector.ts'
+import { startGateway } from './gateway.ts'
 import { Packer } from './packer.ts'
 import { reconcileOrphans } from './reconciler.ts'
 import { instanceId, type BotStorage } from './storage.ts'
@@ -123,21 +124,28 @@ export async function startLeaderWork(options: {
     repeat(FOLD_EVERY_MS, log, 'folding folder sizes', () => foldAllFolderStats(db)),
     repeat(JANITOR_EVERY_MS, log, 'cleaning up', () => cleanUp(db, staging)),
   ]
-  if (discord) {
+  const { guildId, categoryName } = config.discord
+  if (discord && guildId) {
     loops.push(
       repeat(RECONCILE_EVERY_MS, log, 'reconciling orphan messages', async () => {
         const report = await reconcileOrphans({
           db,
           rest: discord,
           instanceId: await instanceId(db),
+          inCategory: await channelsInCategory(discord, guildId, categoryName),
         })
         if (report.deleted > 0) log.info(report, 'deleted orphan messages')
       }),
     )
   }
+  // Production only (DISCORD_GATEWAY, D25): one connection, the leader's.
+  const gateway =
+    discord && guildId && config.discord.gateway
+      ? await startGateway({ config, db, rest: discord, log })
+      : null
   return {
     stop: async () => {
-      await Promise.all(loops.map((loop) => loop.stop()))
+      await Promise.all([...loops.map((loop) => loop.stop()), gateway?.stop()])
     },
   }
 }

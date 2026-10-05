@@ -1,7 +1,12 @@
 import { DiscordAPIError } from '@discordjs/rest'
 import { ChannelType, OverwriteType, PermissionFlagsBits } from 'discord-api-types/v10'
 import { describe, expect, it } from 'vitest'
-import { ensureDiscordLayout } from './discord-layout.ts'
+import {
+  adoptChannel,
+  channelsInCategory,
+  ChannelRefusedError,
+  ensureDiscordLayout,
+} from './discord-layout.ts'
 import { BOT_CHANNEL_PERMISSIONS, discordProblem } from './discord.ts'
 import { FakeDiscord } from './testing.ts'
 
@@ -133,6 +138,61 @@ describe('ensureDiscordLayout (DESIGN.md §4)', () => {
     voice.addChannel({ name: 'storage-01', type: ChannelType.GuildVoice, parent_id: category.id })
     await expect(ensureDiscordLayout(voice, voice.guildId, 'DFS Dev')).rejects.toThrow(
       '“DFS Dev” must hold exactly one text channel named #storage-01',
+    )
+  })
+})
+
+describe('adoptChannel and channelsInCategory (D25)', () => {
+  function server() {
+    const discord = new FakeDiscord()
+    const dev = discord.addChannel({ name: 'DFS Dev', type: ChannelType.GuildCategory })
+    const production = discord.addChannel({ name: 'DFS', type: ChannelType.GuildCategory })
+    const ours = discord.addChannel({
+      name: 'storage-04',
+      type: ChannelType.GuildText,
+      parent_id: dev.id,
+    })
+    const theirs = discord.addChannel({
+      name: 'storage-00',
+      type: ChannelType.GuildText,
+      parent_id: production.id,
+    })
+    const loose = discord.addTextChannel('general')
+    const voice = discord.addChannel({
+      name: 'talk',
+      type: ChannelType.GuildVoice,
+      parent_id: dev.id,
+    })
+    return { discord, ours, theirs, loose, voice }
+  }
+
+  it('takes a text channel of this environment’s category, and makes it private', async () => {
+    const { discord, ours } = server()
+    const adopted = await adoptChannel(discord, discord.guildId, 'DFS Dev', ours.id)
+    expect(adopted).toEqual({
+      name: 'storage-04',
+      changes: ['let the bot into #storage-04', 'hid #storage-04 from everyone'],
+    })
+    expect(discord.channel(ours.id).permission_overwrites).toEqual(privateOverwrites(discord))
+  })
+
+  it('refuses other environments’ channels, loose ones, voice channels and unknown IDs', async () => {
+    const { discord, theirs, loose, voice } = server()
+    for (const id of [theirs.id, loose.id, voice.id, '100000000000000099']) {
+      await expect(adoptChannel(discord, discord.guildId, 'DFS Dev', id)).rejects.toBeInstanceOf(
+        ChannelRefusedError,
+      )
+    }
+    await expect(adoptChannel(discord, discord.guildId, 'DFS Dev', theirs.id)).rejects.toThrow(
+      'That channel isn’t in the “DFS Dev” category',
+    )
+    expect(discord.requests.filter((request) => request.startsWith('PUT'))).toEqual([])
+  })
+
+  it('lists the channels inside a category only', async () => {
+    const { discord, ours, voice } = server()
+    expect(await channelsInCategory(discord, discord.guildId, 'DFS Dev')).toEqual(
+      new Set([ours.id, voice.id]),
     )
   })
 })

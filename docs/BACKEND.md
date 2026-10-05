@@ -183,12 +183,12 @@ Files are encrypted from the start: the API writes DFS1 frames to staging (DESIG
 
 - [x] `DiscordBlobStore`: post attachments with `nonce`/`enforce_nonce`, verify size, Range reads from the CDN, URL refresh in batches (`POST /internal/urls/refresh`). Each post keeps a random nonce and its channel for retries, since blob IDs repeat across databases sharing the bot; the API signs a lookup batch's URLs in one call to the bot.
 - [x] Workers of DESIGN §11: `blob.upload` per channel concurrency, `pack.seal` with the packer of §6.6, `blob.delete`, `reconcile.orphans`; `blob.compact` and `blob.verify` can wait for M4. Messages carry their database's `i` (DESIGN §4), so the reconciler only ever deletes its own.
-- [ ] Gateway: `messageDelete` and `messageDeleteBulk` mark blobs `lost` (intents `Guilds` and `GuildMessages` only; users aren't server members, D27).
+- [x] Gateway: `messageDelete` and `messageDeleteBulk` mark blobs `lost` (intents `Guilds` and `GuildMessages` only; users aren't server members, D27).
 - [x] `dfs setup` in the CLI: create the category named by `DISCORD_CATEGORY_NAME` with the channels of DESIGN §4, hidden from everyone but the bot, and register them in `storage_channels`. Running it again changes nothing.
-- [ ] `/dfs setup` in production, with the gateway: the same, as a slash command.
-- [ ] Environment separation (D25): `DISCORD_GATEWAY=off` skips the gateway (slash commands, tamper watch); the reconciler, scrubber and GC only touch registered channels; Admin → Channels accepts only channels in this environment's category, so development can't register production's channel by its ID.
+- [x] `/dfs setup` in production, with the gateway: the same, as a slash command.
+- [x] Environment separation (D25): `DISCORD_GATEWAY=off` skips the gateway (slash commands, tamper watch); the reconciler, scrubber and GC only touch registered channels; Admin → Channels accepts only channels in this environment's category, so development can't register production's channel by its ID.
 - [x] Frame cache on the API (DESIGN §6.2), with read-ahead that grows as the reader keeps up, one memory budget for all downloads, and whole packs for ZIPs. Measured against Discord with a 256 MB file. Proposed: run the 2 GB check below at the first deployment, from the VPS, rather than through a home link (about 205 messages and 10 minutes of upload from here).
-- [ ] Opt-in Discord contract tests against a test channel (DESIGN §17).
+- [x] Opt-in Discord contract tests against a test channel (DESIGN §17): `pnpm --filter @dfs/storage check:discord`.
 
 **Done when**
 

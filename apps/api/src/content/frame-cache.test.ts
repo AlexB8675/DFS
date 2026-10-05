@@ -6,12 +6,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FrameCache, MemoryBudget } from './frame-cache.ts'
 
 let dir: string
+/** Caches a test opened: they finish writing before the folder goes. */
+const opened: FrameCache[] = []
+
+function open(maxBytes: number): FrameCache {
+  const cache = new FrameCache({ dir, maxBytes })
+  opened.push(cache)
+  return cache
+}
 
 beforeEach(async () => {
   dir = await mkdtemp(path.join(tmpdir(), 'dfs-frame-cache-'))
 })
 
 afterEach(async () => {
+  await Promise.all(opened.splice(0).map((cache) => cache.idle()))
   await rm(dir, { recursive: true, force: true })
 })
 
@@ -30,7 +39,7 @@ async function files(): Promise<string[]> {
 
 describe('FrameCache (DESIGN.md §6.2)', () => {
   it('fetches a frame once, then serves it from the disk', async () => {
-    const cache = new FrameCache({ dir, maxBytes: 10_000 })
+    const cache = open(10_000)
     await cache.ready()
     const { bytes, hash } = await frame(1)
     const fetch = vi.fn(() => Promise.resolve(bytes))
@@ -43,7 +52,7 @@ describe('FrameCache (DESIGN.md §6.2)', () => {
   })
 
   it('shares one fetch among readers of the same frame', async () => {
-    const cache = new FrameCache({ dir, maxBytes: 10_000 })
+    const cache = open(10_000)
     await cache.ready()
     const { bytes, hash } = await frame(2)
     const release = Promise.withResolvers<Uint8Array>()
@@ -55,7 +64,7 @@ describe('FrameCache (DESIGN.md §6.2)', () => {
   })
 
   it('fetches again when its copy fails the check, and keeps nothing a fetch failed', async () => {
-    const cache = new FrameCache({ dir, maxBytes: 10_000 })
+    const cache = open(10_000)
     await cache.ready()
     const { bytes, hash } = await frame(3)
     await cache.load(hash, () => Promise.resolve(bytes))
@@ -76,7 +85,7 @@ describe('FrameCache (DESIGN.md §6.2)', () => {
   })
 
   it('lets the least recently used frames go past its size, and finds the rest after a restart', async () => {
-    const cache = new FrameCache({ dir, maxBytes: 250 })
+    const cache = open(250)
     await cache.ready()
     const a = await frame(5)
     const b = await frame(6)
@@ -95,7 +104,7 @@ describe('FrameCache (DESIGN.md §6.2)', () => {
     // A write a crash interrupted is cleared; what is cached is found again.
     await mkdir(path.join(dir, 'ff'), { recursive: true })
     await writeFile(path.join(dir, 'ff', 'ff00.frame.1234.tmp'), new Uint8Array(5))
-    const restarted = new FrameCache({ dir, maxBytes: 150 })
+    const restarted = open(150)
     await restarted.ready()
     expect(await files()).toHaveLength(1)
     const fetch = vi.fn(() => Promise.resolve(c.bytes))

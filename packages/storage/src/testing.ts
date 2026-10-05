@@ -102,6 +102,12 @@ export class FakeDiscord implements DiscordRest {
     this.requests.push(`GET ${route}`)
     if (route === '/users/@me') return answer({ id: this.botId, username: 'dfs', bot: true })
     if (route === `/guilds/${this.guildId}/channels`) return answer(this.channels)
+    const single = /^\/channels\/(\d+)$/.exec(route)
+    if (single) {
+      const channel = this.channels.find((found) => found.id === single[1])
+      if (!channel) return refuse(404, 10003, 'Unknown Channel', 'GET', route)
+      return answer({ ...channel, guild_id: this.guildId })
+    }
     const listing = /^\/channels\/(\d+)\/messages$/.exec(route)
     if (listing) {
       const after = BigInt(options?.query?.get('after') ?? '0')

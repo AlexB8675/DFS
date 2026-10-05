@@ -516,7 +516,7 @@ async function finishUpload(
   const { rows: old } = await tx.execute<{ id: string }>(sql`
     SELECT id FROM file_versions
     WHERE node_id = ${upload.node_id} AND id <> ${upload.version_id}
-      AND state IN ('syncing', 'stored', 'failed')
+      AND state IN ('syncing', 'stored', 'failed', 'lost')
     ORDER BY version_no DESC
     OFFSET ${app.config.versionRetention}`)
   const prunedIds = old.map((row) => row.id)

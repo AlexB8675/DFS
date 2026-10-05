@@ -217,10 +217,13 @@ export function loadConfig(env: Record<string, string | undefined>, options: Loa
     )
   }
   const blobStore = raw.BLOB_STORE ?? defaults.BLOB_STORE
-  if (options.service === 'bot' && blobStore === 'discord' && !raw.DISCORD_BOT_TOKEN) {
-    problems.push(
-      'DISCORD_BOT_TOKEN: the bot needs it to store blobs in Discord (BLOB_STORE=discord)',
-    )
+  if (options.service === 'bot' && blobStore === 'discord') {
+    // The token to post with, and the server whose category it keeps to (D25).
+    for (const name of ['DISCORD_BOT_TOKEN', 'DISCORD_GUILD_ID'] as const) {
+      if (!raw[name]) {
+        problems.push(`${name}: the bot needs it to store blobs in Discord (BLOB_STORE=discord)`)
+      }
+    }
   }
   if (production && options.service === 'api' && !raw.PUBLIC_BASE_URL) {
     problems.push('PUBLIC_BASE_URL: required in production')

@@ -20,10 +20,13 @@ export interface DiscordRest {
  * `timeoutMs` bounds each request; the bot raises it, since posting a 10 MiB
  * attachment on a slow uplink takes longer than the 15 s default.
  */
+/** The REST client itself, which the bot's gateway connection also uses. */
+export type DiscordRestClient = REST
+
 export function createDiscordRest(
   token: string,
   options: { timeoutMs?: number } = {},
-): DiscordRest {
+): DiscordRestClient {
   return new REST({ version: '10', timeout: options.timeoutMs ?? 15_000 }).setToken(token)
 }
 

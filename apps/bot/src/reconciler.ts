@@ -32,9 +32,11 @@ export async function reconcileOrphans(options: {
   db: Database
   rest: DiscordRest
   instanceId: string
+  /** The channels inside this environment's category; registered ones outside it aren't read (D25). */
+  inCategory?: ReadonlySet<string>
   now?: number
 }): Promise<ReconcileReport> {
-  const { db, rest, instanceId, now = Date.now() } = options
+  const { db, rest, instanceId, inCategory, now = Date.now() } = options
   const bot = await botUserId(rest)
   const { rows: channels } = await db.execute<{
     id: string
@@ -46,6 +48,7 @@ export async function reconcileOrphans(options: {
   const report: ReconcileReport = { checked: 0, deleted: 0 }
 
   for (const channel of channels) {
+    if (inCategory && !inCategory.has(channel.discord_channel_id)) continue
     let after = channel.reconciled_through ?? '0'
     for (;;) {
       const page = await messagesAfter(rest, channel.discord_channel_id, after, PAGE)

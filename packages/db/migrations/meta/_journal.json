@@ -57,6 +57,13 @@
       "when": 1791200781959,
       "tag": "0007_instance",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1791213636434,
+      "tag": "0008_lost_blobs",
+      "breakpoints": true
     }
   ]
 }
