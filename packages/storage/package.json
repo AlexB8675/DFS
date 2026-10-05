@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./testing": "./src/testing.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
@@ -14,5 +15,9 @@
   "devDependencies": {
     "@types/node": "^24.19.1",
     "vitest": "^5.0.3"
+  },
+  "dependencies": {
+    "@discordjs/rest": "^2.6.3",
+    "discord-api-types": "^0.38.56"
   }
 }

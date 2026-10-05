@@ -11,21 +11,28 @@ import {
   type Database,
 } from '@dfs/db'
 import { generatePassword, usernameSchema } from '@dfs/shared'
+import { createDiscordRest, discordProblem } from '@dfs/storage'
 import { eq } from 'drizzle-orm'
 import { audit } from './audit.ts'
 import { hashPassword } from './auth/passwords.ts'
 import { endUserSessions } from './auth/sessions.ts'
+import { setUpDiscord } from './discord-setup.ts'
 import { createUser } from './users/users.ts'
 
-// `dfs`: admin commands run on the server (DESIGN.md §7.1).
+// `dfs`: admin commands run on the server (DESIGN.md §4, §7.1).
 //
 //   pnpm dfs owner [--username <name>]
+//   pnpm dfs setup
 //
 // `owner` creates the owner account with a temporary password, or, when the
 // owner exists, gives it a new one and signs it out everywhere: the way back
 // in for the owner, since there is no email.
+//
+// `setup` creates this environment's Discord category and channels where
+// missing, and registers them for storage. Development has no slash commands
+// (D25), so this is how it gets its channels.
 
-const USAGE = 'Usage: dfs owner [--username <name>]'
+const USAGE = 'Usage: dfs owner [--username <name>] | dfs setup'
 const DAY_MS = 24 * 60 * 60_000
 const rootDir = path.resolve(import.meta.dirname, '../../..')
 
@@ -34,7 +41,8 @@ const { positionals, values } = parseArgs({
   options: { username: { type: 'string' } },
 })
 
-if (positionals[0] !== 'owner' || positionals.length !== 1) {
+const command = positionals.length === 1 ? positionals[0] : undefined
+if (command !== 'owner' && !(command === 'setup' && values.username === undefined)) {
   console.error(`[ERROR] ${USAGE}`)
   process.exit(1)
 }
@@ -52,9 +60,13 @@ const pool = createPool(config.databaseUrl, {
   onError: () => undefined,
 })
 try {
-  await owner(createDatabase(pool), config, values.username)
+  if (command === 'owner') await owner(createDatabase(pool), config, values.username)
+  else await setup(createDatabase(pool), config)
 } catch (error) {
-  console.error('[ERROR]', error instanceof Error ? error.message : error)
+  console.error(
+    '[ERROR]',
+    discordProblem(error) ?? (error instanceof Error ? error.message : error),
+  )
   process.exitCode = 1
 } finally {
   await pool.end()
@@ -123,6 +135,21 @@ async function owner(
   Works until:         ${passwordExpiresAt.toLocaleString()}
 
 You'll choose your own password when you sign in.`)
+}
+
+async function setup(db: Database, config: Config): Promise<void> {
+  const { botToken, guildId, categoryName } = config.discord
+  if (!botToken || !guildId) {
+    throw new Error('Set DISCORD_BOT_TOKEN and DISCORD_GUILD_ID in the root .env first.')
+  }
+  const report = await setUpDiscord(db, createDiscordRest(botToken), { guildId, categoryName })
+  for (const change of report.changes) console.info(`[INFO] Discord: ${change}.`)
+  if (report.registered.length > 0) {
+    console.info(`[INFO] Registered for storage: ${report.registered.join(', ')}.`)
+  }
+  if (report.changes.length === 0 && report.registered.length === 0) {
+    console.info(`[INFO] “${categoryName}” and its channels were already set up.`)
+  }
 }
 
 async function ask(question: string): Promise<string> {

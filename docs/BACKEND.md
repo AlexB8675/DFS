@@ -184,7 +184,8 @@ Files are encrypted from the start: the API writes DFS1 frames to staging (DESIG
 - [ ] `DiscordBlobStore`: post attachments with `nonce`/`enforce_nonce`, verify size, Range reads from the CDN, URL refresh in batches (`POST /internal/urls/refresh`).
 - [ ] Workers of DESIGN §11: `blob.upload` per channel concurrency, `pack.seal` with the packer of §6.6, `blob.delete`, `reconcile.orphans`; `blob.compact` and `blob.verify` can wait for M4.
 - [ ] Gateway: `messageDelete` and `messageDeleteBulk` mark blobs `lost` (intents `Guilds` and `GuildMessages` only; users aren't server members, D27).
-- [ ] `dfs setup` in the CLI, and `/dfs setup` in production: create the category named by `DISCORD_CATEGORY_NAME` with the channels of DESIGN §4, and register them in `storage_channels`.
+- [x] `dfs setup` in the CLI: create the category named by `DISCORD_CATEGORY_NAME` with the channels of DESIGN §4, hidden from everyone but the bot, and register them in `storage_channels`. Running it again changes nothing.
+- [ ] `/dfs setup` in production, with the gateway: the same, as a slash command.
 - [ ] Environment separation (D25): `DISCORD_GATEWAY=off` skips the gateway (slash commands, tamper watch); the reconciler, scrubber and GC only touch registered channels.
 - [ ] Frame cache on the API (DESIGN §6.2).
 - [ ] Opt-in Discord contract tests against a test channel (DESIGN §17).

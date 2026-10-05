@@ -84,6 +84,24 @@ the whole stack, so the ordinary suite skips it):
 pnpm --filter @dfs/api check:dev-shutdown
 ```
 
+## Connect Discord
+
+Development shares the Discord server and bot with production, but keeps to
+its own `DFS Dev` category and never connects to the gateway (D25). In the root
+`.env`, set `DISCORD_BOT_TOKEN` (Developer Portal, Application → Bot) and
+`DISCORD_GUILD_ID`, and keep `DISCORD_CATEGORY_NAME=DFS Dev` and
+`DISCORD_GATEWAY=off`. Git ignores `.env`; never commit the token. Then run:
+
+```powershell
+pnpm dfs setup
+```
+
+It creates the category and its channels where they are missing, hidden from
+everyone but the bot, and registers them for storage. It says what it changed;
+run again, it changes nothing. The bot's role needs View Channels, Send
+Messages, Attach Files, Read Message History and Manage Messages, plus Manage
+Channels and Manage Roles for this command.
+
 ## Test in the browser
 
 Use disposable folders and files for these checks:

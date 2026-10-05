@@ -99,6 +99,19 @@ describe('loadConfig', () => {
     ])
   })
 
+  it("keeps development out of production's Discord category", () => {
+    expect(loadConfig({}, api).discord.categoryName).toBe('DFS Dev')
+    expect(problems({ DISCORD_CATEGORY_NAME: 'DFS' })).toEqual([
+      "DISCORD_CATEGORY_NAME: DFS is production's category; development uses its own, such as DFS Dev",
+    ])
+    const production = {
+      NODE_ENV: 'production',
+      DATABASE_URL: 'postgres://dfs@postgres/dfs',
+      INTERNAL_RPC_SECRET: 'x'.repeat(32),
+    }
+    expect(loadConfig(production, { ...api, service: 'bot' }).discord.categoryName).toBe('DFS')
+  })
+
   it('refuses pack sizes that can never fit an attachment', () => {
     expect(problems({ PACK_THRESHOLD_BYTES: '10 MiB', PACK_TARGET_BYTES: '10 MiB' })).toEqual([
       expect.stringMatching(/^PACK_THRESHOLD_BYTES: must be at most 10420186 bytes/),

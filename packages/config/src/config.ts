@@ -209,6 +209,13 @@ export function loadConfig(env: Record<string, string | undefined>, options: Loa
   if (production && raw.BLOB_STORE === 'chaos') {
     problems.push('BLOB_STORE: chaos is for development only')
   }
+  // Development shares the server and the bot with production, so this is
+  // all that keeps it out of production's channels (D25).
+  if (!production && raw.DISCORD_CATEGORY_NAME === PRODUCTION.DISCORD_CATEGORY_NAME) {
+    problems.push(
+      `DISCORD_CATEGORY_NAME: ${PRODUCTION.DISCORD_CATEGORY_NAME} is production's category; development uses its own, such as ${DEVELOPMENT.DISCORD_CATEGORY_NAME}`,
+    )
+  }
   if (production && options.service === 'api' && !raw.PUBLIC_BASE_URL) {
     problems.push('PUBLIC_BASE_URL: required in production')
   }
