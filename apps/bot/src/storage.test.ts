@@ -31,6 +31,8 @@ describe('refreshBlobUrls (DESIGN.md §6.2)', () => {
       rest: discord,
       channels: () => dataChannels(db),
       maxBytes: 1024,
+      instanceId: () => Promise.resolve('0123456789ab'),
+      perChannel: 2,
       fetch: discord.fetch,
     })
     const ids: number[] = []
@@ -39,7 +41,9 @@ describe('refreshBlobUrls (DESIGN.md §6.2)', () => {
         INSERT INTO blobs (kind, state, size_bytes, live_bytes, frame_count)
         VALUES ('solo', ${state}, 4, 4, 1) RETURNING id::float8 AS id`)
       const id = rows[0]?.id ?? 0
-      const { location } = await store.put({ id, kind: 'solo', frameCount: 1 }, new Uint8Array(4))
+      const { location } = await store.put({ id, kind: 'solo', frameCount: 1 }, () =>
+        Promise.resolve(new Uint8Array(4)),
+      )
       await db.execute(sql`
         UPDATE blobs SET channel_id = ${location.channelId}, message_id = ${location.messageId},
           attachment_id = ${location.attachmentId}

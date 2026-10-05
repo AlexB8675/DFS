@@ -1,7 +1,7 @@
 import { dataChannels, refreshBlobUrls, refreshedUrls } from '@dfs/bot/storage'
-import { storeAllStagedBlobs } from '@dfs/bot/uploader'
+import { settleBlobs } from '@dfs/bot/testing'
 import { defineContractSuite, type ContractTarget } from '@dfs/contract'
-import { foldAllFolderStats, storageChannels } from '@dfs/db'
+import { foldAllFolderStats, liveBytesDrift, storageChannels } from '@dfs/db'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
 import { refreshUrlsSchema } from '@dfs/shared'
 import { DiscordBlobStore, LocalBlobStore, type BlobReader, type BlobStore } from '@dfs/storage'
@@ -37,6 +37,8 @@ for (const storage of ['local', 'discord'] as const) {
           rest: discord,
           channels: () => dataChannels(app.db),
           maxBytes: setup.config.sizes.blobMaxBytes,
+          instanceId: () => Promise.resolve('0123456789ab'),
+          perChannel: setup.config.uploadChannelConcurrency,
           fetch: discord.fetch,
         })
         // The bot's `POST /internal/urls/refresh`, and the CDN behind it.
@@ -71,8 +73,10 @@ for (const storage of ['local', 'discord'] as const) {
         origin: setup.config.publicBaseUrl,
         owner,
         settle: async () => {
-          await storeAllStagedBlobs({ db: app.db, staging: app.staging, store })
+          await settleBlobs({ db: app.db, staging: app.staging, store, sizes: app.config.sizes })
           await foldAllFolderStats(app.db)
+          // Purges, packs and uploads have kept every blob's live bytes exact.
+          expect(await liveBytesDrift(app.db)).toEqual([])
           // As if a day had passed: every read must have its URL signed again.
           discord.revokeUrls()
         },
@@ -88,8 +92,8 @@ for (const storage of ['local', 'discord'] as const) {
     defineContractSuite({ describe, it, expect }, () => target)
 
     if (storage === 'discord') {
-      it('stored the blobs in Discord and read them back through newly signed URLs', () => {
-        expect(discord.messages.length).toBeGreaterThan(10)
+      it('packed small files, stored the blobs in Discord, and read them back through newly signed URLs', () => {
+        expect(discord.messages.some((message) => message.content.includes(' k=pack '))).toBe(true)
         expect(discord.requests).toContain('POST /attachments/refresh-urls')
       })
     }

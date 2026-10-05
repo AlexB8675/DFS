@@ -22,9 +22,19 @@ describe('migrations', () => {
         const tables = await client.query<{ count: string }>(
           "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'",
         )
-        return { applied: Number(applied.rows[0]?.count), tables: Number(tables.rows[0]?.count) }
+        const instance = await client.query<{ id: string }>('SELECT id FROM instance')
+        return {
+          applied: Number(applied.rows[0]?.count),
+          tables: Number(tables.rows[0]?.count),
+          instance: instance.rows.map((row) => row.id),
+        }
       })
-      expect(counts).toEqual({ applied: 7, tables: 14 })
+      // One instance ID, made once (DESIGN §4).
+      expect(counts).toEqual({
+        applied: 8,
+        tables: 15,
+        instance: [expect.stringMatching(/^[0-9a-f]{12}$/)],
+      })
     } finally {
       await withAdmin(adminUrl, (admin) => admin.query(`DROP DATABASE ${name} WITH (FORCE)`))
     }

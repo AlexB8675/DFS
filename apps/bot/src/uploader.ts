@@ -118,27 +118,34 @@ async function storeBlob(
     return []
   }
 
-  const data = await staging.read(blob.staged_path)
-  if (data.length !== blob.size_bytes) {
-    throw new Error(
-      `Staged blob ${String(blobId)} is ${String(data.length)} bytes, not ${String(blob.size_bytes)}.`,
-    )
-  }
-  if (blob.sha256) {
-    // Hash on the thread pool, keeping the bot responsive for other jobs.
-    const hash = Buffer.from(await crypto.subtle.digest('SHA-256', data))
-    if (!hash.equals(blob.sha256)) throw new Error(`Staged blob ${String(blobId)} is corrupt.`)
+  // Read and checked only when the store has a turn for it (see BlobStore.put).
+  const read = async () => {
+    const data = await staging.read(blob.staged_path)
+    if (data.length !== blob.size_bytes) {
+      throw new Error(
+        `Staged blob ${String(blobId)} is ${String(data.length)} bytes, not ${String(blob.size_bytes)}.`,
+      )
+    }
+    if (blob.sha256) {
+      // Hash on the thread pool, keeping the bot responsive for other jobs.
+      const hash = Buffer.from(await crypto.subtle.digest('SHA-256', data))
+      if (!hash.equals(blob.sha256)) throw new Error(`Staged blob ${String(blobId)} is corrupt.`)
+    }
+    return data
   }
   const { location, url } = await store.put(
     { id: blobId, kind: blob.kind, frameCount: blob.frame_count },
-    data,
+    read,
   )
 
   /** Versions this blob finished: nothing of theirs is left in staging. */
   const storedVersions: string[] = []
   const finished = await db.transaction(async (tx) => {
+    // Everything in it may have been purged while it was being posted: then
+    // it goes straight to the GC, which deletes the message.
     const { rows: stored } = await tx.execute<{ id: number }>(sql`
-      UPDATE blobs SET state = 'stored', stored_at = now(), staged_path = NULL,
+      UPDATE blobs SET stored_at = now(), staged_path = NULL,
+        state = CASE WHEN live_bytes <= 0 THEN 'deleting'::blob_state ELSE 'stored' END,
         channel_id = ${location.channelId}, message_id = ${location.messageId},
         attachment_id = ${location.attachmentId},
         cdn_url = ${url?.url ?? null}, cdn_url_expires_at = ${url?.expiresAt ?? null}

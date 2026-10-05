@@ -1,6 +1,7 @@
-import { readFile, rm } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { readdir, readFile, rm, stat } from 'node:fs/promises'
 import path from 'node:path'
-import { writeFileDurably } from './files.ts'
+import { readRange, writeFileDurably } from './files.ts'
 
 /**
  * The staging volume shared by the API and the bot (DESIGN.md §6.1): frames
@@ -19,6 +20,11 @@ export class Staging {
     return path.posix.join('frames', versionId, `${String(index)}.dfs`)
   }
 
+  /** Where a sealed pack of small frames goes until it is stored (§6.6). */
+  packPath(): string {
+    return path.posix.join('packs', `${randomUUID()}.bin`)
+  }
+
   /** Writes a frame durably, so a part acknowledged to the client survives a crash. */
   async write(relativePath: string, data: Uint8Array): Promise<void> {
     await writeFileDurably(this.#resolve(relativePath), data)
@@ -27,6 +33,29 @@ export class Staging {
   async read(relativePath: string): Promise<Uint8Array> {
     const bytes = await readFile(this.#resolve(relativePath))
     return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  }
+
+  /** The files under `packs/`, with when each was written: for sweeping what a crash left. */
+  async packFiles(): Promise<{ path: string; writtenAt: number }[]> {
+    let names: string[]
+    try {
+      names = await readdir(this.#resolve('packs'))
+    } catch (error) {
+      if ((error as { code?: unknown }).code === 'ENOENT') return []
+      throw error
+    }
+    const files: { path: string; writtenAt: number }[] = []
+    for (const name of names) {
+      const relativePath = path.posix.join('packs', name)
+      const stats = await stat(this.#resolve(relativePath)).catch(() => null)
+      if (stats?.isFile()) files.push({ path: relativePath, writtenAt: stats.mtimeMs })
+    }
+    return files
+  }
+
+  /** One frame out of a staged pack. */
+  async readRange(relativePath: string, offset: number, length: number): Promise<Uint8Array> {
+    return readRange(this.#resolve(relativePath), offset, length)
   }
 
   async remove(relativePath: string): Promise<void> {

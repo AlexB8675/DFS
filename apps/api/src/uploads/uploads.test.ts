@@ -266,8 +266,10 @@ describe('receiving parts', () => {
   })
 
   it('rolls a single part back with its completion, and removes its frame', async () => {
-    const session = await start(3)
-    const bytes = new Uint8Array([4, 5, 6])
+    // Large enough to be a blob of its own, so completing it queues a job.
+    const size = app.config.sizes.packThresholdBytes
+    const session = await start(size)
+    const bytes = new Uint8Array(size).fill(4)
     const queue = await app.queue.get()
     const insert = vi
       .spyOn(queue, 'insert')

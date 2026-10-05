@@ -28,6 +28,8 @@ interface ChunkLocation extends Record<string, unknown> {
   blob_id: number | null
   blob_offset: number | null
   blob_state: string | null
+  /** A pack's file in staging, until the pack is stored. */
+  blob_staged_path: string | null
   channel_id: string | null
   message_id: string | null
   attachment_id: string | null
@@ -125,6 +127,7 @@ async function chunkLocations(
   const { rows } = await db.execute<ChunkLocation>(sql`
     SELECT chunk.idx, chunk.plain_size, chunk.frame_size, chunk.frame_sha256, chunk.staged_path,
       chunk.blob_id::float8 AS blob_id, chunk.blob_offset, blob.state::text AS blob_state,
+      blob.staged_path AS blob_staged_path,
       blob.channel_id, blob.message_id, blob.attachment_id,
       blob.cdn_url, (extract(epoch FROM blob.cdn_url_expires_at) * 1000)::float8 AS cdn_url_expires_ms
     FROM chunks chunk LEFT JOIN blobs blob ON blob.id = chunk.blob_id
@@ -134,22 +137,26 @@ async function chunkLocations(
 }
 
 /**
- * A frame from staging while its blob isn't stored, from the blob store
- * after. If the bot stores the blob and removes the staged file between the
- * lookup and the read, the chunk is looked up again.
+ * A frame from staging while its blob isn't stored: its own file, or its
+ * place in a sealed pack (§6.6). From the blob store after. If the bot packs
+ * or stores it and removes the staged file between the lookup and the read,
+ * the chunk is looked up again.
  */
 async function readFrame(
   app: FastifyInstance,
   versionId: string,
   chunk: ChunkLocation,
 ): Promise<Uint8Array> {
-  if (chunk.staged_path) {
+  const { staged_path: own, blob_staged_path: pack, blob_offset: offset } = chunk
+  if (own || (pack && offset !== null)) {
     try {
-      return await app.staging.read(chunk.staged_path)
+      return own
+        ? await app.staging.read(own)
+        : await app.staging.readRange(pack ?? '', offset ?? 0, chunk.frame_size)
     } catch (error) {
       if ((error as { code?: unknown }).code !== 'ENOENT') throw error
       const [moved] = await chunkLocations(app.db, versionId, chunk.idx, chunk.idx)
-      if (!moved || moved.staged_path) throw error
+      if (!moved || (moved.staged_path === own && moved.blob_staged_path === pack)) throw error
       return readFrame(app, versionId, moved)
     }
   }

@@ -1,5 +1,5 @@
 import type { ServerResponse } from 'node:http'
-import { storeAllStagedBlobs } from '@dfs/bot/uploader'
+import { settleBlobs } from '@dfs/bot/testing'
 import { ApiClient, text, uploadFile, workspace } from '@dfs/contract'
 import { notifyEvent } from '@dfs/db'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
@@ -127,7 +127,7 @@ describe('live events (§6.1)', () => {
       })
       return true
     })
-    await storeAllStagedBlobs({ db: app.db, staging: app.staging, store })
+    await settleBlobs({ db: app.db, staging: app.staging, store, sizes: app.config.sizes })
     await received
   })
 

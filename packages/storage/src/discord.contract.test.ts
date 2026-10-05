@@ -4,6 +4,7 @@ import { ChannelType, Routes, type APIChannel, type APIMessage } from 'discord-a
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { blobFilename, readCdnRange } from './cdn.ts'
 import { DiscordBlobStore, type StorageChannel } from './discord-blob-store.ts'
+import { messagesAfter } from './discord-messages.ts'
 import { createDiscordRest, type DiscordRest } from './discord.ts'
 
 // The Discord contract (DESIGN.md §17): what DFS relies on, checked against
@@ -12,8 +13,8 @@ import { createDiscordRest, type DiscordRest } from './discord.ts'
 //
 //   pnpm --filter @dfs/storage check:discord
 //
-// Everything it posts is deleted again. Its blob has an ID no database
-// reaches, so a leftover is an orphan to delete, never one to adopt.
+// Everything it posts is deleted again, by the test itself: its messages
+// carry an instance ID no database has, so no reconciler would touch one.
 
 const enabled = process.env.npm_lifecycle_event === 'check:discord'
 const TEST_BLOB_ID = Number.MAX_SAFE_INTEGER - 1
@@ -54,6 +55,8 @@ describe.skipIf(!enabled)('Discord contract', () => {
       rest,
       channels: () => Promise.resolve([channel]),
       maxBytes: 10 * MiB - 64 * 1024,
+      instanceId: () => Promise.resolve('c0ffee000000'),
+      perChannel: 2,
     })
   })
 
@@ -69,7 +72,7 @@ describe.skipIf(!enabled)('Discord contract', () => {
     const data = new Uint8Array(randomBytes(3 * MiB))
     const { location, url } = await store.put(
       { id: TEST_BLOB_ID, kind: 'solo', frameCount: 1 },
-      data,
+      () => Promise.resolve(data),
     )
     if (location.messageId) posted.push(location.messageId)
     expect(location).toMatchObject({ channelId: 'contract' })
@@ -114,5 +117,24 @@ describe.skipIf(!enabled)('Discord contract', () => {
     const second = await post()
     posted.push(second.id)
     expect(second.id).toBe(first.id)
+  })
+
+  it('lists the first messages after an ID, which DFS reads oldest first', async () => {
+    const ids: string[] = []
+    for (const n of [1, 2, 3]) {
+      const message = (await rest.post(Routes.channelMessages(channel.discordChannelId), {
+        body: { content: `DFS contract test: order ${String(n)}` },
+      })) as APIMessage
+      ids.push(message.id)
+      posted.push(message.id)
+    }
+    const before = String(BigInt(ids[0] ?? '1') - 1n)
+    // Discord answers the oldest two after `before`, newest first; DFS sorts them.
+    const raw = (await rest.get(Routes.channelMessages(channel.discordChannelId), {
+      query: new URLSearchParams({ after: before, limit: '2' }),
+    })) as APIMessage[]
+    expect(raw.map((message) => message.id)).toEqual([ids[1], ids[0]])
+    const page = await messagesAfter(rest, channel.discordChannelId, before, 2)
+    expect(page.map((message) => message.id)).toEqual(ids.slice(0, 2))
   })
 })

@@ -16,13 +16,14 @@ import {
 //   DFS_USERNAME=… DFS_PASSWORD=… pnpm --filter @dfs/api check:end-to-end
 //
 // Options: DFS_API (default http://127.0.0.1:3000), DFS_ORIGIN (the web app's
-// address, default http://localhost:5173), DFS_SMALL_FILES, DFS_LARGE_MB, and
-// DFS_CONCURRENT=off to skip the last step's 480 uploads: on Discord, each is
-// a message of its own until small files are packed.
+// address, default http://localhost:5173), DFS_SMALL_FILES, DFS_SMALL_KB (each
+// small file's size; by default a few hundred bytes), DFS_LARGE_MB, and
+// DFS_CONCURRENT=off to skip the last step's 480 uploads.
 
 const api = process.env.DFS_API ?? 'http://127.0.0.1:3000'
 const origin = process.env.DFS_ORIGIN ?? 'http://localhost:5173'
 const smallFiles = Number(process.env.DFS_SMALL_FILES ?? 1000)
+const smallBytes = process.env.DFS_SMALL_KB ? Number(process.env.DFS_SMALL_KB) * 1024 : null
 const largeBytes = Number(process.env.DFS_LARGE_MB ?? 1024) * 1024 * 1024
 const concurrent = process.env.DFS_CONCURRENT !== 'off'
 const { DFS_USERNAME: username, DFS_PASSWORD: password } = process.env
@@ -41,8 +42,12 @@ console.info(`[INFO] Working in “${root.name}”.`)
 
 await step(`${String(smallFiles)} small files`, async () => {
   const folder = await createFolder(client, root.id, 'Small files')
-  const content = (index: number) =>
-    new TextEncoder().encode(`file ${String(index)}\n`.repeat(1 + (index % 50)))
+  const content = (index: number) => {
+    const line = `file ${String(index)}\n`
+    const lines = smallBytes === null ? 1 + (index % 50) : Math.ceil(smallBytes / line.length)
+    const text = new TextEncoder().encode(line.repeat(lines))
+    return smallBytes === null ? text : text.subarray(0, smallBytes)
+  }
   const inputs: CreateUploadInput[] = Array.from({ length: smallFiles }, (_, index) => ({
     parentId: folder.id,
     name: `file-${String(index).padStart(4, '0')}.txt`,

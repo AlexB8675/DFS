@@ -10,6 +10,7 @@ import {
   type StoredBlob,
 } from './blob-store.ts'
 import { attachmentUrl, blobFilename, cdnUrl, readBlobFromCdn, refreshCdnUrls } from './cdn.ts'
+import { blobMessage, deleteMessage } from './discord-messages.ts'
 import { discordProblem, type DiscordRest } from './discord.ts'
 
 /** A registered data channel (`storage_channels`). */
@@ -29,6 +30,10 @@ export interface DiscordBlobStoreOptions {
   channels: () => Promise<StorageChannel[]>
   /** `BLOB_MAX_BYTES`: the largest attachment DFS posts. */
   maxBytes: number
+  /** This database's instance ID, which every message carries (§4). Asked once. */
+  instanceId: () => Promise<string>
+  /** `UPLOAD_CHANNEL_CONCURRENCY`: posts in flight per channel. */
+  perChannel: number
   /** For reads from the CDN; replaceable in tests. */
   fetch?: typeof fetch
 }
@@ -36,21 +41,29 @@ export interface DiscordBlobStoreOptions {
 const CHANNELS_FRESH_MS = 60_000
 /** Discord answers a repeated nonce with the first message for a few minutes. */
 const NONCE_KEPT_MS = 5 * 60_000
-/** Discord's code for a message that doesn't exist (any more). */
-const UNKNOWN_MESSAGE = 10008
 
 /**
  * Blobs as Discord attachments, one per message (DESIGN.md §2, §4), posted
  * to the registered data channels of this environment only (D25). The bot
  * uses it; the API reads through the bot's signed URLs instead (§6.2).
+ *
+ * Each channel takes `perChannel` posts at a time, and a blob goes to the
+ * least busy one, so the channels' rate limits are used side by side and a
+ * channel Discord slows down gets fewer blobs. A blob waiting for a turn
+ * hasn't been read yet.
  */
 export class DiscordBlobStore implements BlobStore {
   readonly #rest: DiscordRest
   readonly #loadChannels: () => Promise<StorageChannel[]>
   readonly #maxBytes: number
+  readonly #loadInstanceId: () => Promise<string>
+  #instanceId: Promise<string> | null = null
+  readonly #perChannel: number
   readonly #fetch: typeof fetch
   #channels: { list: StorageChannel[]; loadedAt: number } | null = null
   readonly #inFlight = new Map<string, number>()
+  /** Posts waiting for a channel to have room. */
+  #waiting: (() => void)[] = []
   #turn = 0
   /**
    * The channel and nonce of each blob being posted. A retry reuses both, so
@@ -64,22 +77,25 @@ export class DiscordBlobStore implements BlobStore {
     this.#rest = options.rest
     this.#loadChannels = options.channels
     this.#maxBytes = options.maxBytes
+    this.#loadInstanceId = options.instanceId
+    this.#perChannel = options.perChannel
     this.#fetch = options.fetch ?? fetch
   }
 
-  async put(blob: BlobToStore, data: Uint8Array): Promise<PutResult> {
-    if (data.length > this.#maxBytes) {
-      throw new BlobStoreError(
-        `Blob ${String(blob.id)} is ${String(data.length)} bytes, more than an attachment may hold.`,
-        { retryable: false },
-      )
-    }
-    const { channel, nonce } = await this.#attempt(blob.id)
+  async put(blob: BlobToStore, read: () => Promise<Uint8Array>): Promise<PutResult> {
+    const content = blobMessage(blob, await this.#instance())
     const filename = blobFilename(blob.id)
-    const content = `dfs1 b=${String(blob.id)} k=${blob.kind} n=${String(blob.frameCount)}`
-    this.#inFlight.set(channel.id, (this.#inFlight.get(channel.id) ?? 0) + 1)
+    const { channel, nonce } = await this.#turnFor(blob.id)
+    let data: Uint8Array
     let message: APIMessage
     try {
+      data = await read()
+      if (data.length > this.#maxBytes) {
+        throw new BlobStoreError(
+          `Blob ${String(blob.id)} is ${String(data.length)} bytes, more than an attachment may hold.`,
+          { retryable: false },
+        )
+      }
       message = (await this.#rest.post(Routes.channelMessages(channel.discordChannelId), {
         body: {
           content,
@@ -90,9 +106,11 @@ export class DiscordBlobStore implements BlobStore {
         files: [{ name: filename, data, contentType: 'application/octet-stream' }],
       })) as APIMessage
     } catch (error) {
-      throw storeError(error, `Posting blob ${String(blob.id)}`)
+      throw error instanceof BlobStoreError
+        ? error
+        : storeError(error, `Posting blob ${String(blob.id)}`)
     } finally {
-      this.#inFlight.set(channel.id, (this.#inFlight.get(channel.id) ?? 1) - 1)
+      this.#endTurn(channel)
     }
 
     const [attachment, ...others] = message.attachments
@@ -105,7 +123,7 @@ export class DiscordBlobStore implements BlobStore {
     }
     if (attachment.size !== data.length) {
       this.#attempts.delete(blob.id)
-      await this.#deleteMessage(channel.discordChannelId, message.id).catch(() => undefined)
+      await deleteMessage(this.#rest, channel.discordChannelId, message.id).catch(() => undefined)
       throw new BlobStoreError(
         `Discord kept ${String(attachment.size)} of blob ${String(blob.id)}'s ${String(data.length)} bytes.`,
         { retryable: true },
@@ -129,9 +147,8 @@ export class DiscordBlobStore implements BlobStore {
     if (!blob.channelId || !blob.messageId) return
     const channel = await this.#channel(blob.channelId)
     try {
-      await this.#deleteMessage(channel.discordChannelId, blob.messageId)
+      await deleteMessage(this.#rest, channel.discordChannelId, blob.messageId)
     } catch (error) {
-      if (error instanceof DiscordAPIError && error.code === UNKNOWN_MESSAGE) return
       throw storeError(error, `Deleting blob ${String(blob.id)}`)
     }
   }
@@ -164,20 +181,40 @@ export class DiscordBlobStore implements BlobStore {
     return byBlob
   }
 
-  async #attempt(blobId: number): Promise<{ channel: StorageChannel; nonce: string }> {
-    const now = Date.now()
-    for (const [id, attempt] of this.#attempts) {
-      if (now - attempt.at > NONCE_KEPT_MS) this.#attempts.delete(id)
+  /**
+   * Waits until a channel has room for this blob, and takes it: the channel
+   * of its last attempt, if that was recent, or the least busy one.
+   */
+  async #turnFor(blobId: number): Promise<{ channel: StorageChannel; nonce: string }> {
+    for (;;) {
+      const now = Date.now()
+      for (const [id, attempt] of this.#attempts) {
+        if (now - attempt.at > NONCE_KEPT_MS) this.#attempts.delete(id)
+      }
+      const known = this.#attempts.get(blobId)
+      const channel = known?.channel ?? (await this.#leastBusyChannel())
+      const busy = this.#inFlight.get(channel.id) ?? 0
+      if (busy < this.#perChannel) {
+        this.#inFlight.set(channel.id, busy + 1)
+        const attempt = known ?? { channel, nonce: randomBytes(12).toString('base64url'), at: now }
+        this.#attempts.set(blobId, attempt)
+        return attempt
+      }
+      await new Promise<void>((resolve) => this.#waiting.push(resolve))
     }
-    const known = this.#attempts.get(blobId)
-    if (known) return known
-    const attempt = {
-      channel: await this.#leastBusyChannel(),
-      nonce: randomBytes(12).toString('base64url'),
-      at: now,
-    }
-    this.#attempts.set(blobId, attempt)
-    return attempt
+  }
+
+  #endTurn(channel: StorageChannel): void {
+    this.#inFlight.set(channel.id, (this.#inFlight.get(channel.id) ?? 1) - 1)
+    for (const wake of this.#waiting.splice(0)) wake()
+  }
+
+  #instance(): Promise<string> {
+    this.#instanceId ??= this.#loadInstanceId().catch((error: unknown) => {
+      this.#instanceId = null
+      throw error
+    })
+    return this.#instanceId
   }
 
   /** The enabled channel with the fewest posts in flight, taking turns among equals. */
@@ -211,10 +248,6 @@ export class DiscordBlobStore implements BlobStore {
       this.#channels = { list: await this.#loadChannels(), loadedAt: now }
     }
     return this.#channels.list
-  }
-
-  async #deleteMessage(discordChannelId: string, messageId: string): Promise<void> {
-    await this.#rest.delete(Routes.channelMessage(discordChannelId, messageId))
   }
 }
 

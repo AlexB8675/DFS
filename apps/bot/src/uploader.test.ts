@@ -355,7 +355,9 @@ describe('staged blob integrity', () => {
     try {
       const failures = await storeBlobs({ db, staging, store }, [blob.id])
       expect(failures.get(blob.id)?.message).toMatch(/corrupt/)
-      expect(put).not.toHaveBeenCalled()
+      // The store asked for the bytes, and the check stopped them reaching it.
+      const where = { id: blob.id, channelId: null, messageId: null, attachmentId: null }
+      await expect(store.read(where, 0, 4)).rejects.toThrow()
       expect(await staging.read(stagedPath)).toEqual(corrupt)
       const { rows } = await db.execute<{ state: string; staged_path: string }>(sql`
         SELECT state, staged_path FROM blobs WHERE id = ${blob.id}`)
@@ -363,14 +365,8 @@ describe('staged blob integrity', () => {
 
       await staging.write(stagedPath, original)
       expect(await storeBlobs({ db, staging, store }, [blob.id])).toEqual(new Map())
-      expect(put).toHaveBeenCalledOnce()
-      expect(
-        await store.read(
-          { id: blob.id, channelId: null, messageId: null, attachmentId: null },
-          0,
-          4,
-        ),
-      ).toEqual(original)
+      expect(put).toHaveBeenCalledTimes(2)
+      expect(await store.read(where, 0, 4)).toEqual(original)
       await expect(staging.read(stagedPath)).rejects.toMatchObject({ code: 'ENOENT' })
     } finally {
       put.mockRestore()

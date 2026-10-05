@@ -26,8 +26,8 @@ export class LocalBlobStore implements BlobStore {
     this.#root = root
   }
 
-  async put(blob: BlobToStore, data: Uint8Array): Promise<PutResult> {
-    await writeFileDurably(this.#file(blob.id), data)
+  async put(blob: BlobToStore, read: () => Promise<Uint8Array>): Promise<PutResult> {
+    await writeFileDurably(this.#file(blob.id), await read())
     return NOWHERE
   }
 

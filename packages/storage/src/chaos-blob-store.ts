@@ -37,9 +37,9 @@ export class ChaosBlobStore implements BlobStore {
     this.#random = options.random ?? Math.random
   }
 
-  async put(blob: BlobToStore, data: Uint8Array): Promise<PutResult> {
+  async put(blob: BlobToStore, read: () => Promise<Uint8Array>): Promise<PutResult> {
     await this.#trouble('put')
-    const stored = await this.#inner.put(blob, data)
+    const stored = await this.#inner.put(blob, read)
     if (this.#random() < this.#lostResponseRate) {
       throw new BlobStoreError('Chaos: the blob was stored, but the answer was lost.', {
         retryable: true,

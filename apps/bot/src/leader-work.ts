@@ -4,21 +4,43 @@ import {
   BLOB_UPLOAD_QUEUE,
   foldAllFolderStats,
   QUEUES,
+  textArray,
   type BlobUploadJob,
   type Database,
 } from '@dfs/db'
-import { Staging, type BlobStore } from '@dfs/storage'
+import { Staging } from '@dfs/storage'
 import { sql } from 'drizzle-orm'
 import type { FastifyBaseLogger } from 'fastify'
-import type { JobResult, PgBoss } from 'pg-boss'
+import { fromDrizzle, type JobResult, type PgBoss } from 'pg-boss'
+import { collectGarbage, uploadsWaiting } from './collector.ts'
+import { Packer } from './packer.ts'
+import { reconcileOrphans } from './reconciler.ts'
+import { instanceId, type BotStorage } from './storage.ts'
 import { storeBlobs } from './uploader.ts'
 
-// What only the leading bot does (DESIGN.md §11): store staged blobs, keep
-// folder sizes current (§12.1), and clean up after expired uploads and
-// sessions (§6.1).
+// What only the leading bot does (DESIGN.md §11): pack small frames (§6.6),
+// store staged blobs, delete released ones (§6.4), clean up orphan messages
+// (§6.1), keep folder sizes current (§12.1), and clean up after expired
+// uploads and sessions.
 
 const FOLD_EVERY_MS = 2000
 const JANITOR_EVERY_MS = 10 * 60_000
+const PACK_EVERY_MS = 1000
+const COLLECT_EVERY_MS = 2000
+/** Deletes per round while blobs wait to be stored, and while none do (§6.4). */
+const COLLECT_WHILE_UPLOADING = 1
+const COLLECT_WHILE_IDLE = 20
+const RECONCILE_EVERY_MS = 60 * 60_000
+/** A pack file nothing refers to after this long was left by a crash while sealing. */
+const STRAY_PACK_MS = 60 * 60_000
+/**
+ * Jobs per batch, and batches at once. Each batch stores its blobs side by
+ * side, and the store gives each channel UPLOAD_CHANNEL_CONCURRENCY posts at a
+ * time, so 32 blobs in hand keep a dozen channels busy while one waits out a
+ * rate limit. A blob is read only once it is posted.
+ */
+const UPLOAD_BATCH = 8
+const UPLOAD_BATCHES = 4
 
 export interface LeaderWork {
   stop: () => Promise<void>
@@ -28,10 +50,11 @@ export async function startLeaderWork(options: {
   config: Config
   db: Database
   boss: PgBoss
-  store: BlobStore
+  storage: BotStorage
   log: FastifyBaseLogger
 }): Promise<LeaderWork> {
-  const { config, db, boss, store, log } = options
+  const { config, db, boss, storage, log } = options
+  const { store, discord } = storage
   const staging = new Staging(config.stagingDir)
   await boss.createQueue(QUEUES.blobUpload, BLOB_UPLOAD_QUEUE)
   // A queue made by an older version keeps its options unless they are updated.
@@ -53,13 +76,17 @@ export async function startLeaderWork(options: {
     }
   >(
     QUEUES.blobUpload,
-    // Two batches overlap; each pipelines at most uploadChannelConcurrency blobs.
-    { batchSize: 8, burstWhenBatchFull: true, localConcurrency: 2, perJobResults: true },
+    {
+      batchSize: UPLOAD_BATCH,
+      burstWhenBatchFull: true,
+      localConcurrency: UPLOAD_BATCHES,
+      perJobResults: true,
+    },
     async (jobs): Promise<JobResult[]> => {
       const failures = await storeBlobs(
         deps,
         jobs.map((job) => job.data.blobId),
-        config.uploadChannelConcurrency,
+        UPLOAD_BATCH,
       )
       return jobs.map((job) => {
         const error = failures.get(job.data.blobId)
@@ -73,10 +100,41 @@ export async function startLeaderWork(options: {
     },
   )
 
+  const packer = new Packer({
+    db,
+    staging,
+    sizes: config.sizes,
+    maxWaitMs: config.packMaxWaitMs,
+    enqueue: async (tx, blobIds) => {
+      const jobs = blobIds.map((blobId) => ({ data: { blobId } satisfies BlobUploadJob }))
+      await boss.insert(QUEUES.blobUpload, jobs, { db: fromDrizzle(tx, sql) })
+    },
+    log,
+  })
   const loops = [
+    repeat(PACK_EVERY_MS, log, 'packing small files', async () => {
+      await packer.sealDue()
+    }),
+    // Uploads come first, but deleting never stops altogether.
+    repeat(COLLECT_EVERY_MS, log, 'deleting released blobs', async () => {
+      const limit = (await uploadsWaiting(db)) ? COLLECT_WHILE_UPLOADING : COLLECT_WHILE_IDLE
+      await collectGarbage({ db, store, staging, log }, limit)
+    }),
     repeat(FOLD_EVERY_MS, log, 'folding folder sizes', () => foldAllFolderStats(db)),
     repeat(JANITOR_EVERY_MS, log, 'cleaning up', () => cleanUp(db, staging)),
   ]
+  if (discord) {
+    loops.push(
+      repeat(RECONCILE_EVERY_MS, log, 'reconciling orphan messages', async () => {
+        const report = await reconcileOrphans({
+          db,
+          rest: discord,
+          instanceId: await instanceId(db),
+        })
+        if (report.deleted > 0) log.info(report, 'deleted orphan messages')
+      }),
+    )
+  }
   return {
     stop: async () => {
       await Promise.all(loops.map((loop) => loop.stop()))
@@ -84,8 +142,11 @@ export async function startLeaderWork(options: {
   }
 }
 
-/** Gives up uploads past their 24 hours, and forgets ended sessions. */
-export async function cleanUp(db: Database, staging: Staging): Promise<void> {
+/**
+ * Gives up uploads past their 24 hours, forgets ended sessions, and removes
+ * pack files a crash left before their pack was recorded.
+ */
+export async function cleanUp(db: Database, staging: Staging, now = Date.now()): Promise<void> {
   await db.execute(
     sql`DELETE FROM upload_sessions WHERE expires_at <= now() AND state = 'completed'`,
   )
@@ -101,6 +162,17 @@ export async function cleanUp(db: Database, staging: Staging): Promise<void> {
     )
   })
   for (const versionId of versions) await staging.removeVersion(versionId)
+
+  const stale = (await staging.packFiles()).filter((file) => now - file.writtenAt > STRAY_PACK_MS)
+  if (stale.length > 0) {
+    const { rows } = await db.execute<{ staged_path: string }>(sql`
+      SELECT staged_path FROM blobs
+      WHERE staged_path = ANY(${textArray(stale.map((file) => file.path))})`)
+    const recorded = new Set(rows.map((row) => row.staged_path))
+    for (const file of stale) {
+      if (!recorded.has(file.path)) await staging.remove(file.path)
+    }
+  }
 }
 
 /** Runs `work` now and then again `everyMs` after each run ends, so runs never overlap. */

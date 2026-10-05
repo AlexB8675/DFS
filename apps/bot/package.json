@@ -6,7 +6,9 @@
   "exports": {
     "./uploader": "./src/uploader.ts",
     "./leader-work": "./src/leader-work.ts",
-    "./storage": "./src/storage.ts"
+    "./storage": "./src/storage.ts",
+    "./packer": "./src/packer.ts",
+    "./testing": "./src/testing.ts"
   },
   "scripts": {
     "dev": "node --watch --import=@dfs/config/load-env src/main.ts",

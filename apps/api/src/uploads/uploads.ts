@@ -474,12 +474,15 @@ async function finishUpload(
   }
   const contentHash = await sha256(Buffer.concat(parts.map((part) => part.plain_sha256)))
 
-  // Every frame becomes its own blob until packing arrives (M1).
+  // A large frame is a blob of its own. Smaller ones, small files and the
+  // ends of large files, wait for the bot to pack them (§6.6).
   const { rows: blobs } = await tx.execute<{ id: number }>(sql`
     WITH created AS (
       INSERT INTO blobs (kind, state, size_bytes, live_bytes, frame_count, sha256, staged_path)
       SELECT 'solo', 'staged', frame_size, frame_size, 1, frame_sha256, staged_path
-      FROM chunks WHERE version_id = ${upload.version_id}
+      FROM chunks
+      WHERE version_id = ${upload.version_id}
+        AND plain_size >= ${app.config.sizes.packThresholdBytes}
       RETURNING id, staged_path
     )
     UPDATE chunks SET blob_id = created.id, blob_offset = 0

@@ -175,11 +175,10 @@ $env:DFS_SMALL_FILES = '100'
 $env:DFS_LARGE_MB = '64'
 ```
 
-Against Discord storage, run only that smoke check, with
-`$env:DFS_CONCURRENT = 'off'` as well: until small files are packed, every
-small file is a message of its own, and the full run would post about 1,600
-messages on the rate limits production shares. Run the full-size check with
-`BLOB_STORE=local`.
+Against Discord storage, run only that smoke check: the full run sends over a
+gigabyte through the rate limits production shares. Run the full-size check
+with `BLOB_STORE=local`. `$env:DFS_SMALL_KB` sets the small files' size, and
+`$env:DFS_CONCURRENT = 'off'` skips the last step.
 
 A failing check names the step and the request that failed. If one stops
 partway with no message at all, read the exit code pnpm reports: a Windows

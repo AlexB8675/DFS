@@ -255,10 +255,22 @@ export const storageChannels = pgTable(
     enabled: boolean('enabled').notNull().default(true),
     blobCount: bigint('blob_count', { mode: 'number' }).notNull().default(0),
     bytesStored: bytes('bytes_stored').notNull().default(0),
+    /** The newest message the orphan reconciler has looked at (§6.1). */
+    reconciledThrough: text('reconciled_through'),
     createdAt: timestamptz('created_at').notNull().defaultNow(),
   },
   (t) => [uniqueIndex('storage_channels_discord_id').on(t.discordChannelId)],
 )
+
+/**
+ * This database's name for itself, one row made by its migration (§4). Every
+ * message it posts carries it, so it never takes another database's messages
+ * for orphans of its own, even in a channel both have registered.
+ */
+export const instance = pgTable('instance', {
+  id: text('id').primaryKey(),
+  createdAt: timestamptz('created_at').notNull().defaultNow(),
+})
 
 /** One Discord attachment: a solo frame or a pack of many (§5, §6.6). */
 export const blobs = pgTable(

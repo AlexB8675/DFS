@@ -7,6 +7,7 @@ import {
   LocalBlobStore,
   type BlobStore,
   type CdnUrl,
+  type DiscordRest,
   type StorageChannel,
 } from '@dfs/storage'
 import type { RefreshedUrls } from '@dfs/shared'
@@ -18,18 +19,37 @@ import { sql } from 'drizzle-orm'
 /** Posting a 10 MiB attachment takes longer than Discord's 15 s default on a slow uplink. */
 const DISCORD_TIMEOUT_MS = 120_000
 
-export function botBlobStore(config: Config, db: Database): BlobStore {
+export interface BotStorage {
+  store: BlobStore
+  /** Discord's REST API when blobs go there, for the orphan reconciler. */
+  discord: DiscordRest | null
+}
+
+export function botStorage(config: Config, db: Database): BotStorage {
   if (config.blobStore === 'discord') {
     // Config refuses BLOB_STORE=discord for the bot without a token.
-    const token = config.discord.botToken ?? ''
-    return new DiscordBlobStore({
-      rest: createDiscordRest(token, { timeoutMs: DISCORD_TIMEOUT_MS }),
+    const rest = createDiscordRest(config.discord.botToken ?? '', {
+      timeoutMs: DISCORD_TIMEOUT_MS,
+    })
+    const store = new DiscordBlobStore({
+      rest,
       channels: () => dataChannels(db),
       maxBytes: config.sizes.blobMaxBytes,
+      instanceId: () => instanceId(db),
+      perChannel: config.uploadChannelConcurrency,
     })
+    return { store, discord: rest }
   }
   const local = new LocalBlobStore(config.localBlobDir)
-  return config.blobStore === 'chaos' ? new ChaosBlobStore(local) : local
+  return { store: config.blobStore === 'chaos' ? new ChaosBlobStore(local) : local, discord: null }
+}
+
+/** This database's name for itself, which its Discord messages carry (DESIGN.md §4). */
+export async function instanceId(db: Database): Promise<string> {
+  const { rows } = await db.execute<{ id: string }>(sql`SELECT id FROM instance LIMIT 1`)
+  const id = rows[0]?.id
+  if (!id) throw new Error('This database has no instance ID: run its migrations.')
+  return id
 }
 
 /** This environment's registered data channels, the only ones it posts to or reads (D25). */

@@ -46,8 +46,12 @@ export interface BlobReader {
 }
 
 export interface BlobStore extends BlobReader {
-  /** Stores a sealed blob, durably, and says where it went. */
-  put: (blob: BlobToStore, data: Uint8Array) => Promise<PutResult>
+  /**
+   * Stores a sealed blob, durably, and says where it went. `read` gives its
+   * bytes; a store calls it only once it can send them, so blobs waiting for
+   * their turn don't sit in memory.
+   */
+  put: (blob: BlobToStore, read: () => Promise<Uint8Array>) => Promise<PutResult>
   /** Removes a blob. Removing one that is already gone is not an error. */
   delete: (blob: StoredBlob) => Promise<void>
 }

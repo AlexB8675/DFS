@@ -2,12 +2,12 @@ import { createHash, timingSafeEqual } from 'node:crypto'
 import type { Config } from '@dfs/config'
 import { createDatabase, createPool } from '@dfs/db'
 import { refreshUrlsSchema } from '@dfs/shared'
-import { BlobStoreError, type BlobStore } from '@dfs/storage'
+import { BlobStoreError } from '@dfs/storage'
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify'
 import { PgBoss } from 'pg-boss'
 import { startLeaderWork, type LeaderWork } from './leader-work.ts'
 import { LeaderElection } from './leader.ts'
-import { botBlobStore, refreshBlobUrls, refreshedUrls } from './storage.ts'
+import { botStorage, refreshBlobUrls, refreshedUrls, type BotStorage } from './storage.ts'
 
 // The bot (DESIGN §11): job workers on pg-boss, and later the Discord gateway
 // and the packer. Only the leader runs them. Its internal HTTP server answers
@@ -30,7 +30,7 @@ export interface BotOptions {
   onLeadershipLost: () => void
   /** Overrides for tests. */
   election?: { pollMs?: number; heartbeatMs?: number; backoff?: { minMs: number; maxMs: number } }
-  store?: BlobStore
+  storage?: BotStorage
 }
 
 export function createBot({
@@ -38,7 +38,7 @@ export function createBot({
   logger,
   onLeadershipLost,
   election: electionOptions,
-  store: givenStore,
+  storage: givenStorage,
 }: BotOptions): Bot {
   const server = Fastify({ logger: logger ?? loggerOptions(config) })
   const pool = createPool(config.databaseUrl, {
@@ -48,7 +48,8 @@ export function createBot({
     },
   })
   const db = createDatabase(pool)
-  const store = givenStore ?? botBlobStore(config, db)
+  const storage = givenStorage ?? botStorage(config, db)
+  const { store } = storage
   let boss: PgBoss | null = null
   let work: LeaderWork | null = null
   let stopped = false
@@ -76,7 +77,7 @@ export function createBot({
             config,
             db,
             boss: queue,
-            store,
+            storage,
             log: server.log,
           })
         if (stopped) {

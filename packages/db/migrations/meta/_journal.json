@@ -50,6 +50,13 @@
       "when": 1791137986696,
       "tag": "0006_archive_tickets",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1791200781959,
+      "tag": "0007_instance",
+      "breakpoints": true
     }
   ]
 }

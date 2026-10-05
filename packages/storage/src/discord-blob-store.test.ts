@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto'
 import { ChannelType } from 'discord-api-types/v10'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { BlobStoreError, type BlobToStore, type StoredBlob } from './blob-store.ts'
 import { DiscordBlobStore, type StorageChannel } from './discord-blob-store.ts'
 import { FakeDiscord } from './testing.ts'
@@ -25,14 +25,18 @@ beforeEach(() => {
       return Promise.resolve(structuredClone(channels))
     },
     maxBytes: 1024,
+    instanceId: () => Promise.resolve('0123456789ab'),
+    perChannel: 2,
     fetch: discord.fetch,
   })
 })
 
 const solo = (id: number): BlobToStore => ({ id, kind: 'solo', frameCount: 1 })
 
+const bytes = (data: Uint8Array) => () => Promise.resolve(data)
+
 async function put(blob: BlobToStore, data: Uint8Array): Promise<StoredBlob> {
-  const { location, url } = await store.put(blob, data)
+  const { location, url } = await store.put(blob, bytes(data))
   return { id: blob.id, ...location, url }
 }
 
@@ -44,8 +48,8 @@ describe('DiscordBlobStore (DESIGN.md §4, §6.1, §6.2)', () => {
 
     expect([first.channelId, second.channelId].sort()).toEqual(['channel-0', 'channel-1'])
     expect(discord.messages.map((message) => message.content)).toEqual([
-      'dfs1 b=7 k=pack n=12',
-      'dfs1 b=8 k=solo n=1',
+      'dfs1 b=7 k=pack n=12 i=0123456789ab',
+      'dfs1 b=8 k=solo n=1 i=0123456789ab',
     ])
     expect(discord.messages[0]?.attachments).toMatchObject([{ filename: '7.bin', size: 600 }])
     expect(first).toMatchObject({
@@ -61,7 +65,7 @@ describe('DiscordBlobStore (DESIGN.md §4, §6.1, §6.2)', () => {
 
   it('posts a blob once when a retry follows a lost answer', async () => {
     discord.loseNextAnswer = true
-    await expect(store.put(solo(9), new Uint8Array(10))).rejects.toMatchObject({
+    await expect(store.put(solo(9), bytes(new Uint8Array(10)))).rejects.toMatchObject({
       retryable: true,
     })
     const blob = await put(solo(9), new Uint8Array(10))
@@ -71,7 +75,7 @@ describe('DiscordBlobStore (DESIGN.md §4, §6.1, §6.2)', () => {
 
   it('posts again when Discord kept less than was sent', async () => {
     discord.truncateNextAttachment = true
-    await expect(store.put(solo(10), new Uint8Array(10))).rejects.toMatchObject({
+    await expect(store.put(solo(10), bytes(new Uint8Array(10)))).rejects.toMatchObject({
       retryable: true,
     })
     expect(discord.messages).toHaveLength(0)
@@ -79,8 +83,41 @@ describe('DiscordBlobStore (DESIGN.md §4, §6.1, §6.2)', () => {
     expect(discord.messages[0]?.attachments[0]?.size).toBe(10)
   })
 
+  it('keeps every enabled channel busy, but each to its own limit, reading a blob only on its turn', async () => {
+    const release = Promise.withResolvers<undefined>()
+    let posting = 0
+    let most = 0
+    const post = discord.post
+    discord.post = async (route, options) => {
+      posting += 1
+      most = Math.max(most, posting)
+      await release.promise
+      posting -= 1
+      return post(route, options)
+    }
+    let read = 0
+    const reading = (id: number) => () => {
+      read += 1
+      return Promise.resolve(new Uint8Array([id]))
+    }
+    const puts = Array.from({ length: 7 }, (_, index) =>
+      store.put(solo(100 + index), reading(100 + index)),
+    )
+    await vi.waitFor(() => {
+      expect(posting).toBe(4)
+    })
+    // Two enabled channels, two posts each; the other three wait unread.
+    expect(read).toBe(4)
+    release.resolve(undefined)
+    const stored = await Promise.all(puts)
+    expect(most).toBe(4)
+    expect(read).toBe(7)
+    const used = new Set(stored.map((result) => result.location.channelId))
+    expect([...used].sort()).toEqual(['channel-0', 'channel-1'])
+  })
+
   it('refuses a blob larger than an attachment may be, and waits for a channel', async () => {
-    await expect(store.put(solo(1), new Uint8Array(1025))).rejects.toMatchObject({
+    await expect(store.put(solo(1), bytes(new Uint8Array(1025)))).rejects.toMatchObject({
       retryable: false,
     })
     channels = channels.map((channel) => ({ ...channel, enabled: false }))
@@ -88,8 +125,10 @@ describe('DiscordBlobStore (DESIGN.md §4, §6.1, §6.2)', () => {
       rest: discord,
       channels: () => Promise.resolve(channels),
       maxBytes: 1024,
+      instanceId: () => Promise.resolve('0123456789ab'),
+      perChannel: 2,
     })
-    await expect(fresh.put(solo(1), new Uint8Array(1))).rejects.toThrow(/No storage channel/)
+    await expect(fresh.put(solo(1), bytes(new Uint8Array(1)))).rejects.toThrow(/No storage channel/)
     expect(discord.messages).toHaveLength(0)
   })
 

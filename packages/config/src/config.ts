@@ -144,7 +144,7 @@ const envSchema = z.object({
   DISCORD_ATTACHMENT_LIMIT: byteSize(10 * MiB),
   PACK_THRESHOLD_BYTES: byteSize(4 * MiB),
   PACK_TARGET_BYTES: optionalByteSize,
-  PACK_MAX_WAIT_MS: integer(5000),
+  PACK_MAX_WAIT_MS: integer(30_000),
   COMPACT_THRESHOLD: setting(z.coerce.number().min(0).max(1).default(0.3)),
   MASTER_KEY_FILE: setting(z.string().optional()),
   STAGING_DIR: setting(z.string().optional()),

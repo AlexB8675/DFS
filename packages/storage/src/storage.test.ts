@@ -19,11 +19,12 @@ afterEach(async () => {
 
 const blob = (id: number) => ({ id, channelId: null, messageId: null, attachmentId: null })
 const toStore = (id: number) => ({ id, kind: 'solo' as const, frameCount: 1 })
+const bytes = (data: Uint8Array) => () => Promise.resolve(data)
 
 describe('LocalBlobStore', () => {
   it('stores blobs and reads any range back', async () => {
     const store = new LocalBlobStore(dir)
-    await store.put(toStore(300), new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7]))
+    await store.put(toStore(300), bytes(new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7])))
     expect(await store.read(blob(300), 2, 3)).toEqual(new Uint8Array([2, 3, 4]))
     // Spread over subdirectories, and no temporary files left behind.
     expect(await readdir(path.join(dir, '2c'))).toEqual(['300.bin'])
@@ -31,7 +32,7 @@ describe('LocalBlobStore', () => {
 
   it('refuses a read past the end, and deletes idempotently', async () => {
     const store = new LocalBlobStore(dir)
-    await store.put(toStore(1), new Uint8Array(4))
+    await store.put(toStore(1), bytes(new Uint8Array(4)))
     await expect(store.read(blob(1), 2, 4)).rejects.toBeInstanceOf(BlobStoreError)
     await store.delete(blob(1))
     await store.delete(blob(1))
@@ -49,7 +50,7 @@ describe('ChaosBlobStore', () => {
       random: () => rolls.shift() ?? 0.9,
     })
     // First roll passes, the second loses the answer: the blob is there anyway.
-    await expect(chaos.put(toStore(7), new Uint8Array([7]))).rejects.toMatchObject({
+    await expect(chaos.put(toStore(7), bytes(new Uint8Array([7])))).rejects.toMatchObject({
       retryable: true,
     })
     expect(await inner.read(blob(7), 0, 1)).toEqual(new Uint8Array([7]))

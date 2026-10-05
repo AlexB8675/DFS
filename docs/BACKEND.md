@@ -182,7 +182,7 @@ Files are encrypted from the start: the API writes DFS1 frames to staging (DESIG
 **Tasks**
 
 - [x] `DiscordBlobStore`: post attachments with `nonce`/`enforce_nonce`, verify size, Range reads from the CDN, URL refresh in batches (`POST /internal/urls/refresh`). Each post keeps a random nonce and its channel for retries, since blob IDs repeat across databases sharing the bot; the API signs a lookup batch's URLs in one call to the bot.
-- [ ] Workers of DESIGN §11: `blob.upload` per channel concurrency, `pack.seal` with the packer of §6.6, `blob.delete`, `reconcile.orphans`; `blob.compact` and `blob.verify` can wait for M4.
+- [x] Workers of DESIGN §11: `blob.upload` per channel concurrency, `pack.seal` with the packer of §6.6, `blob.delete`, `reconcile.orphans`; `blob.compact` and `blob.verify` can wait for M4. Messages carry their database's `i` (DESIGN §4), so the reconciler only ever deletes its own.
 - [ ] Gateway: `messageDelete` and `messageDeleteBulk` mark blobs `lost` (intents `Guilds` and `GuildMessages` only; users aren't server members, D27).
 - [x] `dfs setup` in the CLI: create the category named by `DISCORD_CATEGORY_NAME` with the channels of DESIGN §4, hidden from everyone but the bot, and register them in `storage_channels`. Running it again changes nothing.
 - [ ] `/dfs setup` in production, with the gateway: the same, as a slash command.

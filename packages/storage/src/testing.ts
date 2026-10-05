@@ -14,6 +14,7 @@ export interface FakeChannel {
 export interface FakeMessage {
   id: string
   channel_id: string
+  author: { id: string; bot: boolean }
   content: string
   nonce: string | null
   attachments: { id: string; filename: string; size: number; url: string }[]
@@ -21,13 +22,17 @@ export interface FakeMessage {
 
 const CDN = 'https://cdn.discordapp.com'
 const URL_LIFETIME_MS = 24 * 60 * 60_000
+/** Discord's snowflakes count milliseconds from 2015. */
+const DISCORD_EPOCH = 1_420_070_400_000n
 
 /**
  * A Discord server in memory that answers the REST routes DFS uses, with a
  * CDN behind it (`fetch`), so tests never need a token or touch the real
  * server. It behaves as the contract test found Discord does: a repeated
- * nonce returns the first message, the CDN honours Range requests, and a
- * deleted message's attachment stays signable and served. Tests only.
+ * nonce returns the first message, the CDN honours Range requests, a
+ * deleted message's attachment stays signable and served, and messages after
+ * an ID come oldest first but listed newest first. IDs are snowflakes of the
+ * moment they were made. Tests only.
  */
 export class FakeDiscord implements DiscordRest {
   readonly botId = '100000000000000001'
@@ -44,8 +49,10 @@ export class FakeDiscord implements DiscordRest {
   truncateNextAttachment = false
   /** Has the CDN answer 200 with the whole file instead of honouring Range. */
   ignoreRange = false
+  /** The time new IDs are made at; set it to make messages from the past. */
+  clock: () => number = () => Date.now()
   readonly #signed = new Set<string>()
-  #nextId = 300_000_000_000_000_000n
+  #sequence = 0n
 
   addChannel(
     channel: Pick<FakeChannel, 'name' | 'type'> & Partial<Omit<FakeChannel, 'id'>>,
@@ -70,15 +77,40 @@ export class FakeDiscord implements DiscordRest {
     return found
   }
 
+  /** Adds a message as someone else, or as the bot from another database. */
+  addMessage(channelId: string, content: string, authorId = this.botId): FakeMessage {
+    const message: FakeMessage = {
+      id: this.#id(),
+      channel_id: channelId,
+      author: { id: authorId, bot: authorId === this.botId },
+      content,
+      nonce: null,
+      attachments: [],
+    }
+    this.messages.push(message)
+    return message
+  }
+
   /** Makes every URL signed so far stop working, as expiry would. */
   revokeUrls(): void {
     this.#signed.clear()
   }
 
-  get = (route: DiscordRoute): Promise<unknown> => {
+  get = (route: DiscordRoute, options?: RequestData): Promise<unknown> => {
     this.requests.push(`GET ${route}`)
     if (route === '/users/@me') return answer({ id: this.botId, username: 'dfs', bot: true })
     if (route === `/guilds/${this.guildId}/channels`) return answer(this.channels)
+    const listing = /^\/channels\/(\d+)\/messages$/.exec(route)
+    if (listing) {
+      const after = BigInt(options?.query?.get('after') ?? '0')
+      const limit = Number(options?.query?.get('limit') ?? '50')
+      const page = this.messages
+        .filter((message) => message.channel_id === listing[1] && BigInt(message.id) > after)
+        .sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1))
+        .slice(0, limit)
+        .reverse()
+      return answer(page.map((message) => this.#withUrls(message)))
+    }
     throw new Error(`FakeDiscord: no route GET ${route}`)
   }
 
@@ -166,6 +198,7 @@ export class FakeDiscord implements DiscordRest {
     const message: FakeMessage = {
       id: this.#id(),
       channel_id: channelId,
+      author: { id: this.botId, bot: true },
       content: body.content,
       nonce: body.nonce ?? null,
       attachments: (options?.files ?? []).map((file: RawFile) => {
@@ -206,7 +239,8 @@ export class FakeDiscord implements DiscordRest {
   }
 
   #id(): string {
-    return String(this.#nextId++)
+    const sequence = this.#sequence++ % 4096n
+    return String(((BigInt(this.clock()) - DISCORD_EPOCH) << 22n) | sequence)
   }
 }
 

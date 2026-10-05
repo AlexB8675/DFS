@@ -26,6 +26,12 @@ export async function purgeVersions(
     WHERE id = ANY(${versions}) AND state IN ('syncing', 'stored', 'failed')`)
   const usedBytes = rows[0]?.bytes ?? 0
 
+  // Waits for a pack being sealed with any of their frames (§6.6), so the
+  // release below sees the pack and counts those frames out of it. Frames
+  // not packed yet stay locked, so the packer leaves them alone.
+  await tx.execute(sql`
+    SELECT id FROM chunks WHERE version_id = ANY(${versions}) AND blob_id IS NULL
+    ORDER BY id FOR UPDATE`)
   await tx.execute(sql`
     UPDATE blobs SET
       live_bytes = blobs.live_bytes - released.bytes,
@@ -111,4 +117,22 @@ export async function releaseReservation(
 ): Promise<void> {
   await tx.execute(sql`
     UPDATE users SET reserved_bytes = greatest(0, reserved_bytes - ${bytes}) WHERE id = ${ownerId}`)
+}
+
+/**
+ * Blobs whose `live_bytes` aren't the sum of the frames still in them: always
+ * empty, unless a purge and a pack or an upload got in each other's way. A
+ * check for tests and for a running stack.
+ */
+export async function liveBytesDrift(
+  db: Executor,
+): Promise<{ id: number; live_bytes: number; frames: number }[]> {
+  const { rows } = await db.execute<{ id: number; live_bytes: number; frames: number }>(sql`
+    SELECT blob.id::float8 AS id, blob.live_bytes,
+      coalesce(sum(chunk.frame_size), 0)::int AS frames
+    FROM blobs blob LEFT JOIN chunks chunk ON chunk.blob_id = blob.id AND chunk.purged_at IS NULL
+    WHERE blob.state <> 'deleted'
+    GROUP BY blob.id
+    HAVING blob.live_bytes <> coalesce(sum(chunk.frame_size), 0)`)
+  return rows
 }

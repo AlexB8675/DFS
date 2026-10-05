@@ -157,11 +157,11 @@ flowchart LR
 - **Environments (D25):** development shares the server and the bot with production. Production uses the `DFS` category, development a `DFS Dev` category (`DISCORD_CATEGORY_NAME`). Each environment registers only its own channels in its own `storage_channels`, and everything that reads or deletes messages (reconciler, scrubber, GC, recovery) works only in registered channels, so neither can take the other's messages for orphans. Development runs without a gateway connection (`DISCORD_GATEWAY=off`): slash commands and tamper watch belong to production, and development sets up its channels with the CLI (`dfs setup`). The two share Discord's rate limits, so load tests use `LocalBlobStore` or `ChaosBlobStore`, never Discord.
 - **Message formats.** They leak no file names, and every attachment is encrypted:
   ```
-  #storage-NN   content: dfs1 b=184467 k=pack n=212        attachment: 184467.bin
+  #storage-NN   content: dfs1 b=184467 k=pack n=212 i=3fa9c1d2e0b4   attachment: 184467.bin
   #dfs-journal  content: dfs1 j=5521 ids=9120004-9125003   attachment: j5521.bin
   #dfs-backups  content: dfs1 snap=212 hwm=9125003         attachment: snap212.bin
   ```
-  - **Data:** `b` is the blob ID, `k` the blob kind (`solo` | `pack`), and `n` the number of frames. This lets a reconciler map orphan messages back to DB rows, and lets recovery rebuild blob locations by scanning channels (§8).
+  - **Data:** `b` is the blob ID, `k` the blob kind (`solo` | `pack`), `n` the number of frames, and `i` the ID of the database that posted it (12 hex digits, made once by its migration in the `instance` table). This lets a reconciler map orphan messages back to DB rows, and lets recovery rebuild blob locations by scanning channels (§8). Blob IDs restart in every database, so `i` is what tells a database its own messages apart: no environment, test stack or restored copy can take another's messages for orphans, even in a channel both registered. Recovery keeps the `i` of the database it rebuilds.
   - **Journal:** `j` is the batch number (contiguous, so a missing batch is detectable) and `ids` the range of journal record IDs inside it.
   - **Backups:** `snap` is the snapshot number and `hwm` its journal high-water mark. The attachment is the encrypted manifest that locates the dump (§8).
 
@@ -431,8 +431,8 @@ sequenceDiagram
   - Completing it moves versions beyond `VERSION_RETENTION` to `purging`, which frees their quota.
   - The upload session says which version it creates (`versionId`) and whether it is a new version of an existing file (`isNewVersion`, so the UI doesn't animate the row in as new). `GET /uploads/:id` answers until the session expires, also after completion (`state: 'receiving' | 'completed'`).
 - **Retries are harmless:** sending a part again is accepted, also after the upload completed, as long as its SHA-256 matches the part received (otherwise `409 upload_completed`); completing a completed upload is a no-op, and cancelling one leaves the file. A client whose response was lost simply retries, and a `404` means the session expired.
-- **Idempotency:** Discord's `nonce` + `enforce_nonce` on message create prevents duplicate posts when a job retries within a short window. A reconciler also scans its environment's registered channels (§4) for orphan `dfs1` messages whose blob is not `stored`, and deletes or adopts them.
-- **Channel selection:** the least-loaded enabled data channel, which spreads rate-limit buckets across channels. Concurrency per channel is configurable (default 2 in-flight requests).
+- **Idempotency:** Discord's `nonce` + `enforce_nonce` on message create prevents duplicate posts when a job retries within a short window: a retry reuses the blob's channel and its random nonce (random, since blob IDs repeat across databases sharing the bot). A reconciler reads its environment's registered channels (§4) every hour from where it last stopped, and deletes the bot's data messages carrying this database's `i` that no blob records (one posted again after the nonce window, say). It leaves messages younger than an hour alone, since an upload may still be recording them, and never adopts one: posting again is cheaper than checking a stray copy.
+- **Channel selection:** the least busy enabled data channel, which spreads rate-limit buckets across channels. Each channel takes `UPLOAD_CHANNEL_CONCURRENCY` posts at a time (default 2), so a channel Discord slows down gets fewer blobs while the others keep going. The bot holds about 32 blobs at once to keep the channels busy, but reads a blob from staging only when its post starts, so waiting blobs take no memory.
 - **Backpressure:** if staging passes `STAGING_MAX_BYTES`, `PUT part` returns `503` with `Retry-After` (seconds or an HTTP date) and the client backs off. Staging cannot grow without limit when Discord is slower than the user's upload.
 - **Read-your-writes:** a `syncing` version is fully readable. The download path reads frames from staging until their blob is `stored`.
 - **Progress:** the UI shows two phases. *Uploading* is browser→API. *Syncing to Discord* is in the background and streamed via SSE from `GET /api/events` (`nodes.synced`).
@@ -498,7 +498,7 @@ Rename, move, create folder, and trash/restore are plain SQL transactions.
 
 1. **Trash:** the item can be restored for `TRASH_RETENTION_DAYS` (default 30).
 2. **Purge:** triggered by emptying the trash, the retention expiring, or a version being pruned. The version goes to `purging`, its chunks get `purged_at`, each affected blob's `live_bytes` drops by the frame size, and quota is released right away.
-3. **Blob release:** a blob with `live_bytes = 0` moves to `deleting`. The GC worker (bot) deletes messages one at a time at a low priority. Uploads always win the rate-limit budget.
+3. **Blob release:** a blob with `live_bytes = 0` moves to `deleting` (also when it was purged while being uploaded). The GC (bot leader) deletes messages one at a time: one every 2 s while blobs wait to be uploaded, up to 20 every 2 s otherwise. Uploads get most of the rate-limit budget, and deleting never stops altogether. It works the same on the local store.
 4. **Pack compaction** (§6.6) reclaims packs that are mostly dead.
 5. When all of a version's chunks are released, the version becomes `purged`.
 
@@ -528,8 +528,8 @@ flowchart LR
     BL --> UP["blob.upload → 1 Discord message"]
 ```
 
-- **Which files are packed:** files with `size < PACK_THRESHOLD_BYTES` (default 4 MiB). Each file still has **its own DEK and frame**. A pack is just a concatenation of self-delimiting frames, so **the packer needs no keys** and runs in the bot. Backup snapshots are never packed (§8).
-- **Packer loop** (single bot leader): `SELECT … FROM chunks WHERE blob_id IS NULL … ORDER BY id FOR UPDATE SKIP LOCKED` over a window of waiting frames. A frame is added only if `pack_bytes + frame_bytes ≤ BLOB_MAX_BYTES`; a frame that doesn't fit stays queued and goes into the next pack. The pack is sealed when it reaches `PACK_TARGET_BYTES`, when no waiting frame fits in the space left, or when its oldest frame has waited `PACK_MAX_WAIT_MS`. Sealing writes `blobs/<id>.bin`, sets `blob_id`/`blob_offset` on each chunk, and enqueues `blob.upload`, all in one transaction. The frame files are deleted after the blob is written. If the bot crashes in the middle, the transaction rolls back and the frame files are still there.
+- **Which frames are packed:** every frame of less than `PACK_THRESHOLD_BYTES` (default 4 MiB) of plaintext: small files, and the last chunk of a large file, so nearly every message is close to full. Each file still has **its own DEK and frame**. A pack is just a concatenation of self-delimiting frames, so **the packer needs no keys** and runs in the bot. Backup snapshots are never packed (§8).
+- **Packer loop** (single bot leader): `SELECT … FROM chunks WHERE blob_id IS NULL … ORDER BY id FOR UPDATE SKIP LOCKED` over a window of waiting frames. A frame is added only if `pack_bytes + frame_bytes ≤ BLOB_MAX_BYTES`; a frame that doesn't fit stays queued and goes into the next pack. The pack is sealed when it reaches `PACK_TARGET_BYTES`, when no waiting frame fits in the space left, or when its oldest frame has waited `PACK_MAX_WAIT_MS`. Sealing writes `packs/<uuid>.bin` in staging, sets `blob_id`/`blob_offset` on each chunk, and enqueues `blob.upload`, all in one transaction. The frame files are deleted after it commits, and until the pack is stored, reads cut frames out of the staged pack. If the bot crashes in the middle, the transaction rolls back and the frame files are still there. The packer runs every second and seals every pack that is due; frames are taken in upload order, so files uploaded together share packs, which keeps folder downloads to a few messages.
 - **Compaction:** a pack whose `live_bytes / size_bytes < COMPACT_THRESHOLD` (default 0.3) and that is older than 7 days is rewritten. The bot downloads it and writes its live frames (still ciphertext, no keys needed) into a new pack, together with frames from other compaction candidates. The chunks keep pointing at the old pack, which stays readable, until the new pack is `stored` in Discord. Only then does one transaction repoint the chunks that are still live and write a `blob.relocated` journal record, and only after that is the old message deleted. This order means a VPS loss mid-compaction can never leave the journal pointing at a pack that never reached Discord.
 - **Trade-off:** a deleted small file keeps taking up space in Discord until its pack is compacted. Its quota is released immediately, though, and Discord space is free, so the only real cost is message count.
 
@@ -732,13 +732,13 @@ Internal (bot), only reachable on `dfs_internal` and returning `404` at the edge
 - **Job workers (pg-boss queues):**
   | Queue | Priority | Notes |
   |---|---|---|
-  | `blob.upload` | high | new jobs `NOTIFY` the leader, which takes them in batches of 8, two batches at a time, fetching again at once while batches come back full; concurrency per channel; retries with backoff; dead-letter after N attempts → affected versions `failed` |
-  | `pack.seal` | high | packer loop (§6.6); also triggered by timer |
+  | `blob.upload` | high | new jobs `NOTIFY` the leader, which takes them in batches of 8, four batches at a time, fetching again at once while batches come back full; concurrency per channel; retries with backoff; dead-letter after N attempts → affected versions `failed` |
+  | `pack.seal` | high | packer loop (§6.6), every second; a loop over waiting frames, not a queue |
   | `journal.upload` | high | uploads encrypted journal batches staged by the API, and posts backup pointers with their manifests to `#dfs-backups` (§8) |
-  | `blob.delete` | low | GC |
+  | `blob.delete` | low | GC (§6.4), every 2 s; a loop over `deleting` blobs, not a queue |
   | `blob.compact` | low | rewrites mostly-dead packs |
   | `blob.verify` | lowest | rolling scrubber, request-budgeted |
-  | `reconcile.orphans` | cron, daily | scans channel history since the last checkpoint for untracked `dfs1` messages |
+  | `reconcile.orphans` | hourly | scans channel history since the last checkpoint (`storage_channels.reconciled_through`) for this database's untracked `dfs1` messages (§6.1) |
 - **Slash commands** (admin-only): `/dfs setup`, `/dfs status` (usage, queue depth, sync backlog, throughput), `/dfs health` (lost blobs, last scrub), `/dfs channel add`.
 - **Gateway events:** `messageDelete`/`messageDeleteBulk` in storage channels → mark blobs `lost` and alert.
 - **Rate limiting:** relies on `@discordjs/rest`'s bucket handling, plus our own per-channel concurrency limiter. Rate-limit metrics are exported to `/internal/health`.
@@ -875,7 +875,7 @@ The **`BlobStore` interface** (`put(blob) → ref`, `get(ref, range?) → stream
 | `BLOB_MAX_BYTES` / `CHUNK_SIZE` | derived | Not set directly. Attachment limit − 64 KiB (hard cap on every attachment) / the largest multiple of 64 KiB that fits one frame under that cap (§7.3) |
 | `PACK_THRESHOLD_BYTES` | `4194304` | files smaller than this are packed |
 | `PACK_TARGET_BYTES` | `BLOB_MAX_BYTES` − 256 KiB | soft target: seal a pack once it reaches this size. Packs never exceed `BLOB_MAX_BYTES` |
-| `PACK_MAX_WAIT_MS` | `5000` | seal a partial pack after this long |
+| `PACK_MAX_WAIT_MS` | `30000` | seal a partial pack after this long. Staging serves the files meanwhile, so waiting only delays when they are safe in Discord; files that trickle in within half a minute share a message instead of taking one each |
 | `COMPACT_THRESHOLD` | `0.3` | live/size ratio below which packs are compacted |
 | `MASTER_KEY_FILE` | `/run/secrets/dfs_master_key` | api only. Holds the current key and every retired key, each with its `key_id` (§7.3) |
 | `STAGING_DIR` / `STAGING_MAX_BYTES` | `/data/staging` / `20 GiB` | shared volume |
