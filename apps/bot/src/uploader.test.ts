@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
@@ -54,7 +54,91 @@ async function staged(bytes = new Uint8Array([1, 2, 3, 4])) {
   return { id: blob.id, stagedPath, bytes }
 }
 
+/** A file with one syncing version of `chunkCount` parts, owned by a new user. */
+async function syncingVersion(chunkCount: number, sizeBytes: number) {
+  const [owner] = await db
+    .insert(users)
+    .values({
+      username: crypto.randomUUID(),
+      displayName: 'Test',
+      passwordHash: 'unused',
+      quotaBytes: 1024,
+    })
+    .returning()
+  if (!owner) throw new Error('No test owner.')
+  const [root] = await db
+    .insert(nodes)
+    .values({ ownerId: owner.id, kind: 'folder', name: '', nameKey: '' })
+    .returning()
+  if (!root) throw new Error('No test root.')
+  const [node] = await db
+    .insert(nodes)
+    .values({
+      ownerId: owner.id,
+      parentId: root.id,
+      kind: 'file',
+      name: 'file.bin',
+      nameKey: 'file.bin',
+      sizeBytes,
+    })
+    .returning()
+  if (!node) throw new Error('No test node.')
+  const [version] = await db
+    .insert(fileVersions)
+    .values({
+      nodeId: node.id,
+      versionNo: 1,
+      state: 'syncing',
+      sizeBytes,
+      chunkSize: sizeBytes,
+      chunkCount,
+      wrappedDek: Buffer.alloc(60),
+      keyId: 'k1',
+      createdBy: owner.id,
+    })
+    .returning()
+  if (!version) throw new Error('No test version.')
+  await db.update(nodes).set({ currentVersionId: version.id }).where(eq(nodes.id, node.id))
+  return version
+}
+
 describe('blob pipeline', () => {
+  it('clears a stored version from staging, with files an interrupted attempt left', async () => {
+    const bytes = new Uint8Array([7, 7, 7, 7])
+    const hash = createHash('sha256').update(bytes).digest()
+    const version = await syncingVersion(1, bytes.length)
+    const stagedPath = staging.framePath(version.id, 0)
+    // A crash between writing a part and recording it leaves its file behind.
+    const leftover = `${stagedPath}.${crypto.randomUUID()}`
+    const {
+      rows: [blob],
+    } = await db.execute<{ id: number }>(sql`
+      INSERT INTO blobs (kind, state, size_bytes, live_bytes, frame_count, sha256, staged_path)
+      VALUES ('solo', 'staged', ${bytes.length}, ${bytes.length}, 1, ${hash}, ${stagedPath})
+      RETURNING id::float8 AS id`)
+    if (!blob) throw new Error('No test blob created.')
+    await staging.write(stagedPath, bytes)
+    await staging.write(leftover, bytes)
+    await db.insert(chunks).values({
+      versionId: version.id,
+      idx: 0,
+      plainSize: bytes.length,
+      frameSize: bytes.length,
+      plainSha256: hash,
+      frameSha256: hash,
+      blobId: blob.id,
+      blobOffset: 0,
+      stagedPath,
+    })
+
+    expect(await storeBlobs({ db, staging, store }, [blob.id])).toEqual(new Map())
+    const { rows } = await db.execute(sql`SELECT state FROM file_versions WHERE id = ${version.id}`)
+    expect(rows).toEqual([{ state: 'stored' }])
+    await expect(readdir(path.join(staging.root, 'frames', version.id))).rejects.toMatchObject({
+      code: 'ENOENT',
+    })
+  })
+
   it('counts concurrent parts once and notifies completion even when final staging cleanup fails', async () => {
     const blobs = await Promise.all(Array.from({ length: 4 }, () => staged()))
     const [owner] = await db

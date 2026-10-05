@@ -98,6 +98,18 @@ export async function visibleNode(db: Executor, ownerId: string, id: string): Pr
   return row
 }
 
+/** The visible ones among `ids`, in no particular order; the rest are left out. */
+export async function lookupNodes(
+  db: Executor,
+  ownerId: string,
+  ids: readonly string[],
+): Promise<NodeRow[]> {
+  const { rows } = await db.execute<NodeRow>(sql`
+    SELECT ${NODE_COLUMNS} FROM nodes n ${NODE_JOINS}
+    WHERE n.id = ANY(${uuidArray([...new Set(ids)])}) AND n.owner_id = ${ownerId} AND ${VISIBLE}`)
+  return rows
+}
+
 /** Like `visibleNode`, for a folder that something goes into. */
 export async function visibleFolder(db: Executor, ownerId: string, id: string): Promise<NodeRow> {
   const folder = await visibleNode(db, ownerId, id)

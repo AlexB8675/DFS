@@ -1,5 +1,6 @@
 import {
   ensureFoldersResultSchema,
+  nodeListSchema,
   nodePageSchema,
   nodePathSchema,
   nodeSchema,
@@ -13,7 +14,7 @@ import type { SuiteContext } from './context.ts'
 import { createFolder as folder, workspace } from './files.ts'
 
 /** Browsing and changing the tree, the trash and search (DESIGN.md §5.1, §6.3, §9). */
-export function treeTests({ describe, it, expect, owner }: SuiteContext): void {
+export function treeTests({ describe, it, expect, owner, newUser, activated }: SuiteContext): void {
   async function names(client: ApiClient, folderId: string, query = ''): Promise<string[]> {
     const page = await client.call('GET', `/nodes/${folderId}/children${query}`, nodePageSchema)
     return page.items.map((node) => node.name)
@@ -92,6 +93,25 @@ export function treeTests({ describe, it, expect, owner }: SuiteContext): void {
           json: { ids: [clash.id], parentId: target.id },
         }),
       ).toEqual({ status: 409, code: 'name_conflict' })
+    })
+
+    it('looks up several items at once, leaving out what the caller can’t see', async () => {
+      // Another user's folder, made first: switching users signs the owner out of the mock.
+      const { username, temporaryPassword } = await newUser(await owner())
+      const other = await activated(username, temporaryPassword)
+      const { user } = await other.call('GET', '/auth/me', sessionSchema)
+      const theirs = await folder(other, user.rootFolderId, 'Theirs')
+
+      const client = await owner()
+      const root = await workspace(client)
+      const kept = await folder(client, root.id, 'Kept')
+      const trashed = await folder(client, root.id, 'Trashed')
+      await client.send('POST', '/nodes/trash', { json: { ids: [trashed.id] } })
+      const { items } = await client.call('POST', '/nodes/lookup', nodeListSchema, {
+        json: { ids: [kept.id, trashed.id, theirs.id, crypto.randomUUID(), root.id, kept.id] },
+      })
+      expect(items.map((node) => node.id).sort()).toEqual([kept.id, root.id].sort())
+      expect(items.find((node) => node.id === kept.id)).toMatchObject({ name: 'Kept' })
     })
 
     it('makes folder paths in one call, reusing what exists', async () => {

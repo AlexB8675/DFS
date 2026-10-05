@@ -76,8 +76,13 @@ Open `http://localhost:5173`, sign in, and choose a permanent password if prompt
 The API runs on port 3000 and the bot on port 3001.
 
 Press Ctrl+C once and check that the terminal prompt returns. Run `pnpm dev`
-again to confirm all three ports are available. On Windows, the automated API
-suite also checks this using a real console Ctrl+C and isolated server ports.
+again to confirm all three ports are available. On Windows, this command checks
+the same with a real console Ctrl+C, on its own database and ports (it starts
+the whole stack, so the ordinary suite skips it):
+
+```powershell
+pnpm --filter @dfs/api check:dev-shutdown
+```
 
 ## Test in the browser
 

@@ -53,6 +53,8 @@ const PUBLISH_MS = 100
 const REFRESH_MS = 1000
 const SPEED_WINDOW_MS = 5000
 const ENSURE_BATCH = 500
+/** Nodes per `POST /nodes/lookup`, the API's limit. */
+const LOOKUP_BATCH = 500
 
 interface Job {
   id: string
@@ -252,23 +254,23 @@ export class UploadEngine {
     const syncing = [...this.jobs.values()].filter(
       (job) => job.status === 'done' && job.syncState === 'syncing',
     )
-    let next = 0
-    const refresh = async () => {
-      for (let job = syncing[next++]; job; job = syncing[next++]) {
-        const nodeId = job.session?.nodeId
-        if (!nodeId || job.syncState !== 'syncing' || this.jobs.get(job.id) !== job) continue
-        const node = await this.transport.node(nodeId).catch(() => null)
+    // A request per 500 files, one after the other: a big upload's thousands
+    // of files cost a handful of requests.
+    for (let start = 0; start < syncing.length; start += LOOKUP_BATCH) {
+      const batch = syncing.slice(start, start + LOOKUP_BATCH)
+      const ids = batch.flatMap((job) => job.session?.nodeId ?? [])
+      if (ids.length === 0) continue
+      const nodes = await this.transport.nodes(ids).catch(() => [])
+      const states = new Map(nodes.map((node) => [node.id, node.syncState]))
+      for (const job of batch) {
+        const state = job.session && states.get(job.session.nodeId)
         // A live event may have settled the file while this request was pending.
-        const current = this.jobs.get(job.id)
-        if (node?.syncState && current === job && current.syncState === 'syncing') {
-          job.syncState = node.syncState
+        if (state && this.jobs.get(job.id) === job && job.syncState === 'syncing') {
+          job.syncState = state
           this.publish(job)
         }
       }
     }
-    await Promise.all(
-      Array.from({ length: Math.min(this.limits.requests, syncing.length) }, refresh),
-    )
   }
 
   /** Retries now whatever is waiting out a backoff, e.g. when the network comes back. */

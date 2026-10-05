@@ -71,33 +71,43 @@ async function readEvents(
 }
 
 describe('live events (§6.1)', () => {
-  it('disconnects a stalled client instead of buffering more events', async () => {
+  it('keeps a client through a burst, and drops one that stops reading', async () => {
     const client = new ApiClient(address, origin)
     const { user } = await client.signIn('owner', 'the-owner-password')
     const response = await client.fetch('GET', '/events')
     const stream = eventStream
     if (!stream) throw new Error('No server event stream.')
+    const notify = () =>
+      notifyEvent(app.db, {
+        userId: user.id,
+        type: 'nodes.changed',
+        payload: { parentIds: [user.rootFolderId] },
+      })
+    // Backpressure alone is a burst: the client stays.
     const write = vi.spyOn(stream, 'write').mockReturnValueOnce(false)
     try {
-      // A pg notification reaches the actual HTTP stream. Make its next write
-      // signal backpressure, as it would when a client stops reading.
       // The first subscription connects lazily; wait until a notification reaches it.
       await vi.waitFor(
         async () => {
-          await notifyEvent(app.db, {
-            userId: user.id,
-            type: 'nodes.changed',
-            payload: { parentIds: [user.rootFolderId] },
-          })
+          await notify()
           expect(write).toHaveBeenCalled()
         },
         { timeout: 5000 },
       )
+      expect(stream.destroyed).toBe(false)
+
+      // More than a megabyte waiting means it stopped reading.
+      Object.defineProperty(stream, 'writableLength', {
+        configurable: true,
+        get: () => 2 * 1024 * 1024,
+      })
+      await notify()
       await vi.waitFor(() => {
         expect(stream.destroyed).toBe(true)
       })
     } finally {
       write.mockRestore()
+      Reflect.deleteProperty(stream, 'writableLength')
       await response.body?.cancel().catch(() => undefined)
     }
   })

@@ -130,6 +130,8 @@ async function storeBlob(
   }
   const location = await store.put(blobId, data)
 
+  /** Versions this blob finished: nothing of theirs is left in staging. */
+  const storedVersions: string[] = []
   const finished = await db.transaction(async (tx) => {
     const { rows: stored } = await tx.execute<{ id: number }>(sql`
       UPDATE blobs SET state = 'stored', stored_at = now(), staged_path = NULL,
@@ -140,6 +142,12 @@ async function storeBlob(
     if (stored.length === 0) return []
 
     await tx.execute(sql`UPDATE chunks SET staged_path = NULL WHERE blob_id = ${blobId}`)
+    // Versions in id order: once packs hold frames of several files (M1), two
+    // blobs stored at once must not lock their versions in opposite orders.
+    await tx.execute(sql`
+      SELECT id FROM file_versions
+      WHERE id IN (SELECT version_id FROM chunks WHERE blob_id = ${blobId})
+      ORDER BY id FOR NO KEY UPDATE`)
     // Each version this blob holds frames of gets closer to stored.
     const { rows: versions } = await tx.execute<{
       id: string
@@ -169,6 +177,7 @@ async function storeBlob(
       },
     ]
     let files: { userId: string; id: string; parentId: string }[] = []
+    storedVersions.push(...doneIds)
     if (doneIds.length > 0) {
       await tx.execute(sql`
         UPDATE file_versions SET state = 'stored' WHERE id = ANY(${uuidArray(doneIds)})`)
@@ -195,6 +204,12 @@ async function storeBlob(
       'could not remove a staged file after storing its blob',
     )
   })
+  // Their folders go too, with any file an interrupted upload attempt left.
+  for (const versionId of storedVersions) {
+    await staging.removeVersion(versionId).catch((error: unknown) => {
+      deps.log?.warn({ err: error, versionId }, 'could not remove a stored version from staging')
+    })
+  }
   return finished
 }
 

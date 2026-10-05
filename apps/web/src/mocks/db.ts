@@ -91,7 +91,8 @@ interface MockUpload {
   chunkSize: number
   chunkCount: number
   /** Part index → the SHA-256 it arrived with, so a part sent again is recognized. */
-  receivedParts: Record<number, string | null>
+  /** Each received part's SHA-256, so a part sent again can be checked. */
+  receivedParts: Record<number, string>
   state: 'receiving' | 'completed'
 }
 
@@ -143,7 +144,7 @@ export class MockApiError extends Error {
   }
 }
 
-const STATE_VERSION = 7
+const STATE_VERSION = 8
 const STORAGE_KEY = 'dfs.mock-db'
 /** `CHUNK_SIZE` at the 10 MiB attachment limit (§7.3). */
 export const CHUNK_SIZE = 10 * 1024 * 1024 - 128 * 1024
@@ -354,6 +355,18 @@ export class MockDb {
 
   node(id: string): DriveNode {
     return this.toDto(this.visibleNode(id))
+  }
+
+  /** The visible ones among `ids`; the rest are left out. */
+  lookupNodes(ids: readonly string[]): DriveNode[] {
+    return [...new Set(ids)].flatMap((id) => {
+      try {
+        return [this.toDto(this.visibleNode(id))]
+      } catch (error) {
+        if (error instanceof MockApiError && error.status === 404) return []
+        throw error
+      }
+    })
   }
 
   path(id: string): NodePath {
@@ -664,14 +677,27 @@ export class MockDb {
     if (!Number.isInteger(index) || index < 0 || index >= upload.chunkCount) {
       throw new MockApiError(400, 'invalid_part', 'Part index out of range.')
     }
-    if (sha256 && sha256 !== (await sha256Hex(body))) {
+    const hash = await sha256Hex(body)
+    if (sha256 && sha256 !== hash) {
       throw new MockApiError(400, 'hash_mismatch', 'The part was corrupted in transit.')
     }
+    // A part sent again is accepted with the same bytes, also after completion.
+    const received = upload.receivedParts[index]
+    if (received !== undefined) {
+      if (received !== hash) {
+        throw new MockApiError(
+          409,
+          'part_conflict',
+          'This part was already received with other bytes.',
+        )
+      }
+      if (upload.chunkCount === 1) this.completeUpload(uploadId)
+      return
+    }
     if (upload.state === 'completed') {
-      if (upload.receivedParts[index] === sha256) return
       throw new MockApiError(409, 'upload_completed', 'This upload is already complete.')
     }
-    upload.receivedParts[index] = sha256
+    upload.receivedParts[index] = hash
     const parts = this.receivedBytes.get(uploadId) ?? new Map<number, Uint8Array>()
     parts.set(index, new Uint8Array(body))
     this.receivedBytes.set(uploadId, parts)

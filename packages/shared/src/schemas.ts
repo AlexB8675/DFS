@@ -177,6 +177,12 @@ export const nodeIdsSchema = z.object({ ids: z.array(id).min(1).max(1000) })
 export const moveNodesSchema = nodeIdsSchema.extend({ parentId: id })
 export type MoveNodesInput = z.infer<typeof moveNodesSchema>
 
+/** `POST /nodes/lookup`: the caller's visible nodes among these; the rest are left out. */
+export const lookupNodesSchema = z.object({ ids: z.array(id).min(1).max(500) })
+export type LookupNodesInput = z.infer<typeof lookupNodesSchema>
+export const nodeListSchema = z.object({ items: z.array(nodeSchema) })
+export type NodeList = z.infer<typeof nodeListSchema>
+
 // ── Search & trash ───────────────────────────────────────────────────────────
 
 export const searchResultSchema = nodeSchema.extend({

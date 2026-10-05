@@ -12,9 +12,9 @@ import { httpTransport } from './upload-transport'
 // resumed. The bot stores blobs through the ChaosBlobStore, so syncing retries
 // too. Skipped unless DFS_API is set.
 //
-// Put `BLOB_STORE=chaos` in the root `.env` before `pnpm dev` (turbo hands
-// `dev` tasks no other variables from the shell); the bot then logs a
-// `BLOB_STORE=chaos` warning. Take it out afterwards. Then:
+// Start `pnpm dev` with `BLOB_STORE=chaos`, from the root `.env` or the
+// shell's environment (`$env:BLOB_STORE = 'chaos'` in PowerShell); the bot
+// then logs a `BLOB_STORE=chaos` warning. Take it out afterwards. Then:
 //
 //   DFS_API=http://127.0.0.1:3000 DFS_USERNAME=… DFS_PASSWORD=… pnpm --filter @dfs/web check:engine
 //

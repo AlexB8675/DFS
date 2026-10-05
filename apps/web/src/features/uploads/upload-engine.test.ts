@@ -99,7 +99,7 @@ function fakeApi() {
       return Promise.resolve({ ...rest, state, receivedParts: [...parts] })
     },
     cancel: vi.fn<UploadTransport['cancel']>(() => Promise.resolve()),
-    node: vi.fn<UploadTransport['node']>(() => Promise.resolve(null)),
+    nodes: vi.fn<UploadTransport['nodes']>(() => Promise.resolve([])),
   }
   return { api, transport }
 }
@@ -680,8 +680,8 @@ describe('UploadEngine', () => {
 
     engine.markSyncStates(new Map([[item('a.txt').nodeId ?? '', 'stored']]))
     // After a reconnect, events may have been missed: the rest is asked for.
-    vi.mocked(transport.node).mockImplementation((nodeId) =>
-      Promise.resolve(driveNode(nodeId, 'lost')),
+    vi.mocked(transport.nodes).mockImplementation((nodeIds) =>
+      Promise.resolve(nodeIds.map((nodeId) => driveNode(nodeId, 'lost'))),
     )
     await engine.refreshSyncStates()
 
@@ -689,13 +689,40 @@ describe('UploadEngine', () => {
       expect(item('a.txt').syncState).toBe('stored')
       expect(item('b.txt').syncState).toBe('lost')
     })
-    expect(transport.node).toHaveBeenCalledTimes(1)
+    // Only the file still syncing is asked about.
+    expect(transport.nodes).toHaveBeenCalledTimes(1)
+    expect(transport.nodes).toHaveBeenCalledWith([item('b.txt').nodeId])
+  })
+
+  it('asks about 1,200 syncing files in three requests', async () => {
+    const { transport } = fakeApi()
+    const engine = new UploadEngine(transport)
+    await engine.enqueue(
+      'folder',
+      Array.from({ length: 1200 }, (_, index) => file(`many-${String(index)}.txt`, 1)),
+    )
+    await vi.waitFor(
+      () => {
+        expect(items().every((upload) => upload.status === 'done')).toBe(true)
+      },
+      { timeout: 10_000 },
+    )
+    vi.mocked(transport.nodes).mockImplementation((nodeIds) =>
+      Promise.resolve(nodeIds.map((nodeId) => driveNode(nodeId, 'stored'))),
+    )
+    await engine.refreshSyncStates()
+    expect(vi.mocked(transport.nodes).mock.calls.map(([ids]) => ids.length)).toEqual([
+      500, 500, 200,
+    ])
+    await vi.waitFor(() => {
+      expect(items().every((upload) => upload.syncState === 'stored')).toBe(true)
+    })
   })
 
   it.each([1, 3])('keeps sync events received before a %i-part upload response', async (parts) => {
     const { api, transport } = fakeApi()
-    vi.mocked(transport.node).mockImplementation((nodeId) =>
-      Promise.resolve(driveNode(nodeId, 'stored')),
+    vi.mocked(transport.nodes).mockImplementation((nodeIds) =>
+      Promise.resolve(nodeIds.map((nodeId) => driveNode(nodeId, 'stored'))),
     )
     const stored = (uploadId: string) => {
       const session = api.sessions.get(uploadId)
@@ -717,13 +744,13 @@ describe('UploadEngine', () => {
     await vi.waitFor(() => {
       expect(item('quick.bin')).toMatchObject({ status: 'done', syncState: 'stored' })
     })
-    expect(transport.node).toHaveBeenCalledTimes(1)
+    expect(transport.nodes).toHaveBeenCalledTimes(1)
   })
 
   it('checks the new version instead of accepting an early event for the old one', async () => {
     const { api, transport } = fakeApi()
-    vi.mocked(transport.node).mockImplementation((nodeId) =>
-      Promise.resolve(driveNode(nodeId, 'syncing')),
+    vi.mocked(transport.nodes).mockImplementation((nodeIds) =>
+      Promise.resolve(nodeIds.map((nodeId) => driveNode(nodeId, 'syncing'))),
     )
     const engine = new UploadEngine({
       ...transport,
@@ -736,7 +763,7 @@ describe('UploadEngine', () => {
     await engine.enqueue('folder', [file('new-version.bin', CHUNK)])
     await vi.waitFor(() => {
       expect(item('new-version.bin')).toMatchObject({ status: 'done', syncState: 'syncing' })
-      expect(transport.node).toHaveBeenCalledTimes(1)
+      expect(transport.nodes).toHaveBeenCalledTimes(1)
     })
   })
 
@@ -754,23 +781,25 @@ describe('UploadEngine', () => {
     await vi.waitFor(() => {
       expect(item('first.bin').status).toBe('done')
     })
-    const pending = Promise.withResolvers<DriveNode | null>()
-    vi.mocked(transport.node)
+    const pending = Promise.withResolvers<DriveNode[]>()
+    vi.mocked(transport.nodes)
       .mockClear()
       .mockReturnValueOnce(pending.promise)
-      .mockImplementation((nodeId) => Promise.resolve(driveNode(nodeId, 'stored')))
+      .mockImplementation((nodeIds) =>
+        Promise.resolve(nodeIds.map((nodeId) => driveNode(nodeId, 'stored'))),
+      )
     const refreshing = engine.refreshSyncStates()
     await engine.enqueue('folder', [file('second.bin', CHUNK)])
     await vi.waitFor(() => {
       expect(item('second.bin').status).toBe('done')
     })
-    expect(transport.node).toHaveBeenCalledTimes(1)
-    pending.resolve(driveNode(item('first.bin').nodeId ?? '', 'stored'))
+    expect(transport.nodes).toHaveBeenCalledTimes(1)
+    pending.resolve([driveNode(item('first.bin').nodeId ?? '', 'stored')])
     await refreshing
     await vi.waitFor(() => {
       expect(item('second.bin').syncState).toBe('stored')
     })
-    expect(transport.node).toHaveBeenCalledTimes(2)
+    expect(transport.nodes).toHaveBeenCalledTimes(2)
   })
 
   it('waits for retry receipts when paused and resumed while checking the session', async () => {
@@ -813,7 +842,7 @@ describe('UploadEngine', () => {
     expect(transport.complete).toHaveBeenCalledTimes(1)
   })
 
-  it('resyncs every uploaded file with bounded requests and shares concurrent refreshes', async () => {
+  it('resyncs every uploaded file in one lookup, shared by concurrent refreshes', async () => {
     const { transport } = fakeApi()
     const engine = new UploadEngine(transport)
     const count = 205
@@ -828,20 +857,21 @@ describe('UploadEngine', () => {
     const gate = Promise.withResolvers<undefined>()
     let requests = 0
     let maximum = 0
-    vi.mocked(transport.node).mockImplementation(async (nodeId) => {
+    vi.mocked(transport.nodes).mockImplementation(async (nodeIds) => {
       requests += 1
       maximum = Math.max(maximum, requests)
       await gate.promise
       requests -= 1
-      return driveNode(nodeId, 'stored')
+      return nodeIds.map((nodeId) => driveNode(nodeId, 'stored'))
     })
     const first = engine.refreshSyncStates()
     const concurrent = engine.refreshSyncStates()
     gate.resolve(undefined)
     await Promise.all([first, concurrent])
 
-    expect(maximum).toBeLessThanOrEqual(DEFAULT_LIMITS.requests)
-    expect(transport.node).toHaveBeenCalledTimes(count)
+    // One lookup covers them all, and the concurrent refresh shares it.
+    expect(maximum).toBe(1)
+    expect(transport.nodes).toHaveBeenCalledTimes(1)
     await vi.waitFor(() => {
       expect(items().every((upload) => upload.syncState === 'stored')).toBe(true)
     })
@@ -854,12 +884,12 @@ describe('UploadEngine', () => {
     await vi.waitFor(() => {
       expect(item('synced.txt').status).toBe('done')
     })
-    const pending = Promise.withResolvers<DriveNode | null>()
-    vi.mocked(transport.node).mockReturnValueOnce(pending.promise)
+    const pending = Promise.withResolvers<DriveNode[]>()
+    vi.mocked(transport.nodes).mockReturnValueOnce(pending.promise)
     const refreshing = engine.refreshSyncStates()
     const nodeId = item('synced.txt').nodeId ?? ''
     engine.markSyncStates(new Map([[nodeId, 'stored']]))
-    pending.resolve(driveNode(nodeId, 'syncing'))
+    pending.resolve([driveNode(nodeId, 'syncing')])
     await refreshing
 
     await vi.waitFor(() => {

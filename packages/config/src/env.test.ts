@@ -39,12 +39,11 @@ describe('optional environment file preload', () => {
     )
   }
 
-  it('labels an absent optional file as info and continues with the current environment', () => {
+  it('continues quietly with the current environment when the optional file is absent', () => {
     const result = run('from the environment')
     expect(result.status).toBe(0)
     expect(result.stderr).toBe('')
-    expect(result.stdout).toContain('[INFO] Optional environment file "../../.env" not found;')
-    expect(result.stdout).toContain('"value":"from the environment"')
+    expect(result.stdout.trim()).toBe(JSON.stringify({ value: 'from the environment' }))
   })
 
   it('loads quoted and multiline settings before evaluating the entry module', async () => {

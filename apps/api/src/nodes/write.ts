@@ -15,12 +15,10 @@ import type { Auth } from '../auth/sessions.ts'
 import { isUniqueViolation } from '../db-errors.ts'
 import { ApiError } from '../errors.ts'
 import {
-  NODE_COLUMNS,
-  NODE_JOINS,
+  lookupNodes,
   nodePath,
   notFound,
   toDriveNode,
-  VISIBLE,
   visibleFolder,
   visibleNode,
   type NodeRow,
@@ -349,11 +347,8 @@ async function childByName(tx: Executor, parentId: string, name: string) {
 
 /** All of these, owned and not in the trash, or a 404. */
 async function visibleNodes(tx: Executor, ownerId: string, ids: string[]): Promise<NodeRow[]> {
-  const unique = [...new Set(ids)]
-  const { rows } = await tx.execute<NodeRow>(sql`
-    SELECT ${NODE_COLUMNS} FROM nodes n ${NODE_JOINS}
-    WHERE n.id = ANY(${uuidArray(unique)}) AND n.owner_id = ${ownerId} AND ${VISIBLE}`)
-  if (rows.length !== unique.length) throw notFound()
+  const rows = await lookupNodes(tx, ownerId, ids)
+  if (rows.length !== new Set(ids).size) throw notFound()
   return rows
 }
 

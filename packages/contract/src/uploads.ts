@@ -6,7 +6,15 @@ import {
   uploadStatusSchema,
 } from '@dfs/shared'
 import type { SuiteContext } from './context.ts'
-import { createFolder, sendPart, startUpload, text, uploadFile, workspace } from './files.ts'
+import {
+  createFolder,
+  sendPart,
+  sha256Hex,
+  startUpload,
+  text,
+  uploadFile,
+  workspace,
+} from './files.ts'
 
 /** Multipart uploads and versions (DESIGN.md §6.1, D20, D24). */
 export function uploadTests({ describe, it, expect, owner, target }: SuiteContext): void {
@@ -68,6 +76,36 @@ export function uploadTests({ describe, it, expect, owner, target }: SuiteContex
       expect(done).toMatchObject({ state: 'completed', receivedParts: [0, 1, 2] })
       const file = await client.call('GET', `/nodes/${session.nodeId}`, nodeSchema)
       expect(file.sizeBytes).toBe(bytes.length)
+    })
+
+    it('takes a part sent again with the same bytes, and refuses other bytes', async () => {
+      const client = await owner()
+      const root = await workspace(client)
+      const probe = await startUpload(client, root.id, 'probe.bin', 1)
+      const bytes = new Uint8Array(probe.chunkSize + 10).map((_, i) => i % 251)
+      const other = bytes.map((byte) => byte ^ 0xff)
+      const session = await startUpload(client, root.id, 'twice.bin', bytes.length)
+      const sendOther = async (index: number) => {
+        const part = other.slice(index * session.chunkSize, (index + 1) * session.chunkSize)
+        return client.error('PUT', `/uploads/${session.uploadId}/parts/${String(index)}`, {
+          body: part,
+          headers: { 'X-Part-SHA256': await sha256Hex(part) },
+        })
+      }
+
+      // While the upload is open…
+      await sendPart(client, session, 0, bytes)
+      await sendPart(client, session, 0, bytes)
+      expect(await sendOther(0)).toEqual({ status: 409, code: 'part_conflict' })
+      // …and once it is complete.
+      await sendPart(client, session, 1, bytes)
+      await client.send('POST', `/uploads/${session.uploadId}/complete`)
+      await sendPart(client, session, 1, bytes)
+      expect(await sendOther(1)).toEqual({ status: 409, code: 'part_conflict' })
+
+      const response = await client.fetch('GET', `/files/${session.nodeId}/content`)
+      const content = new Uint8Array(await response.arrayBuffer())
+      expect(await sha256Hex(content)).toBe(await sha256Hex(bytes))
     })
 
     it('makes a new version when the name matches a file, and keeps both in the quota (D20, D24)', async () => {

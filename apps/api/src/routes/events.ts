@@ -3,6 +3,12 @@ import { requireAuth } from '../auth/access.ts'
 
 /** Clients reconnect if they hear nothing for 60 s, so ping well within that (§6.1). */
 const PING_EVERY_MS = 25_000
+/**
+ * A client is dropped once this much is waiting for it: it has stopped
+ * reading, and reconnecting refetches what it missed. Bursts, such as the
+ * sync events of a big upload on a slow link, stay well below it.
+ */
+const MAX_BUFFERED_BYTES = 1024 * 1024
 
 /**
  * `GET /api/events`: the signed-in user's live events as Server-Sent Events.
@@ -23,14 +29,10 @@ export function eventRoutes(app: FastifyInstance, _options: object, done: () => 
     })
     const send = (type: string, payload: unknown) => {
       if (stream.destroyed || stream.writableEnded) return
-      // Events can be recovered by refetching on reconnect. Bound memory for
-      // a stalled client by closing its stream as soon as its buffer fills.
-      if (!stream.write(`event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`)) stream.destroy()
+      stream.write(`event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`)
+      if (stream.writableLength > MAX_BUFFERED_BYTES) stream.destroy()
     }
-    if (!stream.write('retry: 3000\n\n')) {
-      stream.destroy()
-      return
-    }
+    stream.write('retry: 3000\n\n')
 
     const unsubscribe = app.events.subscribe(
       auth.user.id,

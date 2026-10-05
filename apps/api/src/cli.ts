@@ -95,8 +95,8 @@ async function owner(
       })
       await appendJournal(tx, [userRecord(updated)])
     })
-    console.warn(
-      `[WARN] Gave the owner, ${username}, a new temporary password and signed them out everywhere.`,
+    console.info(
+      `[INFO] Gave the owner, ${username}, a new temporary password and signed them out everywhere.`,
     )
   } else {
     username = usernameSchema.parse(

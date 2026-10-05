@@ -42,7 +42,11 @@ async function unusedPorts(): Promise<number[]> {
   }
 }
 
-it.skipIf(process.platform !== 'win32')(
+// It starts the whole dev stack, Vite included, so it runs only on request:
+//   pnpm --filter @dfs/api check:dev-shutdown
+const requested = process.env.npm_lifecycle_event === 'check:dev-shutdown'
+
+it.skipIf(process.platform !== 'win32' || !requested)(
   'stops pnpm dev and releases every server port after one console Ctrl+C',
   async () => {
     const pnpm = process.env.npm_execpath
@@ -85,6 +89,9 @@ $startOptions = @{
   RedirectStandardOutput = ${literal(stdoutFile)}
   RedirectStandardError = ${literal(stderrFile)}
 }
+# Children inherit whether Ctrl+C is ignored, and an IDE, a CI runner or an
+# agent's shell may have turned it off. Turn it on, so the launcher hears it.
+[DevConsole]::SetConsoleCtrlHandler([IntPtr]::Zero, $false) | Out-Null
 $dev = Start-Process @startOptions
 try {
   $deadline = [DateTime]::UtcNow.AddSeconds(25)

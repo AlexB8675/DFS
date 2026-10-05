@@ -25,7 +25,7 @@ import {
 } from '@dfs/shared'
 import { eq, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
-import { fromDrizzle } from 'pg-boss'
+import { fromDrizzle, type PgBoss } from 'pg-boss'
 import type { Auth } from '../auth/sessions.ts'
 import { ApiError } from '../errors.ts'
 import { notFound, VISIBLE } from '../nodes/read.ts'
@@ -372,11 +372,16 @@ export async function receivePart(
   const key = await app.dataKeys.get(versionId, () =>
     app.keys.unwrapDek(upload.wrapped_dek, upload.key_id, uuidBytes(versionId)),
   )
+  // A single-part upload completes on its own, saving a request per small file.
+  const queue = upload.chunk_count === 1 ? await app.queue.get() : null
   // Each attempt owns its file; a late or duplicate PUT cannot overwrite an
   // accepted frame. Only publishing the chunk takes the session's row lock,
   // so different parts can still encrypt and write in parallel.
   const stagedPath = `${app.staging.framePath(versionId, index)}.${randomUUID()}`
-  const publication = { mayBeCommitted: false }
+  // The frame stays if its chunk row may have committed: once the transaction
+  // reached COMMIT, whose answer can be lost. A throw before that rolls back.
+  const attempt = { published: false, committing: false }
+  let pruned: string[] = []
   try {
     const { frame, hash: frameHash } = await stageFrame(
       app.staging,
@@ -393,44 +398,41 @@ export async function receivePart(
           VALUES (${versionId}, ${index}, ${body.length}, ${frame.length}, ${Buffer.from(plainHash)},
             ${Buffer.from(frameHash)}, ${stagedPath})
           ON CONFLICT (version_id, idx) DO NOTHING RETURNING idx`)
-        if (inserted.rows.length > 0) {
-          // Keep the frame even if COMMIT's response is lost. It may already be
-          // referenced by a committed chunk, and a retry can check that receipt.
-          publication.mayBeCommitted = true
-          return
-        }
+        attempt.published = inserted.rows.length > 0
       }
-      // Only racing retries need another lookup. Read after taking the lock:
-      // a receipt or completion may have committed while this attempt waited.
-      const { rows } = await tx.execute<{ plain_sha256: Buffer }>(sql`
-        SELECT plain_sha256 FROM chunks WHERE version_id = ${versionId} AND idx = ${index}`)
-      if (receivedPartMatches(rows[0]?.plain_sha256 ?? null, plainHash)) return
-      throw uploadCompleted()
+      if (!attempt.published) {
+        // Only racing retries need another lookup. Read after taking the lock:
+        // a receipt or completion may have committed while this attempt waited.
+        const { rows } = await tx.execute<{ plain_sha256: Buffer }>(sql`
+          SELECT plain_sha256 FROM chunks WHERE version_id = ${versionId} AND idx = ${index}`)
+        if (!receivedPartMatches(rows[0]?.plain_sha256 ?? null, plainHash)) throw uploadCompleted()
+      }
+      // In the same transaction as the part: one lock of the session and one
+      // commit per small file.
+      if (queue) pruned = await finishUpload(app, tx, queue, auth, current)
+      attempt.committing = true
     })
   } finally {
-    if (!publication.mayBeCommitted) {
+    if (!(attempt.published && attempt.committing)) {
       await app.staging.remove(stagedPath).catch((error: unknown) => {
         app.log.warn({ err: error, stagedPath }, 'could not remove an unaccepted staged frame')
       })
     }
   }
-
-  // A single-part upload completes on its own, saving a request per small file.
-  if (upload.chunk_count === 1) await completeUpload(app, auth, uploadId)
+  await removeStagedVersions(app, pruned)
 }
 
+/** Whether this part already arrived with these bytes; other bytes are a conflict. */
 function receivedPartMatches(received: Buffer | null, hash: Uint8Array): boolean {
   if (!received) return false
-  if (!received.equals(hash)) throw uploadCompleted()
+  if (!received.equals(hash)) {
+    throw new ApiError(409, 'part_conflict', 'This part was already received with other bytes.')
+  }
   return true
 }
 
 function uploadCompleted(): ApiError {
-  return new ApiError(
-    409,
-    'upload_completed',
-    'This part has already been received with other bytes.',
-  )
+  return new ApiError(409, 'upload_completed', 'This upload is already complete.')
 }
 
 /**
@@ -447,76 +449,90 @@ export async function completeUpload(
   const queue = await app.queue.get()
   const pruned = await app.db.transaction(async (tx) => {
     const upload = await findUpload(tx, auth, uploadId, { lock: true })
-    if (upload.state === 'completed') return []
-
-    const { rows: parts } = await tx.execute<{ plain_sha256: Buffer }>(sql`
-      SELECT plain_sha256 FROM chunks WHERE version_id = ${upload.version_id} ORDER BY idx`)
-    if (parts.length !== upload.chunk_count) {
-      throw new ApiError(409, 'incomplete_upload', 'Some parts have not been uploaded yet.')
-    }
-    const contentHash = await sha256(Buffer.concat(parts.map((part) => part.plain_sha256)))
-
-    // Every frame becomes its own blob until packing arrives (M1).
-    const { rows: blobs } = await tx.execute<{ id: number }>(sql`
-      WITH created AS (
-        INSERT INTO blobs (kind, state, size_bytes, live_bytes, frame_count, sha256, staged_path)
-        SELECT 'solo', 'staged', frame_size, frame_size, 1, frame_sha256, staged_path
-        FROM chunks WHERE version_id = ${upload.version_id}
-        RETURNING id, staged_path
-      )
-      UPDATE chunks SET blob_id = created.id, blob_offset = 0
-      FROM created
-      WHERE chunks.version_id = ${upload.version_id} AND chunks.staged_path = created.staged_path
-      RETURNING chunks.blob_id::float8 AS id`)
-
-    await tx
-      .update(fileVersions)
-      .set({
-        state: upload.chunk_count === 0 ? 'stored' : 'syncing',
-        contentHash: Buffer.from(contentHash),
-      })
-      .where(eq(fileVersions.id, upload.version_id))
-    const [node] = await tx
-      .update(nodes)
-      .set({
-        currentVersionId: upload.version_id,
-        sizeBytes: upload.size_bytes,
-        updatedAt: new Date(),
-      })
-      .where(eq(nodes.id, upload.node_id))
-      .returning()
-    if (!node) throw new ApiError(404, 'upload_not_found', 'This upload has expired.')
-    await tx
-      .update(uploadSessions)
-      .set({ state: 'completed' })
-      .where(eq(uploadSessions.id, uploadId))
-
-    // Old versions beyond retention go (D20), which frees their quota (D24).
-    const { rows: old } = await tx.execute<{ id: string }>(sql`
-      SELECT id FROM file_versions
-      WHERE node_id = ${upload.node_id} AND id <> ${upload.version_id}
-        AND state IN ('syncing', 'stored', 'failed')
-      ORDER BY version_no DESC
-      OFFSET ${app.config.versionRetention}`)
-    const prunedIds = old.map((row) => row.id)
-    const pruneRecords = await purgeVersions(tx, auth.user.id, prunedIds)
-
-    if (blobs.length > 0) {
-      const jobs = blobs.map((blob) => ({ data: { blobId: blob.id } satisfies BlobUploadJob }))
-      await queue.insert(QUEUES.blobUpload, jobs, { db: fromDrizzle(tx, sql) })
-    }
-    // The user's row as late as the order of locks.ts allows: completions for
-    // one user queue on it until they commit, and this keeps that short.
-    await tx.execute(sql`
-      UPDATE users SET
-        used_bytes = used_bytes + ${upload.size_bytes},
-        reserved_bytes = greatest(0, reserved_bytes - ${upload.reserved_bytes})
-      WHERE id = ${auth.user.id}`)
-    if (upload.parent_id) await markFoldersDirty(tx, [upload.parent_id])
-    await appendJournal(tx, [...pruneRecords, nodeRecord(node)])
-    return prunedIds
+    return finishUpload(app, tx, queue, auth, upload)
   })
   await removeStagedVersions(app, pruned)
+}
+
+/**
+ * Completes an upload whose session the caller's transaction has locked.
+ * Returns the pruned versions, whose staged frames go once it commits.
+ */
+async function finishUpload(
+  app: FastifyInstance,
+  tx: Executor,
+  queue: PgBoss,
+  auth: Auth,
+  upload: UploadRow,
+): Promise<string[]> {
+  if (upload.state === 'completed') return []
+
+  const { rows: parts } = await tx.execute<{ plain_sha256: Buffer }>(sql`
+    SELECT plain_sha256 FROM chunks WHERE version_id = ${upload.version_id} ORDER BY idx`)
+  if (parts.length !== upload.chunk_count) {
+    throw new ApiError(409, 'incomplete_upload', 'Some parts have not been uploaded yet.')
+  }
+  const contentHash = await sha256(Buffer.concat(parts.map((part) => part.plain_sha256)))
+
+  // Every frame becomes its own blob until packing arrives (M1).
+  const { rows: blobs } = await tx.execute<{ id: number }>(sql`
+    WITH created AS (
+      INSERT INTO blobs (kind, state, size_bytes, live_bytes, frame_count, sha256, staged_path)
+      SELECT 'solo', 'staged', frame_size, frame_size, 1, frame_sha256, staged_path
+      FROM chunks WHERE version_id = ${upload.version_id}
+      RETURNING id, staged_path
+    )
+    UPDATE chunks SET blob_id = created.id, blob_offset = 0
+    FROM created
+    WHERE chunks.version_id = ${upload.version_id} AND chunks.staged_path = created.staged_path
+    RETURNING chunks.blob_id::float8 AS id`)
+
+  await tx
+    .update(fileVersions)
+    .set({
+      state: upload.chunk_count === 0 ? 'stored' : 'syncing',
+      contentHash: Buffer.from(contentHash),
+    })
+    .where(eq(fileVersions.id, upload.version_id))
+  const [node] = await tx
+    .update(nodes)
+    .set({
+      currentVersionId: upload.version_id,
+      sizeBytes: upload.size_bytes,
+      updatedAt: new Date(),
+    })
+    .where(eq(nodes.id, upload.node_id))
+    .returning()
+  if (!node) throw new ApiError(404, 'upload_not_found', 'This upload has expired.')
+  await tx
+    .update(uploadSessions)
+    .set({ state: 'completed' })
+    .where(eq(uploadSessions.id, upload.id))
+
+  // Old versions beyond retention go (D20), which frees their quota (D24).
+  const { rows: old } = await tx.execute<{ id: string }>(sql`
+    SELECT id FROM file_versions
+    WHERE node_id = ${upload.node_id} AND id <> ${upload.version_id}
+      AND state IN ('syncing', 'stored', 'failed')
+    ORDER BY version_no DESC
+    OFFSET ${app.config.versionRetention}`)
+  const prunedIds = old.map((row) => row.id)
+  const pruneRecords = await purgeVersions(tx, auth.user.id, prunedIds)
+
+  if (blobs.length > 0) {
+    const jobs = blobs.map((blob) => ({ data: { blobId: blob.id } satisfies BlobUploadJob }))
+    await queue.insert(QUEUES.blobUpload, jobs, { db: fromDrizzle(tx, sql) })
+  }
+  // The user's row as late as the order of locks.ts allows: completions for
+  // one user queue on it until they commit, and this keeps that short.
+  await tx.execute(sql`
+    UPDATE users SET
+      used_bytes = used_bytes + ${upload.size_bytes},
+      reserved_bytes = greatest(0, reserved_bytes - ${upload.reserved_bytes})
+    WHERE id = ${auth.user.id}`)
+  if (upload.parent_id) await markFoldersDirty(tx, [upload.parent_id])
+  await appendJournal(tx, [...pruneRecords, nodeRecord(node)])
+  return prunedIds
 }
 
 /** `DELETE /uploads/:id`. A completed upload stays: its file is in the drive now. */

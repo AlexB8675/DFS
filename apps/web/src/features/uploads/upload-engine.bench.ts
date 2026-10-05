@@ -66,7 +66,7 @@ for (const parts of [4, 6, 8]) {
         },
         status: () => Promise.reject(new Error('Unexpected retry.')),
         cancel: () => Promise.resolve(),
-        node: () => Promise.resolve(null),
+        nodes: () => Promise.resolve([]),
       }
       const engine = new UploadEngine(transport, {
         ...DEFAULT_LIMITS,

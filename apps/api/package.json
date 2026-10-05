@@ -11,6 +11,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "check:end-to-end": "node --import=@dfs/config/load-env src/scripts/end-to-end.ts",
+    "check:dev-shutdown": "vitest run src/dev-shutdown.test.ts",
     "check:performance": "node --expose-gc src/scripts/performance.ts"
   },
   "dependencies": {

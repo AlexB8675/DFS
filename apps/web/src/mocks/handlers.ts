@@ -8,6 +8,7 @@ import {
   createUserSchema,
   ensureFoldersSchema,
   loginSchema,
+  lookupNodesSchema,
   moderationSchema,
   moveNodesSchema,
   nodeIdsSchema,
@@ -118,6 +119,11 @@ export const handlers = [
   // ── Browse ─────────────────────────────────────────────────────────────────
   http.get<Id>('/api/nodes/:id', ({ request, params }) =>
     respond(request, () => db.node(params.id)),
+  ),
+  http.post('/api/nodes/lookup', ({ request }) =>
+    respond(request, async () => ({
+      items: db.lookupNodes(lookupNodesSchema.parse(await request.json()).ids),
+    })),
   ),
   http.get<Id>('/api/nodes/:id/path', ({ request, params }) =>
     respond(request, () => db.path(params.id)),

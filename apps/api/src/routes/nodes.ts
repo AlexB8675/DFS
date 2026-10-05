@@ -2,9 +2,11 @@ import {
   createFolderSchema,
   ensureFoldersResultSchema,
   ensureFoldersSchema,
+  lookupNodesSchema,
   moveNodesSchema,
   nodeIdsSchema,
   nodeKindSchema,
+  nodeListSchema,
   nodePageSchema,
   nodePathSchema,
   nodeSchema,
@@ -18,7 +20,14 @@ import type { FastifyInstance } from 'fastify'
 import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
 import { requireAuth } from '../auth/access.ts'
-import { listChildren, nodePath, toDriveNode, visibleFolder, visibleNode } from '../nodes/read.ts'
+import {
+  listChildren,
+  lookupNodes,
+  nodePath,
+  toDriveNode,
+  visibleFolder,
+  visibleNode,
+} from '../nodes/read.ts'
 import { searchNodes } from '../nodes/search.ts'
 import { deleteForever, emptyTrash, listTrash } from '../nodes/trash.ts'
 import {
@@ -56,6 +65,15 @@ export function nodeRoutes(app: FastifyInstance, _options: object, done: () => v
     { schema: { params: byId, response: { 200: nodeSchema } } },
     async (request) =>
       toDriveNode(await visibleNode(app.db, ownerOf(request.auth), request.params.id)),
+  )
+
+  routes.post(
+    '/nodes/lookup',
+    { schema: { body: lookupNodesSchema, response: { 200: nodeListSchema } } },
+    async (request) => {
+      const rows = await lookupNodes(app.db, ownerOf(request.auth), request.body.ids)
+      return { items: rows.map(toDriveNode) }
+    },
   )
 
   routes.get(

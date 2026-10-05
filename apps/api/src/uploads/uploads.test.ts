@@ -1,3 +1,5 @@
+import { readdir } from 'node:fs/promises'
+import path from 'node:path'
 import { nodes, users } from '@dfs/db'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
 import { nameKey, type CreateUploadInput } from '@dfs/shared'
@@ -236,7 +238,7 @@ describe('receiving parts', () => {
       bytes[0] = 8
       await expect(
         receivePart(app, auth, session.uploadId, 0, bytes, undefined),
-      ).rejects.toMatchObject({ status: 409, code: 'upload_completed' })
+      ).rejects.toMatchObject({ status: 409, code: 'part_conflict' })
       expect(write).not.toHaveBeenCalled()
     } finally {
       write.mockRestore()
@@ -261,6 +263,35 @@ describe('receiving parts', () => {
     } finally {
       spy.mockRestore()
     }
+  })
+
+  it('rolls a single part back with its completion, and removes its frame', async () => {
+    const session = await start(3)
+    const bytes = new Uint8Array([4, 5, 6])
+    const queue = await app.queue.get()
+    const insert = vi
+      .spyOn(queue, 'insert')
+      .mockRejectedValueOnce(new Error('The job queue is unavailable.'))
+    try {
+      await expect(receivePart(app, auth, session.uploadId, 0, bytes, undefined)).rejects.toThrow(
+        'The job queue is unavailable.',
+      )
+    } finally {
+      insert.mockRestore()
+    }
+    const { rows: chunks } = await app.db.execute(sql`
+      SELECT 1 FROM chunks WHERE version_id = ${session.versionId}`)
+    expect(chunks).toHaveLength(0)
+    await expect(
+      readdir(path.join(app.staging.root, 'frames', session.versionId)),
+    ).resolves.toEqual([])
+
+    // The part and its completion go through together on the retry.
+    await receivePart(app, auth, session.uploadId, 0, bytes, undefined)
+    const { rows: sessions } = await app.db.execute<{ state: string }>(sql`
+      SELECT state FROM upload_sessions WHERE id = ${session.uploadId}`)
+    expect(sessions[0]?.state).toBe('completed')
+    expect((await readPart(session.versionId, bytes.length)).equals(bytes)).toBe(true)
   })
 
   it('keeps ciphertext and its hash together when two copies arrive concurrently', async () => {

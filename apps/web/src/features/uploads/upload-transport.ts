@@ -1,6 +1,6 @@
 import {
   ensureFoldersResultSchema,
-  nodeSchema,
+  nodeListSchema,
   uploadBatchResultSchema,
   uploadStatusSchema,
   type CreateUploadInput,
@@ -8,7 +8,7 @@ import {
   type UploadBatchResult,
   type UploadSessionStatus,
 } from '@dfs/shared'
-import { ApiError, apiFetch, apiGet, apiSend } from '@/lib/api/client'
+import { apiFetch, apiGet, apiSend } from '@/lib/api/client'
 
 /**
  * The upload API calls (§6.1), behind an interface so the upload engine can
@@ -29,8 +29,8 @@ export interface UploadTransport {
   /** The parts the server already has, to resume. */
   status: (uploadId: string) => Promise<UploadSessionStatus>
   cancel: (uploadId: string) => Promise<void>
-  /** The node, or `null` if it doesn't exist (any more). */
-  node: (nodeId: string) => Promise<DriveNode | null>
+  /** The visible ones of these nodes, up to 500; any that are gone are left out. */
+  nodes: (nodeIds: string[]) => Promise<DriveNode[]>
 }
 
 export const httpTransport: UploadTransport = {
@@ -49,12 +49,6 @@ export const httpTransport: UploadTransport = {
   complete: (uploadId) => apiSend('POST', `/uploads/${uploadId}/complete`),
   status: (uploadId) => apiGet(`/uploads/${uploadId}`, uploadStatusSchema),
   cancel: (uploadId) => apiSend('DELETE', `/uploads/${uploadId}`),
-  node: async (nodeId) => {
-    try {
-      return await apiGet(`/nodes/${nodeId}`, nodeSchema)
-    } catch (error) {
-      if (error instanceof ApiError && error.status === 404) return null
-      throw error
-    }
-  },
+  nodes: async (nodeIds) =>
+    (await apiSend('POST', '/nodes/lookup', { ids: nodeIds }, nodeListSchema)).items,
 }
