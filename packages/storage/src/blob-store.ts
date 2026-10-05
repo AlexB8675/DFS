@@ -10,15 +10,44 @@ export interface BlobLocation {
   attachmentId: string | null
 }
 
-export interface StoredBlob extends BlobLocation {
-  id: number
+/** A signed Discord CDN URL, which works until `expiresAt` (about a day, DESIGN.md §2). */
+export interface CdnUrl {
+  url: string
+  expiresAt: Date
 }
 
-export interface BlobStore {
-  /** Stores a sealed blob, durably, and says where it went. */
-  put: (id: number, data: Uint8Array) => Promise<BlobLocation>
+export interface StoredBlob extends BlobLocation {
+  id: number
+  /** A URL to read it with, if one is known; it may have expired. */
+  url?: CdnUrl | null
+}
+
+/** What a store is told about a blob it stores: Discord's message names it (DESIGN.md §4). */
+export interface BlobToStore {
+  id: number
+  kind: 'solo' | 'pack'
+  frameCount: number
+}
+
+export interface PutResult {
+  location: BlobLocation
+  /** Where to read it until the URL expires; `null` for a local store. */
+  url: CdnUrl | null
+}
+
+export interface BlobReader {
   /** Reads `length` bytes from `offset`: one frame out of a pack, or a whole solo blob. */
   read: (blob: StoredBlob, offset: number, length: number) => Promise<Uint8Array>
+  /**
+   * Fresh signed URLs, by blob ID, for a store read through a CDN, so a
+   * reader can sign a whole batch at once. A blob that is gone gets none.
+   */
+  signUrls?: (blobs: readonly StoredBlob[]) => Promise<Map<number, CdnUrl>>
+}
+
+export interface BlobStore extends BlobReader {
+  /** Stores a sealed blob, durably, and says where it went. */
+  put: (blob: BlobToStore, data: Uint8Array) => Promise<PutResult>
   /** Removes a blob. Removing one that is already gone is not an error. */
   delete: (blob: StoredBlob) => Promise<void>
 }

@@ -1,5 +1,6 @@
 import { chunkContext, openFrame, sha256, uuidBytes, type AesKey } from '@dfs/crypto'
 import type { Executor } from '@dfs/db'
+import { isFresh, type BlobReader, type CdnUrl } from '@dfs/storage'
 import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 
@@ -30,6 +31,8 @@ interface ChunkLocation extends Record<string, unknown> {
   channel_id: string | null
   message_id: string | null
   attachment_id: string | null
+  cdn_url: string | null
+  cdn_url_expires_ms: number | null
 }
 
 /** Chunk locations are looked up this many at a time, so a huge file isn't loaded at once. */
@@ -65,6 +68,7 @@ export async function* readVersion(
         `Version ${versionId} is missing chunks ${String(from)}–${String(to)}.`,
       )
     }
+    await signUrls(app.blobStore, chunks)
     let next = prefetchChunk(app, versionId, key, chunks[0])
     for (let i = 0; i < chunks.length; i += 1) {
       const chunk = chunks[i]
@@ -121,7 +125,8 @@ async function chunkLocations(
   const { rows } = await db.execute<ChunkLocation>(sql`
     SELECT chunk.idx, chunk.plain_size, chunk.frame_size, chunk.frame_sha256, chunk.staged_path,
       chunk.blob_id::float8 AS blob_id, chunk.blob_offset, blob.state::text AS blob_state,
-      blob.channel_id, blob.message_id, blob.attachment_id
+      blob.channel_id, blob.message_id, blob.attachment_id,
+      blob.cdn_url, (extract(epoch FROM blob.cdn_url_expires_at) * 1000)::float8 AS cdn_url_expires_ms
     FROM chunks chunk LEFT JOIN blobs blob ON blob.id = chunk.blob_id
     WHERE chunk.version_id = ${versionId} AND chunk.idx BETWEEN ${from} AND ${to}
     ORDER BY chunk.idx`)
@@ -157,8 +162,43 @@ async function readFrame(
       channelId: chunk.channel_id,
       messageId: chunk.message_id,
       attachmentId: chunk.attachment_id,
+      url: cdnUrlOf(chunk),
     },
     chunk.blob_offset,
     chunk.frame_size,
   )
+}
+
+/**
+ * Signs, in one request, the CDN URLs a lookup batch is missing or that are
+ * about to expire, rather than one request per chunk as they are read.
+ */
+async function signUrls(reader: BlobReader, chunks: ChunkLocation[]): Promise<void> {
+  if (!reader.signUrls) return
+  const stale = chunks.filter(
+    (chunk) => chunk.blob_state === 'stored' && !chunk.staged_path && !isFresh(cdnUrlOf(chunk)),
+  )
+  const blobs = new Map<number, ChunkLocation>()
+  for (const chunk of stale) if (chunk.blob_id !== null) blobs.set(chunk.blob_id, chunk)
+  if (blobs.size === 0) return
+  const signed = await reader.signUrls(
+    [...blobs].map(([id, chunk]) => ({
+      id,
+      channelId: chunk.channel_id,
+      messageId: chunk.message_id,
+      attachmentId: chunk.attachment_id,
+    })),
+  )
+  for (const chunk of stale) {
+    const url = chunk.blob_id === null ? undefined : signed.get(chunk.blob_id)
+    if (url) {
+      chunk.cdn_url = url.url
+      chunk.cdn_url_expires_ms = url.expiresAt.getTime()
+    }
+  }
+}
+
+function cdnUrlOf(chunk: ChunkLocation): CdnUrl | null {
+  if (!chunk.cdn_url || chunk.cdn_url_expires_ms === null) return null
+  return { url: chunk.cdn_url, expiresAt: new Date(chunk.cdn_url_expires_ms) }
 }

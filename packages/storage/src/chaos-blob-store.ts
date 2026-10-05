@@ -1,5 +1,11 @@
 import { setTimeout as sleep } from 'node:timers/promises'
-import { BlobStoreError, type BlobLocation, type BlobStore, type StoredBlob } from './blob-store.ts'
+import {
+  BlobStoreError,
+  type BlobStore,
+  type BlobToStore,
+  type PutResult,
+  type StoredBlob,
+} from './blob-store.ts'
 
 export interface ChaosOptions {
   /** Chance that a call fails before doing anything (a 429, a 5xx, a timeout). */
@@ -31,15 +37,15 @@ export class ChaosBlobStore implements BlobStore {
     this.#random = options.random ?? Math.random
   }
 
-  async put(id: number, data: Uint8Array): Promise<BlobLocation> {
+  async put(blob: BlobToStore, data: Uint8Array): Promise<PutResult> {
     await this.#trouble('put')
-    const location = await this.#inner.put(id, data)
+    const stored = await this.#inner.put(blob, data)
     if (this.#random() < this.#lostResponseRate) {
       throw new BlobStoreError('Chaos: the blob was stored, but the answer was lost.', {
         retryable: true,
       })
     }
-    return location
+    return stored
   }
 
   async read(blob: StoredBlob, offset: number, length: number): Promise<Uint8Array> {

@@ -19,6 +19,7 @@ interface StagedBlob extends Record<string, unknown> {
   kind: 'solo' | 'pack'
   size_bytes: number
   live_bytes: number
+  frame_count: number
   sha256: Buffer | null
   staged_path: string
 }
@@ -103,7 +104,7 @@ async function storeBlob(
 ): Promise<{ userId: string; id: string; parentId: string }[]> {
   const { db, staging, store } = deps
   const { rows } = await db.execute<StagedBlob>(sql`
-    SELECT id::float8 AS id, kind, size_bytes, live_bytes, sha256, staged_path
+    SELECT id::float8 AS id, kind, size_bytes, live_bytes, frame_count, sha256, staged_path
     FROM blobs WHERE id = ${blobId} AND state IN ('staged', 'uploading') AND staged_path IS NOT NULL`)
   const blob = rows[0]
   if (!blob) return []
@@ -128,7 +129,10 @@ async function storeBlob(
     const hash = Buffer.from(await crypto.subtle.digest('SHA-256', data))
     if (!hash.equals(blob.sha256)) throw new Error(`Staged blob ${String(blobId)} is corrupt.`)
   }
-  const location = await store.put(blobId, data)
+  const { location, url } = await store.put(
+    { id: blobId, kind: blob.kind, frameCount: blob.frame_count },
+    data,
+  )
 
   /** Versions this blob finished: nothing of theirs is left in staging. */
   const storedVersions: string[] = []
@@ -136,7 +140,8 @@ async function storeBlob(
     const { rows: stored } = await tx.execute<{ id: number }>(sql`
       UPDATE blobs SET state = 'stored', stored_at = now(), staged_path = NULL,
         channel_id = ${location.channelId}, message_id = ${location.messageId},
-        attachment_id = ${location.attachmentId}
+        attachment_id = ${location.attachmentId},
+        cdn_url = ${url?.url ?? null}, cdn_url_expires_at = ${url?.expiresAt ?? null}
       WHERE id = ${blobId} AND state IN ('staged', 'uploading')
       RETURNING id`)
     if (stored.length === 0) return []
@@ -172,7 +177,10 @@ async function storeBlob(
           kind: blob.kind,
           sizeBytes: blob.size_bytes,
           sha256: blob.sha256?.toString('hex') ?? null,
-          ...location,
+          // Where it is for good; the signed URL expires, so it stays out.
+          channelId: location.channelId,
+          messageId: location.messageId,
+          attachmentId: location.attachmentId,
         },
       },
     ]

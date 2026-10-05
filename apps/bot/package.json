@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     "./uploader": "./src/uploader.ts",
-    "./leader-work": "./src/leader-work.ts"
+    "./leader-work": "./src/leader-work.ts",
+    "./storage": "./src/storage.ts"
   },
   "scripts": {
     "dev": "node --watch --import=@dfs/config/load-env src/main.ts",

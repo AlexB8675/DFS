@@ -16,12 +16,15 @@ import {
 //   DFS_USERNAME=… DFS_PASSWORD=… pnpm --filter @dfs/api check:end-to-end
 //
 // Options: DFS_API (default http://127.0.0.1:3000), DFS_ORIGIN (the web app's
-// address, default http://localhost:5173), DFS_SMALL_FILES, DFS_LARGE_MB.
+// address, default http://localhost:5173), DFS_SMALL_FILES, DFS_LARGE_MB, and
+// DFS_CONCURRENT=off to skip the last step's 480 uploads: on Discord, each is
+// a message of its own until small files are packed.
 
 const api = process.env.DFS_API ?? 'http://127.0.0.1:3000'
 const origin = process.env.DFS_ORIGIN ?? 'http://localhost:5173'
 const smallFiles = Number(process.env.DFS_SMALL_FILES ?? 1000)
 const largeBytes = Number(process.env.DFS_LARGE_MB ?? 1024) * 1024 * 1024
+const concurrent = process.env.DFS_CONCURRENT !== 'off'
 const { DFS_USERNAME: username, DFS_PASSWORD: password } = process.env
 if (!username || !password) {
   console.error('[ERROR] Set DFS_USERNAME and DFS_PASSWORD.')
@@ -119,40 +122,42 @@ await step(`a ${String(largeBytes / 1024 / 1024)} MB file`, async () => {
     throw new Error('The large file came back different.')
 })
 
-await step('12 clients uploading versions of the same names at once', async () => {
-  // Starts and completions of one user's uploads interleave, versions of the
-  // same files are numbered and pruned concurrently: no request may fail.
-  const folders = await Promise.all(
-    ['A', 'B'].map((name) => createFolder(client, root.id, `Shared ${name}`)),
-  )
-  const bytes = new TextEncoder().encode('hello\n')
-  await inParallel(12, Array.from({ length: 12 }), async (_, worker) => {
-    for (let round = 0; round < 5; round++) {
-      const uploads = Array.from({ length: 8 }, (_, index) => ({
-        parentId: folders[(worker + index) % 2]?.id ?? root.id,
-        name: `shared-${String((round + index) % 12)}.txt`,
-        sizeBytes: bytes.length,
-        mimeType: 'text/plain',
-      }))
-      const { results } = await client.call('POST', '/uploads/batch', uploadBatchResultSchema, {
-        json: { uploads },
-      })
-      await Promise.all(
-        results.map(async (result) => {
-          if (!result.ok) throw new Error(result.error.message)
-          await client.send('PUT', `/uploads/${result.session.uploadId}/parts/0`, {
-            body: bytes,
-            headers: { 'X-Part-SHA256': await sha256Hex(bytes) },
-          })
-        }),
-      )
+if (concurrent) {
+  await step('12 clients uploading versions of the same names at once', async () => {
+    // Starts and completions of one user's uploads interleave, versions of the
+    // same files are numbered and pruned concurrently: no request may fail.
+    const folders = await Promise.all(
+      ['A', 'B'].map((name) => createFolder(client, root.id, `Shared ${name}`)),
+    )
+    const bytes = new TextEncoder().encode('hello\n')
+    await inParallel(12, Array.from({ length: 12 }), async (_, worker) => {
+      for (let round = 0; round < 5; round++) {
+        const uploads = Array.from({ length: 8 }, (_, index) => ({
+          parentId: folders[(worker + index) % 2]?.id ?? root.id,
+          name: `shared-${String((round + index) % 12)}.txt`,
+          sizeBytes: bytes.length,
+          mimeType: 'text/plain',
+        }))
+        const { results } = await client.call('POST', '/uploads/batch', uploadBatchResultSchema, {
+          json: { uploads },
+        })
+        await Promise.all(
+          results.map(async (result) => {
+            if (!result.ok) throw new Error(result.error.message)
+            await client.send('PUT', `/uploads/${result.session.uploadId}/parts/0`, {
+              body: bytes,
+              headers: { 'X-Part-SHA256': await sha256Hex(bytes) },
+            })
+          }),
+        )
+      }
+    })
+    for (const folder of folders) {
+      const page = await client.call('GET', `/nodes/${folder.id}/children`, nodePageSchema)
+      if (page.items.length !== 12) throw new Error('Shared names made the wrong files.')
     }
   })
-  for (const folder of folders) {
-    const page = await client.call('GET', `/nodes/${folder.id}/children`, nodePageSchema)
-    if (page.items.length !== 12) throw new Error('Shared names made the wrong files.')
-  }
-})
+}
 
 console.info('[INFO] All checks passed.')
 

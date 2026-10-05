@@ -54,4 +54,18 @@ describe('bot', () => {
     expect((await call('Bearer wrong')).statusCode).toBe(401)
     expect((await call(`Bearer ${secret}`)).statusCode).toBe(200)
   })
+
+  it('signs CDN URLs only for Discord storage, for a bounded number of blobs', async () => {
+    const refresh = (blobIds: unknown) =>
+      bot.server.inject({
+        method: 'POST',
+        url: '/internal/urls/refresh',
+        headers: { authorization: `Bearer ${secret}` },
+        payload: { blobIds },
+      })
+    expect((await refresh([])).statusCode).toBe(400)
+    expect((await refresh(Array.from({ length: 201 }, (_, i) => i + 1))).statusCode).toBe(400)
+    // A local store has no URLs to sign.
+    expect((await refresh([1, 2])).json()).toEqual({ urls: [] })
+  })
 })

@@ -7,7 +7,7 @@ import {
   type BlobUploadJob,
   type Database,
 } from '@dfs/db'
-import { ChaosBlobStore, LocalBlobStore, Staging, type BlobStore } from '@dfs/storage'
+import { Staging, type BlobStore } from '@dfs/storage'
 import { sql } from 'drizzle-orm'
 import type { FastifyBaseLogger } from 'fastify'
 import type { JobResult, PgBoss } from 'pg-boss'
@@ -28,55 +28,50 @@ export async function startLeaderWork(options: {
   config: Config
   db: Database
   boss: PgBoss
+  store: BlobStore
   log: FastifyBaseLogger
 }): Promise<LeaderWork> {
-  const { config, db, boss, log } = options
+  const { config, db, boss, store, log } = options
   const staging = new Staging(config.stagingDir)
   await boss.createQueue(QUEUES.blobUpload, BLOB_UPLOAD_QUEUE)
   // A queue made by an older version keeps its options unless they are updated.
   const { retryDelayMax: _fixed, ...changeable } = BLOB_UPLOAD_QUEUE
   await boss.updateQueue(QUEUES.blobUpload, changeable)
 
-  if (config.blobStore !== 'discord') {
-    let store: BlobStore = new LocalBlobStore(config.localBlobDir)
-    if (config.blobStore === 'chaos') {
-      store = new ChaosBlobStore(store)
-      log.warn('BLOB_STORE=chaos: storing blobs will fail now and then, on purpose')
-    }
-    const deps = { db, staging, store, log }
-    await boss.work<
-      BlobUploadJob,
-      unknown,
-      {
-        batchSize: number
-        burstWhenBatchFull: boolean
-        localConcurrency: number
-        perJobResults: true
-      }
-    >(
-      QUEUES.blobUpload,
-      // Two batches overlap; each pipelines at most uploadChannelConcurrency blobs.
-      { batchSize: 8, burstWhenBatchFull: true, localConcurrency: 2, perJobResults: true },
-      async (jobs): Promise<JobResult[]> => {
-        const failures = await storeBlobs(
-          deps,
-          jobs.map((job) => job.data.blobId),
-          config.uploadChannelConcurrency,
-        )
-        return jobs.map((job) => {
-          const error = failures.get(job.data.blobId)
-          if (error === undefined) return { id: job.id, status: 'completed' }
-          log.warn(
-            { err: error, blobId: job.data.blobId },
-            'storing a blob failed; it will be retried',
-          )
-          return { id: job.id, status: 'failed', output: { message: error.message } }
-        })
-      },
-    )
-  } else {
-    log.warn('Discord storage arrives with M1: staged blobs wait until then')
+  if (config.blobStore === 'chaos') {
+    log.warn('BLOB_STORE=chaos: storing blobs will fail now and then, on purpose')
   }
+  const deps = { db, staging, store, log }
+  await boss.work<
+    BlobUploadJob,
+    unknown,
+    {
+      batchSize: number
+      burstWhenBatchFull: boolean
+      localConcurrency: number
+      perJobResults: true
+    }
+  >(
+    QUEUES.blobUpload,
+    // Two batches overlap; each pipelines at most uploadChannelConcurrency blobs.
+    { batchSize: 8, burstWhenBatchFull: true, localConcurrency: 2, perJobResults: true },
+    async (jobs): Promise<JobResult[]> => {
+      const failures = await storeBlobs(
+        deps,
+        jobs.map((job) => job.data.blobId),
+        config.uploadChannelConcurrency,
+      )
+      return jobs.map((job) => {
+        const error = failures.get(job.data.blobId)
+        if (error === undefined) return { id: job.id, status: 'completed' }
+        log.warn(
+          { err: error, blobId: job.data.blobId },
+          'storing a blob failed; it will be retried',
+        )
+        return { id: job.id, status: 'failed', output: { message: error.message } }
+      })
+    },
+  )
 
   const loops = [
     repeat(FOLD_EVERY_MS, log, 'folding folder sizes', () => foldAllFolderStats(db)),

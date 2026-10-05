@@ -1,14 +1,19 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
 import type { Config } from '@dfs/config'
 import { createDatabase, createPool } from '@dfs/db'
+import { refreshUrlsSchema } from '@dfs/shared'
+import { BlobStoreError, type BlobStore } from '@dfs/storage'
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify'
 import { PgBoss } from 'pg-boss'
 import { startLeaderWork, type LeaderWork } from './leader-work.ts'
 import { LeaderElection } from './leader.ts'
+import { botBlobStore, refreshBlobUrls, refreshedUrls } from './storage.ts'
 
 // The bot (DESIGN §11): job workers on pg-boss, and later the Discord gateway
 // and the packer. Only the leader runs them. Its internal HTTP server answers
-// the API on the internal network only, behind a shared secret (§7.5).
+// the API on the internal network only, behind a shared secret (§7.5): its
+// health, and signed CDN URLs for reading blobs back (§6.2), which any
+// instance can give.
 
 export interface Bot {
   server: FastifyInstance
@@ -25,6 +30,7 @@ export interface BotOptions {
   onLeadershipLost: () => void
   /** Overrides for tests. */
   election?: { pollMs?: number; heartbeatMs?: number; backoff?: { minMs: number; maxMs: number } }
+  store?: BlobStore
 }
 
 export function createBot({
@@ -32,6 +38,7 @@ export function createBot({
   logger,
   onLeadershipLost,
   election: electionOptions,
+  store: givenStore,
 }: BotOptions): Bot {
   const server = Fastify({ logger: logger ?? loggerOptions(config) })
   const pool = createPool(config.databaseUrl, {
@@ -41,6 +48,7 @@ export function createBot({
     },
   })
   const db = createDatabase(pool)
+  const store = givenStore ?? botBlobStore(config, db)
   let boss: PgBoss | null = null
   let work: LeaderWork | null = null
   let stopped = false
@@ -64,7 +72,13 @@ export function createBot({
         // Creates or upgrades pg-boss's own schema on first start.
         await queue.start()
         if (!stopped)
-          leadingWork = await startLeaderWork({ config, db, boss: queue, log: server.log })
+          leadingWork = await startLeaderWork({
+            config,
+            db,
+            boss: queue,
+            store,
+            log: server.log,
+          })
         if (stopped) {
           await leadingWork?.stop()
           await queue.stop({ graceful: false })
@@ -103,6 +117,24 @@ export function createBot({
     role: election.state,
     queue: boss ? 'running' : 'stopped',
   }))
+
+  server.post('/internal/urls/refresh', async (request, reply) => {
+    const input = refreshUrlsSchema.safeParse(request.body)
+    if (!input.success) {
+      return reply
+        .code(400)
+        .send({ error: { code: 'invalid_request', message: 'Expected 1 to 200 blob IDs.' } })
+    }
+    try {
+      return refreshedUrls(await refreshBlobUrls(db, store, input.data.blobIds))
+    } catch (error) {
+      if (!(error instanceof BlobStoreError)) throw error
+      request.log.warn({ err: error }, 'signing CDN URLs failed')
+      return reply
+        .code(503)
+        .send({ error: { code: 'discord_unavailable', message: error.message } })
+    }
+  })
 
   election.start()
 

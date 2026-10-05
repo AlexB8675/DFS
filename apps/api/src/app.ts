@@ -3,12 +3,13 @@ import cookie from '@fastify/cookie'
 import type { Config } from '@dfs/config'
 import type { MasterKeys } from '@dfs/crypto'
 import { createDatabase, createPool, type Database } from '@dfs/db'
-import { BlobStoreError, LocalBlobStore, Staging, type BlobStore } from '@dfs/storage'
+import { LocalBlobStore, Staging, type BlobReader } from '@dfs/storage'
 import Fastify, { LogController, type FastifyInstance, type FastifyServerOptions } from 'fastify'
 import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod'
 import type pg from 'pg'
 import { registerAccess } from './auth/access.ts'
 import { RateLimiter } from './auth/rate-limit.ts'
+import { CdnBlobReader } from './content/cdn-reader.ts'
 import { registerErrorHandling } from './errors.ts'
 import { EventHub } from './events/hub.ts'
 import { DataKeyCache, loadMasterKeys } from './keys.ts'
@@ -41,7 +42,7 @@ declare module 'fastify' {
     /** Live events for the users with open streams on this instance (§6.1). */
     events: EventHub
     /** Where stored blobs are read from (§6.2). */
-    blobStore: BlobStore
+    blobStore: BlobReader
   }
 }
 
@@ -49,6 +50,8 @@ export interface AppOptions {
   config: Config
   /** Defaults to pino at `LOG_LEVEL`, pretty-printed in development. */
   logger?: FastifyServerOptions['logger']
+  /** Defaults to the store `BLOB_STORE` names; tests read from a fake Discord. */
+  blobStore?: BlobReader
 }
 
 /**
@@ -56,7 +59,11 @@ export interface AppOptions {
  * `app.inject()`. The database pool connects on first use, so the API starts
  * even while Postgres is down; `/api/health` says so.
  */
-export async function buildApp({ config, logger }: AppOptions): Promise<FastifyInstance> {
+export async function buildApp({
+  config,
+  logger,
+  blobStore,
+}: AppOptions): Promise<FastifyInstance> {
   const app = Fastify({
     logger: logger ?? loggerOptions(config),
     // IDs are ours: a client can't choose what the logs call its request.
@@ -94,7 +101,7 @@ export async function buildApp({ config, logger }: AppOptions): Promise<FastifyI
   app.decorate('dataKeys', new DataKeyCache())
   app.decorate('queue', queue)
   app.decorate('events', events)
-  app.decorate('blobStore', blobStoreFor(config))
+  app.decorate('blobStore', blobStore ?? blobStoreFor(config))
   // Open event streams would keep the server from closing.
   app.addHook('preClose', (done) => {
     events.endStreams()
@@ -123,15 +130,11 @@ export async function buildApp({ config, logger }: AppOptions): Promise<FastifyI
   return app
 }
 
-/** The local store in development; reading from Discord arrives with M1. */
-function blobStoreFor(config: Config): BlobStore {
+/** The API only reads blobs; the bot stores them (DESIGN.md §3.1). */
+function blobStoreFor(config: Config): BlobReader {
   // Chaos troubles only the bot's writes; the API reads the local store as is.
   if (config.blobStore !== 'discord') return new LocalBlobStore(config.localBlobDir)
-  const unavailable = () =>
-    Promise.reject(
-      new BlobStoreError('Reading from Discord arrives with M1.', { retryable: false }),
-    )
-  return { put: unavailable, read: unavailable, delete: unavailable }
+  return new CdnBlobReader({ botUrl: config.botInternalUrl, secret: config.internalRpcSecret })
 }
 
 function loggerOptions(config: Config): FastifyServerOptions['logger'] {

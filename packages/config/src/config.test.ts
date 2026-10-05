@@ -73,6 +73,7 @@ describe('loadConfig', () => {
       NODE_ENV: 'production',
       DATABASE_URL: 'postgres://dfs@postgres/dfs',
       INTERNAL_RPC_SECRET: 'x'.repeat(32),
+      DISCORD_BOT_TOKEN: 'a-bot-token',
     }
     // Only the API serves the public URL.
     expect(loadConfig(production, { ...api, service: 'bot' })).toMatchObject({
@@ -108,8 +109,16 @@ describe('loadConfig', () => {
       NODE_ENV: 'production',
       DATABASE_URL: 'postgres://dfs@postgres/dfs',
       INTERNAL_RPC_SECRET: 'x'.repeat(32),
+      DISCORD_BOT_TOKEN: 'a-bot-token',
     }
     expect(loadConfig(production, { ...api, service: 'bot' }).discord.categoryName).toBe('DFS')
+  })
+
+  it('gives the bot a token when it stores in Discord, and only the bot', () => {
+    expect(problems({ BLOB_STORE: 'discord' }, { ...api, service: 'bot' })).toEqual([
+      'DISCORD_BOT_TOKEN: the bot needs it to store blobs in Discord (BLOB_STORE=discord)',
+    ])
+    expect(loadConfig({ BLOB_STORE: 'discord' }, api).blobStore).toBe('discord')
   })
 
   it('refuses pack sizes that can never fit an attachment', () => {

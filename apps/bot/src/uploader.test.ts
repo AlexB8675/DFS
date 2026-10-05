@@ -211,9 +211,9 @@ describe('blob pipeline', () => {
     const remove = staging.remove.bind(staging)
     const log = { warn: vi.fn() }
     let cleaned = 0
-    const writing = vi.spyOn(store, 'put').mockImplementation(async (id, data) => {
-      if (id === last.id) await release.promise
-      return put(id, data)
+    const writing = vi.spyOn(store, 'put').mockImplementation(async (blob, data) => {
+      if (blob.id === last.id) await release.promise
+      return put(blob, data)
     })
     const cleanup = vi.spyOn(staging, 'remove').mockImplementation(async (file) => {
       if (file === last.stagedPath) throw cleanupError
@@ -271,13 +271,13 @@ describe('blob pipeline', () => {
     const error = new Error('Temporary store failure.')
     let active = 0
     let maximum = 0
-    const spy = vi.spyOn(store, 'put').mockImplementation(async (id, data) => {
+    const spy = vi.spyOn(store, 'put').mockImplementation(async (blob, data) => {
       active += 1
       maximum = Math.max(maximum, active)
       try {
         await release.promise
-        if (id === failed.id) throw error
-        return await put(id, data)
+        if (blob.id === failed.id) throw error
+        return await put(blob, data)
       } finally {
         active -= 1
       }

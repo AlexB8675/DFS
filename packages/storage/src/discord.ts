@@ -13,10 +13,18 @@ export interface DiscordRest {
   get: (route: DiscordRoute, options?: RequestData) => Promise<unknown>
   post: (route: DiscordRoute, options?: RequestData) => Promise<unknown>
   put: (route: DiscordRoute, options?: RequestData) => Promise<unknown>
+  delete: (route: DiscordRoute, options?: RequestData) => Promise<unknown>
 }
 
-export function createDiscordRest(token: string): DiscordRest {
-  return new REST({ version: '10' }).setToken(token)
+/**
+ * `timeoutMs` bounds each request; the bot raises it, since posting a 10 MiB
+ * attachment on a slow uplink takes longer than the 15 s default.
+ */
+export function createDiscordRest(
+  token: string,
+  options: { timeoutMs?: number } = {},
+): DiscordRest {
+  return new REST({ version: '10', timeout: options.timeoutMs ?? 15_000 }).setToken(token)
 }
 
 /** What the bot may do in DFS's channels (DESIGN.md §4). */

@@ -216,6 +216,12 @@ export function loadConfig(env: Record<string, string | undefined>, options: Loa
       `DISCORD_CATEGORY_NAME: ${PRODUCTION.DISCORD_CATEGORY_NAME} is production's category; development uses its own, such as ${DEVELOPMENT.DISCORD_CATEGORY_NAME}`,
     )
   }
+  const blobStore = raw.BLOB_STORE ?? defaults.BLOB_STORE
+  if (options.service === 'bot' && blobStore === 'discord' && !raw.DISCORD_BOT_TOKEN) {
+    problems.push(
+      'DISCORD_BOT_TOKEN: the bot needs it to store blobs in Discord (BLOB_STORE=discord)',
+    )
+  }
   if (production && options.service === 'api' && !raw.PUBLIC_BASE_URL) {
     problems.push('PUBLIC_BASE_URL: required in production')
   }
@@ -247,7 +253,7 @@ export function loadConfig(env: Record<string, string | undefined>, options: Loa
     nodeEnv: raw.NODE_ENV,
     logLevel: raw.LOG_LEVEL,
     databaseUrl,
-    blobStore: raw.BLOB_STORE ?? defaults.BLOB_STORE,
+    blobStore,
     localBlobDir: directory(raw.LOCAL_BLOB_DIR),
     discord: {
       botToken: raw.DISCORD_BOT_TOKEN ?? null,

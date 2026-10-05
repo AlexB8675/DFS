@@ -102,6 +102,18 @@ run again, it changes nothing. The bot's role needs View Channels, Send
 Messages, Attach Files, Read Message History and Manage Messages, plus Manage
 Channels and Manage Roles for this command.
 
+Set `BLOB_STORE=discord` in `.env` to store files in those channels, and
+restart `pnpm dev`. To check what DFS relies on from Discord (posting with a
+nonce, Range reads from the CDN, signing URLs again, deleting) against
+`#storage-03`, run:
+
+```powershell
+pnpm --filter @dfs/storage check:discord
+```
+
+It deletes everything it posts. Development shares Discord's rate limits with
+production, so keep load tests on `BLOB_STORE=local` or `chaos`.
+
 ## Test in the browser
 
 Use disposable folders and files for these checks:
@@ -163,6 +175,12 @@ $env:DFS_SMALL_FILES = '100'
 $env:DFS_LARGE_MB = '64'
 ```
 
+Against Discord storage, run only that smoke check, with
+`$env:DFS_CONCURRENT = 'off'` as well: until small files are packed, every
+small file is a message of its own, and the full run would post about 1,600
+messages on the rate limits production shares. Run the full-size check with
+`BLOB_STORE=local`.
+
 A failing check names the step and the request that failed. If one stops
 partway with no message at all, read the exit code pnpm reports: a Windows
 exception code such as `3221225477` (0xC0000005) or `3221225725` (0xC00000FD)
@@ -186,7 +204,7 @@ and resume recover all uploads, the downloads match byte for byte, and quota is
 counted once. It can take several minutes because it exercises real backoff.
 The seed replays the upload request faults; the bot's storage faults are random.
 
-Afterwards, restore `BLOB_STORE=local`, restart `pnpm dev`, and remove the test
+Afterwards, restore your previous `BLOB_STORE`, restart `pnpm dev`, and remove the test
 credentials from the terminal environment:
 
 ```powershell

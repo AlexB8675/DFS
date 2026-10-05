@@ -508,3 +508,15 @@ export const auditEntrySchema = z.object({
 })
 export type AuditEntry = z.infer<typeof auditEntrySchema>
 export const auditPageSchema = pageSchema(auditEntrySchema)
+
+// ── Internal: api ↔ bot (§6.2, never public) ─────────────────────────────────
+
+/** `POST /internal/urls/refresh`: blobs whose CDN URLs the API needs signed. */
+export const refreshUrlsSchema = z.object({
+  blobIds: z.array(z.number().int().positive()).min(1).max(200),
+})
+export type RefreshUrlsInput = z.infer<typeof refreshUrlsSchema>
+export const refreshedUrlsSchema = z.object({
+  urls: z.array(z.object({ blobId: z.number(), url: z.url(), expiresAt: z.iso.datetime() })),
+})
+export type RefreshedUrls = z.infer<typeof refreshedUrlsSchema>

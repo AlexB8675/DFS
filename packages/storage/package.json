@@ -10,7 +10,8 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "lint": "eslint .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "check:discord": "vitest run src/discord.contract.test.ts"
   },
   "devDependencies": {
     "@types/node": "^24.19.1",

@@ -1,9 +1,18 @@
 import { rm } from 'node:fs/promises'
 import path from 'node:path'
-import { BlobStoreError, type BlobLocation, type BlobStore, type StoredBlob } from './blob-store.ts'
+import {
+  BlobStoreError,
+  type BlobStore,
+  type BlobToStore,
+  type PutResult,
+  type StoredBlob,
+} from './blob-store.ts'
 import { readRange, writeFileDurably } from './files.ts'
 
-const NOWHERE: BlobLocation = { channelId: null, messageId: null, attachmentId: null }
+const NOWHERE: PutResult = {
+  location: { channelId: null, messageId: null, attachmentId: null },
+  url: null,
+}
 
 /**
  * Blobs as files under a directory (`BLOB_STORE=local`), for development and
@@ -17,8 +26,8 @@ export class LocalBlobStore implements BlobStore {
     this.#root = root
   }
 
-  async put(id: number, data: Uint8Array): Promise<BlobLocation> {
-    await writeFileDurably(this.#file(id), data)
+  async put(blob: BlobToStore, data: Uint8Array): Promise<PutResult> {
+    await writeFileDurably(this.#file(blob.id), data)
     return NOWHERE
   }
 
