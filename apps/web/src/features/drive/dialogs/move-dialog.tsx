@@ -18,13 +18,11 @@ import { useNodeActions } from '../use-node-actions'
 
 interface MoveDialogProps {
   nodes: DriveNode[]
-  /** Copies instead of moving ("Copy to…"), into their own folder too. */
-  copy?: boolean
   onClose: () => void
 }
 
-/** Picks a destination folder by browsing, then moves or copies the nodes there. */
-export function MoveDialog({ nodes, copy = false, onClose }: MoveDialogProps) {
+/** Picks a destination folder by browsing, then moves the nodes there. */
+export function MoveDialog({ nodes, onClose }: MoveDialogProps) {
   const { rootFolderId } = useCurrentUser()
   const [folderId, setFolderId] = useState(nodes[0]?.parentId ?? rootFolderId)
   const path = useQuery(pathQuery(folderId))
@@ -34,8 +32,7 @@ export function MoveDialog({ nodes, copy = false, onClose }: MoveDialogProps) {
   const movingIds = new Set(nodes.map((node) => node.id))
   const current = path.data?.at(-1)
   const parent = path.data?.at(-2)
-  const alreadyThere = !copy && nodes.every((node) => node.parentId === folderId)
-  const verb = copy ? 'Copy' : 'Move'
+  const alreadyThere = nodes.every((node) => node.parentId === folderId)
   const folders = subfolders.data?.pages.flatMap((page) => page.items) ?? []
   const [first] = nodes
   const subject = nodes.length === 1 && first ? `“${first.name}”` : `${nodes.length} items`
@@ -43,8 +40,7 @@ export function MoveDialog({ nodes, copy = false, onClose }: MoveDialogProps) {
   function confirm() {
     if (!current) return
     onClose()
-    if (copy) actions.copyInto(nodes, current)
-    else actions.moveTo(nodes, current)
+    actions.moveTo(nodes, current)
   }
 
   return (
@@ -56,11 +52,9 @@ export function MoveDialog({ nodes, copy = false, onClose }: MoveDialogProps) {
     >
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle className="truncate">
-            {verb} {subject}
-          </DialogTitle>
+          <DialogTitle className="truncate">Move {subject}</DialogTitle>
           <DialogDescription>
-            Open the folder you want to {verb.toLowerCase()} to, then choose {verb} here.
+            Open the folder you want to move to, then choose Move here.
           </DialogDescription>
         </DialogHeader>
 
@@ -101,11 +95,7 @@ export function MoveDialog({ nodes, copy = false, onClose }: MoveDialogProps) {
                   <button
                     type="button"
                     disabled={isMoving}
-                    title={
-                      isMoving
-                        ? `A folder cannot be ${copy ? 'copied' : 'moved'} into itself`
-                        : undefined
-                    }
+                    title={isMoving ? 'A folder cannot be moved into itself' : undefined}
                     className="flex h-9 w-full items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
                     onClick={() => {
                       setFolderId(folder.id)
@@ -141,7 +131,7 @@ export function MoveDialog({ nodes, copy = false, onClose }: MoveDialogProps) {
             Cancel
           </Button>
           <Button disabled={alreadyThere || !current} onClick={confirm}>
-            {verb} here
+            Move here
           </Button>
         </DialogFooter>
       </DialogContent>

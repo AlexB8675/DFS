@@ -201,12 +201,6 @@ export const fileVersions = pgTable(
     /** The version's data key, wrapped with the master key `key_id` (§7.3). */
     wrappedDek: bytea('wrapped_dek').notNull(),
     keyId: text('key_id').notNull(),
-    /**
-     * The version ID its data key and frames were sealed under (§7.3), for a
-     * copy (D31): the version it shares them with, which may be gone since.
-     * `null` for a version sealed under its own ID.
-     */
-    sealedVersionId: uuid('sealed_version_id'),
     createdBy: uuid('created_by').references(() => users.id),
     createdAt: timestamptz('created_at').notNull().defaultNow(),
   },
@@ -294,12 +288,8 @@ export const blobs = pgTable(
     kind: blobKindEnum('kind').notNull(),
     state: blobStateEnum('state').notNull(),
     sizeBytes: integer('size_bytes').notNull(),
-    /**
-     * Bytes of frames not yet purged, counted once per version using them: a
-     * copy's shared frames count again (D31). A frame copied often can take
-     * it past the blob's own size.
-     */
-    liveBytes: bytes('live_bytes').notNull().default(0),
+    /** Bytes of frames not yet purged; compaction looks at live / size. */
+    liveBytes: integer('live_bytes').notNull().default(0),
     frameCount: integer('frame_count').notNull().default(0),
     sha256: bytea('sha256'),
     channelId: uuid('channel_id').references(() => storageChannels.id),

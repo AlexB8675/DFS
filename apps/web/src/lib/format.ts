@@ -13,8 +13,7 @@ export function formatDate(iso: string, now: Date = new Date()): string {
   const date = new Date(iso)
   const elapsed = now.getTime() - date.getTime()
 
-  // The server's clock may run a little ahead of this device's: a moment from now is now too.
-  if (elapsed > -MINUTE && elapsed < MINUTE) return 'Just now'
+  if (elapsed >= 0 && elapsed < MINUTE) return 'Just now'
   if (elapsed >= 0 && elapsed < HOUR)
     return relativeFormat.format(-Math.round(elapsed / MINUTE), 'minute')
   if (isSameDay(date, now)) return timeFormat.format(date)

@@ -59,7 +59,6 @@ async function fixture() {
   } as unknown as FastifyInstance
   const version: ReadableVersion = {
     version_id: versionId,
-    sealed_id: versionId,
     size_bytes: plaintext.length,
     chunk_size: 4,
     chunk_count: locations.length,

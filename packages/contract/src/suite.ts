@@ -1,7 +1,6 @@
 import { adminTests } from './admin.ts'
 import { authTests } from './auth.ts'
 import { createContext } from './context.ts'
-import { copyTests } from './copies.ts'
 import { downloadTests } from './downloads.ts'
 import { shareTests } from './shares.ts'
 import type { ContractTarget, TestApi } from './target.ts'
@@ -18,7 +17,6 @@ export function defineContractSuite(t: TestApi, target: () => ContractTarget): v
   const context = createContext(t, target)
   authTests(context)
   treeTests(context)
-  copyTests(context)
   uploadTests(context)
   downloadTests(context)
   shareTests(context)

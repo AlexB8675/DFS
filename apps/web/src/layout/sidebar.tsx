@@ -52,10 +52,7 @@ export function Sidebar({ onNavigate }: SidebarProps) {
 function NewMenu() {
   const { folderId } = useParams()
   const { rootFolderId } = useCurrentUser()
-  // What "New" makes: pasting belongs to the folder's own menus.
-  const actions = useNodeMenu([], folderId ?? rootFolderId).filter(
-    (action) => action.key !== 'paste',
-  )
+  const actions = useNodeMenu([], folderId ?? rootFolderId)
 
   return (
     <DropdownMenu>

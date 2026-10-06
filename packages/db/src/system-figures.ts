@@ -100,9 +100,7 @@ export async function storageTotals(db: Database): Promise<StorageTotals> {
       count(*) FILTER (WHERE state = 'stored')::float8 AS blobs,
       count(*) FILTER (WHERE state = 'stored' AND kind = 'pack')::float8 AS packs,
       coalesce(sum(size_bytes) FILTER (WHERE state = 'stored'), 0)::float8 AS "storedBytes",
-      -- A frame copies share counts once per copy (D31): no blob holds more than its size.
-      coalesce(sum(least(live_bytes, size_bytes)) FILTER (WHERE state = 'stored'), 0)::float8
-        AS "liveBytes",
+      coalesce(sum(live_bytes) FILTER (WHERE state = 'stored'), 0)::float8 AS "liveBytes",
       count(*) FILTER (WHERE state IN ('staged', 'uploading'))::float8 AS "waitingBlobs",
       count(*) FILTER (WHERE state = 'deleting')::float8 AS "deletingBlobs"
     FROM blobs`)

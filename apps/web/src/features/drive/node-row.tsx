@@ -43,7 +43,7 @@ export function NodeRow({
         state.selected ? 'bg-primary/15' : 'hover:bg-muted/60',
         state.active &&
           'group-focus-visible/list:ring-1 group-focus-visible/list:ring-ring group-focus-visible/list:ring-inset',
-        (state.dragged || state.cut) && 'opacity-40',
+        state.dragged && 'opacity-40',
         state.over && 'bg-(--drop-target) ring-1 ring-primary/60 ring-inset',
         state.springing && 'animate-[spring-load_450ms_ease-in-out]',
         state.fresh && 'animate-in fade-in-0 zoom-in-95 motion-spring',

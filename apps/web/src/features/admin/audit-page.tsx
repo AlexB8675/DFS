@@ -1,7 +1,6 @@
 import type { AuditEntry } from '@dfs/shared'
 import { useInfiniteQuery } from '@tanstack/react-query'
 import {
-  Copy,
   Database,
   DatabaseBackup,
   Eye,
@@ -55,7 +54,6 @@ const ACTIONS: Record<string, { label: string; icon: LucideIcon; tone?: string }
   'share.revoked': { label: 'Turned a link off', icon: Link2Off },
   'admin.viewed': { label: 'Viewed a drive', icon: Eye },
   'upload.completed': { label: 'Uploaded', icon: Upload },
-  'node.copied': { label: 'Made a copy', icon: Copy },
   'node.trashed': { label: 'Moved to the trash', icon: Trash },
   'node.restored': { label: 'Restored', icon: RotateCcw },
   'node.purged': { label: 'Deleted for good', icon: Trash2 },

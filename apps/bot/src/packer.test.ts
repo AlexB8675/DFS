@@ -128,8 +128,7 @@ async function pack(blobId: number) {
     sha256: Buffer
     staged_path: string
   }>(sql`
-    SELECT kind, state, size_bytes, live_bytes::float8 AS live_bytes, frame_count, sha256,
-      staged_path
+    SELECT kind, state, size_bytes, live_bytes, frame_count, sha256, staged_path
     FROM blobs WHERE id = ${blobId}`)
   const blob = rows[0]
   if (!blob) throw new Error(`No blob ${String(blobId)}.`)

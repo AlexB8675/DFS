@@ -246,7 +246,7 @@ The admin pages grow from a status page into the place to watch and run DFS, bef
 
 **Tasks**
 
-- [ ] GC (`blob.delete`), compaction (`blob.compact`), scrubber (`blob.verify`), tamper alerts in `#dfs-log`. Compaction must allow for copies (D31): several chunk rows can point at one frame, so a pack's ratio comes from its distinct frames, and every row pointing at a moved frame moves with it.
+- [ ] GC (`blob.delete`), compaction (`blob.compact`), scrubber (`blob.verify`), tamper alerts in `#dfs-log`.
 - [ ] Journal flush to Discord, nightly snapshots with manifests and backup pointers (DESIGN §8).
 - [ ] `dfs recover` and the recovery drill of DESIGN §17.
 

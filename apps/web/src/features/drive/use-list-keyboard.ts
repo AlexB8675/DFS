@@ -6,17 +6,10 @@ import { useNodeActions } from './use-node-actions'
 /**
  * Keyboard support for a node list, like a desktop file manager:
  * arrows move (Shift extends the selection), Home/End jump, Enter opens,
- * F2 renames, Delete trashes, Ctrl+A selects all, Ctrl+X/C cut or copy the
- * selection and Ctrl+V pastes into the folder shown (`folderId`), Escape
- * clears the selection and a cut, and Backspace or Alt+↑ goes to the parent
- * folder. ⌘ stands for Ctrl on Apple devices.
+ * F2 renames, Delete trashes, Ctrl+A selects all, Escape clears, and
+ * Backspace or Alt+↑ goes to the parent folder.
  */
-export function useListKeyboard(
-  nodes: DriveNode[],
-  columns: number,
-  onBack?: () => void,
-  folderId: string | null = null,
-) {
+export function useListKeyboard(nodes: DriveNode[], columns: number, onBack?: () => void) {
   const store = useSelectionStore()
   const actions = useNodeActions()
 
@@ -93,26 +86,11 @@ export function useListKeyboard(
         break
       case 'Escape':
         state.clear()
-        actions.cancelCut()
         break
       case 'a':
         if (event.ctrlKey || event.metaKey) {
           event.preventDefault()
           state.selectAll(nodes.map((node) => node.id))
-        }
-        break
-      case 'x':
-      case 'c':
-        if ((event.ctrlKey || event.metaKey) && selectedNodes.length > 0) {
-          event.preventDefault()
-          if (event.key === 'x') actions.cut(selectedNodes)
-          else actions.copy(selectedNodes)
-        }
-        break
-      case 'v':
-        if ((event.ctrlKey || event.metaKey) && folderId) {
-          event.preventDefault()
-          actions.paste(folderId)
         }
         break
     }

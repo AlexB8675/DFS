@@ -21,8 +21,7 @@ export function NodeTile({ node, onSelect, onOpen, onContextMenu, onPointerDown 
       {...itemDropProps(node)}
       {...prefetch}
       className={cn(
-        'h-full p-1.5 transition-opacity select-none',
-        state.cut && 'opacity-40',
+        'h-full p-1.5 select-none',
         state.fresh && 'animate-in fade-in-0 zoom-in-75 motion-bounce',
         state.leaving && 'animate-out fill-mode-forwards fade-out-0 zoom-out-75 motion-exit',
       )}

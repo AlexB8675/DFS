@@ -13,11 +13,6 @@ import type { FastifyInstance } from 'fastify'
 /** What reading needs to know about a file version. */
 export interface ReadableVersion extends Record<string, unknown> {
   version_id: string
-  /**
-   * The version ID its data key and frames were sealed under: its own, or for
-   * a copy the original's (D31), as `coalesce(sealed_version_id, id)`.
-   */
-  sealed_id: string
   size_bytes: number
   chunk_size: number
   chunk_count: number
@@ -68,9 +63,9 @@ export async function* readVersion(
   end: number,
 ): AsyncGenerator<Uint8Array> {
   if (end < start) return
-  const { version_id: versionId, sealed_id: sealedId, chunk_size: chunkSize } = version
-  const key = await app.dataKeys.get(sealedId, () =>
-    app.keys.unwrapDek(version.wrapped_dek, version.key_id, uuidBytes(sealedId)),
+  const { version_id: versionId, chunk_size: chunkSize } = version
+  const key = await app.dataKeys.get(versionId, () =>
+    app.keys.unwrapDek(version.wrapped_dek, version.key_id, uuidBytes(versionId)),
   )
   const locations = chunksBetween(
     app,
@@ -93,11 +88,7 @@ export async function* readVersion(
             ? NOTHING_TO_GIVE_BACK
             : app.readBudget.tryTake(chunk.frame_size)
         if (!giveBack) break
-        reading.push({
-          chunk,
-          plaintext: prefetchChunk(app, { versionId, sealedId }, key, chunk),
-          giveBack,
-        })
+        reading.push({ chunk, plaintext: prefetchChunk(app, versionId, key, chunk), giveBack })
         upcoming = await locations.next()
       }
       const current = reading.shift()
@@ -147,31 +138,25 @@ async function* chunksBetween(
 /** Starts reading a chunk without leaving an unhandled rejection if the stream pauses or closes. */
 function prefetchChunk(
   app: FastifyInstance,
-  version: SealedVersion,
+  versionId: string,
   key: AesKey,
   chunk: ChunkLocation,
 ): Promise<Uint8Array> {
-  const next = readChunk(app, version, key, chunk)
+  const next = readChunk(app, versionId, key, chunk)
   // The original promise still rejects when awaited; observe it immediately,
   // since backpressure or a disconnected client can delay or skip that await.
   void next.catch(() => undefined)
   return next
 }
 
-/** A version, and the one its frames were sealed under: itself, or the original of a copy. */
-interface SealedVersion {
-  versionId: string
-  sealedId: string
-}
-
 async function readChunk(
   app: FastifyInstance,
-  { versionId, sealedId }: SealedVersion,
+  versionId: string,
   key: AesKey,
   chunk: ChunkLocation,
 ): Promise<Uint8Array> {
   const frame = await checkedFrame(app, versionId, chunk)
-  const plaintext = await openFrame(key, frame, chunkContext(sealedId, chunk.idx))
+  const plaintext = await openFrame(key, frame, chunkContext(versionId, chunk.idx))
   if (plaintext.length !== chunk.plain_size) {
     throw new ContentError(`Chunk ${String(chunk.idx)} of ${versionId} has the wrong size.`)
   }

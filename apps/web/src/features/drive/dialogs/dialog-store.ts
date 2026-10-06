@@ -5,7 +5,6 @@ export type DriveDialog =
   | { type: 'new-folder'; parentId: string }
   | { type: 'rename'; node: DriveNode }
   | { type: 'move'; nodes: DriveNode[] }
-  | { type: 'copy'; nodes: DriveNode[] }
   | { type: 'share'; node: DriveNode }
 
 interface DialogState {

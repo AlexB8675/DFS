@@ -57,8 +57,7 @@ export async function downloadableFile(db: Executor, nodeId: string): Promise<Do
   const { rows } = await db.execute<DownloadableFile & { state: string | null; kind: string }>(sql`
     SELECT node.name, node.mime_type, node.kind, version.state::text AS state,
       version.id AS version_id, version.size_bytes::float8 AS size_bytes, version.chunk_size,
-      version.chunk_count, version.wrapped_dek, version.key_id,
-      coalesce(version.sealed_version_id, version.id) AS sealed_id
+      version.chunk_count, version.wrapped_dek, version.key_id
     FROM nodes node LEFT JOIN file_versions version ON version.id = node.current_version_id
     WHERE node.id = ${nodeId}`)
   const [file] = rows

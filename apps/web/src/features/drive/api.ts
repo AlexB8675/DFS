@@ -1,6 +1,5 @@
 import {
   archiveTicketSchema,
-  copyResultSchema,
   nodePageSchema,
   nodePathSchema,
   nodeSchema,
@@ -155,28 +154,6 @@ export function useMoveNodes() {
         queryClient.invalidateQueries({ queryKey: ['search'] }),
       ])
     },
-  })
-}
-
-/** Copies into `parentId` (D31): the copies pop in there, and the quota grows. */
-export function useCopyNodes() {
-  return useMutation({
-    mutationFn: ({ nodes, parentId }: MoveInput) =>
-      apiSend(
-        'POST',
-        '/nodes/copy',
-        { ids: nodes.map((node) => node.id), parentId },
-        copyResultSchema,
-      ),
-    onSuccess: (result) => {
-      markFresh(result.items.map((node) => node.id))
-    },
-    onSettled: (_result, _error, { parentId }) =>
-      Promise.all([
-        invalidateListings([parentId]),
-        queryClient.invalidateQueries({ queryKey: ['search'] }),
-        queryClient.invalidateQueries({ queryKey: ['session'] }),
-      ]),
   })
 }
 

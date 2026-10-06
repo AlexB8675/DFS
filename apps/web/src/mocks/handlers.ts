@@ -1,5 +1,4 @@
 import {
-  copyNodesSchema,
   changePasswordSchema,
   createChannelSchema,
   createFolderSchema,
@@ -163,12 +162,6 @@ export const handlers = [
     respondEmpty(request, async () => {
       const input = moveNodesSchema.parse(await request.json())
       db.move(input.ids, input.parentId)
-    }),
-  ),
-  http.post('/api/nodes/copy', ({ request }) =>
-    respond(request, async () => {
-      const input = copyNodesSchema.parse(await request.json())
-      return db.copy(input.ids, input.parentId)
     }),
   ),
   http.post('/api/nodes/trash', ({ request }) =>
