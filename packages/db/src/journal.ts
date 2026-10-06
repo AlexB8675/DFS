@@ -50,10 +50,18 @@ export function userRecord(user: UserRow): JournalRecord {
   return { kind: 'user.upsert', record: state }
 }
 
-/** A node's state for recovery. `trashed_via` is derived from the trashed ancestors, so it is left out. */
-export function nodeRecord(node: NodeRow): JournalRecord {
-  const { trashedVia: _trashedVia, ...state } = node
-  return { kind: 'node.upsert', record: state }
+/**
+ * Nodes' states for recovery. `trashed_via` is derived from the trashed
+ * ancestors, so it is left out. A file joins the journal with its first
+ * completed version: until then it is an upload, which lives in its page and
+ * can't be recovered (§8), so nothing that happens to it is journaled.
+ */
+export function nodeRecords(nodes: readonly NodeRow[]): JournalRecord[] {
+  return nodes.flatMap(({ trashedVia: _trashedVia, ...state }): JournalRecord[] =>
+    state.kind === 'file' && state.currentVersionId === null
+      ? []
+      : [{ kind: 'node.upsert', record: state }],
+  )
 }
 
 /**

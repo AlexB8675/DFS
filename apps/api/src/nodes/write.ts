@@ -2,7 +2,7 @@ import { nameKey, normalizeName, splitExtension, validateName, type DriveNode } 
 import {
   appendJournal,
   markFoldersDirty,
-  nodeRecord,
+  nodeRecords,
   nodes,
   textArray,
   TREE_LOCK_NAMESPACE,
@@ -43,7 +43,7 @@ export async function createFolder(
     await lockDrive(tx, ownerId, 'shared')
     await visibleFolder(tx, ownerId, parentId)
     const folder = await insertFolder(tx, ownerId, parentId, name)
-    await appendJournal(tx, [nodeRecord(folder)])
+    await appendJournal(tx, nodeRecords([folder]))
     return folder.id
   })
   return toDriveNode(await visibleNode(app.db, ownerId, id))
@@ -113,7 +113,7 @@ export async function ensureFolders(
       }
       result[path] = currentId
     }
-    await appendJournal(tx, created.map(nodeRecord))
+    await appendJournal(tx, nodeRecords(created))
     return result
   })
 }
@@ -151,7 +151,7 @@ export async function updateNode(
     )
     if (!updated) throw notFound()
     if (moving) await markFoldersDirty(tx, [node.parent_id, parentId])
-    await appendJournal(tx, [nodeRecord(updated)])
+    await appendJournal(tx, nodeRecords([updated]))
   })
   return toDriveNode(await visibleNode(app.db, ownerId, id))
 }
@@ -189,7 +189,7 @@ export async function moveNodes(
         .returning(),
     )
     await markFoldersDirty(tx, [parentId, ...moving.flatMap((node) => node.parent_id ?? [])])
-    await appendJournal(tx, updated.map(nodeRecord))
+    await appendJournal(tx, nodeRecords(updated))
   })
 }
 
@@ -219,7 +219,7 @@ export async function trashNodes(app: FastifyInstance, auth: Auth, ids: string[]
         nodeId: node.id,
       })),
     )
-    await appendJournal(tx, updated.map(nodeRecord))
+    await appendJournal(tx, nodeRecords(updated))
   })
 }
 
@@ -294,7 +294,7 @@ export async function restoreNode(
       details: restored.name === node.name ? null : `renamed from ${node.name}`,
       nodeId: id,
     })
-    await appendJournal(tx, [nodeRecord(restored)])
+    await appendJournal(tx, nodeRecords([restored]))
   })
   return toDriveNode(await visibleNode(app.db, ownerId, id))
 }

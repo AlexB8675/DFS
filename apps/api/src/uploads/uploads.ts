@@ -6,7 +6,7 @@ import {
   bigintArray,
   fileVersions,
   markFoldersDirty,
-  nodeRecord,
+  nodeRecords,
   nodes,
   purgeVersions,
   QUEUES,
@@ -270,12 +270,12 @@ async function startUploads(
     }
   }
 
-  // New files count toward their folders' sizes.
+  // New files count toward their folders' sizes. They join the journal when
+  // their upload completes (§8).
   await markFoldersDirty(
     tx,
     created.flatMap((node) => node.parentId ?? []),
   )
-  await appendJournal(tx, created.map(nodeRecord))
   return outcomes
 }
 
@@ -672,7 +672,7 @@ async function finishUpload(
     details: upload.version_no > 1 ? `${size}, new version` : size,
     nodeId: node.id,
   })
-  await appendJournal(tx, [...pruneRecords, nodeRecord(node)])
+  await appendJournal(tx, [...pruneRecords, ...nodeRecords([node])])
   return prunedIds
 }
 

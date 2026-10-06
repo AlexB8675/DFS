@@ -1,5 +1,5 @@
 import type { Role, User } from '@dfs/shared'
-import { appendJournal, nodeRecord, nodes, userRecord, users, type Executor } from '@dfs/db'
+import { appendJournal, nodeRecords, nodes, userRecord, users, type Executor } from '@dfs/db'
 import { eq } from 'drizzle-orm'
 import type { UserRow } from '../auth/sessions.ts'
 import { isUniqueViolation } from '../db-errors.ts'
@@ -46,7 +46,7 @@ export async function createUser(tx: Executor, input: NewUser): Promise<UserRow>
     .returning()
   if (!withRoot) throw new Error('The new user disappeared.')
 
-  await appendJournal(tx, [userRecord(withRoot), nodeRecord(root)])
+  await appendJournal(tx, [userRecord(withRoot), ...nodeRecords([root])])
   return withRoot
 }
 

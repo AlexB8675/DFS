@@ -2,14 +2,16 @@ import { sql } from 'drizzle-orm'
 import type { Database } from './client.ts'
 import { notifyEvent } from './events.ts'
 import { markFoldersDirty, uuidArray } from './folder-stats.ts'
-import { appendJournal, type Executor, type JournalRecord } from './journal.ts'
+import type { Executor } from './journal.ts'
 import { purgeSubtrees, purgeVersions, releaseReservation } from './purge.ts'
 
 /**
  * Gives up uploads that are still receiving: cancelled by the client, or
  * expired (DESIGN.md §6.1). Their reservations are released and their
  * versions purged; a file that never had a completed version goes with them.
- * Returns the versions whose staged frames can be removed after commit.
+ * None of it was journaled, so none of it is (§8): a file joins the journal
+ * with its first completed version, a version once it is stored. Returns the
+ * versions whose staged frames can be removed after commit.
  */
 export async function abandonUploads(
   tx: Executor,
@@ -65,7 +67,6 @@ export async function abandonUploads(
   )
 
   const staged: string[] = []
-  const records: JournalRecord[] = []
   const unfinishedByOwner = new Map<string, Set<string>>()
   const versionsByOwner = new Map<string, string[]>()
   for (const row of rows) {
@@ -82,13 +83,11 @@ export async function abandonUploads(
   for (const [ownerId, nodeIds] of unfinishedByOwner) {
     const purged = await purgeSubtrees(tx, ownerId, [...nodeIds])
     staged.push(...purged.versionIds)
-    records.push(...purged.records)
   }
   for (const [ownerId, versionIds] of versionsByOwner) {
-    records.push(...(await purgeVersions(tx, ownerId, versionIds)))
+    await purgeVersions(tx, ownerId, versionIds)
     staged.push(...versionIds)
   }
-  await appendJournal(tx, records)
   return staged
 }
 

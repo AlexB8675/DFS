@@ -10,6 +10,7 @@ import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest'
 import { buildApp } from '../app.ts'
 import type { Auth } from '../auth/sessions.ts'
 import { readVersion, type ReadableVersion } from '../content/reader.ts'
+import { updateNode } from '../nodes/write.ts'
 import { testConfig } from '../testing/config.ts'
 import { seedUser } from '../testing/seed.ts'
 import { cancelUpload, createUploads, keepUploadsAlive, receivePart } from './uploads.ts'
@@ -426,6 +427,30 @@ describe('uploads living in their page (§6.1)', () => {
       mine.uploadId,
     ])
     expect(await quietFor(mine.uploadId)).toBeGreaterThan(3000)
+  })
+})
+
+describe('the journal (§8)', () => {
+  async function journaled(...ids: string[]) {
+    const { rows } = await app.db.execute<{ kind: string; record: Record<string, unknown> }>(sql`
+      SELECT kind, record FROM journal
+      WHERE record->>'id' = ANY(${`{${ids.join(',')}}`}::text[]) ORDER BY id`)
+    return rows
+  }
+
+  it('records a file once its upload completes, and nothing of one given up', async () => {
+    const given = await start(app.config.sizes.chunkSize + 10)
+    await receivePart(app, auth, given.uploadId, 1, Buffer.from('0123456789'), undefined)
+    await updateNode(app, auth, given.nodeId, { name: `${crypto.randomUUID()}.bin` })
+    await cancelUpload(app, auth, given.uploadId)
+    expect(await journaled(given.nodeId, given.versionId)).toEqual([])
+
+    const done = await start(3)
+    expect(await journaled(done.nodeId)).toEqual([])
+    await receivePart(app, auth, done.uploadId, 0, Buffer.from('abc'), undefined)
+    expect(await journaled(done.nodeId, done.versionId)).toMatchObject([
+      { kind: 'node.upsert', record: { id: done.nodeId, currentVersionId: done.versionId } },
+    ])
   })
 })
 

@@ -5,7 +5,7 @@ import {
   type UsageCategory,
   type UserUsage,
 } from '@dfs/shared'
-import { appendJournal, markFoldersDirty, nodeRecord, notifyEvent, type Executor } from '@dfs/db'
+import { appendJournal, markFoldersDirty, nodeRecords, notifyEvent, type Executor } from '@dfs/db'
 import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { audit } from '../audit.ts'
@@ -140,6 +140,6 @@ export async function moderate(
       type: 'nodes.changed',
       payload: { parentIds: [node.parent_id] },
     })
-    await appendJournal(tx, updated.map(nodeRecord))
+    await appendJournal(tx, nodeRecords(updated))
   })
 }
