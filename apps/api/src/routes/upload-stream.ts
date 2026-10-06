@@ -97,7 +97,10 @@ export function uploadStreamRoutes(app: FastifyInstance, _options: object, done:
           await storing?.catch(() => undefined)
           // The rest of the body isn't wanted: the connection goes with the answer.
           if (!body.complete) reply.header('connection', 'close')
-          throw gone.signal.aborted ? interrupted() : error
+          if (!gone.signal.aborted) throw error
+          // No answer reaches a client that left, and Fastify logs none: say where it stopped.
+          request.log.info({ uploadId, from, parts: index - from }, 'upload stream cut off')
+          throw interrupted()
         }
         if (index < start.chunkCount) {
           throw new ApiError(400, 'invalid_part', 'The stream ended before the file did.')
