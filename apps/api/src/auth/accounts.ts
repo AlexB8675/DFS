@@ -10,6 +10,7 @@ import {
   openSession,
   type Auth,
   type OpenedSession,
+  type SessionClient,
   type UserRow,
 } from './sessions.ts'
 
@@ -29,8 +30,9 @@ export interface SignedIn {
 export async function signIn(
   app: FastifyInstance,
   input: LoginInput,
-  ip: string,
+  client: SessionClient,
 ): Promise<SignedIn> {
+  const { ip } = client
   // Only failures count, so a household behind one address can sign in freely.
   const ipWait = app.limits.signIn.waitMs(ip)
   if (ipWait > 0) throw tooManyTries(ipWait)
@@ -84,7 +86,7 @@ export async function signIn(
       .where(eq(users.id, user.id))
       .returning()
     if (!current) throw new ApiError(401, 'invalid_credentials', 'Wrong username or password.')
-    const session = await openSession(tx, current)
+    const session = await openSession(tx, current, client)
     await audit(tx, {
       actorId: current.id,
       action: 'auth.login',
@@ -106,6 +108,7 @@ export async function changePassword(
   app: FastifyInstance,
   auth: Auth,
   input: ChangePasswordInput,
+  client: SessionClient,
 ): Promise<SignedIn> {
   const { user } = auth
   if (!auth.limited) {
@@ -137,7 +140,7 @@ export async function changePassword(
       .returning()
     if (!updated) throw new ApiError(401, 'unauthenticated', 'Sign in to continue.')
     await endUserSessions(tx, user.id)
-    const session = await openSession(tx, updated)
+    const session = await openSession(tx, updated, client)
     await audit(tx, {
       actorId: user.id,
       action: 'auth.password_changed',

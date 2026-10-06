@@ -3,7 +3,13 @@ import type { FastifyInstance, FastifyRequest } from 'fastify'
 import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { requireAuth } from '../auth/access.ts'
 import { changePassword, signIn } from '../auth/accounts.ts'
-import { clearSessionCookie, endSession, setSessionCookie, type UserRow } from '../auth/sessions.ts'
+import {
+  clearSessionCookie,
+  endSession,
+  setSessionCookie,
+  type SessionClient,
+  type UserRow,
+} from '../auth/sessions.ts'
 import { ApiError } from '../errors.ts'
 import { pendingPasswordChange, toUserDto } from '../users/users.ts'
 
@@ -20,7 +26,7 @@ export function authRoutes(app: FastifyInstance, _options: object, done: () => v
     },
     async (request, reply) => {
       assertOwnOrigin(app, request)
-      const { user, session } = await signIn(app, request.body, request.ip)
+      const { user, session } = await signIn(app, request.body, clientOf(request))
       setSessionCookie(reply, app.config, session.token, session.expiresAt)
       return toSession(user, session.csrfToken)
     },
@@ -42,7 +48,12 @@ export function authRoutes(app: FastifyInstance, _options: object, done: () => v
       schema: { body: changePasswordSchema, response: { 200: sessionSchema } },
     },
     async (request, reply) => {
-      const { user, session } = await changePassword(app, requireAuth(request.auth), request.body)
+      const { user, session } = await changePassword(
+        app,
+        requireAuth(request.auth),
+        request.body,
+        clientOf(request),
+      )
       setSessionCookie(reply, app.config, session.token, session.expiresAt)
       return toSession(user, session.csrfToken)
     },
@@ -55,6 +66,11 @@ export function authRoutes(app: FastifyInstance, _options: object, done: () => v
   })
 
   done()
+}
+
+/** Where a request comes from, for the session it opens. */
+function clientOf(request: FastifyRequest): SessionClient {
+  return { ip: request.ip, userAgent: request.headers['user-agent'] }
 }
 
 function toSession(user: UserRow, csrfToken: string): Session {

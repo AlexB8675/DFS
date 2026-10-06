@@ -8,6 +8,7 @@ import {
   createUserSchema,
   ensureFoldersSchema,
   adminTaskRequestSchema,
+  auditQuerySchema,
   loginSchema,
   lookupNodesSchema,
   metricsQuerySchema,
@@ -347,9 +348,48 @@ export const handlers = [
     ),
   ),
   http.get('/api/admin/audit', ({ request }) =>
+    respond(request, () => db.auditLog(readQuery(request, auditQuerySchema))),
+  ),
+  http.get('/api/admin/sessions', ({ request }) =>
+    respond(request, () =>
+      db.adminSessions(readQuery(request, z.object({ userId: z.uuid().optional() })).userId),
+    ),
+  ),
+  http.delete<{ key: string }>('/api/admin/sessions/:key', ({ request, params }) =>
+    respondEmpty(request, () => {
+      db.endSession(
+        z
+          .string()
+          .regex(/^[0-9a-f]{16}$/)
+          .parse(params.key),
+      )
+    }),
+  ),
+  http.post<Id>('/api/admin/users/:id/sign-out', ({ request, params }) =>
+    respond(request, () => db.signOutUser(params.id)),
+  ),
+  http.get('/api/admin/shares', ({ request }) =>
     respond(request, () => {
-      const query = readQuery(request, pageQuery)
-      return db.auditLog(query.cursor ?? null, query.limit)
+      const query = readQuery(
+        request,
+        z.object({
+          cursor: z.uuid().optional(),
+          limit: z.coerce.number().int().min(1).max(500).default(100),
+          active: z.enum(['true', 'false']).default('false'),
+        }),
+      )
+      return db.adminShares(query.cursor ?? null, query.limit, query.active === 'true')
+    }),
+  ),
+  http.delete<Id>('/api/admin/shares/:id', ({ request, params }) =>
+    respondEmpty(request, () => {
+      db.revokeShareAsAdmin(params.id)
+    }),
+  ),
+  http.get('/api/admin/uploads', ({ request }) => respond(request, () => db.adminUploads())),
+  http.delete<Id>('/api/admin/uploads/:id', ({ request, params }) =>
+    respondEmpty(request, () => {
+      db.cancelUploadAsAdmin(params.id)
     }),
   ),
 

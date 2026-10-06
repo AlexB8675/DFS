@@ -23,6 +23,7 @@ import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '@/components/ui/spinner'
 import { VirtualList } from '@/components/virtual-list'
+import { sessionQuery } from '@/features/auth/session'
 import { UserAvatar } from '@/layout/user-menu'
 import { errorMessage } from '@/lib/api/client'
 import { formatBytes, formatDate, formatFullDate } from '@/lib/format'
@@ -37,6 +38,7 @@ import {
   userUsageQuery,
 } from './api'
 import { UserBadges } from './user-badges'
+import { UserSessions } from './user-sessions'
 
 const ROW_HEIGHT = 40
 
@@ -58,7 +60,10 @@ export function UserPage() {
   const { userId = '', folderId } = useParams()
   const users = useQuery(adminUsersQuery)
   const usage = useQuery(userUsageQuery(userId))
+  const session = useQuery(sessionQuery)
   const user = users.data?.items.find((candidate) => candidate.id === userId)
+  const viewerIsOwner =
+    users.data?.items.find((candidate) => candidate.id === session.data?.user.id)?.isOwner ?? false
 
   if (users.isPending) return <ListSkeleton />
   if (!user) {
@@ -82,13 +87,21 @@ export function UserPage() {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <title>{`${user.displayName} – Admin – DFS`}</title>
-      <UserSummary user={user} usage={usage.data} />
+      <UserSummary user={user} usage={usage.data} viewerIsOwner={viewerIsOwner} />
       <MetadataBrowser user={user} folderId={folderId ?? user.rootFolderId} />
     </div>
   )
 }
 
-function UserSummary({ user, usage }: { user: AdminUser; usage: UserUsage | undefined }) {
+function UserSummary({
+  user,
+  usage,
+  viewerIsOwner,
+}: {
+  user: AdminUser
+  usage: UserUsage | undefined
+  viewerIsOwner: boolean
+}) {
   return (
     <div className="grid shrink-0 gap-3 border-b px-4 py-3 sm:px-5">
       <div className="flex items-center gap-3">
@@ -111,6 +124,7 @@ function UserSummary({ user, usage }: { user: AdminUser; usage: UserUsage | unde
               ` · ${usage.fileCount.toLocaleString()} files in ${usage.folderCount.toLocaleString()} folders · ${formatBytes(usage.trashBytes)} in trash`}
           </p>
         </div>
+        <UserSessions user={user} viewerIsOwner={viewerIsOwner} />
       </div>
       {usage ? <UsageBar usage={usage} /> : <Skeleton className="h-6 w-full" />}
     </div>

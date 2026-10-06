@@ -1,5 +1,9 @@
 import {
   ADMIN_TASK_LABELS,
+  type AdminSession,
+  type AdminShare,
+  type AdminUpload,
+  type AuditQuery,
   type AdminTask,
   type AdminTaskRequest,
   type StorageStatus,
@@ -347,6 +351,157 @@ export class AdminMockDb extends MockDb {
     }
   }
 
+  // ── People and access ──────────────────────────────────────────────────────
+
+  /** Made-up sessions an admin signed out, by key. */
+  private readonly signedOutSessions = new Set<string>()
+
+  /**
+   * The mock has one real session, the signed-in one; every other active
+   * user gets a made-up one, on another device, so the page has something
+   * to show and to end.
+   */
+  adminSessions(userId?: string): AdminSession[] {
+    const admin = this.requireAdmin()
+    const now = Date.now()
+    return this.state.users
+      .filter((user) => !user.disabled && (user.id === admin.id || user.activatedAt))
+      .filter((user) => !userId || user.id === userId)
+      .map((user, index) => ({
+        key: sessionKey(user.id),
+        userId: user.id,
+        userName: user.displayName,
+        createdAt: new Date(now - (index + 1) * 3 * DAY).toISOString(),
+        lastSeenAt: new Date(
+          now - (user.id === admin.id ? 0 : (index + 1) * 2_700_000),
+        ).toISOString(),
+        expiresAt: new Date(now + 27 * DAY).toISOString(),
+        ip: user.id === admin.id ? '127.0.0.1' : `192.168.1.${String(20 + index)}`,
+        userAgent:
+          index % 2 === 0
+            ? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0 Safari/537.36'
+            : 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1',
+        limited: user.temporaryPasswordExpiresAt !== null,
+        current: user.id === admin.id,
+      }))
+      .filter((session) => !this.signedOutSessions.has(session.key))
+  }
+
+  endSession(key: string): void {
+    const admin = this.requireAdmin()
+    const session = this.adminSessions().find((candidate) => candidate.key === key)
+    if (!session) throw new MockApiError(404, 'not_found', 'No such session.')
+    if (session.current) {
+      throw new MockApiError(409, 'self_change', 'That is this session: sign out instead.')
+    }
+    if (this.findUser(session.userId).isOwner && !admin.isOwner) {
+      throw new MockApiError(409, 'owner_protected', 'Only the owner can sign the owner out.')
+    }
+    this.signedOutSessions.add(key)
+    this.audit('session.ended', session.userName, session.ip)
+    this.save()
+  }
+
+  signOutUser(userId: string): { ended: number } {
+    const admin = this.requireAdmin()
+    const user = this.findUser(userId)
+    if (user.isOwner && !admin.isOwner) {
+      throw new MockApiError(409, 'owner_protected', 'Only the owner can sign the owner out.')
+    }
+    const sessions = this.adminSessions(userId).filter((session) => !session.current)
+    for (const session of sessions) this.signedOutSessions.add(session.key)
+    this.audit('user.signed_out', user.displayName)
+    this.save()
+    return { ended: sessions.length }
+  }
+
+  adminShares(cursor: string | null, limit: number, active: boolean): Page<AdminShare> {
+    this.requireAdmin()
+    const now = Date.now()
+    const all = [...this.state.shares]
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .flatMap((share): AdminShare[] => {
+        const node = this.state.nodes[share.nodeId]
+        const owner = node && this.state.users.find((user) => user.id === node.ownerId)
+        if (!node || !owner) return []
+        const state = share.revokedAt
+          ? 'revoked'
+          : share.expiresAt && Date.parse(share.expiresAt) <= now
+            ? 'expired'
+            : share.maxDownloads !== null && share.downloadCount >= share.maxDownloads
+              ? 'used_up'
+              : 'active'
+        return [
+          {
+            id: share.id,
+            nodeId: node.id,
+            nodeName: node.name,
+            nodeKind: node.kind,
+            ownerId: owner.id,
+            ownerName: owner.displayName,
+            parentId: node.parentId,
+            createdAt: share.createdAt,
+            expiresAt: share.expiresAt,
+            hasPassword: share.password !== null,
+            maxDownloads: share.maxDownloads,
+            downloadCount: share.downloadCount,
+            revokedAt: share.revokedAt,
+            state,
+          },
+        ]
+      })
+      .filter((share) => !active || share.state === 'active')
+    const start = cursor ? all.findIndex((share) => share.id === cursor) + 1 : 0
+    const items = all.slice(start, start + limit)
+    const last = items.at(-1)
+    return { items, nextCursor: start + limit < all.length && last ? last.id : null }
+  }
+
+  revokeShareAsAdmin(id: string): void {
+    this.requireAdmin()
+    const share = this.state.shares.find((candidate) => candidate.id === id)
+    const node = share && this.state.nodes[share.nodeId]
+    if (!share || !node) throw new MockApiError(404, 'not_found', 'No such link.')
+    const owner = this.state.users.find((user) => user.id === node.ownerId)
+    share.revokedAt ??= new Date().toISOString()
+    this.audit('share.revoked', node.name, `${owner?.displayName ?? 'Someone'}’s link`)
+    this.save()
+  }
+
+  adminUploads(): AdminUpload[] {
+    this.requireAdmin()
+    const now = Date.now()
+    return Object.values(this.state.uploads).flatMap((upload): AdminUpload[] => {
+      const node = this.state.nodes[upload.nodeId]
+      const owner = node && this.state.users.find((user) => user.id === node.ownerId)
+      if (upload.state !== 'receiving' || !node || !owner) return []
+      const received = Object.keys(upload.receivedParts).length * upload.chunkSize
+      return [
+        {
+          id: upload.id,
+          userId: owner.id,
+          userName: owner.displayName,
+          nodeId: node.id,
+          fileName: node.name,
+          parentId: node.parentId,
+          sizeBytes: upload.sizeBytes,
+          receivedBytes: Math.min(received, upload.sizeBytes),
+          createdAt: node.createdAt,
+          expiresAt: new Date(now + DAY).toISOString(),
+        },
+      ]
+    })
+  }
+
+  cancelUploadAsAdmin(id: string): void {
+    this.requireAdmin()
+    const upload = this.adminUploads().find((candidate) => candidate.id === id)
+    if (!upload) throw new MockApiError(404, 'not_found', 'No such upload under way.')
+    this.cancelUpload(id)
+    this.audit('upload.cancelled', upload.fileName, `${upload.userName}’s upload`)
+    this.save()
+  }
+
   /** Tasks admins started, newest first; the mock finishes each at once. */
   private readonly tasks: AdminTask[] = []
   /** Whether the made-up failing deletion was tried again (and went). */
@@ -604,12 +759,23 @@ export class AdminMockDb extends MockDb {
     return listed
   }
 
-  auditLog(cursor: string | null, limit: number): Page<AuditEntry> {
+  auditLog(query: AuditQuery): Page<AuditEntry> {
     this.requireAdmin()
-    const start = cursor ? this.state.audit.findIndex((entry) => entry.id === cursor) + 1 : 0
-    const items = this.state.audit.slice(start, start + limit)
+    const { cursor, limit, actions, actorId, q } = query
+    const actor = actorId ? this.findUser(actorId).displayName : null
+    const words = q?.toLowerCase()
+    const matching = this.state.audit.filter(
+      (entry) =>
+        (!actions?.length || actions.some((prefix) => entry.action.startsWith(prefix))) &&
+        (actor === null || entry.actorName === actor) &&
+        (!words ||
+          entry.target.toLowerCase().includes(words) ||
+          (entry.details ?? '').toLowerCase().includes(words)),
+    )
+    const start = cursor ? matching.findIndex((entry) => entry.id === cursor) + 1 : 0
+    const items = matching.slice(start, start + limit)
     const last = items.at(-1)
-    const hasMore = start + limit < this.state.audit.length
+    const hasMore = start + limit < matching.length
     return { items, nextCursor: hasMore && last ? last.id : null }
   }
 
@@ -635,6 +801,11 @@ export class AdminMockDb extends MockDb {
     const { password: _password, ...fields } = user
     return { ...fields, usedBytes: this.usedBytes(user.id), fileCount }
   }
+}
+
+/** A made-up session's key: 16 hex digits from the user's ID. */
+function sessionKey(userId: string): string {
+  return userId.replaceAll('-', '').slice(-16)
 }
 
 function temporaryPasswordExpiry(from: Date): string {

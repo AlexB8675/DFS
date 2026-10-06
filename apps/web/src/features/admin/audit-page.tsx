@@ -10,6 +10,8 @@ import {
   History,
   KeyRound,
   LogIn,
+  LogOut,
+  Search,
   Play,
   ScanSearch,
   ShieldAlert,
@@ -19,9 +21,13 @@ import {
   UserLock,
   UserPlus,
   UserX,
+  XCircle,
   type LucideIcon,
 } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import { ListSkeleton } from '@/components/list-skeleton'
+import { Input } from '@/components/ui/input'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { Spinner } from '@/components/ui/spinner'
 import { VirtualList } from '@/components/virtual-list'
 import { formatDate, formatFullDate } from '@/lib/format'
@@ -48,6 +54,9 @@ const ACTIONS: Record<string, { label: string; icon: LucideIcon; tone?: string }
   'channel.enabled': { label: 'Enabled channel', icon: Hash },
   'channel.disabled': { label: 'Disabled channel', icon: Hash, tone: 'text-amber-500' },
   'task.started': { label: 'Ran a task', icon: Play },
+  'session.ended': { label: 'Signed a session out', icon: LogOut, tone: 'text-amber-500' },
+  'user.signed_out': { label: 'Signed out everywhere', icon: LogOut, tone: 'text-amber-500' },
+  'upload.cancelled': { label: 'Gave up an upload', icon: XCircle, tone: 'text-amber-500' },
   'database.query_cancelled': {
     label: 'Cancelled a query',
     icon: Database,
@@ -63,30 +72,120 @@ const ACTIONS: Record<string, { label: string; icon: LucideIcon; tone?: string }
   'blob.lost': { label: 'Blob lost', icon: TriangleAlert, tone: 'text-destructive' },
 }
 
-/** `/admin/audit`: who did what, newest first (§7.5). */
+/** Kinds of action to narrow the log to, by the prefixes of their names. */
+const CATEGORIES = [
+  { value: 'all', label: 'All', actions: [] },
+  { value: 'sign-ins', label: 'Sign-ins', actions: ['auth.', 'session.'] },
+  { value: 'accounts', label: 'Accounts', actions: ['user.'] },
+  { value: 'sharing', label: 'Sharing', actions: ['share.'] },
+  { value: 'content', label: 'Content', actions: ['node.', 'upload.', 'admin.'] },
+  {
+    value: 'system',
+    label: 'System',
+    actions: ['channel.', 'task.', 'database.', 'blob.', 'backup.', 'scrub.'],
+  },
+] as const
+
+/** `/admin/audit`: who did what, newest first, by kind or by words (§7.5). */
 export function AuditPage() {
-  const audit = useInfiniteQuery(auditQuery)
+  const [category, setCategory] = useState<(typeof CATEGORIES)[number]['value']>('all')
+  const [draft, setDraft] = useState('')
+  const [q, setQ] = useState('')
+  // Searches once typing pauses, not on every key.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setQ(draft.trim())
+    }, 300)
+    return () => {
+      clearTimeout(timer)
+    }
+  }, [draft])
+  const actions = [...(CATEGORIES.find((entry) => entry.value === category)?.actions ?? [])]
+  const audit = useInfiniteQuery(auditQuery({ actions, q }))
   const entries = audit.data?.pages.flatMap((page) => page.items) ?? []
 
-  if (audit.isPending) return <ListSkeleton />
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b px-4 py-2 sm:px-5">
+        <ToggleGroup
+          type="single"
+          variant="outline"
+          size="sm"
+          spacing={0}
+          value={category}
+          aria-label="Kind of action"
+          onValueChange={(value) => {
+            const found = CATEGORIES.find((entry) => entry.value === value)
+            if (found) setCategory(found.value)
+          }}
+        >
+          {CATEGORIES.map((entry) => (
+            <ToggleGroupItem key={entry.value} value={entry.value} className="px-2.5">
+              {entry.label}
+            </ToggleGroupItem>
+          ))}
+        </ToggleGroup>
+        <div className="relative ml-auto w-full sm:w-64">
+          <Search
+            className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
+            aria-hidden
+          />
+          <Input
+            type="search"
+            value={draft}
+            onChange={(event) => {
+              setDraft(event.target.value)
+            }}
+            placeholder="Find a name or address"
+            aria-label="Find in the audit log"
+            className="pl-8"
+          />
+        </div>
+      </div>
+      {audit.isPending ? (
+        <ListSkeleton />
+      ) : entries.length === 0 ? (
+        <p className="p-6 text-center text-sm text-muted-foreground">Nothing matches.</p>
+      ) : (
+        <AuditList
+          entries={entries}
+          stale={audit.isPlaceholderData}
+          onEndReached={
+            audit.hasNextPage && !audit.isFetchingNextPage
+              ? () => void audit.fetchNextPage()
+              : undefined
+          }
+          loadingMore={audit.isFetchingNextPage}
+        />
+      )}
+    </div>
+  )
+}
 
+function AuditList({
+  entries,
+  stale,
+  onEndReached,
+  loadingMore,
+}: {
+  entries: AuditEntry[]
+  stale: boolean
+  onEndReached: (() => void) | undefined
+  loadingMore: boolean
+}) {
   return (
     <VirtualList
       role="list"
       aria-label="Audit log"
-      className="flex-1 py-1"
+      className={cn('flex-1 py-1 transition-opacity motion-glide', stale && 'opacity-50')}
       items={entries}
       getKey={(entry) => entry.id}
       itemHeight={ROW_HEIGHT}
       animateMoves
-      onEndReached={
-        audit.hasNextPage && !audit.isFetchingNextPage
-          ? () => void audit.fetchNextPage()
-          : undefined
-      }
+      onEndReached={onEndReached}
       renderItem={(entry) => <AuditRow entry={entry} />}
       footer={
-        audit.isFetchingNextPage && (
+        loadingMore && (
           <div className="flex justify-center py-3">
             <Spinner />
           </div>

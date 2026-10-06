@@ -1,4 +1,7 @@
 import {
+  adminSessionListSchema,
+  adminSharePageSchema,
+  adminUploadListSchema,
   adminTaskListSchema,
   auditPageSchema,
   databaseStatusSchema,
@@ -7,13 +10,15 @@ import {
   nodePageSchema,
   storageChannelListSchema,
   storageChannelSchema,
+  shareLinkPageSchema,
+  shareLinkSchema,
   storageStatusSchema,
   systemHealthSchema,
   trashPageSchema,
   userUsageSchema,
 } from '@dfs/shared'
 import { chosenPassword, type SuiteContext } from './context.ts'
-import { text, uploadFile } from './files.ts'
+import { startUpload, text, uploadFile } from './files.ts'
 
 /** The admin area: usage, the metadata browser, moderation, channels, audit (DESIGN.md §9, D4). */
 export function adminTests({
@@ -107,6 +112,92 @@ export function adminTests({
     it('reports the system’s health', async () => {
       const health = await (await owner()).call('GET', '/admin/health', systemHealthSchema)
       expect(health.services.length).toBeGreaterThan(0)
+    })
+
+    it('lists who is signed in, and won’t end the session asking (§9)', async () => {
+      const admin = await owner()
+      const sessions = await admin.call('GET', '/admin/sessions', adminSessionListSchema)
+      const own = sessions.filter((session) => session.current)
+      expect(own).toHaveLength(1)
+      expect(await admin.error('DELETE', `/admin/sessions/${own[0]?.key ?? ''}`)).toEqual({
+        status: 409,
+        code: 'self_change',
+      })
+      expect(await admin.error('DELETE', '/admin/sessions/0000000000000000')).toEqual({
+        status: 404,
+        code: 'not_found',
+      })
+      const { username, temporaryPassword } = await newUser(admin)
+      const user = await activated(username, temporaryPassword)
+      for (const path of ['/admin/sessions', '/admin/shares', '/admin/uploads']) {
+        expect(await user.error('GET', path)).toEqual({ status: 403, code: 'forbidden' })
+      }
+    })
+
+    it('lists any user’s share link without its token, and turns it off (§9, D4)', async () => {
+      const { user, username, photo } = await userWithFiles()
+      const client = await signIn(username, chosenPassword(username))
+      const link = await client.call('POST', '/shares', shareLinkSchema, {
+        json: { nodeId: photo.nodeId, expiresAt: null, password: null, maxDownloads: null },
+      })
+      const admin = await owner()
+      const listed = await admin.call('GET', '/admin/shares?active=true', adminSharePageSchema)
+      const found = listed.items.find((share) => share.id === link.id)
+      expect(found).toMatchObject({
+        nodeName: 'beach.jpg',
+        ownerId: user.id,
+        ownerName: user.displayName,
+        state: 'active',
+      })
+      expect(JSON.stringify(found)).not.toContain(link.url?.split('/s/')[1] ?? 'no token')
+
+      await admin.send('DELETE', `/admin/shares/${link.id}`)
+      const own = await client.call('GET', '/shares', shareLinkPageSchema)
+      expect(own.items.find((share) => share.id === link.id)?.revokedAt).not.toBeNull()
+      const active = await admin.call('GET', '/admin/shares?active=true', adminSharePageSchema)
+      expect(active.items.map((share) => share.id)).not.toContain(link.id)
+      const log = await admin.call('GET', '/admin/audit?actions=share.&limit=1', auditPageSchema)
+      expect(log.items[0]).toMatchObject({ action: 'share.revoked', target: 'beach.jpg' })
+    })
+
+    it('lists uploads under way, and gives one up (§9)', async () => {
+      const { user, username } = await userWithFiles()
+      const client = await signIn(username, chosenPassword(username))
+      const started = await startUpload(client, user.rootFolderId, 'half.bin', 3 * 1024 * 1024)
+      const admin = await owner()
+      const uploads = await admin.call('GET', '/admin/uploads', adminUploadListSchema)
+      expect(uploads.find((upload) => upload.id === started.uploadId)).toMatchObject({
+        fileName: 'half.bin',
+        userName: user.displayName,
+        sizeBytes: 3 * 1024 * 1024,
+        receivedBytes: 0,
+      })
+      await admin.send('DELETE', `/admin/uploads/${started.uploadId}`)
+      const after = await admin.call('GET', '/admin/uploads', adminUploadListSchema)
+      expect(after.map((upload) => upload.id)).not.toContain(started.uploadId)
+      expect(await admin.error('DELETE', `/admin/uploads/${started.uploadId}`)).toEqual({
+        status: 404,
+        code: 'not_found',
+      })
+    })
+
+    it('filters the audit log by kind of action and by words (§9)', async () => {
+      const { user } = await newUser(await owner())
+      const admin = await owner()
+      const accounts = await admin.call(
+        'GET',
+        `/admin/audit?actions=user.&q=${encodeURIComponent(user.displayName)}`,
+        auditPageSchema,
+      )
+      expect(accounts.items.length).toBeGreaterThan(0)
+      expect(accounts.items.every((entry) => entry.action.startsWith('user.'))).toBe(true)
+      expect(accounts.items.every((entry) => entry.target === user.displayName)).toBe(true)
+      const signIns = await admin.call('GET', '/admin/audit?actions=auth.', auditPageSchema)
+      expect(signIns.items.every((entry) => entry.action.startsWith('auth.'))).toBe(true)
+      expect(await admin.error('GET', '/admin/audit?actions=DROP%20TABLE')).toEqual({
+        status: 400,
+        code: 'invalid_request',
+      })
     })
 
     it('reports what is stuck in storage, and takes only known tasks (§9)', async () => {

@@ -117,6 +117,10 @@ export const sessions = pgTable(
     createdAt: timestamptz('created_at').notNull().defaultNow(),
     /** Slides forward with use; 15 minutes while the session can only choose a password. */
     expiresAt: timestamptz('expires_at').notNull(),
+    /** Where and with what it signed in, and when it was last used (every few minutes at most). */
+    ip: text('ip'),
+    userAgent: text('user_agent'),
+    lastSeenAt: timestamptz('last_seen_at'),
   },
   (t) => [index('sessions_user_id').on(t.userId), index('sessions_expires_at').on(t.expiresAt)],
 )

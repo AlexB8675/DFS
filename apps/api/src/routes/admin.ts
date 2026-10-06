@@ -1,4 +1,8 @@
 import {
+  adminSessionListSchema,
+  adminSharePageSchema,
+  adminUploadListSchema,
+  auditQuerySchema,
   adminTaskListSchema,
   adminTaskRequestSchema,
   adminTaskSchema,
@@ -31,6 +35,15 @@ import type { FastifyInstance } from 'fastify'
 import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
 import { adminNode, anyVisibleNode, moderate, userUsage } from '../admin/browse.ts'
+import {
+  cancelUploadAsAdmin,
+  endSessionAsAdmin,
+  listSessions,
+  listShares,
+  listUploads,
+  revokeShareAsAdmin,
+  signOutUser,
+} from '../admin/access.ts'
 import { databaseStatus, signalSession } from '../admin/database.ts'
 import { getTask, listTasks, startTask, storageStatus } from '../admin/storage.ts'
 import {
@@ -161,6 +174,93 @@ export function adminRoutes(app: FastifyInstance, _options: object, done: () => 
     (request) => readMetrics(app.db, request.query.range, request.query.series),
   )
 
+  // ── People and access ──────────────────────────────────────────────────────
+
+  routes.get(
+    '/admin/sessions',
+    {
+      config: admin,
+      schema: {
+        querystring: z.object({ userId: z.uuid().optional() }),
+        response: { 200: adminSessionListSchema },
+      },
+    },
+    (request) => listSessions(app, requireAuth(request.auth), request.query.userId),
+  )
+
+  routes.delete(
+    '/admin/sessions/:key',
+    {
+      config: admin,
+      schema: {
+        params: z.object({ key: z.string().regex(/^[0-9a-f]{16}$/) }),
+        response: noContent,
+      },
+    },
+    async (request, reply) => {
+      await endSessionAsAdmin(app, requireAuth(request.auth), request.params.key)
+      return reply.code(204).send(null)
+    },
+  )
+
+  routes.post(
+    '/admin/users/:id/sign-out',
+    {
+      config: admin,
+      schema: { params: byId, response: { 200: z.object({ ended: z.number().int().min(0) }) } },
+    },
+    async (request) => ({
+      ended: await signOutUser(app, requireAuth(request.auth), request.params.id),
+    }),
+  )
+
+  routes.get(
+    '/admin/shares',
+    {
+      config: admin,
+      schema: {
+        querystring: z.object({
+          cursor: z.uuid().optional(),
+          limit: z.coerce.number().int().min(1).max(500).default(100),
+          active: z.enum(['true', 'false']).default('false'),
+        }),
+        response: { 200: adminSharePageSchema },
+      },
+    },
+    (request) =>
+      listShares(app, {
+        cursor: request.query.cursor,
+        limit: request.query.limit,
+        active: request.query.active === 'true',
+      }),
+  )
+
+  routes.delete(
+    '/admin/shares/:id',
+    { config: admin, schema: { params: byId, response: noContent } },
+    async (request, reply) => {
+      await revokeShareAsAdmin(app, requireAuth(request.auth), request.params.id)
+      return reply.code(204).send(null)
+    },
+  )
+
+  routes.get(
+    '/admin/uploads',
+    { config: admin, schema: { response: { 200: adminUploadListSchema } } },
+    () => listUploads(app),
+  )
+
+  routes.delete(
+    '/admin/uploads/:id',
+    { config: admin, schema: { params: byId, response: noContent } },
+    async (request, reply) => {
+      await cancelUploadAsAdmin(app, requireAuth(request.auth), request.params.id)
+      return reply.code(204).send(null)
+    },
+  )
+
+  // ── Storage ────────────────────────────────────────────────────────────────
+
   routes.get(
     '/admin/storage',
     { config: admin, schema: { response: { 200: storageStatusSchema } } },
@@ -245,15 +345,9 @@ export function adminRoutes(app: FastifyInstance, _options: object, done: () => 
     '/admin/audit',
     {
       config: admin,
-      schema: {
-        querystring: z.object({
-          cursor: z.string().optional(),
-          limit: z.coerce.number().int().min(1).max(500).default(100),
-        }),
-        response: { 200: auditPageSchema },
-      },
+      schema: { querystring: auditQuerySchema, response: { 200: auditPageSchema } },
     },
-    (request) => auditLog(app, request.query.cursor, request.query.limit),
+    (request) => auditLog(app, request.query),
   )
 
   done()

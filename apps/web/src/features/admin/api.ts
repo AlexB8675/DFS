@@ -1,4 +1,7 @@
 import {
+  adminSessionListSchema,
+  adminSharePageSchema,
+  adminUploadListSchema,
   adminTaskListSchema,
   adminTaskSchema,
   adminUserPageSchema,
@@ -23,9 +26,12 @@ import { infiniteQueryOptions, queryOptions, useMutation } from '@tanstack/react
 import type { LoaderFunctionArgs } from 'react-router'
 import { queryClient } from '@/app/query-client'
 import { sessionQuery } from '@/features/auth/session'
+import { z } from 'zod'
 import { apiGet, apiSend } from '@/lib/api/client'
 
 // The admin API (§9). Admins see other users' metadata, never content (D4).
+
+const signedOutSchema = z.object({ ended: z.number() })
 
 /** How often the overview refreshes while it is on screen. */
 const HEALTH_REFRESH_MS = 5000
@@ -152,13 +158,99 @@ export const channelsQuery = queryOptions({
   queryFn: ({ signal }) => apiGet('/admin/channels', storageChannelListSchema, { signal }),
 })
 
-export const auditQuery = infiniteQueryOptions({
-  queryKey: ['admin', 'audit'],
-  queryFn: ({ pageParam, signal }) =>
-    apiGet('/admin/audit', auditPageSchema, { query: { cursor: pageParam, limit: 100 }, signal }),
-  initialPageParam: null as string | null,
-  getNextPageParam: (page) => page.nextCursor,
+/** What the audit log shows: some kinds of action (by prefix), and words. */
+export interface AuditFilters {
+  actions: string[]
+  q: string
+}
+
+export function auditQuery({ actions, q }: AuditFilters) {
+  return infiniteQueryOptions({
+    queryKey: ['admin', 'audit', actions, q],
+    queryFn: ({ pageParam, signal }) =>
+      apiGet('/admin/audit', auditPageSchema, {
+        query: {
+          cursor: pageParam,
+          limit: 100,
+          actions: actions.length > 0 ? actions.join(',') : undefined,
+          q: q || undefined,
+        },
+        signal,
+      }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (page) => page.nextCursor,
+    // A new filter keeps the list on screen until it arrives.
+    placeholderData: (previous) => previous,
+  })
+}
+
+// ── People and access ────────────────────────────────────────────────────────
+
+/** Signed-in sessions: everyone's, or one user's. */
+export function adminSessionsQuery(userId?: string) {
+  return queryOptions({
+    queryKey: ['admin', 'sessions', userId ?? 'everyone'],
+    queryFn: ({ signal }) =>
+      apiGet('/admin/sessions', adminSessionListSchema, { query: { userId }, signal }),
+    refetchInterval: 30_000,
+  })
+}
+
+export function adminSharesQuery(active: boolean) {
+  return infiniteQueryOptions({
+    queryKey: ['admin', 'shares', active],
+    queryFn: ({ pageParam, signal }) =>
+      apiGet('/admin/shares', adminSharePageSchema, {
+        query: { cursor: pageParam, limit: 100, active: String(active) },
+        signal,
+      }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (page) => page.nextCursor,
+  })
+}
+
+export const adminUploadsQuery = queryOptions({
+  queryKey: ['admin', 'uploads'],
+  queryFn: ({ signal }) => apiGet('/admin/uploads', adminUploadListSchema, { signal }),
+  refetchInterval: 10_000,
 })
+
+/** What ending someone's access may have changed. */
+async function afterAccessChange(key: string): Promise<void> {
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: ['admin', key] }),
+    queryClient.invalidateQueries({ queryKey: ['admin', 'audit'] }),
+  ])
+}
+
+export function useEndSession() {
+  return useMutation({
+    mutationFn: (key: string) => apiSend('DELETE', `/admin/sessions/${key}`),
+    onSettled: () => afterAccessChange('sessions'),
+  })
+}
+
+export function useSignOutUser() {
+  return useMutation({
+    mutationFn: (userId: string) =>
+      apiSend('POST', `/admin/users/${userId}/sign-out`, undefined, signedOutSchema),
+    onSettled: () => afterAccessChange('sessions'),
+  })
+}
+
+export function useRevokeShareAsAdmin() {
+  return useMutation({
+    mutationFn: (id: string) => apiSend('DELETE', `/admin/shares/${id}`),
+    onSettled: () => afterAccessChange('shares'),
+  })
+}
+
+export function useCancelUploadAsAdmin() {
+  return useMutation({
+    mutationFn: (id: string) => apiSend('DELETE', `/admin/uploads/${id}`),
+    onSettled: () => afterAccessChange('uploads'),
+  })
+}
 
 export function useUpdateUser() {
   return useMutation({

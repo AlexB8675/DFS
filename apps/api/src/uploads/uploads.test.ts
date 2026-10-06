@@ -32,6 +32,7 @@ beforeAll(async () => {
     sessionId: 'test',
     csrfToken: 'test',
     expiresAt: new Date(Date.now() + 60_000),
+    seenAt: null,
     limited: false,
   }
 })

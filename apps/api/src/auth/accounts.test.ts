@@ -60,8 +60,11 @@ function heldVerification() {
   return { entered: entered.promise, release: result.resolve }
 }
 
+/** Where the test's sessions come from. */
+const client = { ip: 'address', userAgent: undefined }
+
 async function authenticated(user: UserRow) {
-  const opened = await openSession(app.db, user)
+  const opened = await openSession(app.db, user, client)
   const auth = await findSession(app.db, opened.token)
   if (!auth) throw new Error('No session opened.')
   return auth
@@ -72,7 +75,11 @@ describe('sign-in races', () => {
     const user = await account('concurrent-failures')
     const verification = heldVerification()
     const attempts = Array.from({ length: 12 }, (_, index) =>
-      signIn(app, { username: user.username, password: 'wrong' }, `address-${String(index)}`).then(
+      signIn(
+        app,
+        { username: user.username, password: 'wrong' },
+        { ip: `address-${String(index)}`, userAgent: undefined },
+      ).then(
         () => null,
         (error: unknown) => error,
       ),
@@ -97,7 +104,7 @@ describe('sign-in races', () => {
     await app.db.update(users).set({ failedSignIns: 1000 }).where(eq(users.id, user.id))
     vi.mocked(verifyPassword).mockResolvedValue(false)
     await expect(
-      signIn(app, { username: user.username, password: 'wrong' }, 'address'),
+      signIn(app, { username: user.username, password: 'wrong' }, client),
     ).rejects.toMatchObject({ status: 401, code: 'invalid_credentials' })
 
     const [current] = await app.db.select().from(users).where(eq(users.id, user.id))
@@ -124,7 +131,7 @@ describe('sign-in races', () => {
       const outcome = signIn(
         app,
         { username: user.username, password: 'the-original-password' },
-        'address',
+        client,
       ).then(
         () => null,
         (error: unknown) => error,
@@ -145,7 +152,7 @@ describe('sign-in races', () => {
     const outcome = signIn(
       app,
       { username: user.username, password: 'the-original-password' },
-      'address',
+      client,
     ).then(
       () => null,
       (error: unknown) => error,
@@ -166,10 +173,12 @@ describe('password-change races', () => {
     const user = await account('reset-during-change')
     const auth = await authenticated(user)
     const verification = heldVerification()
-    const outcome = changePassword(app, auth, {
-      currentPassword: 'the-original-password',
-      newPassword: 'the-user-chosen-password',
-    }).then(
+    const outcome = changePassword(
+      app,
+      auth,
+      { currentPassword: 'the-original-password', newPassword: 'the-user-chosen-password' },
+      client,
+    ).then(
       () => null,
       (error: unknown) => error,
     )
@@ -202,10 +211,12 @@ describe('password-change races', () => {
       entered.resolve(undefined)
       return hashed.promise
     })
-    const outcome = changePassword(app, auth, {
-      currentPassword: 'the-original-password',
-      newPassword: 'the-user-chosen-password',
-    }).then(
+    const outcome = changePassword(
+      app,
+      auth,
+      { currentPassword: 'the-original-password', newPassword: 'the-user-chosen-password' },
+      client,
+    ).then(
       () => null,
       (error: unknown) => error,
     )

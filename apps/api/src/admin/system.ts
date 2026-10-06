@@ -2,6 +2,7 @@ import {
   formatBytes,
   METRIC_STEPS,
   type AuditEntry,
+  type AuditQuery,
   type CreateChannelInput,
   type Page,
   type StorageChannel,
@@ -333,13 +334,25 @@ async function channelById(
 
 // ── Audit log ────────────────────────────────────────────────────────────────
 
-/** `GET /admin/audit`: newest first, paged by ID. */
-export async function auditLog(
-  app: FastifyInstance,
-  cursor: string | undefined,
-  limit: number,
-): Promise<Page<AuditEntry>> {
+/**
+ * `GET /admin/audit`: newest first, paged by ID, narrowed to some kinds of
+ * action (by prefix), one actor, or words in its target or details.
+ */
+export async function auditLog(app: FastifyInstance, query: AuditQuery): Promise<Page<AuditEntry>> {
+  const { cursor, limit, actions, actorId, q } = query
   const before = cursor && /^\d+$/.test(cursor) ? sql`AND entry.id < ${cursor}::bigint` : sql``
+  const kinds =
+    actions && actions.length > 0
+      ? sql`AND (${sql.join(
+          actions.map((prefix) => sql`starts_with(entry.action, ${prefix})`),
+          sql` OR `,
+        )})`
+      : sql``
+  const by = actorId ? sql`AND entry.user_id = ${actorId}` : sql``
+  const words = q ? `%${q.replace(/[\\%_]/g, (char) => `\\${char}`)}%` : null
+  const about = words
+    ? sql`AND (entry.meta->>'target' ILIKE ${words} OR entry.meta->>'details' ILIKE ${words})`
+    : sql``
   const { rows } = await app.db.execute<{
     id: string
     at: string
@@ -351,7 +364,7 @@ export async function auditLog(
     SELECT entry.id::text AS id, entry.at::text AS at, actor.display_name AS actor, entry.action,
       entry.meta->>'target' AS target, entry.meta->>'details' AS details
     FROM audit_log entry LEFT JOIN users actor ON actor.id = entry.user_id
-    WHERE true ${before}
+    WHERE true ${before} ${kinds} ${by} ${about}
     ORDER BY entry.id DESC
     LIMIT ${limit + 1}`)
   const page = rows.slice(0, limit)

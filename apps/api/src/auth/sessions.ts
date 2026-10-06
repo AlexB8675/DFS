@@ -14,6 +14,8 @@ const LIMITED_SESSION_MS = 15 * 60_000
 /** Sliding expiry, written at most daily rather than on every request. */
 const EXTEND_AFTER_MS = DAY_MS
 const LAST_SEEN_EVERY_MS = 5 * 60_000
+/** Enough to tell browsers apart. */
+const MAX_USER_AGENT = 300
 
 export type UserRow = typeof users.$inferSelect
 
@@ -21,9 +23,17 @@ export interface Auth {
   sessionId: string
   csrfToken: string
   expiresAt: Date
+  /** When this session was last noted as used. */
+  seenAt: Date | null
   user: UserRow
   /** Signed in with a temporary password: may only choose a new one. */
   limited: boolean
+}
+
+/** The browser a session signs in from, as Admin → Access shows it. */
+export interface SessionClient {
+  ip: string
+  userAgent: string | undefined
 }
 
 export interface OpenedSession {
@@ -32,12 +42,24 @@ export interface OpenedSession {
   expiresAt: Date
 }
 
-export async function openSession(db: Executor, user: UserRow): Promise<OpenedSession> {
+export async function openSession(
+  db: Executor,
+  user: UserRow,
+  client: SessionClient,
+): Promise<OpenedSession> {
   const token = randomBytes(32).toString('base64url')
   const csrfToken = randomBytes(24).toString('base64url')
   const lifetime = user.passwordExpiresAt ? LIMITED_SESSION_MS : FULL_SESSION_MS
   const expiresAt = new Date(Date.now() + lifetime)
-  await db.insert(sessions).values({ id: tokenId(token), userId: user.id, csrfToken, expiresAt })
+  await db.insert(sessions).values({
+    id: tokenId(token),
+    userId: user.id,
+    csrfToken,
+    expiresAt,
+    ip: client.ip,
+    userAgent: client.userAgent?.slice(0, MAX_USER_AGENT) ?? null,
+    lastSeenAt: new Date(),
+  })
   return { token, csrfToken, expiresAt }
 }
 
@@ -59,14 +81,16 @@ export async function findSession(db: Executor, token: string): Promise<Auth | n
     sessionId: row.session.id,
     csrfToken: row.session.csrfToken,
     expiresAt: row.session.expiresAt,
+    seenAt: row.session.lastSeenAt,
     user: row.user,
     limited: row.user.passwordExpiresAt !== null,
   }
 }
 
 /**
- * Slides a full session's expiry forward and notes when the user was last
- * seen, each at most once in a while. Returns the new expiry, if it moved.
+ * Slides a full session's expiry forward, and notes when the user and the
+ * session were last seen, each at most once in a while. Returns the new
+ * expiry, if it moved.
  */
 export async function touchSession(db: Executor, auth: Auth): Promise<Date | null> {
   const now = Date.now()
@@ -76,6 +100,12 @@ export async function touchSession(db: Executor, auth: Auth): Promise<Date | nul
       .update(users)
       .set({ lastSeenAt: new Date(now) })
       .where(eq(users.id, auth.user.id))
+  }
+  if (now - (auth.seenAt?.getTime() ?? 0) > LAST_SEEN_EVERY_MS) {
+    await db
+      .update(sessions)
+      .set({ lastSeenAt: new Date(now) })
+      .where(eq(sessions.id, auth.sessionId))
   }
   if (auth.limited || auth.expiresAt.getTime() - now > FULL_SESSION_MS - EXTEND_AFTER_MS)
     return null

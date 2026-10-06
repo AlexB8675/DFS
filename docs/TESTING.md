@@ -155,7 +155,13 @@ Use disposable folders and files for these checks:
     shows as waiting, then done with how many packs it sealed, and the audit log
     records it. With Discord storage, Create channel adds the next `storage-NN`
     to `DFS Dev`; stop the bot and a task is refused until it is back.
-12. Open Admin → Database. In a terminal, hold a query open:
+12. Open Admin → Access in one browser, signed in as an admin, and sign in
+    as another user in a private window. The second session shows with its
+    browser and address; Sign out ends it, and the private window's next
+    click asks to sign in again. Share a file as that user, then turn the link
+    off from Access: opening the link says it was turned off. In the audit
+    log, choose Sharing and type the file's name.
+13. Open Admin → Database. In a terminal, hold a query open:
     `docker exec -it dfs-dev-postgres-1 psql -U dfs -d dfs -c "SELECT pg_sleep(120)"`.
     Within 10 s it shows under Running now; Cancel query stops it (psql says
     `canceling statement due to user request`), and the audit log records it.

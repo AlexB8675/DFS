@@ -99,6 +99,12 @@ export function createAppRouter() {
             { path: 'users/:userId', lazy: adminUserPage },
             { path: 'users/:userId/folders/:folderId', lazy: adminUserPage },
             {
+              path: 'access',
+              lazy: async () => ({
+                Component: (await import('@/features/admin/access-page')).AccessPage,
+              }),
+            },
+            {
               path: 'storage',
               lazy: async () => ({
                 Component: (await import('@/features/admin/storage-page')).StoragePage,

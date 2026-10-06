@@ -488,6 +488,84 @@ export const systemHealthSchema = z.object({
 })
 export type SystemHealth = z.infer<typeof systemHealthSchema>
 
+// ── People and access (§9) ───────────────────────────────────────────────────
+
+/**
+ * A signed-in session. `key` names it: the start of the hash the database
+ * keeps of its cookie, which can't sign anyone in.
+ */
+export const adminSessionSchema = z.object({
+  key: z.string().regex(/^[0-9a-f]{16}$/),
+  userId: id,
+  userName: z.string(),
+  createdAt: timestamp,
+  /** When it was last used, to within a few minutes. */
+  lastSeenAt: timestamp.nullable(),
+  expiresAt: timestamp,
+  ip: z.string().nullable(),
+  userAgent: z.string().nullable(),
+  /** Signed in with a temporary password: it can only choose a new one. */
+  limited: z.boolean(),
+  /** The session asking. */
+  current: z.boolean(),
+})
+export type AdminSession = z.infer<typeof adminSessionSchema>
+export const adminSessionListSchema = z.array(adminSessionSchema)
+
+/** Any user's share link, as an admin sees it: never its token or URL (D4). */
+export const adminShareSchema = z.object({
+  id,
+  nodeId: id,
+  nodeName: z.string(),
+  nodeKind: nodeKindSchema,
+  ownerId: id,
+  ownerName: z.string(),
+  /** The folder it is in, for the metadata browser; `null` for a root. */
+  parentId: id.nullable(),
+  createdAt: timestamp,
+  expiresAt: timestamp.nullable(),
+  hasPassword: z.boolean(),
+  maxDownloads: z.number().int().positive().nullable(),
+  downloadCount: count,
+  revokedAt: timestamp.nullable(),
+  state: z.enum(['active', 'expired', 'used_up', 'revoked']),
+})
+export type AdminShare = z.infer<typeof adminShareSchema>
+export const adminSharePageSchema = pageSchema(adminShareSchema)
+
+/** An upload still receiving its parts. */
+export const adminUploadSchema = z.object({
+  id,
+  userId: id,
+  userName: z.string(),
+  nodeId: id,
+  fileName: z.string(),
+  parentId: id.nullable(),
+  sizeBytes: byteCount,
+  receivedBytes: byteCount,
+  createdAt: timestamp,
+  /** When it is given up if it doesn't finish. */
+  expiresAt: timestamp,
+})
+export type AdminUpload = z.infer<typeof adminUploadSchema>
+export const adminUploadListSchema = z.array(adminUploadSchema)
+
+/** `GET /admin/audit`: newest first, narrowed to some kinds of action, an actor, or a word. */
+export const auditQuerySchema = z.object({
+  cursor: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(500).default(100),
+  /** Prefixes of actions, comma-separated: `auth.`, or `share.,node.`. */
+  actions: z
+    .string()
+    .transform((value) => value.split(',').filter(Boolean))
+    .pipe(z.array(z.string().regex(/^[a-z_]+(\.[a-z_]*)?$/)).max(10))
+    .optional(),
+  actorId: id.optional(),
+  /** Words in what the entry is about or its details. */
+  q: z.string().trim().max(100).optional(),
+})
+export type AuditQuery = z.infer<typeof auditQuerySchema>
+
 // ── Storage control (§9) ─────────────────────────────────────────────────────
 
 /**

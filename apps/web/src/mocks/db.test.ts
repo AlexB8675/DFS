@@ -293,7 +293,7 @@ describe('mock API database', () => {
     db.moderate(exe.id, 'No executables.')
 
     expect(db.adminChildren(games?.id ?? '', options).items.map((n) => n.id)).not.toContain(exe.id)
-    expect(db.auditLog(null, 1).items[0]).toMatchObject({
+    expect(db.auditLog({ limit: 1 }).items[0]).toMatchObject({
       action: 'node.moderated',
       details: 'No executables.',
     })
