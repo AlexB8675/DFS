@@ -145,7 +145,7 @@ export class MockApiError extends Error {
   }
 }
 
-const STATE_VERSION = 8
+const STATE_VERSION = 9
 const STORAGE_KEY = 'dfs.mock-db'
 /** `CHUNK_SIZE` at the 10 MiB attachment limit (§7.3). */
 export const CHUNK_SIZE = 10 * 1024 * 1024 - 128 * 1024
