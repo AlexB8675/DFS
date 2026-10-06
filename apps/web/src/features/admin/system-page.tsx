@@ -109,6 +109,7 @@ function SystemView({ system }: { system: SystemInfo }) {
 
       <div className="grid gap-6 lg:grid-cols-2">
         <DiscordCard system={system} discord={blobStore === 'discord'} />
+        <JournalCard journal={system.journal} />
         <DisksCard system={system} />
       </div>
 
@@ -251,6 +252,38 @@ function DiscordCard({ system, discord }: { system: SystemInfo; discord: boolean
           </tbody>
         </table>
       )}
+    </Section>
+  )
+}
+
+/** The metadata journal (§8): what reached #dfs-journal, and what waits. */
+function JournalCard({ journal }: { journal: SystemInfo['journal'] }) {
+  const waiting =
+    journal.waitingRecords === 0 && journal.waitingBatches === 0
+      ? 'Nothing waits.'
+      : `${journal.waitingRecords.toLocaleString()} ${journal.waitingRecords === 1 ? 'change waits' : 'changes wait'} to be sealed, ${journal.waitingBatches.toLocaleString()} ${journal.waitingBatches === 1 ? 'batch' : 'batches'} to be posted.`
+  return (
+    <Section
+      title="Journal"
+      description="Every change to accounts, files and folders, sealed into batches about once a minute and posted to #dfs-journal, so the metadata can be rebuilt from Discord."
+    >
+      <div className="space-y-1 text-sm">
+        <p>
+          {journal.lastBatch === null || !journal.lastPostedAt ? (
+            'No batch posted yet.'
+          ) : (
+            <>
+              Batch {journal.lastBatch.toLocaleString()} posted{' '}
+              <time dateTime={journal.lastPostedAt} title={formatFullDate(journal.lastPostedAt)}>
+                {formatDate(journal.lastPostedAt).toLowerCase()}
+              </time>
+              .
+            </>
+          )}
+        </p>
+        <p className="text-muted-foreground">{waiting}</p>
+        {journal.lastError && <p className="text-destructive">{journal.lastError}</p>}
+      </div>
     </Section>
   )
 }

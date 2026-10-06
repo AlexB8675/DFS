@@ -752,6 +752,17 @@ export const systemInfoSchema = z.object({
   frameCache: z
     .object({ dir: z.string(), usedBytes: byteCount, maxBytes: byteCount, frames: count })
     .nullable(),
+  /** The metadata journal on its way to #dfs-journal (§8). */
+  journal: z.object({
+    /** The newest batch posted, and when; `null` before the first. */
+    lastBatch: z.number().int().min(1).nullable(),
+    lastPostedAt: timestamp.nullable(),
+    /** Changes not sealed into a batch yet, and batches sealed but not posted. */
+    waitingRecords: count,
+    waitingBatches: count,
+    /** Why the batch first in line failed to post, if it did. */
+    lastError: z.string().nullable(),
+  }),
 })
 export type SystemInfo = z.infer<typeof systemInfoSchema>
 

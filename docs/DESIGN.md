@@ -158,11 +158,11 @@ flowchart LR
 - **Message formats.** They leak no file names, and every attachment is encrypted:
   ```
   #storage-NN   content: dfs1 b=184467 k=pack n=212 i=3fa9c1d2e0b4   attachment: 184467.bin
-  #dfs-journal  content: dfs1 j=5521 ids=9120004-9125003   attachment: j5521.bin
+  #dfs-journal  content: dfs1 j=5521 ids=9120004-9125003 i=3fa9c1d2e0b4   attachment: j5521.bin
   #dfs-backups  content: dfs1 snap=212 hwm=9125003         attachment: snap212.bin
   ```
   - **Data:** `b` is the blob ID, `k` the blob kind (`solo` | `pack`), `n` the number of frames, and `i` the ID of the database that posted it (12 hex digits, made once by its migration in the `instance` table). This lets a reconciler map orphan messages back to DB rows, and lets recovery rebuild blob locations by scanning channels (§8). Blob IDs restart in every database, so `i` is what tells a database its own messages apart: no environment, test stack or restored copy can take another's messages for orphans, even in a channel both registered. Recovery keeps the `i` of the database it rebuilds.
-  - **Journal:** `j` is the batch number (contiguous, so a missing batch is detectable) and `ids` the range of journal record IDs inside it.
+  - **Journal:** `j` is the batch number (contiguous, so a missing batch is detectable), `ids` the range of journal record IDs inside it (a range: IDs can have gaps), and `i` the database that posted it, as for data. The sealed batch names its database too, which recovery checks, since development stacks share a master key and a category.
   - **Backups:** `snap` is the snapshot number and `hwm` its journal high-water mark. The attachment is the encrypted manifest that locates the dump (§8).
 
 ---
@@ -327,7 +327,7 @@ erDiagram
     }
 ```
 
-Supporting tables not drawn above: `journal` (outbox of metadata changes, §8), `backups` (snapshots and their manifests, §8, added with M4), `folder_stats_dirty` (§12.1), `archive_tickets` (single-use ZIP links, §9), `metrics` (the admin's graphs, §16), and pg-boss's own schema. The Drizzle schema in `packages/db` is the exact definition; this diagram shows its shape. A received upload part is its chunk row, so upload sessions don't list parts separately. Storage channels have their own ID, so a Discord channel ID appears once, in `storage_channels`.
+Supporting tables not drawn above: `journal` (outbox of metadata changes, §8), `journal_batches` (the sealed batches, staged until the bot posts them, §8), `backups` (snapshots and their manifests, §8, added with M4), `folder_stats_dirty` (§12.1), `archive_tickets` (single-use ZIP links, §9), `metrics` (the admin's graphs, §16), and pg-boss's own schema. The Drizzle schema in `packages/db` is the exact definition; this diagram shows its shape. A received upload part is its chunk row, so upload sessions don't list parts separately. Storage channels have their own ID, so a Discord channel ID appears once, in `storage_channels`.
 
 ### 5.1 Key rules and indexes
 
@@ -635,7 +635,7 @@ The design aims to survive **losing the VPS** (DB plus disks), as long as the Di
 
    Derived values (`live_bytes`, `used_bytes`, `folder_stats`, `nodes.trashed_via`, channel counters) are not journaled. Recovery recomputes them.
 2. **Commit order.** A transaction writes its journal records last, right after taking a transaction-scoped advisory lock (`pg_advisory_xact_lock`), so `journal.id` order is commit order. Without this, a transaction that took a lower ID but committed later could be skipped by both the flusher and a snapshot's high-water mark. The cost is that journaled commits are serialized, at about one fsync each, so they top out near 1 ÷ fsync latency (hundreds to a few thousand per second on an SSD). That is fine at this scale, because bulk work is journaled once per batch or per pack, not once per file.
-3. **Journal batches.** A singleton job (`journal.flush`, in the API because it needs the master key) runs every `JOURNAL_FLUSH_INTERVAL_MS` (60 s) or after 5,000 records. It takes the unflushed records in ID order, compresses them, and seals them as one encrypted object (§7.3, AAD type `0x03`). A batch is also cut at about 8 MiB so it always fits in one attachment. A single record too large for that (only a `version.stored` for a multi-terabyte file) is split across consecutive batches. The bot posts each batch to `#dfs-journal` (`journal.upload`, message format in §4). This adds **one message per batch, not one per file**, which matters when there are millions of files.
+3. **Journal batches.** A singleton job (`journal.flush`, in the API because it needs the master key) runs every `JOURNAL_FLUSH_INTERVAL_MS` (60 s) or as soon as 5,000 records wait. One API instance flushes at a time (a lock of its own, never the journal's, which every journaled write takes). Each batch is sealed in a transaction of its own, which takes the next number and gives it back if it rolls back, so numbers stay contiguous; the sealed bytes wait in `journal_batches` until the leading bot posts them, in number order, and then only Discord holds them (rows of batches posted a week ago are pruned). The plaintext is `{v, instance, batch, records: [{id, kind, at, record}]}` as JSON, gzip'd (frame flag `0x01`), sealed as an object (§7.3: `key_id length | key_id | wrapped DEK | frame`); a record too large for a batch is cut into pieces, one per batch, `{piece: {id, index, count, data}}`, all sealed in one transaction, and recovery joins their `data`. It takes the unflushed records in ID order, compresses them, and seals them as one encrypted object (§7.3, AAD type `0x03`). A batch is also cut at about 8 MiB so it always fits in one attachment. A single record too large for that (only a `version.stored` for a multi-terabyte file) is split across consecutive batches. The bot posts each batch to `#dfs-journal` (`journal.upload`, message format in §4). This adds **one message per batch, not one per file**, which matters when there are millions of files.
 4. **DB snapshots.** A nightly `backup.snapshot` job runs in the API (it holds the keys, and its image ships `pg_dump` 18):
    - It opens a `REPEATABLE READ` transaction, exports its snapshot, and reads the high-water mark (`max(journal.id)`) inside it. `pg_dump --snapshot=…` then dumps that same snapshot, so the dump holds exactly the changes up to the high-water mark.
    - The dump (custom format) is streamed into a DFS file owned by a system account. Backup files are **always stored as solo blobs**, never packed, so compaction never moves them.
@@ -750,7 +750,7 @@ Internal (bot), only reachable on `dfs_internal` and returning `404` at the edge
   |---|---|---|
   | `blob.upload` | high | new jobs `NOTIFY` the leader, which takes them in batches of 8, four batches at a time, fetching again at once while batches come back full; concurrency per channel; retries with backoff; dead-letter after N attempts → affected versions `failed` |
   | `pack.seal` | high | packer loop (§6.6), every second; a loop over waiting frames, not a queue |
-  | `journal.upload` | high | uploads encrypted journal batches staged by the API, and posts backup pointers with their manifests to `#dfs-backups` (§8) |
+  | `journal.upload` | high | posts the journal batches the API sealed to `#dfs-journal`, in number order, every 5 s; a loop over `journal_batches`, not a queue; after a failure it waits longer each time, up to 5 minutes (backup pointers, with M4's snapshots, will go to `#dfs-backups`) (§8) |
   | `blob.delete` | low | GC (§6.4), every 2 s; a loop over `deleting` blobs, not a queue |
   | `blob.compact` | low | rewrites mostly-dead packs |
   | `blob.verify` | lowest | rolling scrubber, request-budgeted |

@@ -55,3 +55,25 @@ export function nodeRecord(node: NodeRow): JournalRecord {
   const { trashedVia: _trashedVia, ...state } = node
   return { kind: 'node.upsert', record: state }
 }
+
+/**
+ * Deletes the records of batches on Discord for `days` or more, and of every
+ * batch before them: #dfs-journal holds them now (§8). Stops below the first
+ * batch not yet posted. Returns how many records went.
+ */
+export async function pruneJournal(db: Executor, days = 7): Promise<number> {
+  const { rows } = await db.execute<{ count: number }>(sql`
+    WITH posted AS (
+      SELECT max(batch.last_id) AS through FROM journal_batches batch
+      WHERE batch.state = 'stored' AND batch.stored_at < now() - make_interval(days => ${days}::int)
+        AND NOT EXISTS (
+          SELECT 1 FROM journal_batches earlier
+          WHERE earlier.state = 'staged' AND earlier.batch_no < batch.batch_no)
+    ), deleted AS (
+      DELETE FROM journal
+      WHERE id <= (SELECT through FROM posted) AND batch_no IS NOT NULL
+      RETURNING 1
+    )
+    SELECT count(*)::int AS count FROM deleted`)
+  return rows[0]?.count ?? 0
+}

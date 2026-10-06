@@ -10,6 +10,7 @@ import type pg from 'pg'
 import { registerAccess } from './auth/access.ts'
 import { RateLimiter } from './auth/rate-limit.ts'
 import { Checks } from './checks.ts'
+import { JournalFlusher } from './journal.ts'
 import { CdnBlobReader } from './content/cdn-reader.ts'
 import { FrameCache, MemoryBudget } from './content/frame-cache.ts'
 import { registerErrorHandling } from './errors.ts'
@@ -54,6 +55,8 @@ declare module 'fastify' {
     metrics: Metrics
     /** How Discord and the internet answer; `main.ts` starts them once listening (§16). */
     checks: Checks
+    /** Seals the journal into batches for Discord (§8); `main.ts` starts it. */
+    journalFlusher: JournalFlusher
   }
 }
 
@@ -155,12 +158,15 @@ export async function buildApp({
   app.decorate('readBudget', new MemoryBudget(READ_AHEAD_BYTES))
   const checks = new Checks(metrics)
   app.decorate('checks', checks)
+  const journalFlusher = new JournalFlusher(app)
+  app.decorate('journalFlusher', journalFlusher)
   const savingMetrics = metrics.start(db, app.log)
   // Open event streams would keep the server from closing; a check of
   // itself would find it closing.
   app.addHook('preClose', async () => {
     events.endStreams()
     await checks.stop()
+    await journalFlusher.stop()
   })
   app.addHook('onClose', async () => {
     await events.stop()

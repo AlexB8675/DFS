@@ -4,7 +4,7 @@ import path from 'node:path'
 import { loadConfig, type Config } from '@dfs/config'
 import { createDatabase, createPool, QUEUES, storageChannels, type Database } from '@dfs/db'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
-import { DiscordBlobStore, Staging } from '@dfs/storage'
+import { DiscordBlobStore, LocalJournalStore, Staging } from '@dfs/storage'
 import { FakeDiscord, type FakeChannel } from '@dfs/storage/testing'
 import { ChannelType } from '@discordjs/core'
 import { sql } from 'drizzle-orm'
@@ -78,7 +78,7 @@ function deps(overrides: Partial<TaskDeps> = {}): TaskDeps {
     config,
     db,
     boss: { retry: vi.fn() } as unknown as PgBoss,
-    storage: { store, discord: discord as never },
+    storage: { store, journal: new LocalJournalStore(directory), discord: discord as never },
     staging,
     packer: new Packer({ db, staging, sizes, maxWaitMs: 60_000 }),
     log: log as never,
@@ -235,7 +235,10 @@ describe('admin tasks (DESIGN.md §9)', () => {
 
   it('says a Discord task needs Discord storage, and refuses tasks it doesn’t know', async () => {
     await expect(
-      runAdminTask(deps({ storage: { store, discord: null } }), task('channel.create')),
+      runAdminTask(
+        deps({ storage: { store, journal: new LocalJournalStore(directory), discord: null } }),
+        task('channel.create'),
+      ),
     ).rejects.toThrow('This needs Discord storage')
     await expect(runAdminTask(deps(), task('everything.delete'))).rejects.toThrow()
   })

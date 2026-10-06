@@ -90,12 +90,22 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
     // can't be downloaded: those whose current version is in one.
     app.db.execute<{
       failing_deletions: number
+      journal_behind: number
+      journal_error: string | null
       lost_files: number
       lost: { id: string; channel: string | null; lostAt: string | null; files: number }[]
     }>(sql`
       SELECT
         (SELECT count(*)::int FROM blobs
           WHERE state = 'deleting' AND attempts >= ${FAILING_DELETE_ATTEMPTS}) AS failing_deletions,
+        -- The oldest change not in #dfs-journal: not sealed yet, or sealed and not posted (§8).
+        greatest(
+          (SELECT extract(epoch FROM now() - min(created_at)) FROM journal WHERE batch_no IS NULL),
+          (SELECT extract(epoch FROM now() - min(created_at)) FROM journal_batches
+            WHERE state = 'staged'),
+          0)::float8 AS journal_behind,
+        (SELECT last_error FROM journal_batches WHERE state = 'staged'
+          ORDER BY batch_no LIMIT 1) AS journal_error,
         (SELECT count(DISTINCT node.id)::int
           FROM blobs blob JOIN chunks chunk ON chunk.blob_id = blob.id
           JOIN file_versions version ON version.id = chunk.version_id
@@ -167,6 +177,10 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
       network: {
         discordDown: !local && discordCheck.down,
         internetDown: internetCheck.down,
+      },
+      journal: {
+        behindSeconds: troubles.rows[0]?.journal_behind ?? 0,
+        lastError: troubles.rows[0]?.journal_error ?? null,
       },
     }),
     services: [

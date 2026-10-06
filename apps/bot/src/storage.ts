@@ -6,8 +6,12 @@ import {
   ChaosBlobStore,
   createDiscordRest,
   DiscordBlobStore,
+  DiscordJournalStore,
   LocalBlobStore,
+  LocalJournalStore,
   type BlobStore,
+  type JournalChannel,
+  type JournalStore,
   type CdnUrl,
   type DiscordRest,
   type DiscordRestClient,
@@ -25,6 +29,8 @@ const DISCORD_TIMEOUT_MS = 120_000
 
 export interface BotStorage {
   store: BlobStore
+  /** Where journal batches go (§8): #dfs-journal, or a folder beside local blobs. */
+  journal: JournalStore
   /** Discord's REST client when blobs go there: for the gateway, the reconciler and channel checks. */
   discord: DiscordRestClient | null
 }
@@ -47,10 +53,37 @@ export function botStorage(
       instanceId: () => instanceId(db),
       perChannel: config.uploadChannelConcurrency,
     })
-    return { store, discord: rest }
+    const journal = new DiscordJournalStore({
+      rest,
+      channel: () => journalChannel(db, rest, guildId ?? '', categoryName),
+      instanceId: () => instanceId(db),
+    })
+    return { store, journal, discord: rest }
   }
   const local = new LocalBlobStore(config.localBlobDir)
-  return { store: config.blobStore === 'chaos' ? new ChaosBlobStore(local) : local, discord: null }
+  return {
+    store: config.blobStore === 'chaos' ? new ChaosBlobStore(local) : local,
+    journal: new LocalJournalStore(config.localBlobDir),
+    discord: null,
+  }
+}
+
+/**
+ * The registered journal channel inside this environment's category in
+ * Discord (D25), if there is one: batches are never posted anywhere else.
+ */
+export async function journalChannel(
+  db: Database,
+  rest: DiscordRest,
+  guildId: string,
+  categoryName: string,
+): Promise<JournalChannel | null> {
+  const { rows } = await db.execute<{ id: string; discord_channel_id: string }>(sql`
+    SELECT id, discord_channel_id FROM storage_channels WHERE kind = 'journal' ORDER BY id`)
+  if (rows.length === 0) return null
+  const inCategory = await channelsInCategory(rest, guildId, categoryName)
+  const row = rows.find((candidate) => inCategory.has(candidate.discord_channel_id))
+  return row ? { id: row.id, discordChannelId: row.discord_channel_id } : null
 }
 
 /**

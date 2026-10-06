@@ -6,6 +6,7 @@
   "exports": {
     "./uploader": "./src/uploader.ts",
     "./leader-work": "./src/leader-work.ts",
+    "./journal-uploader": "./src/journal-uploader.ts",
     "./storage": "./src/storage.ts",
     "./packer": "./src/packer.ts",
     "./testing": "./src/testing.ts",

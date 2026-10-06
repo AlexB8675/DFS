@@ -721,6 +721,13 @@ export class AdminMockDb extends MockDb {
         maxBytes: CACHE_MAX_BYTES,
         frames: Math.round(this.cachedBytes / (10 * 1024 * 1024)),
       },
+      journal: {
+        lastBatch: 4812,
+        lastPostedAt: new Date(Date.now() - 40_000).toISOString(),
+        waitingRecords: 37,
+        waitingBatches: 0,
+        lastError: null,
+      },
     }
   }
 

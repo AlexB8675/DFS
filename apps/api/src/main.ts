@@ -39,5 +39,7 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
 // machine, only from this machine.
 const host = config.nodeEnv === 'production' ? '0.0.0.0' : '127.0.0.1'
 await app.listen({ port: config.apiPort, host })
-// Only a listening API checks Discord, the internet and itself: tests don't.
+// Only a listening API checks Discord, the internet and itself, and flushes
+// the journal: tests don't.
 app.checks.start(`http://127.0.0.1:${String(config.apiPort)}/api/health`)
+app.journalFlusher.start()

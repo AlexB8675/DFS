@@ -25,6 +25,11 @@ export const LOCKS = {
    * find none of its kind under way (Admin → Storage).
    */
   adminTask: 5,
+  /**
+   * Held while the journal is sealed into batches (§8), so one API instance
+   * flushes at a time. Never `journal`: every journaled write takes that one.
+   */
+  journalFlush: 6,
 } as const
 
 /**

@@ -74,8 +74,13 @@ export class FakeDiscord implements DiscordRest {
     return added
   }
 
-  addTextChannel(name: string): FakeChannel {
-    return this.addChannel({ name, type: ChannelType.GuildText })
+  /** A text channel, in the category `parentId` if given. */
+  addTextChannel(name: string, parentId: string | null = null): FakeChannel {
+    return this.addChannel({ name, type: ChannelType.GuildText, parent_id: parentId })
+  }
+
+  addCategory(name: string): FakeChannel {
+    return this.addChannel({ name, type: ChannelType.GuildCategory })
   }
 
   channel(id: string): FakeChannel {

@@ -23,6 +23,8 @@ const LIMITS = {
   connectionsCritical: 0.95,
   /** An open transaction this old holds back vacuum and may block others. */
   transactionSeconds: 10 * 60,
+  /** Changes this long out of #dfs-journal: the API seals a batch a minute, the bot posts it at once. */
+  journalSeconds: 10 * 60,
 }
 
 export interface AlertFigures {
@@ -55,6 +57,11 @@ export interface AlertFigures {
    * is never down with a local blob store, which doesn't need it.
    */
   network: { discordDown: boolean; internetDown: boolean }
+  /**
+   * How far the journal is behind (§8): the oldest change not in #dfs-journal
+   * yet, sealed or not, and why the batch first in line failed, if it did.
+   */
+  journal: { behindSeconds: number; lastError: string | null }
 }
 
 export const FAILING_DELETE_ATTEMPTS = LIMITS.deleteAttempts
@@ -151,6 +158,14 @@ export function healthAlerts(figures: AlertFigures): SystemAlert[] {
       level: 'warning',
       title: 'Deleting from Discord keeps failing',
       detail: `${plural(figures.failingDeletions, 'released blob')} failed to delete ${String(LIMITS.deleteAttempts)} times or more.`,
+    })
+  }
+  if (figures.journal.behindSeconds >= LIMITS.journalSeconds) {
+    alerts.push({
+      code: 'journal_behind',
+      level: 'warning',
+      title: 'Changes aren’t reaching #dfs-journal',
+      detail: `The journal is ${minutes(figures.journal.behindSeconds)} behind: if this server were lost now, recovery from Discord would miss those changes.${figures.journal.lastError ? ` Last error: ${figures.journal.lastError}` : ''}`,
     })
   }
   if (database.oldestTransactionSeconds >= LIMITS.transactionSeconds) {

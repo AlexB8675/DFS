@@ -262,7 +262,8 @@ export class DiscordBlobStore implements BlobStore {
 }
 
 /** Rate limits, server errors and network trouble pass; Discord refusing a request doesn't. */
-function storeError(error: unknown, doing: string): BlobStoreError {
+/** A store failure from a Discord call: retryable for rate limits and server errors. */
+export function storeError(error: unknown, doing: string): BlobStoreError {
   if (error instanceof DiscordAPIError) {
     return new BlobStoreError(`${doing}: ${discordProblem(error) ?? error.message}`, {
       retryable: error.status === 429 || error.status >= 500,

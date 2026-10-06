@@ -13,11 +13,23 @@ const calm: AlertFigures = {
   database: { connections: 12, maxConnections: 100, oldestTransactionSeconds: 2, longLockWaits: 0 },
   lastHour: { rateLimited: 3, serverErrors: 0, cdnFailures: 0, postFailures: 0, deadlocks: 0 },
   network: { discordDown: false, internetDown: false },
+  journal: { behindSeconds: 45, lastError: null },
 }
 
 describe('health alerts (DESIGN.md §16)', () => {
   it('stays quiet while everything is fine', () => {
     expect(healthAlerts(calm)).toEqual([])
+  })
+
+  it('says when changes haven’t reached #dfs-journal for ten minutes, and why', () => {
+    expect(healthAlerts({ ...calm, journal: { behindSeconds: 590, lastError: null } })).toEqual([])
+    const [alert] = healthAlerts({
+      ...calm,
+      journal: { behindSeconds: 1500, lastError: 'Discord is down' },
+    })
+    expect(alert).toMatchObject({ code: 'journal_behind', level: 'warning' })
+    expect(alert?.detail).toContain('25 min behind')
+    expect(alert?.detail).toContain('Last error: Discord is down')
   })
 
   it('names what is wrong, critical first', () => {

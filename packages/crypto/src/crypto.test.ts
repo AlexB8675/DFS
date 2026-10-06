@@ -7,6 +7,7 @@ import { chunkContext, journalBatchContext, uuidBytes } from './context.ts'
 import { FRAME_OVERHEAD, FrameError, openFrame, readFrameHeader, sealFrame } from './frame.ts'
 import { fromSha256Hex, sha256, toHex } from './hash.ts'
 import { generateDek, importAesKey, MasterKeys, type AesKey } from './keys.ts'
+import { openObject, sealObject } from './object.ts'
 
 const versionId = '0192f3a4-5b6c-7d8e-9f00-112233445566'
 const otherVersionId = '0192f3a4-5b6c-7d8e-9f00-112233445567'
@@ -127,6 +128,27 @@ describe('master keys and wrapped DEKs', () => {
 
   afterAll(async () => {
     await rm(dir, { recursive: true, force: true })
+  })
+
+  it('seals an object with its own key in front, and opens it only for its context', async () => {
+    const plaintext = new TextEncoder().encode('journal records')
+    const sealed = await sealObject(keys, plaintext, journalBatchContext(7), 1)
+    expect(sealed[0]).toBe(2)
+    expect(new TextDecoder().decode(sealed.subarray(1, 3))).toBe('k1')
+    const opened = await openObject(keys, sealed, journalBatchContext(7))
+    expect(new TextDecoder().decode(opened.plaintext)).toBe('journal records')
+    expect(opened.flags).toBe(1)
+
+    // Passed off as another batch, it fails, key and frame alike.
+    await expect(openObject(keys, sealed, journalBatchContext(8))).rejects.toThrow(FrameError)
+    for (const at of [5, sealed.length - 1]) {
+      const tampered = sealed.slice()
+      tampered[at] = (tampered[at] ?? 0) ^ 1
+      await expect(openObject(keys, tampered, journalBatchContext(7))).rejects.toThrow(FrameError)
+    }
+    await expect(openObject(keys, sealed.subarray(0, 20), journalBatchContext(7))).rejects.toThrow(
+      FrameError,
+    )
   })
 
   it('never overwrites an existing key file', async () => {

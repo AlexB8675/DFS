@@ -6,6 +6,7 @@ import {
   expireTrash,
   foldAllFolderStats,
   PostgresSampler,
+  pruneJournal,
   pruneMetrics,
   QUEUES,
   sampleSystem,
@@ -21,6 +22,7 @@ import type { FastifyBaseLogger } from 'fastify'
 import { fromDrizzle, type JobResult, type PgBoss } from 'pg-boss'
 import { collectGarbage, uploadsWaiting } from './collector.ts'
 import { keepGateway } from './gateway.ts'
+import { JournalUploader } from './journal-uploader.ts'
 import { Packer } from './packer.ts'
 import { reconcileOrphans } from './reconciler.ts'
 import { instanceId, type BotStorage } from './storage.ts'
@@ -29,9 +31,10 @@ import { storeBlobs } from './uploader.ts'
 
 // What only the leading bot does (DESIGN.md §11): pack small frames (§6.6),
 // store staged blobs, delete released ones (§6.4), clean up orphan messages
-// (§6.1), keep folder sizes current (§12.1), clean up after expired uploads
-// and sessions, empty the trash of what has been there too long (§6.4), and
-// drop old metrics and audit entries.
+// (§6.1), keep folder sizes current (§12.1), post the journal's batches to
+// #dfs-journal (§8), clean up after expired uploads and sessions, empty the
+// trash of what has been there too long (§6.4), and drop old metrics, audit
+// entries and journal records already posted.
 
 const FOLD_EVERY_MS = 2000
 const JANITOR_EVERY_MS = 10 * 60_000
@@ -41,6 +44,8 @@ const COLLECT_EVERY_MS = 2000
 const COLLECT_WHILE_UPLOADING = 1
 const COLLECT_WHILE_IDLE = 20
 const RECONCILE_EVERY_MS = 60 * 60_000
+/** The API seals a batch a minute or so: one is posted within seconds. */
+const JOURNAL_EVERY_MS = 5000
 /**
  * The system's figures, for the admin's graphs (§16): one sample in each
  * half-minute bucket, a little after it starts.
@@ -147,6 +152,7 @@ export async function startLeaderWork(options: {
     },
   )
 
+  const journalUploader = new JournalUploader({ db, journal: storage.journal })
   const loops = [
     repeat(PACK_EVERY_MS, log, 'packing small files', async () => {
       const sealed = await packer.sealDue()
@@ -159,9 +165,15 @@ export async function startLeaderWork(options: {
       if (deleted > 0) metrics?.record('discord.deleted', deleted)
     }),
     repeat(FOLD_EVERY_MS, log, 'folding folder sizes', () => foldAllFolderStats(db)),
+    repeat(JOURNAL_EVERY_MS, log, 'posting journal batches', async () => {
+      await journalUploader.run()
+    }),
     repeat(JANITOR_EVERY_MS, log, 'cleaning up', () => cleanUp(db, staging)),
     // On their own, so a failure in one never holds back the others.
     repeat(JANITOR_EVERY_MS, log, 'dropping old metrics', () => pruneMetrics(db)),
+    repeat(JANITOR_EVERY_MS, log, 'dropping posted journal records', async () => {
+      await pruneJournal(db)
+    }),
     repeat(JANITOR_EVERY_MS, log, 'emptying old trash', async () => {
       const items = await emptyOldTrash(db, staging, config.trashRetentionDays)
       if (items > 0) log.info({ items }, 'emptied items kept their days in the trash')

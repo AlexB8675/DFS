@@ -62,6 +62,7 @@ export const blobStateEnum = pgEnum('blob_state', [
   'deleted',
 ])
 export const channelKindEnum = pgEnum('channel_kind', ['data', 'journal', 'backup', 'log'])
+export const journalBatchStateEnum = pgEnum('journal_batch_state', ['staged', 'stored'])
 export const uploadStateEnum = pgEnum('upload_state', ['receiving', 'completed'])
 
 // ── Accounts (§7.1) ──────────────────────────────────────────────────────────
@@ -455,6 +456,39 @@ export const journal = pgTable(
     index('journal_unflushed')
       .on(t.id)
       .where(sql`${t.batchNo} IS NULL`),
+  ],
+)
+
+/**
+ * Journal batches (§8): unflushed records sealed together by the API, then
+ * posted to `#dfs-journal` by the leading bot, in number order. Numbers are
+ * contiguous, so recovery can tell a missing batch.
+ */
+export const journalBatches = pgTable(
+  'journal_batches',
+  {
+    batchNo: bigint('batch_no', { mode: 'number' }).primaryKey(),
+    /** The journal IDs it holds, first and last; IDs may have gaps. */
+    firstId: bigint('first_id', { mode: 'number' }).notNull(),
+    lastId: bigint('last_id', { mode: 'number' }).notNull(),
+    recordCount: integer('record_count').notNull(),
+    state: journalBatchStateEnum('state').notNull().default('staged'),
+    /** The sealed object as posted; `null` once it is on Discord. */
+    sealed: bytea('sealed'),
+    sizeBytes: integer('size_bytes').notNull(),
+    sha256: bytea('sha256').notNull(),
+    channelId: uuid('channel_id').references(() => storageChannels.id),
+    messageId: text('message_id'),
+    attachmentId: text('attachment_id'),
+    attempts: integer('attempts').notNull().default(0),
+    lastError: text('last_error'),
+    createdAt: timestamptz('created_at').notNull().defaultNow(),
+    storedAt: timestamptz('stored_at'),
+  },
+  (t) => [
+    index('journal_batches_staged')
+      .on(t.batchNo)
+      .where(sql`${t.state} = 'staged'`),
   ],
 )
 

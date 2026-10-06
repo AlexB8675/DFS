@@ -28,7 +28,7 @@ type BotSettings = z.infer<typeof botSettingsSchema>
 
 /** `GET /admin/system`. */
 export async function systemInfo(app: FastifyInstance): Promise<SystemInfo> {
-  const [instance, channels, staged, bot] = await Promise.all([
+  const [instance, channels, staged, journal, bot] = await Promise.all([
     app.db.execute<{ id: string }>(sql`SELECT id FROM instance LIMIT 1`),
     app.db.execute<{
       name: string
@@ -39,8 +39,27 @@ export async function systemInfo(app: FastifyInstance): Promise<SystemInfo> {
       SELECT name, kind, discord_channel_id, enabled FROM storage_channels
       ORDER BY kind, name`),
     app.db.execute<{ bytes: number }>(sql`SELECT ${stagedBytesSql()}::float8 AS bytes`),
+    // The newest batch posted, read back from the end of the batches' key.
+    app.db.execute<{
+      last_batch: number | null
+      last_posted_at: string | null
+      waiting_records: number
+      waiting_batches: number
+      last_error: string | null
+    }>(sql`
+      SELECT posted.batch_no::float8 AS last_batch, posted.stored_at::text AS last_posted_at,
+        (SELECT count(*)::int FROM journal WHERE batch_no IS NULL) AS waiting_records,
+        (SELECT count(*)::int FROM journal_batches WHERE state = 'staged') AS waiting_batches,
+        (SELECT last_error FROM journal_batches WHERE state = 'staged'
+          ORDER BY batch_no LIMIT 1) AS last_error
+      FROM (SELECT 1) one
+      LEFT JOIN LATERAL (
+        SELECT batch_no, stored_at FROM journal_batches WHERE state = 'stored'
+        ORDER BY batch_no DESC LIMIT 1
+      ) posted ON true`),
     botSettings(app),
   ])
+  const posted = journal.rows[0]
   const { config, frameCache } = app
   // The API reads the Discord settings only to show them: the bot's are the ones that count.
   const { guildId, categoryName, gateway } = bot?.discord ?? config.discord
@@ -72,6 +91,13 @@ export async function systemInfo(app: FastifyInstance): Promise<SystemInfo> {
       usedBytes: frameCache.bytes,
       maxBytes: config.cacheMaxBytes,
       frames: frameCache.frames,
+    },
+    journal: {
+      lastBatch: posted?.last_batch ?? null,
+      lastPostedAt: posted?.last_posted_at ? new Date(posted.last_posted_at).toISOString() : null,
+      waitingRecords: posted?.waiting_records ?? 0,
+      waitingBatches: posted?.waiting_batches ?? 0,
+      lastError: posted?.last_error ?? null,
     },
   }
 }

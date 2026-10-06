@@ -247,7 +247,8 @@ The admin pages grow from a status page into the place to watch and run DFS, bef
 **Tasks**
 
 - [ ] GC (`blob.delete`), compaction (`blob.compact`), scrubber (`blob.verify`), tamper alerts in `#dfs-log`.
-- [ ] Journal flush to Discord, nightly snapshots with manifests and backup pointers (DESIGN §8).
+- [x] Journal flush to Discord (DESIGN §8): the API seals batches into `journal_batches`, the leading bot posts them to `#dfs-journal`, an alert says when it falls behind, Admin → System shows it. Done 2026-10-07.
+- [ ] Nightly snapshots with manifests and backup pointers (DESIGN §8).
 - [ ] `dfs recover` and the recovery drill of DESIGN §17.
 
 **Done when**
