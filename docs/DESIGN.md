@@ -816,9 +816,9 @@ Expected profile (D7): **few users (≤ ~20), many files.** The design targets *
 - **firewalld:** allow only `ssh`, `http`, `https` (plus `443/udp` for HTTP/3). Docker writes its own iptables/nftables rules for published ports. That is fine here because only Caddy publishes ports.
 - **Secrets:** one file each in `/etc/dfs/secrets` (`postgres_password`, `database_url`, `internal_rpc_secret`, `discord_bot_token`, `master_key`), mounted read-only as Compose `secrets:` in `/run/secrets`, and read through `DATABASE_URL_FILE`, `INTERNAL_RPC_SECRET_FILE` and `DISCORD_BOT_TOKEN_FILE` (§15) and `MASTER_KEY_FILE`. Each service gets only the ones it uses. Outside Swarm, Compose mounts the files as they are on the host, so each is mode `0400` and owned by the user of the container reading it: uid 1000 for the API and the bot, 70 for Postgres; on SELinux, the directory carries the `container_file_t` label. The master key is made by `dfs master-key` and kept off the server too. Nothing sensitive goes into images (`.dockerignore` leaves out `.env` files and `.data`) or into files committed to git; the settings that aren't secret are in `docker/.env`, from `docker/.env.example`.
 - **Images:** `docker/server.Dockerfile` (the API, the bot and the migration: one image, three commands, keeping the workspace's layout, since Node runs the TypeScript sources and won't strip types under `node_modules`) and `docker/caddy.Dockerfile` (Caddy with the Caddyfile and the built web app). Both run without root; logs rotate at 10 MB, five files each.
-- **Lifecycle:** `restart: unless-stopped` and Docker enabled via systemd (`systemctl enable --now docker`). Updates: `git pull && docker compose build && docker compose up -d`. Migrations run automatically in a one-shot `migrate` service before `api`/`bot` start.
-- **Code (D26):** a private GitHub repository. The VPS pulls it with a read-only deploy key. There is no CI: `pnpm check` (format, typecheck, lint, tests) runs locally before pushing.
-- **Host hardening:** `dnf-automatic` security updates, SSH key-only login, fail2ban (optional), and a non-root deploy user in the `docker` group.
+- **Lifecycle:** `restart: unless-stopped` and Docker enabled via systemd (`systemctl enable --now docker`). Updates: `docker/deploy.sh` on the development PC, which sends the committed code over SSH to `/opt/dfs`, replacing it whole, and runs `docker compose up -d --build` there. Migrations run automatically in a one-shot `migrate` service before `api`/`bot` start. The runbook is [DEPLOY.md](DEPLOY.md).
+- **Code (D26):** a private GitHub repository. The VPS has no access to it: it gets the code from the development PC (the owner's choice at the first deployment, over a deploy key). There is no CI: `pnpm check` (format, typecheck, lint, tests) runs locally before committing and deploying.
+- **Host hardening:** `dnf-automatic` security updates, SSH key-only login, fail2ban (optional), and a non-root deploy user in the `docker` group. The first VPS goes without it, by the owner's choice: it serves other uses too.
 - **Disk:** staging (`STAGING_MAX_BYTES`) and cache (`CACHE_MAX_BYTES`) must fit on the VPS disk alongside Postgres. Size the VPS disk from those plus the DB estimate (§12.2).
 
 ---
@@ -977,7 +977,9 @@ The numbers are the original milestones; the arrows are the order of work (D19):
 
 **Done (2026-10-06):** the admin console. Metrics in Postgres (D29) with the API's own graphs and alerts; tabs for monitoring, access, storage control through tasks for the leading bot, PostgreSQL and the system's settings. [BACKEND.md](BACKEND.md) §4.4.
 
-**Next: the first deployment**, then the rest in the order above. [BACKEND.md](BACKEND.md) is the build plan: packages, conventions, the tasks of each milestone and how each is checked.
+**Done (2026-10-06):** the first deployment. DFS runs at `https://dfs.xlestudio.it` on the Contabo VPS: Caddy with a Let's Encrypt certificate, the API, the bot with the gateway and the `DFS` channels, and PostgreSQL, in Docker, sent from the development PC by `docker/deploy.sh`. [DEPLOY.md](DEPLOY.md) is the runbook. It holds test data only until M4: there are no backups of the database yet, and without it the files in Discord can't be read.
+
+**Next: M4, durability**, then the rest in the order above. [BACKEND.md](BACKEND.md) is the build plan: packages, conventions, the tasks of each milestone and how each is checked.
 
 **Web UI, still to do:**
 

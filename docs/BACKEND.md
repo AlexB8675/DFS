@@ -231,16 +231,16 @@ The admin pages grow from a status page into the place to watch and run DFS, bef
 **Tasks**
 
 - [x] Dockerfiles for api, bot and the web build; `docker-compose.yml` with caddy, api, bot, postgres and the one-shot `migrate`; the Caddyfile with the route allowlist and streaming settings (DESIGN §3.2, §13.2). Postgres starts with `shared_preload_libraries=pg_stat_statements`, as in development, for Admin → Database. Secrets come from files (`*_FILE`), and `dfs master-key` makes the master key. Checked on this PC with local storage (TESTING.md): only Caddy publishes ports, `/internal/*` is a 404, sign-in works over HTTPS, and the end-to-end check passes through Caddy.
-- [ ] Secrets in `/etc/dfs/secrets`, the master key generated and backed up outside the VPS, `PUBLIC_BASE_URL`, and `dfs owner` to make your account.
+- [x] Secrets in `/etc/dfs/secrets`, the master key generated on the development PC (its copy in `D:\Docs\DFS`) and copied to the VPS, `PUBLIC_BASE_URL` (`https://dfs.xlestudio.it`). Then `dfs owner` to make your account, run by the owner.
 - [x] `NODE_ENV=production` in the images, so no development default applies (DESIGN §15); a fixed subnet for the internal Compose network, with `TRUSTED_PROXY_CIDRS` set to Caddy's address on it, so sign-in limits and the audit log see real client addresses. To check on the VPS: Docker Desktop shows its own gateway for every client, so only a real host proves it; no AAAA record until IPv6 keeps client addresses too.
-- [ ] Getting the code: a read-only deploy key for the GitHub repository; updates stay `git pull && docker compose up -d --build` (DESIGN §13.2).
-- [ ] Sizes for this VPS: its disk turned out to be 100 GB (91 GB free), not more than 150, so `STAGING_MAX_BYTES=30GiB` and `CACHE_MAX_BYTES=15GiB` (the defaults in `docker/.env.example`), leaving room for Postgres, images and the OS. Check them against the DB estimate of DESIGN §12.2 before going live.
-- [ ] Host setup: Docker Engine and its Compose plugin from Docker's repository. The hardening of DESIGN §13.2 (firewalld, SSH keys only, automatic updates) is left out by the owner's choice (2026-10-06): the VPS serves other uses too. Only Caddy's ports 80 and 443 are DFS's; nothing else of DFS listens.
+- [x] Getting the code: sent from the development PC by `docker/deploy.sh` (the owner's choice, over a deploy key), which replaces `/opt/dfs` whole and starts the stack (DEPLOY.md).
+- [x] Sizes for this VPS: its disk turned out to be 100 GB (91 GB free), not more than 150, so `STAGING_MAX_BYTES=30GiB` and `CACHE_MAX_BYTES=15GiB` (the defaults in `docker/.env.example`), leaving room for Postgres, images and the OS. Check them against the DB estimate of DESIGN §12.2 before going live.
+- [x] Host setup: Docker Engine and its Compose plugin from Docker's repository. The hardening of DESIGN §13.2 (firewalld, SSH keys only, automatic updates) is left out by the owner's choice (2026-10-06): the VPS serves other uses too. Only Caddy's ports 80 and 443 are DFS's; nothing else of DFS listens.
 
 **Done when**
 
-- The site answers over HTTPS on the VPS domain, `/internal/*` answers 404 from outside, and only Caddy publishes ports.
-- Sign-in works over HTTPS, and the M2 checks pass against the deployed instance, with test data only.
+- [x] The site answers over HTTPS on the VPS domain, `/internal/*` answers 404 from outside, and only Caddy publishes ports. On 2026-10-06: `https://dfs.xlestudio.it` with a Let's Encrypt certificate, `/internal/*` and `/metrics` 404 from outside, ports 80 and 443 only, from Caddy.
+- [x] Sign-in works over HTTPS, and the M2 checks pass against the deployed instance, with test data only. The end-to-end check signs in with the owner's password, so the owner ran it on 2026-10-06 against `https://dfs.xlestudio.it`: all checks passed (300 small files, a 64 MB file, through Discord). Both sessions recorded the visitor's public IPv4 address, so the sign-in limits and the audit log see real clients, not Docker.
 
 ### 4.6 M4 · Durability
 
