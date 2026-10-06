@@ -6,6 +6,7 @@ import {
   validateName,
   type AdminUser,
   type ArchiveTicket,
+  type CopyResult,
   type AuditEntry,
   type ChangePasswordInput,
   type CreateUploadInput,
@@ -152,6 +153,8 @@ export const CHUNK_SIZE = 10 * 1024 * 1024 - 128 * 1024
 const CSRF_TOKEN = 'mock-csrf-token'
 /** Archive links from `POST /archive` work once, for a minute (§9). */
 const ARCHIVE_TICKET_MS = 60_000
+/** Items one copy makes at most, as in the API (D31). */
+const COPY_LIMIT = 10_000
 /** `VERSION_RETENTION` (§15): previous versions kept after a new one completes. */
 const VERSION_RETENTION = 3
 
@@ -547,6 +550,71 @@ export class MockDb {
     const now = new Date().toISOString()
     for (const node of nodes) Object.assign(node, { parentId, updatedAt: now })
     this.changed()
+  }
+
+  /**
+   * `POST /nodes/copy` (D31): copies items, folders with what they hold, into
+   * a folder; a copy whose name is taken there is named `name (1)`, … Files
+   * still syncing hold the copy back; unreadable ones are left out.
+   */
+  copy(ids: string[], parentId: string): CopyResult {
+    const picked = [...new Set(ids)].map((id) => this.visibleNode(id))
+    const target = this.requireFolder(parentId)
+    const pickedIds = new Set(picked.map((node) => node.id))
+    // An item inside another one asked for comes with it.
+    const tops = picked.filter(
+      (node) =>
+        !this.ancestors(node).some((above) => above.id !== node.id && pickedIds.has(above.id)),
+    )
+    const path = new Set(this.ancestors(target).map((above) => above.id))
+    if (tops.some((node) => path.has(node.id))) {
+      throw new MockApiError(400, 'invalid_copy', 'A folder cannot be copied into itself.')
+    }
+    const tree = tops.flatMap((top) => [top, ...this.descendants(top.id).filter(isVisible)])
+    if (tree.length > COPY_LIMIT) {
+      throw new MockApiError(400, 'too_many_items', 'Copy at most 10,000 items at once.')
+    }
+    const files = tree.filter((node) => node.kind === 'file')
+    const syncing = files.filter((node) => node.syncState === 'syncing').length
+    if (syncing > 0) {
+      throw new MockApiError(
+        409,
+        'still_syncing',
+        `${syncing === 1 ? 'A file is' : `${syncing} files are`} still on the way to Discord. Copy again in a moment.`,
+      )
+    }
+    const readable = (node: MockNode) => node.kind === 'folder' || node.syncState === 'stored'
+    const bytes = files.filter(readable).reduce((total, node) => total + node.sizeBytes, 0)
+    const user = this.currentUser()
+    if (this.usedBytes(user.id) + bytes > user.quotaBytes) {
+      throw new MockApiError(507, 'quota_exceeded', 'Not enough storage left for the copy.')
+    }
+
+    const copyOf = (node: MockNode, into: string, name: string): MockNode => {
+      const copy = this.insert({
+        parentId: into,
+        kind: node.kind,
+        name,
+        mimeType: node.mimeType,
+        sizeBytes: node.kind === 'file' ? node.sizeBytes : 0,
+      })
+      const content = this.fileBytes.get(node.id)
+      if (content) this.fileBytes.set(copy.id, content)
+      for (const child of this.childrenOf(node.id).filter(readable)) {
+        copyOf(child, copy.id, child.name)
+      }
+      return copy
+    }
+    const copies = tops.filter(readable).map((top) => {
+      const copy = copyOf(top, parentId, this.freeName(parentId, top.name))
+      this.audit('node.copied', copy.name, copy.name === top.name ? null : `copy of ${top.name}`)
+      return copy
+    })
+    this.changed()
+    return {
+      items: copies.map((copy) => this.toDto(copy)),
+      skipped: files.length - files.filter(readable).length,
+    }
   }
 
   trash(ids: string[]): void {

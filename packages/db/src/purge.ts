@@ -32,6 +32,12 @@ export async function purgeVersions(
   await tx.execute(sql`
     SELECT id FROM chunks WHERE version_id = ANY(${versions}) AND blob_id IS NULL
     ORDER BY id FOR UPDATE`)
+  // Their blobs in id order, as copying takes them (D31): a pack holds frames
+  // of several owners, so one owner's purge may meet another's copy there.
+  await tx.execute(sql`
+    SELECT id FROM blobs
+    WHERE id IN (SELECT blob_id FROM chunks WHERE version_id = ANY(${versions}))
+    ORDER BY id FOR NO KEY UPDATE`)
   await tx.execute(sql`
     UPDATE blobs SET
       live_bytes = blobs.live_bytes - released.bytes,
@@ -133,7 +139,7 @@ export async function liveBytesDrift(
   db: Executor,
 ): Promise<{ id: number; live_bytes: number; frames: number }[]> {
   const { rows } = await db.execute<{ id: number; live_bytes: number; frames: number }>(sql`
-    SELECT blob.id::float8 AS id, blob.live_bytes,
+    SELECT blob.id::float8 AS id, blob.live_bytes::float8 AS live_bytes,
       coalesce(sum(chunk.frame_size), 0)::int AS frames
     FROM blobs blob LEFT JOIN chunks chunk ON chunk.blob_id = blob.id AND chunk.purged_at IS NULL
     WHERE blob.state <> 'deleted'

@@ -81,8 +81,9 @@ async function readPart(versionId: string, size: number): Promise<Buffer> {
   const {
     rows: [version],
   } = await app.db.execute<ReadableVersion>(sql`
-    SELECT id AS version_id, size_bytes::float8 AS size_bytes, chunk_size, chunk_count,
-      wrapped_dek, key_id FROM file_versions WHERE id = ${versionId}`)
+    SELECT id AS version_id, coalesce(sealed_version_id, id) AS sealed_id,
+      size_bytes::float8 AS size_bytes, chunk_size, chunk_count, wrapped_dek, key_id
+    FROM file_versions WHERE id = ${versionId}`)
   if (!version) throw new Error('Missing test version.')
   const stream = readVersion(app, version, 0, size - 1)
   try {

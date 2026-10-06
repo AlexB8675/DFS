@@ -1,4 +1,6 @@
 import {
+  copyNodesSchema,
+  copyResultSchema,
   createFolderSchema,
   ensureFoldersResultSchema,
   ensureFoldersSchema,
@@ -20,6 +22,7 @@ import type { FastifyInstance } from 'fastify'
 import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
 import { requireAuth } from '../auth/access.ts'
+import { copyNodes } from '../nodes/copy.ts'
 import {
   listChildren,
   lookupNodes,
@@ -124,6 +127,12 @@ export function nodeRoutes(app: FastifyInstance, _options: object, done: () => v
       await moveNodes(app, requireAuth(request.auth), request.body.ids, request.body.parentId)
       return reply.code(204).send(null)
     },
+  )
+
+  routes.post(
+    '/nodes/copy',
+    { schema: { body: copyNodesSchema, response: { 200: copyResultSchema } } },
+    (request) => copyNodes(app, requireAuth(request.auth), request.body.ids, request.body.parentId),
   )
 
   routes.post(

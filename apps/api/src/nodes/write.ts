@@ -363,7 +363,11 @@ async function childByName(tx: Executor, parentId: string, name: string) {
 }
 
 /** All of these, owned and not in the trash, or a 404. */
-async function visibleNodes(tx: Executor, ownerId: string, ids: string[]): Promise<NodeRow[]> {
+export async function visibleNodes(
+  tx: Executor,
+  ownerId: string,
+  ids: string[],
+): Promise<NodeRow[]> {
   const rows = await lookupNodes(tx, ownerId, ids)
   if (rows.length !== new Set(ids).size) throw notFound()
   return rows
@@ -383,14 +387,22 @@ async function assertCanMove(
   }
 }
 
-/** `name`, or `name (1)`, `name (2)`, … whichever is free in the folder. */
-async function freeName(tx: Executor, parentId: string, name: string): Promise<string> {
+/**
+ * `name`, or `name (1)`, `name (2)`, … whichever is free in the folder and
+ * not among `alsoTaken` (name keys given out already in this transaction).
+ */
+export async function freeName(
+  tx: Executor,
+  parentId: string,
+  name: string,
+  alsoTaken: ReadonlySet<string> = new Set(),
+): Promise<string> {
   const { base, extension } = splitExtension(name)
   const { rows } = await tx.execute<{ name_key: string }>(sql`
     SELECT name_key FROM nodes
     WHERE parent_id = ${parentId} AND deleted_at IS NULL
       AND name_key LIKE ${`${escapeLike(nameKey(base))}%`}`)
-  const taken = new Set(rows.map((row) => row.name_key))
+  const taken = new Set([...rows.map((row) => row.name_key), ...alsoTaken])
   let candidate = name
   for (let n = 1; taken.has(nameKey(candidate)); n += 1)
     candidate = `${base} (${String(n)})${extension}`

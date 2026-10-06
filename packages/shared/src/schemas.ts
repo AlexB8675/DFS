@@ -177,6 +177,19 @@ export const nodeIdsSchema = z.object({ ids: z.array(id).min(1).max(1000) })
 export const moveNodesSchema = nodeIdsSchema.extend({ parentId: id })
 export type MoveNodesInput = z.infer<typeof moveNodesSchema>
 
+/** `POST /nodes/copy` (D31): copies items, folders with all they hold, into a folder. */
+export const copyNodesSchema = moveNodesSchema
+export type CopyNodesInput = MoveNodesInput
+/**
+ * The copies of the items asked for, in order, and how many files were left
+ * out because they can't be read: lost, failed, or never finished uploading.
+ */
+export const copyResultSchema = z.object({
+  items: z.array(nodeSchema),
+  skipped: z.number().int().min(0),
+})
+export type CopyResult = z.infer<typeof copyResultSchema>
+
 /** `POST /nodes/lookup`: the caller's visible nodes among these; the rest are left out. */
 export const lookupNodesSchema = z.object({ ids: z.array(id).min(1).max(500) })
 export type LookupNodesInput = z.infer<typeof lookupNodesSchema>

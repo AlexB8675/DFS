@@ -37,7 +37,6 @@ The core idea is that **Discord stores opaque encrypted bytes, and Postgres stor
 - Real-time collaborative editing, office-document previews.
 - Content deduplication across users.
 - Public sign-up / multi-tenant SaaS.
-- Server-side **copy** of files or folders (D3). Users download and re-upload instead.
 - **Mirroring** to a second blob store (D5). Discord is the only blob store, and the risk is accepted (§2).
 - **Thumbnails** (D13). The grid shows file-type icons in v1. The planned design: the API generates a small WebP for each image version and stores it as one extra encrypted frame of that version, packed like a small file and not journaled (it can be regenerated). AAD type `0x02` is reserved for it (§7.3), so adding thumbnails later needs no frame-format change.
 
@@ -499,10 +498,11 @@ sequenceDiagram
 
 ### 6.3 Metadata operations (no Discord traffic)
 
-Rename, move, create folder, and trash/restore are plain SQL transactions.
+Rename, move, copy, create folder, and trash/restore are plain SQL transactions.
 
 - **Trash a folder:** set `deleted_at` on the folder, and in the same transaction set `trashed_via = <folder id>` on all its descendants (recursive CTE update). This keeps search and stats queries simple (`trashed_via IS NULL`). For very large subtrees (over `TRASH_SYNC_LIMIT`, default 50k nodes), the descendant update runs as a batched background job; the folder itself is hidden immediately.
 - **Restore** clears both fields for the subtree, auto-renaming to `name (1)` if the name has since been taken.
+- **Copy** (D31, `POST /nodes/copy`): copies items into a folder, folders with everything visible below them, up to 10,000 items per request; a copy whose name is taken there is named `name (1)`. A file's copy is a new file whose one version shares the original's frames: its chunk rows point at the same blobs and offsets, it keeps the original's wrapped DEK, and `sealed_version_id` names the version the key and frames were sealed under (§7.3), so copying is instant and takes no Discord traffic. Each shared frame counts once more toward its blob's `live_bytes`, so a blob stays until every version using it is purged, and the copy's bytes count toward the owner's quota like any file's. Only the current version is copied. Copying waits for a file to be `stored` on Discord (`409 still_syncing`), since staged frames belong to the version that wrote them; lost and failed files, and placeholders of first uploads, are left out and counted (`skipped`). Blobs are locked in id order, as purging takes them. **A copy is not a backup:** losing the Discord message loses both.
 
 ### 6.4 Deletion & garbage collection
 
@@ -541,6 +541,7 @@ flowchart LR
 - **Which frames are packed:** every frame of less than `PACK_THRESHOLD_BYTES` (default 4 MiB) of plaintext: small files, and the last chunk of a large file, so nearly every message is close to full. Each file still has **its own DEK and frame**. A pack is just a concatenation of self-delimiting frames, so **the packer needs no keys** and runs in the bot. Backup snapshots are never packed (§8).
 - **Packer loop** (single bot leader): `SELECT … FROM chunks WHERE blob_id IS NULL … ORDER BY id FOR UPDATE SKIP LOCKED` over a window of waiting frames. A frame is added only if `pack_bytes + frame_bytes ≤ BLOB_MAX_BYTES`; a frame that doesn't fit stays queued and goes into the next pack. The pack is sealed when it reaches `PACK_TARGET_BYTES`, when no waiting frame fits in the space left, or when its oldest frame has waited `PACK_MAX_WAIT_MS`. Sealing writes `packs/<uuid>.bin` in staging, sets `blob_id`/`blob_offset` on each chunk, and enqueues `blob.upload`, all in one transaction. The frame files are deleted after it commits, and until the pack is stored, reads cut frames out of the staged pack. If the bot crashes in the middle, the transaction rolls back and the frame files are still there. The packer runs every second and seals every pack that is due; frames are taken in upload order, so files uploaded together share packs, which keeps folder downloads to a few messages.
 - **Compaction:** a pack whose `live_bytes / size_bytes < COMPACT_THRESHOLD` (default 0.3) and that is older than 7 days is rewritten. The bot downloads it and writes its live frames (still ciphertext, no keys needed) into a new pack, together with frames from other compaction candidates. The chunks keep pointing at the old pack, which stays readable, until the new pack is `stored` in Discord. Only then does one transaction repoint the chunks that are still live and write a `blob.relocated` journal record, and only after that is the old message deleted. This order means a VPS loss mid-compaction can never leave the journal pointing at a pack that never reached Discord.
+- **Copies (D31)** share frames, so `live_bytes` counts a frame once per version using it and can exceed the blob's size. Compaction must work out a pack's ratio from its distinct frames, and move every chunk row that points at a frame it moves.
 - **Trade-off:** a deleted small file keeps taking up space in Discord until its pack is compacted. Its quota is released immediately, though, and Discord space is free, so the only real cost is message count.
 
 ---
@@ -579,7 +580,7 @@ flowchart TD
     DEK -->|encrypts| CH
 ```
 
-- **Envelope encryption:** each file version gets a random data key (DEK). Only the wrapped DEK is stored. The wrap uses `AAD = "dfs1-dek" | key_id | version_id`, so a wrapped DEK copied onto another version fails to unwrap.
+- **Envelope encryption:** each file version gets a random data key (DEK). Only the wrapped DEK is stored. The wrap uses `AAD = "dfs1-dek" | key_id | version_id`, so a wrapped DEK copied onto another version fails to unwrap. A copy (D31) is the one exception, made on purpose: it keeps the original's wrapped DEK and frames, and `sealed_version_id` names the version they were sealed under, which both AADs then use.
 - **Frame format** (self-delimiting, so packs can be parsed without the DB):
   `magic "DFS1" (4B) | format ver (1B) | flags (1B) | ciphertext length (4B, BE) | nonce (12B) | ciphertext | GCM tag (16B)`.
   Overhead is 38 bytes per frame.
@@ -630,7 +631,7 @@ The design aims to survive **losing the VPS** (DB plus disks), as long as the Di
 1. **Metadata journal (outbox pattern).** Every metadata change that matters for recovery is inserted into a `journal` table **in the same transaction** as the change. Records carry the entity's full state after the change, so replaying a record twice is harmless:
    - `user.upsert`, `node.upsert` (create, rename, move, trash, restore), `node.purge`
    - `blob.stored` (blob ID, kind, size, SHA-256, and its Discord location: the Discord channel ID, `message_id`, `attachment_id`), `blob.deleted`. Records name channels by their Discord ID, not by the database's own `storage_channels.id`, so they stay meaningful without the database.
-   - `version.stored` (version metadata, wrapped DEK and `key_id`, and each chunk's blob ID, offset, size, and hashes), `version.purged`
+   - `version.stored` (version metadata, wrapped DEK and `key_id`, `sealedVersionId` for a copy, and each chunk's blob ID, offset, size, and hashes), `version.purged`. A copy's record is written by the API when it is made, already stored.
    - `blob.relocated` (compaction: the new blob ID and offset of every moved chunk, written only after the new pack's `blob.stored`, §6.6)
 
    Derived values (`live_bytes`, `used_bytes`, `folder_stats`, `nodes.trashed_via`, channel counters) are not journaled. Recovery recomputes them.
@@ -668,6 +669,7 @@ All routes are under `/api`, use JSON unless noted, and are validated with Zod s
 | `GET /nodes/:id` · `GET /nodes/:id/children?kind&sort&order&cursor&limit` · `GET /nodes/:id/path` · `POST /nodes/lookup` `{ids[]}` | Browse. `kind=folder` lists subfolders only (folder tree, move dialog). Folder nodes carry `hasChildFolders`, so the tree only shows an expand arrow where there is something to expand. The lookup returns the caller's visible nodes among up to 500 IDs, leaving out the rest: the upload panel re-checks thousands of files' sync states with a few requests |
 | `POST /folders` `{parentId, name}` · `POST /folders/ensure` `{parentId, paths[]}` | Create folder / `mkdir -p` in bulk |
 | `PATCH /nodes/:id` `{name?, parentId?}` · `POST /nodes/move` `{ids[], parentId}` | Rename / move (single or bulk) |
+| `POST /nodes/copy` `{ids[], parentId}` → `{items, skipped}` | Copy (D31, §6.3): folders with what they hold; a taken name becomes `name (1)`. `400 invalid_copy` into itself, `409 still_syncing` while a file is on its way to Discord, `507 quota_exceeded` |
 | `DELETE /nodes/:id` · `POST /nodes/trash` `{ids[]}` · `POST /nodes/:id/restore` · `GET /trash` · `DELETE /trash/:id` · `DELETE /trash` | Trash: move, restore, list, delete one item forever, empty |
 | `POST /uploads` · `POST /uploads/batch` (per-upload results) · `GET /uploads/:id` (`receivedParts`; also `state` and `versionId`, until the session expires) · `PUT /uploads/:id/parts/:idx` (binary) · `PUT /uploads/:id/content?from=` (the file from part `from` to its end, streamed) · `POST /uploads/:id/complete` (`partSha256` for a streamed file) · `DELETE /uploads/:id` | Uploads (§6.1) |
 | `GET /files/:id/content` (Range) · `GET /files/:id/versions` · `POST /files/:id/versions/:vid/restore` | Content & versions |
@@ -686,7 +688,7 @@ All routes are under `/api`, use JSON unless noted, and are validated with Zod s
 | `GET /admin/system` · `POST /admin/system/cache/clear` → `{freedBytes}` · `POST /admin/database/tables/:name/vacuum` | Admin: system (§15). The settings in effect, safe ones only, compared with the bot's; whether each secret is set; the registered Discord channels by kind; staging and this instance's frame cache. Clearing the cache frees its disk (`409 no_cache` with local storage, which has none); frames are read from Discord again as needed. Vacuum takes a table by the name the Database page lists, looked up in the catalog and quoted, and runs `VACUUM (ANALYZE)` on it. Both are audited |
 | `GET /admin/metrics?range&series` | Admin: graphs (§16). `range` is `1h`, `6h`, `24h`, `7d`, `30d` or `1y`; `series` lists up to 24 `<metric>:<reading>`, such as `http.ms:p95` or `discord.posted:rate`. Answers the bucket starts and one value per bucket for each series, a few hundred at most, plus each series over the whole range |
 
-There is no copy endpoint (D3).
+Copies share their originals' frames on Discord (D31), so copying needs no upload.
 
 Internal (bot), only reachable on `dfs_internal` and returning `404` at the edge: `POST /internal/urls/refresh` (batched, up to 50 blobs), `GET /internal/health`.
 
@@ -1005,7 +1007,7 @@ The numbers are the original milestones; the arrows are the order of work (D19):
 |---|---|---|---|
 | D1 | Chunk size / boost level | **10 MiB** attachment limit (unboosted). Blobs are at most 10 MiB − 64 KiB. | §2, §7.3, §15 |
 | D2 | Exposure | **Only the web UI is public.** API, bot, and DB are internal with no published ports, and the edge proxies an allowlist of routes. | §3, §7.5 |
-| D3 | Server-side copy | **Not supported.** | §1.2, §9 |
+| D3 | Server-side copy | **Not supported** (until 2026-10-06; superseded by D31). | §1.2, §9 |
 | D4 | Admin visibility | **Admins can see other users' file names, folder trees, sizes, and usage** (read-only metadata) for moderation. Content stays off-limits through the UI and API. | §7.2, §7.4, §9, §10 |
 | D5 | Mirroring to a second store | **No.** Discord is the only blob store. | §1.2, §14 |
 | D6 | Topology | **Everything on the same VPS**, running **Fedora Linux**. Development happens locally on Windows for now. | §3.2, §13 |
@@ -1033,5 +1035,6 @@ The numbers are the original milestones; the arrows are the order of work (D19):
 | D28 | Admins and the owner | **Set in DFS** on the Users page. The owner is created on the server with `dfs owner`, is always an admin, and can't be demoted, disabled or reset from the app; the same command recovers the owner's password. | §5.1, §7.1, §9 |
 | D29 | Where metrics live | **In Postgres**, in a table of half-minute, minute and hour buckets that every process adds to, read by the admin's own graphs. Not Prometheus and Grafana: two more services to run, secure and back up on one VPS, and a second sign-in, for a few dozen series that Postgres keeps in a few hundred thousand rows. | §5, §9, §16 |
 | D30 | Sending a file | **One request per file**, streamed from disk, which the API cuts into parts as it arrives; progress from XMLHttpRequest's upload events. Parts sent four at a time showed progress only as each part finished, so the bar jumped and the speed fell to nothing between them; one stream keeps the connection busy and its progress true. Resuming starts at the first part missing, and the parts' hashes are checked at completion. Small files keep their single `PUT`. | §3.2, §6.1, §6.5, §10.2 |
+| D31 | Server-side copy (2026-10-06, replacing D3) | **Copies share frames.** A copy is a new file whose version points at the original's frames and keeps its wrapped DEK, sealed under the original's version ID (`sealed_version_id`); frames count once per version in `live_bytes`; the copy counts toward the quota; files still syncing can't be copied yet. Instant and free on Discord, but a copy is no backup of its original | §6.3, §6.6, §7.3, §8, §9 |
 
 No open questions at this time.

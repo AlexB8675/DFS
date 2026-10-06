@@ -147,7 +147,8 @@ async function subtrees(db: Executor, rootIds: string[]): Promise<TreeRow[]> {
     )
     SELECT tree.root_id, tree.path, tree.kind, tree.updated_at::text AS updated_at,
       version.id AS version_id, version.size_bytes::float8 AS size_bytes, version.chunk_size,
-      version.chunk_count, version.wrapped_dek, version.key_id
+      version.chunk_count, version.wrapped_dek, version.key_id,
+      coalesce(version.sealed_version_id, version.id) AS sealed_id
     FROM tree
     LEFT JOIN file_versions version
       ON version.id = tree.current_version_id AND version.state IN ('syncing', 'stored')

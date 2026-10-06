@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm'
 import type { Database } from './client.ts'
+import { uuidArray } from './folder-stats.ts'
 import { LOCK_NAMESPACE, LOCKS } from './locks.ts'
 import { journal, type nodes, type users } from './schema.ts'
 
@@ -54,4 +55,35 @@ export function userRecord(user: UserRow): JournalRecord {
 export function nodeRecord(node: NodeRow): JournalRecord {
   const { trashedVia: _trashedVia, ...state } = node
   return { kind: 'node.upsert', record: state }
+}
+
+/**
+ * `version.stored` records: what recovery needs to read each version without
+ * the database. A copy (D31) names the version its key and frames were
+ * sealed under (`sealedVersionId`).
+ */
+export async function versionRecords(
+  tx: Executor,
+  versionIds: readonly string[],
+): Promise<JournalRecord[]> {
+  if (versionIds.length === 0) return []
+  const { rows } = await tx.execute<{ record: Record<string, unknown> }>(sql`
+    SELECT json_build_object(
+      'id', version.id, 'nodeId', version.node_id, 'versionNo', version.version_no,
+      'sizeBytes', version.size_bytes, 'chunkSize', version.chunk_size,
+      'chunkCount', version.chunk_count, 'contentHash', encode(version.content_hash, 'hex'),
+      'wrappedDek', encode(version.wrapped_dek, 'base64'), 'keyId', version.key_id,
+      'sealedVersionId', version.sealed_version_id,
+      'chunks', (
+        SELECT json_agg(json_build_object(
+          'idx', chunk.idx, 'blobId', chunk.blob_id, 'offset', chunk.blob_offset,
+          'plainSize', chunk.plain_size, 'frameSize', chunk.frame_size,
+          'plainSha256', encode(chunk.plain_sha256, 'hex'),
+          'frameSha256', encode(chunk.frame_sha256, 'hex')
+        ) ORDER BY chunk.idx)
+        FROM chunks chunk WHERE chunk.version_id = version.id
+      )
+    ) AS record
+    FROM file_versions version WHERE version.id = ANY(${uuidArray(versionIds)})`)
+  return rows.map((row) => ({ kind: 'version.stored', record: row.record }))
 }
