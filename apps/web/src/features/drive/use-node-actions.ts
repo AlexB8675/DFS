@@ -80,15 +80,16 @@ export function useNodeActions() {
     }
   }
 
-  async function moveTo(nodes: DriveNode[], target: MoveTarget) {
+  /** Moves into a folder; whether anything moved. */
+  async function moveTo(nodes: DriveNode[], target: MoveTarget): Promise<boolean> {
     const moving = nodes.filter((node) => node.parentId !== target.id && node.id !== target.id)
-    if (moving.length === 0) return
+    if (moving.length === 0) return false
     await animateOut(moving.map((node) => node.id))
     try {
       await moveNodes.mutateAsync({ nodes: moving, parentId: target.id })
     } catch (error) {
       toast.error('Could not move', { description: errorMessage(error) })
-      return
+      return false
     }
     toast.success(`Moved ${subject(moving)} to “${target.name}”`, {
       action: {
@@ -96,6 +97,7 @@ export function useNodeActions() {
         onClick: () => void moveBack(moving, target.id),
       },
     })
+    return true
   }
 
   /** Undoes a move: each node goes back to the folder it came from. */
@@ -151,8 +153,9 @@ export function useNodeActions() {
       await copyInto(clipboard.nodes, target)
       return
     }
-    clearClipboard()
-    await moveTo(clipboard.nodes, target)
+    // A cut stays until it moves: after a name clash, it can go elsewhere.
+    const moved = await moveTo(clipboard.nodes, target)
+    if (moved && useClipboard.getState().clipboard === clipboard) clearClipboard()
   }
 
   async function moveToTrash(nodes: DriveNode[]) {

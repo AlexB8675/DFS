@@ -8,6 +8,7 @@ import {
 import type { ApiClient } from './client.ts'
 import type { SuiteContext } from './context.ts'
 import { createFolder, text, uploadFile, workspace } from './files.ts'
+import { readZip } from './zip-reader.ts'
 
 /** Copying files and folders (DESIGN.md §6.3, D31). */
 export function copyTests({
@@ -106,6 +107,15 @@ export function copyTests({
       await target().settle()
       const sized = await client.call('GET', `/nodes/${folder}`, nodeSchema)
       expect(sized.sizeBytes).toBe(3)
+
+      // With the source gone for good, the copy still downloads as a ZIP.
+      await client.send('POST', '/nodes/trash', { json: { ids: [source.id] } })
+      await client.send('DELETE', `/trash/${source.id}`)
+      await target().settle()
+      const zip = await client.fetch('GET', `/folders/${folder}/archive`)
+      const entries = readZip(new Uint8Array(await zip.arrayBuffer()))
+      expect(new TextDecoder().decode(entries.get('Source (1)/Inside/b.txt'))).toBe('bb')
+      expect(new TextDecoder().decode(entries.get('Source (1)/a.txt'))).toBe('a')
     })
 
     it('refuses a copy into itself, of a file still syncing, or of another’s file', async () => {
