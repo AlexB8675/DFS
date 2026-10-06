@@ -6,6 +6,7 @@ const data: MetricSeries = {
   range: '1h',
   bucketSeconds: 60,
   times: [0, 60_000, 120_000],
+  until: 180_000,
   series: [
     { id: 'cache.hits:rate', values: [3, 0, 1], overall: 240 },
     { id: 'cache.misses:rate', values: [1, 0, 1], overall: 120 },

@@ -175,8 +175,13 @@ const bucketDays = new Intl.DateTimeFormat(undefined, {
   day: 'numeric',
 })
 
-/** The time a point covers, for its tooltip and table row. */
-export function formatBucket(time: number, bucketSeconds: number): string {
-  if (bucketSeconds >= 86_400) return bucketDays.format(new Date(time))
-  return bucketTimes.formatRange(new Date(time), new Date(time + bucketSeconds * 1000))
+/**
+ * The time a point covers, for its tooltip and table row. The last may not
+ * be over: it covers up to `until`, so far.
+ */
+export function formatBucket(time: number, bucketSeconds: number, until = Infinity): string {
+  const end = time + bucketSeconds * 1000
+  const soFar = end > until ? ', so far' : ''
+  if (bucketSeconds >= 86_400) return `${bucketDays.format(new Date(time))}${soFar}`
+  return `${bucketTimes.formatRange(new Date(time), new Date(Math.min(end, until)))}${soFar}`
 }

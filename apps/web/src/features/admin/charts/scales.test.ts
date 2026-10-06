@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatValue, timeTicks, totalFormat, valueTicks } from './scales'
+import { formatBucket, formatValue, timeTicks, totalFormat, valueTicks } from './scales'
 
 const KB = 1024
 const MB = 1024 ** 2
@@ -51,6 +51,18 @@ describe('formatValue', () => {
     expect(totalFormat('bytesPerSecond')).toBe('bytes')
     expect(totalFormat('perMinute')).toBe('count')
     expect(totalFormat('ms')).toBe('ms')
+  })
+})
+
+describe('formatBucket', () => {
+  it('says when the last bucket covers only part of its time so far', () => {
+    const start = new Date(2026, 9, 5, 10).getTime()
+    const hour = formatBucket(start, 3600)
+    expect(hour).not.toContain('so far')
+    const partial = formatBucket(start, 3600, start + 25 * 60_000)
+    expect(partial).toMatch(/so far$/)
+    expect(partial).toContain('25')
+    expect(formatBucket(start, 86_400, start + 3_600_000)).toMatch(/so far$/)
   })
 })
 

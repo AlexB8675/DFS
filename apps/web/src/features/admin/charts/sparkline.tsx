@@ -4,7 +4,8 @@ const HEIGHT = 28
 
 /**
  * A trend without axes, for a figure's tile: a quiet line in the muted ink,
- * ending in a dot of the accent where the figure is now.
+ * broken where there is no data, ending in a dot of the accent where the
+ * figure is now.
  */
 export function Sparkline({ values }: { values: readonly (number | null)[] }) {
   const [ref, width] = useElementWidth<HTMLDivElement>()
@@ -23,7 +24,8 @@ export function Sparkline({ values }: { values: readonly (number | null)[] }) {
             d={points
               .map(
                 (point, at) =>
-                  `${at === 0 ? 'M' : 'L'}${x(point.index).toFixed(1)},${y(point.value).toFixed(1)}`,
+                  // A gap starts the line afresh rather than bridging it.
+                  `${at === 0 || points[at - 1]?.index !== point.index - 1 ? 'M' : 'L'}${x(point.index).toFixed(1)},${y(point.value).toFixed(1)}`,
               )
               .join('')}
             fill="none"

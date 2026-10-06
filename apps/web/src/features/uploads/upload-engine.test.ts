@@ -1,5 +1,6 @@
 import type { DriveNode, SyncState, UploadSession } from '@dfs/shared'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { queryClient } from '@/app/query-client'
 import { ApiError } from '@/lib/api/client'
 import { DEFAULT_LIMITS, UploadEngine } from './upload-engine'
 import { useUploadStore } from './upload-store'
@@ -417,6 +418,27 @@ describe('UploadEngine', () => {
     expect(ensureFolders).toHaveBeenCalledTimes(2)
     expect(transport.createSessions).not.toHaveBeenCalled()
     expect(useUploadStore.getState().items).toEqual([])
+  })
+
+  it('shows a dropped folder in the folder it was dropped into, and in its parents', async () => {
+    const { transport } = fakeApi()
+    const ensureFolders = vi.fn(transport.ensureFolders)
+    const engine = new UploadEngine({ ...transport, ensureFolders })
+    const listing = (id: string) => ['nodes', id, 'children', { sort: 'name', order: 'asc' }]
+    for (const id of ['folder', 'elsewhere']) queryClient.setQueryData(listing(id), { pages: [] })
+
+    await engine.enqueue('folder', [{ ...file('photo.jpg', 2), relativeDir: 'trip/photos' }])
+
+    // Every folder on the way is asked for, so an existing one that gains a subfolder refreshes.
+    expect(ensureFolders).toHaveBeenCalledWith('folder', ['trip', 'trip/photos'])
+    await vi.waitFor(
+      () => {
+        expect(queryClient.getQueryState(listing('folder'))?.isInvalidated).toBe(true)
+      },
+      { timeout: 3000 },
+    )
+    expect(queryClient.getQueryState(listing('elsewhere'))?.isInvalidated).toBe(false)
+    queryClient.clear()
   })
 
   it('uploads nested and loose files into their prepared folders', async () => {

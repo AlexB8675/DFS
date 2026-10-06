@@ -573,9 +573,13 @@ export class UploadEngine {
     }
   }
 
-  /** `mkdir -p` for every folder in a dropped tree, 500 paths per request. */
+  /**
+   * `mkdir -p` for every folder in a dropped tree, 500 paths per request.
+   * Every folder on the way is asked for, so each that may have gained a
+   * subfolder is known; their listings, and the one dropped into, refresh.
+   */
   private async ensureFolders(parentId: string, files: PickedFile[]): Promise<Map<string, string>> {
-    const paths = [...new Set(files.map((file) => file.relativeDir).filter(Boolean))]
+    const paths = [...new Set(files.flatMap((file) => prefixes(file.relativeDir)))]
     const folderIds = new Map<string, string>()
     for (let start = 0; start < paths.length; start += ENSURE_BATCH) {
       const batch = paths.slice(start, start + ENSURE_BATCH)
@@ -587,6 +591,9 @@ export class UploadEngine {
         }
         folderIds.set(path, id)
       }
+    }
+    if (folderIds.size > 0) {
+      for (const id of [parentId, ...folderIds.values()]) this.refreshFolder(id)
     }
     return folderIds
   }
@@ -810,4 +817,10 @@ if (typeof window !== 'undefined') {
 
 export function enqueueUploads(parentId: string, files: PickedFile[]): Promise<void> {
   return uploadEngine.enqueue(parentId, files)
+}
+
+/** `a/b/c` → `a`, `a/b`, `a/b/c`; nothing for files dropped on their own. */
+function prefixes(relativeDir: string): string[] {
+  const names = relativeDir.split('/').filter(Boolean)
+  return names.map((_, index) => names.slice(0, index + 1).join('/'))
 }

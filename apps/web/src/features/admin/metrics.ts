@@ -24,12 +24,12 @@ export const RANGES: { value: MetricRange; label: string }[] = [
 
 /** Short ranges move while you watch; long ones change slowly. */
 const REFRESH_MS: Record<MetricRange, number> = {
-  '1h': 15_000,
-  '6h': 30_000,
-  '24h': 60_000,
-  '7d': 5 * 60_000,
-  '30d': 5 * 60_000,
-  '1y': 15 * 60_000,
+  '1h': 7_500,
+  '6h': 15_000,
+  '24h': 30_000,
+  '7d': 150_000,
+  '30d': 150_000,
+  '1y': 450_000,
 }
 
 export function metricsQuery(range: MetricRange, series: readonly MetricSeriesId[]) {

@@ -107,7 +107,7 @@ export function MetricChart({
                   .map(({ time, index }) => (
                     <tr key={time} className="border-t border-border/60">
                       <td className="px-2 py-1 whitespace-nowrap text-muted-foreground">
-                        {formatBucket(time, data.bucketSeconds)}
+                        {formatBucket(time, data.bucketSeconds, data.until)}
                       </td>
                       {lines.map((line) => {
                         const value = line.values[index]
@@ -128,6 +128,7 @@ export function MetricChart({
           <TimeSeriesChart
             times={data.times}
             bucketSeconds={data.bucketSeconds}
+            until={data.until}
             lines={lines}
             format={chart.format}
             label={chart.title}

@@ -294,6 +294,10 @@ export function adminTests({
       expect(day.times).toHaveLength(288)
       const steps = day.times.slice(1).map((time, index) => time - (day.times[index] ?? 0))
       expect(new Set(steps)).toEqual(new Set([300_000]))
+      // The figures end within the last bucket, at a whole minute.
+      const lastStart = day.times.at(-1) ?? 0
+      expect(day.until > lastStart && day.until <= lastStart + 300_000).toBe(true)
+      expect(day.until % 60_000).toBe(0)
       expect(day.series.map((series) => series.id)).toEqual(ids)
       for (const series of day.series) expect(series.values).toHaveLength(288)
 

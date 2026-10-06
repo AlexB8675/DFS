@@ -1,8 +1,11 @@
 import { monitorEventLoopDelay } from 'node:perf_hooks'
 import {
+  heartbeatOf,
+  METRIC_FLUSH_MS,
   METRIC_RANGES,
   METRIC_RETENTION_SECONDS,
   METRIC_STEPS,
+  metricsUntil,
   parseSeriesId,
   TIMING_BOUNDS,
   timingBucketName,
@@ -16,20 +19,19 @@ import type { Database } from './client.ts'
 import { textArray } from './folder-stats.ts'
 
 // Metrics (DESIGN.md §16). Each process records what it does in memory, by
-// minute, and adds it to the `metrics` table every few seconds, in buckets of
-// a minute and of an hour, where other processes' figures add up with its
-// own. The admin's graphs read them back with `readMetrics`.
+// half minute, and adds it to the `metrics` table every 5 s, in buckets of
+// half a minute, a minute and an hour, where other processes' figures add up
+// with its own. The admin's graphs read them back with `readMetrics`.
 
+const HALF_MINUTE_MS = METRIC_STEPS.halfMinute * 1000
 const MINUTE_MS = 60_000
 const HOUR_MS = 3_600_000
-/** How often a process adds what it recorded to the table. */
-const FLUSH_EVERY_MS = 10_000
 /** While the database is out of reach, figures older than this are let go. */
 const KEEP_UNSAVED_MS = 60 * MINUTE_MS
 
 interface Bucket {
   name: string
-  /** The minute's start, in milliseconds since 1970. */
+  /** The half minute's start, in milliseconds since 1970. */
   at: number
   sum: number
   count: number
@@ -79,7 +81,8 @@ export class Metrics {
     this.#pending = new Map()
     const rows = new Map<string, Bucket & { step: number }>()
     for (const bucket of taken.values()) {
-      addRow(rows, bucket, METRIC_STEPS.minute, bucket.at)
+      addRow(rows, bucket, METRIC_STEPS.halfMinute, bucket.at)
+      addRow(rows, bucket, METRIC_STEPS.minute, bucket.at - (bucket.at % MINUTE_MS))
       addRow(rows, bucket, METRIC_STEPS.hour, bucket.at - (bucket.at % HOUR_MS))
     }
     try {
@@ -109,7 +112,7 @@ export class Metrics {
     }
   }
 
-  /** Flushes every few seconds until stopped; stopping flushes what is left. */
+  /** Flushes every 5 s until stopped; stopping flushes what is left. */
   start(db: Database, log?: Log): { stop: () => Promise<void> } {
     let timer: NodeJS.Timeout | null = null
     let running: Promise<void> = Promise.resolve()
@@ -131,7 +134,7 @@ export class Metrics {
       if (stopped) return
       timer = setTimeout(() => {
         running = flush().finally(schedule)
-      }, FLUSH_EVERY_MS)
+      }, METRIC_FLUSH_MS)
       timer.unref()
     }
     schedule()
@@ -146,7 +149,7 @@ export class Metrics {
   }
 
   #add(name: string, value: number, now: number): void {
-    const at = now - (now % MINUTE_MS)
+    const at = now - (now % HALF_MINUTE_MS)
     const key = `${name}\n${String(at)}`
     const bucket = this.#pending.get(key)
     if (bucket) {
@@ -181,8 +184,7 @@ function addRow(
  * sampled at each flush. Returns how to stop watching the event loop.
  */
 export function recordProcess(metrics: Metrics, service: 'api' | 'bot'): () => void {
-  const resolutionMs = 20
-  const delay = monitorEventLoopDelay({ resolution: resolutionMs })
+  const delay = monitorEventLoopDelay({ resolution: 20 })
   delay.enable()
   let cpu = process.cpuUsage()
   let cpuAt = performance.now()
@@ -198,8 +200,11 @@ export function recordProcess(metrics: Metrics, service: 'api' | 'bot'): () => v
   })
   metrics.gauge(`${service}.loop_ms`, () => {
     if (delay.count === 0) return null
-    // Each sample includes the timer's own interval.
-    const p99 = Math.max(0, delay.percentile(99) / 1e6 - resolutionMs)
+    // Each sample is the time between two ticks of the timer: its interval
+    // plus any delay. The quickest tick is the interval as the system keeps
+    // it (about 31 ms for 20 on Windows, whose timers are coarse), so the
+    // delay is how much later than that the slow ones came.
+    const p99 = Math.max(0, (delay.percentile(99) - delay.min) / 1e6)
     delay.reset()
     return p99
   })
@@ -213,7 +218,9 @@ export async function pruneMetrics(db: Database, now = Date.now()): Promise<void
   const seconds = now / 1000
   await db.execute(sql`
     DELETE FROM metrics
-    WHERE (step = ${METRIC_STEPS.minute}
+    WHERE (step = ${METRIC_STEPS.halfMinute}
+        AND at < to_timestamp(${seconds - METRIC_RETENTION_SECONDS.halfMinute}))
+      OR (step = ${METRIC_STEPS.minute}
         AND at < to_timestamp(${seconds - METRIC_RETENTION_SECONDS.minute}))
       OR (step = ${METRIC_STEPS.hour}
         AND at < to_timestamp(${seconds - METRIC_RETENTION_SECONDS.hour}))`)
@@ -227,8 +234,10 @@ interface Totals {
 
 /**
  * Series over a range, one point per bucket of the range (DESIGN.md §16).
- * Series IDs must have been checked with `parseSeriesId`. The last point is
- * the bucket under way: its rates count only the time it has run.
+ * Series IDs must have been checked with `parseSeriesId`. Only figures every
+ * process has added are read (`metricsUntil`): the last point is the bucket
+ * they end in, and if it isn't over yet, its rates count only the time read.
+ * On the ranges read by the hour, such a bucket is read from its minutes.
  */
 export async function readMetrics(
   db: Database,
@@ -238,10 +247,16 @@ export async function readMetrics(
 ): Promise<MetricSeries> {
   const { seconds, step, bucketSeconds } = METRIC_RANGES[range]
   const bucketMs = bucketSeconds * 1000
+  const until = metricsUntil(range, now)
   const points = Math.round(seconds / bucketSeconds)
-  const last = now - (now % bucketMs)
+  // The bucket holding the last figures read.
+  const last = until - 1 - ((until - 1) % bucketMs)
   const times = Array.from({ length: points }, (_, index) => last - (points - 1 - index) * bucketMs)
   const first = times[0] ?? last
+  // Read by the hour, a bucket not over yet would take its hour still under
+  // way: it is read from its minutes instead.
+  const partialByMinutes = step === METRIC_STEPS.hour && last + bucketMs > until
+  const stepUntil = partialByMinutes ? last : until
 
   const wanted = seriesIds.flatMap((id) => {
     const parsed = parseSeriesId(id)
@@ -250,12 +265,16 @@ export async function readMetrics(
   const names = new Set<string>()
   for (const { name, reading } of wanted) {
     names.add(name)
+    if (isCount(reading)) names.add(heartbeatOf(name))
     if (isPercentile(reading)) {
       for (let index = 0; index <= TIMING_BOUNDS.length; index++) {
         names.add(timingBucketName(name, index))
       }
     }
   }
+  const bin = sql`(extract(epoch FROM date_bin(${`${String(bucketSeconds)} seconds`}::interval, at,
+    'epoch'::timestamptz)) * 1000)::float8`
+  const named = sql`name = ANY(${textArray([...names])})`
   const { rows } = await db.execute<{
     name: string
     t: number
@@ -263,13 +282,21 @@ export async function readMetrics(
     count: number
     max: number
   }>(sql`
-    SELECT name,
-      (extract(epoch FROM date_bin(${`${String(bucketSeconds)} seconds`}::interval, at,
-        'epoch'::timestamptz)) * 1000)::float8 AS t,
-      sum(sum)::float8 AS sum, sum(count)::float8 AS count, max(max)::float8 AS max
-    FROM metrics
-    WHERE step = ${step} AND name = ANY(${textArray([...names])})
-      AND at >= to_timestamp(${first / 1000})
+    SELECT name, t, sum(sum)::float8 AS sum, sum(count)::float8 AS count,
+      max(max)::float8 AS max
+    FROM (
+      SELECT name, ${bin} AS t, sum, count, max FROM metrics
+      WHERE step = ${step} AND ${named}
+        AND at >= to_timestamp(${first / 1000}) AND at < to_timestamp(${stepUntil / 1000})
+      ${
+        partialByMinutes
+          ? sql`UNION ALL
+            SELECT name, ${bin} AS t, sum, count, max FROM metrics
+            WHERE step = ${METRIC_STEPS.minute} AND ${named}
+              AND at >= to_timestamp(${last / 1000}) AND at < to_timestamp(${until / 1000})`
+          : sql``
+      }
+    ) found
     GROUP BY name, t`)
   const found = new Map<string, Map<number, Totals>>()
   for (const row of rows) {
@@ -282,6 +309,7 @@ export async function readMetrics(
     range,
     bucketSeconds,
     times,
+    until,
     series: wanted.map(({ id, name, reading }) => {
       const byTime = found.get(name)
       if (isPercentile(reading)) {
@@ -298,11 +326,14 @@ export async function readMetrics(
           )
         return { id, values: times.map((time) => at(time)), overall: at(null) }
       }
+      const ran = found.get(heartbeatOf(name))
       const values = times.map((time) => {
         const totals = byTime?.get(time)
-        // The bucket under way has only run since its start.
-        const elapsed = Math.min(bucketSeconds, Math.max(1, (now - time) / 1000))
-        return reduce(reading, totals, elapsed)
+        // Nothing counted while the process that counts it didn't run is no data, not 0.
+        if (!totals && isCount(reading) && !ran?.has(time)) return null
+        // The last bucket may not be over: only the time read counts.
+        const covered = Math.min(bucketMs, until - time) / 1000
+        return reduce(reading, totals, covered)
       })
       return { id, values, overall: overall(reading, byTime) }
     }),
@@ -311,6 +342,11 @@ export async function readMetrics(
 
 function isPercentile(reading: MetricReading): reading is 'p50' | 'p95' | 'p99' {
   return reading === 'p50' || reading === 'p95' || reading === 'p99'
+}
+
+/** Readings that are 0 when nothing happened, rather than no data. */
+function isCount(reading: MetricReading): reading is 'rate' | 'events' {
+  return reading === 'rate' || reading === 'events'
 }
 
 function reduce(reading: MetricReading, totals: Totals | undefined, seconds: number) {

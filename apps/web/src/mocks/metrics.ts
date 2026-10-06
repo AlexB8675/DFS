@@ -1,5 +1,6 @@
 import {
   METRIC_RANGES,
+  metricsUntil,
   METRICS,
   parseSeriesId,
   type MetricName,
@@ -85,13 +86,16 @@ export function mockMetrics(
   const { seconds, bucketSeconds } = METRIC_RANGES[query.range]
   const bucketMs = bucketSeconds * 1000
   const points = Math.round(seconds / bucketSeconds)
-  const last = now - (now % bucketMs)
+  // As the API reads them: the last bucket may be under way.
+  const until = metricsUntil(query.range, now)
+  const last = until - 1 - ((until - 1) % bucketMs)
   const times = Array.from({ length: points }, (_, index) => last - (points - 1 - index) * bucketMs)
 
   return {
     range: query.range,
     bucketSeconds,
     times,
+    until,
     series: query.series.flatMap((id) => {
       const parsed = parseSeriesId(id)
       if (!parsed) return []

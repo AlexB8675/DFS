@@ -39,8 +39,12 @@ const COLLECT_EVERY_MS = 2000
 const COLLECT_WHILE_UPLOADING = 1
 const COLLECT_WHILE_IDLE = 20
 const RECONCILE_EVERY_MS = 60 * 60_000
-/** The system's figures, for the admin's graphs (§16). */
-const SAMPLE_EVERY_MS = 60_000
+/**
+ * The system's figures, for the admin's graphs (§16): one sample in each
+ * half-minute bucket, a little after it starts.
+ */
+const SAMPLE_EVERY_MS = 30_000
+const SAMPLE_AT_MS = 2_000
 /** A pack file nothing refers to after this long was left by a crash while sealing. */
 const STRAY_PACK_MS = 60 * 60_000
 /**
@@ -161,8 +165,12 @@ export async function startLeaderWork(options: {
   if (metrics) {
     const postgres = new PostgresSampler()
     loops.push(
-      repeat(SAMPLE_EVERY_MS, log, 'sampling the system', () => sampleSystem(db, metrics)),
-      repeat(SAMPLE_EVERY_MS, log, 'sampling PostgreSQL', () => postgres.sample(db, metrics)),
+      onTheClock(SAMPLE_EVERY_MS, SAMPLE_AT_MS, log, 'sampling the system', () =>
+        sampleSystem(db, metrics),
+      ),
+      onTheClock(SAMPLE_EVERY_MS, SAMPLE_AT_MS, log, 'sampling PostgreSQL', () =>
+        postgres.sample(db, metrics),
+      ),
     )
   }
   const { guildId, categoryName } = config.discord
@@ -225,6 +233,43 @@ export async function cleanUp(db: Database, staging: Staging, now = Date.now()):
     for (const file of stale) {
       if (!recorded.has(file.path)) await staging.remove(file.path)
     }
+  }
+}
+
+/**
+ * Runs `work` `atMs` past each multiple of `everyMs` on the clock, so each
+ * bucket of that size gets exactly one run, where `repeat` would drift and
+ * now and then leave one empty. A run that overruns the next mark skips it;
+ * runs never overlap.
+ */
+export function onTheClock(
+  everyMs: number,
+  atMs: number,
+  log: Pick<FastifyBaseLogger, 'warn'>,
+  what: string,
+  work: () => Promise<void>,
+): { stop: () => Promise<void> } {
+  let timer: NodeJS.Timeout | null = null
+  let running: Promise<void> = Promise.resolve()
+  let stopped = false
+  const schedule = () => {
+    if (stopped) return
+    timer = setTimeout(run, everyMs - ((Date.now() - atMs) % everyMs))
+  }
+  const run = () => {
+    running = work()
+      .catch((error: unknown) => {
+        log.warn({ err: error }, `${what} failed; trying again later`)
+      })
+      .finally(schedule)
+  }
+  schedule()
+  return {
+    stop: async () => {
+      stopped = true
+      if (timer) clearTimeout(timer)
+      await running
+    },
   }
 }
 

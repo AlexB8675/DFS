@@ -14,94 +14,106 @@ import { z } from 'zod'
 export type MetricKind = 'counter' | 'gauge' | 'timing'
 export type MetricUnit = 'bytes' | 'count' | 'ms' | 'ratio'
 
+/** Which process records a metric: an API, a bot, or the leading bot's samples of the system. */
+export type MetricSource = 'api' | 'bot' | 'leader'
+
 interface MetricInfo {
   kind: MetricKind
   unit: MetricUnit
   label: string
+  source: MetricSource
 }
 
-function metric(kind: MetricKind, unit: MetricUnit, label: string): MetricInfo {
-  return { kind, unit, label }
+function byApi(kind: MetricKind, unit: MetricUnit, label: string): MetricInfo {
+  return { kind, unit, label, source: 'api' }
+}
+
+function byBot(kind: MetricKind, unit: MetricUnit, label: string): MetricInfo {
+  return { kind, unit, label, source: 'bot' }
+}
+
+function byLeader(kind: MetricKind, unit: MetricUnit, label: string): MetricInfo {
+  return { kind, unit, label, source: 'leader' }
 }
 
 /** Every metric DFS records. Names a process doesn't record simply have no data. */
 export const METRICS = {
   // The API, per instance.
-  'http.requests': metric('counter', 'count', 'Requests'),
-  'http.client_errors': metric('counter', 'count', 'Refused requests (4xx)'),
-  'http.server_errors': metric('counter', 'count', 'Failed requests (5xx)'),
+  'http.requests': byApi('counter', 'count', 'Requests'),
+  'http.client_errors': byApi('counter', 'count', 'Refused requests (4xx)'),
+  'http.server_errors': byApi('counter', 'count', 'Failed requests (5xx)'),
   /** Requests that answer at once; downloads, uploaded parts and event streams aren't timed. */
-  'http.ms': metric('timing', 'ms', 'Response time'),
-  'downloads.bytes': metric('counter', 'bytes', 'Sent to browsers'),
-  'uploads.bytes': metric('counter', 'bytes', 'Received from browsers'),
-  'cache.hits': metric('counter', 'count', 'Frame cache hits'),
-  'cache.misses': metric('counter', 'count', 'Frame cache misses'),
-  'cache.bytes': metric('gauge', 'bytes', 'Frame cache size'),
+  'http.ms': byApi('timing', 'ms', 'Response time'),
+  'downloads.bytes': byApi('counter', 'bytes', 'Sent to browsers'),
+  'uploads.bytes': byApi('counter', 'bytes', 'Received from browsers'),
+  'cache.hits': byApi('counter', 'count', 'Frame cache hits'),
+  'cache.misses': byApi('counter', 'count', 'Frame cache misses'),
+  'cache.bytes': byApi('gauge', 'bytes', 'Frame cache size'),
   /** One event per CDN request, with the bytes it brought. */
-  'cdn.reads': metric('counter', 'bytes', 'Read from the CDN'),
-  'cdn.failures': metric('counter', 'count', 'Failed CDN reads'),
-  'events.streams': metric('gauge', 'count', 'Open event streams'),
-  'auth.sign_ins': metric('counter', 'count', 'Sign-ins'),
-  'auth.failed_sign_ins': metric('counter', 'count', 'Failed sign-ins'),
-  'api.rss': metric('gauge', 'bytes', 'API memory'),
-  'api.heap': metric('gauge', 'bytes', 'API heap'),
-  'api.cpu': metric('gauge', 'ratio', 'API CPU (of one core)'),
-  'api.loop_ms': metric('gauge', 'ms', 'API event loop delay (p99)'),
+  'cdn.reads': byApi('counter', 'bytes', 'Read from the CDN'),
+  'cdn.failures': byApi('counter', 'count', 'Failed CDN reads'),
+  'events.streams': byApi('gauge', 'count', 'Open event streams'),
+  'auth.sign_ins': byApi('counter', 'count', 'Sign-ins'),
+  'auth.failed_sign_ins': byApi('counter', 'count', 'Failed sign-ins'),
+  'api.rss': byApi('gauge', 'bytes', 'API memory'),
+  'api.heap': byApi('gauge', 'bytes', 'API heap'),
+  'api.cpu': byApi('gauge', 'ratio', 'API CPU (of one core)'),
+  'api.loop_ms': byApi('gauge', 'ms', 'API event loop delay (p99)'),
 
   // The bot, per instance.
-  'discord.requests': metric('counter', 'count', 'Discord requests'),
+  'discord.requests': byBot('counter', 'count', 'Discord requests'),
   /** Answers of 429: Discord refused a request for its rate limits. */
-  'discord.429': metric('counter', 'count', 'Rate limited (429)'),
+  'discord.429': byBot('counter', 'count', 'Rate limited (429)'),
   /** Waits the client chose to stay inside a rate limit, with the milliseconds waited. */
-  'discord.waits': metric('counter', 'ms', 'Waits for rate limits'),
-  'discord.server_errors': metric('counter', 'count', 'Discord errors (5xx)'),
+  'discord.waits': byBot('counter', 'ms', 'Waits for rate limits'),
+  'discord.server_errors': byBot('counter', 'count', 'Discord errors (5xx)'),
   /** One event per stored blob, with its size. */
-  'discord.posted': metric('counter', 'bytes', 'Posted to Discord'),
-  'discord.post_failures': metric('counter', 'count', 'Failed posts'),
-  'discord.deleted': metric('counter', 'count', 'Deleted messages'),
-  'discord.signed': metric('counter', 'count', 'Signed CDN URLs'),
-  'packs.sealed': metric('counter', 'count', 'Packs sealed'),
-  'orphans.deleted': metric('counter', 'count', 'Orphan messages deleted'),
-  'bot.rss': metric('gauge', 'bytes', 'Bot memory'),
-  'bot.heap': metric('gauge', 'bytes', 'Bot heap'),
-  'bot.cpu': metric('gauge', 'ratio', 'Bot CPU (of one core)'),
-  'bot.loop_ms': metric('gauge', 'ms', 'Bot event loop delay (p99)'),
+  'discord.posted': byBot('counter', 'bytes', 'Posted to Discord'),
+  'discord.post_failures': byBot('counter', 'count', 'Failed posts'),
+  'discord.deleted': byBot('counter', 'count', 'Deleted messages'),
+  'discord.signed': byBot('counter', 'count', 'Signed CDN URLs'),
+  'packs.sealed': byBot('counter', 'count', 'Packs sealed'),
+  'orphans.deleted': byBot('counter', 'count', 'Orphan messages deleted'),
+  'bot.rss': byBot('gauge', 'bytes', 'Bot memory'),
+  'bot.heap': byBot('gauge', 'bytes', 'Bot heap'),
+  'bot.cpu': byBot('gauge', 'ratio', 'Bot CPU (of one core)'),
+  'bot.loop_ms': byBot('gauge', 'ms', 'Bot event loop delay (p99)'),
 
   // The whole system, sampled by the leading bot once a minute.
-  'sync.files': metric('gauge', 'count', 'Files waiting to sync'),
-  'sync.bytes': metric('gauge', 'bytes', 'Bytes waiting to sync'),
-  'staging.bytes': metric('gauge', 'bytes', 'Staging used'),
-  'storage.bytes': metric('gauge', 'bytes', 'Stored on Discord'),
-  'storage.live_bytes': metric('gauge', 'bytes', 'Live bytes on Discord'),
-  'storage.blobs': metric('gauge', 'count', 'Stored blobs'),
-  'storage.packs': metric('gauge', 'count', 'Stored packs'),
-  'blobs.waiting': metric('gauge', 'count', 'Blobs waiting to be stored'),
-  'blobs.deleting': metric('gauge', 'count', 'Blobs waiting to be deleted'),
-  'blobs.lost': metric('gauge', 'count', 'Lost blobs'),
-  'queue.pending': metric('gauge', 'count', 'Pending jobs'),
-  'queue.failed': metric('gauge', 'count', 'Failed jobs'),
-  'db.bytes': metric('gauge', 'bytes', 'Database size'),
-  'users.count': metric('gauge', 'count', 'Users'),
-  'files.count': metric('gauge', 'count', 'Files'),
-  'files.bytes': metric('gauge', 'bytes', 'Used by files'),
-  'sessions.count': metric('gauge', 'count', 'Signed-in sessions'),
+  'sync.files': byLeader('gauge', 'count', 'Files waiting to sync'),
+  'sync.bytes': byLeader('gauge', 'bytes', 'Bytes waiting to sync'),
+  'staging.bytes': byLeader('gauge', 'bytes', 'Staging used'),
+  'storage.bytes': byLeader('gauge', 'bytes', 'Stored on Discord'),
+  'storage.live_bytes': byLeader('gauge', 'bytes', 'Live bytes on Discord'),
+  'storage.blobs': byLeader('gauge', 'count', 'Stored blobs'),
+  'storage.packs': byLeader('gauge', 'count', 'Stored packs'),
+  'blobs.waiting': byLeader('gauge', 'count', 'Blobs waiting to be stored'),
+  'blobs.deleting': byLeader('gauge', 'count', 'Blobs waiting to be deleted'),
+  'blobs.lost': byLeader('gauge', 'count', 'Lost blobs'),
+  'queue.pending': byLeader('gauge', 'count', 'Pending jobs'),
+  'queue.failed': byLeader('gauge', 'count', 'Failed jobs'),
+  'db.bytes': byLeader('gauge', 'bytes', 'Database size'),
+  'users.count': byLeader('gauge', 'count', 'Users'),
+  'files.count': byLeader('gauge', 'count', 'Files'),
+  'files.bytes': byLeader('gauge', 'bytes', 'Used by files'),
+  'sessions.count': byLeader('gauge', 'count', 'Signed-in sessions'),
 
   // PostgreSQL's own statistics, sampled by the leading bot once a minute.
-  'pg.connections': metric('gauge', 'count', 'Database connections'),
-  'pg.active': metric('gauge', 'count', 'Queries running'),
-  'pg.lock_waits': metric('gauge', 'count', 'Queries waiting for locks'),
-  'pg.oldest_xact_ms': metric('gauge', 'ms', 'Longest transaction'),
-  'pg.dead_rows': metric('gauge', 'count', 'Dead rows'),
-  'pg.commits': metric('counter', 'count', 'Commits'),
-  'pg.rollbacks': metric('counter', 'count', 'Rollbacks'),
-  'pg.deadlocks': metric('counter', 'count', 'Deadlocks'),
+  'pg.connections': byLeader('gauge', 'count', 'Database connections'),
+  'pg.active': byLeader('gauge', 'count', 'Queries running'),
+  'pg.lock_waits': byLeader('gauge', 'count', 'Queries waiting for locks'),
+  'pg.oldest_xact_ms': byLeader('gauge', 'ms', 'Longest transaction'),
+  'pg.dead_rows': byLeader('gauge', 'count', 'Dead rows'),
+  'pg.commits': byLeader('counter', 'count', 'Commits'),
+  'pg.rollbacks': byLeader('counter', 'count', 'Rollbacks'),
+  'pg.deadlocks': byLeader('counter', 'count', 'Deadlocks'),
   /** Blocks found in shared buffers, and those read from the disk (or the OS cache). */
-  'pg.cache_hits': metric('counter', 'count', 'Blocks found in memory'),
-  'pg.disk_reads': metric('counter', 'count', 'Blocks read from disk'),
-  'pg.rows_read': metric('counter', 'count', 'Rows read'),
-  'pg.rows_written': metric('counter', 'count', 'Rows written'),
-  'pg.temp_bytes': metric('counter', 'bytes', 'Temporary files'),
-  'pg.wal_bytes': metric('counter', 'bytes', 'WAL written'),
+  'pg.cache_hits': byLeader('counter', 'count', 'Blocks found in memory'),
+  'pg.disk_reads': byLeader('counter', 'count', 'Blocks read from disk'),
+  'pg.rows_read': byLeader('counter', 'count', 'Rows read'),
+  'pg.rows_written': byLeader('counter', 'count', 'Rows written'),
+  'pg.temp_bytes': byLeader('counter', 'bytes', 'Temporary files'),
+  'pg.wal_bytes': byLeader('counter', 'bytes', 'WAL written'),
 } as const satisfies Record<string, MetricInfo>
 
 export type MetricName = keyof typeof METRICS
@@ -111,21 +123,53 @@ export function isMetricName(name: string): name is MetricName {
 }
 
 /**
- * Upper bounds of the buckets timings are counted in, in milliseconds; the
- * last one takes the rest. Stored as `<name>.le<bound>` (`.leInf` for the last).
+ * A level each source records at every turn, whichever else it records: a
+ * count is 0 in a bucket only if its process ran then, and no data if not.
  */
-export const TIMING_BOUNDS = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10_000] as const
+const HEARTBEATS: Record<MetricSource, MetricName> = {
+  api: 'api.rss',
+  bot: 'bot.rss',
+  leader: 'pg.connections',
+}
+
+export function heartbeatOf(name: MetricName): MetricName {
+  return HEARTBEATS[METRICS[name].source]
+}
+
+/**
+ * Upper bounds of the buckets timings are counted in, in milliseconds; the
+ * last one takes the rest. Stored as `<name>.le<bound>` (`.leInf` for the
+ * last). Fine where most answers are, a few milliseconds, so percentiles are
+ * read to within a millisecond or two there; each bound of the first, coarser
+ * list is still one, so older figures keep their meaning.
+ */
+export const TIMING_BOUNDS = [
+  1, 2.5, 5, 7.5, 10, 15, 25, 35, 50, 75, 100, 150, 250, 350, 500, 750, 1000, 2500, 5000, 10_000,
+] as const
 
 export function timingBucketName(name: MetricName, index: number): string {
   const bound = TIMING_BOUNDS[index]
   return `${name}.le${bound === undefined ? 'Inf' : String(bound)}`
 }
 
-/** The buckets metrics are stored in: a minute, and an hour (DESIGN.md §16). */
-export const METRIC_STEPS = { minute: 60, hour: 3600 } as const
+/** The buckets metrics are stored in: half a minute, a minute, and an hour (DESIGN.md §16). */
+export const METRIC_STEPS = { halfMinute: 30, minute: 60, hour: 3600 } as const
 
-/** How long each step is kept. */
-export const METRIC_RETENTION_SECONDS = { minute: 2 * 86_400, hour: 400 * 86_400 } as const
+/** How long each step is kept: half minutes only for the last hour's graphs. */
+export const METRIC_RETENTION_SECONDS = {
+  halfMinute: 3 * 3600,
+  minute: 2 * 86_400,
+  hour: 400 * 86_400,
+} as const
+
+/** How often each process adds what it recorded to the table. */
+export const METRIC_FLUSH_MS = 5_000
+
+/**
+ * A bucket is read once this long has passed since it ended: by then every
+ * process has added its figures for it. One read sooner would read low.
+ */
+export const METRIC_SETTLE_MS = METRIC_FLUSH_MS + 3_000
 
 export const metricRangeSchema = z.enum(['1h', '6h', '24h', '7d', '30d', '1y'])
 export type MetricRange = z.infer<typeof metricRangeSchema>
@@ -138,12 +182,24 @@ export const METRIC_RANGES: Record<
   MetricRange,
   { seconds: number; step: number; bucketSeconds: number }
 > = {
-  '1h': { seconds: 3600, step: METRIC_STEPS.minute, bucketSeconds: 60 },
+  '1h': { seconds: 3600, step: METRIC_STEPS.halfMinute, bucketSeconds: 30 },
   '6h': { seconds: 6 * 3600, step: METRIC_STEPS.minute, bucketSeconds: 120 },
   '24h': { seconds: 86_400, step: METRIC_STEPS.minute, bucketSeconds: 300 },
   '7d': { seconds: 7 * 86_400, step: METRIC_STEPS.hour, bucketSeconds: 3600 },
   '30d': { seconds: 30 * 86_400, step: METRIC_STEPS.hour, bucketSeconds: 4 * 3600 },
   '1y': { seconds: 365 * 86_400, step: METRIC_STEPS.hour, bucketSeconds: 86_400 },
+}
+
+/**
+ * Where a range's figures end at `now` (`until`): at the end of the last
+ * bucket, of the finest step it reads, that every process has added its
+ * figures for. Ranges read by the hour fill their last bucket from minutes.
+ */
+export function metricsUntil(range: MetricRange, now: number): number {
+  const { step } = METRIC_RANGES[range]
+  const finestMs = (step === METRIC_STEPS.hour ? METRIC_STEPS.minute : step) * 1000
+  const settled = now - METRIC_SETTLE_MS
+  return settled - (settled % finestMs)
 }
 
 /**
@@ -196,8 +252,13 @@ export type MetricsQuery = z.infer<typeof metricsQuerySchema>
 export const metricSeriesSchema = z.object({
   range: metricRangeSchema,
   bucketSeconds: z.number().int().positive(),
-  /** Each point's start, in milliseconds since 1970, oldest first; the last one is under way. */
+  /** Each point's start, in milliseconds since 1970, oldest first. */
   times: z.array(z.number()),
+  /**
+   * Where the figures end (`metricsUntil`): every process has added its
+   * figures up to here. The last point's bucket may run past it, still under way.
+   */
+  until: z.number(),
   series: z.array(
     z.object({
       id: z.string(),
