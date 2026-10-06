@@ -506,7 +506,7 @@ Rename, move, create folder, and trash/restore are plain SQL transactions.
 
 ### 6.4 Deletion & garbage collection
 
-1. **Trash:** the item can be restored for `TRASH_RETENTION_DAYS` (default 30).
+1. **Trash:** the item can be restored for `TRASH_RETENTION_DAYS` (default 30). After that, the leading bot's janitor purges it, every 10 minutes, the oldest 500 items at a time and one drive per transaction under its tree lock, as emptying the trash would; each is logged as deleted for good by the system.
 2. **Purge:** triggered by emptying the trash, the retention expiring, or a version being pruned. The version goes to `purging`, its chunks get `purged_at`, each affected blob's `live_bytes` drops by the frame size, and quota is released right away.
 3. **Blob release:** a blob with `live_bytes = 0` moves to `deleting` (also when it was purged while being uploaded). The GC (bot leader) deletes messages one at a time: one every 2 s while blobs wait to be uploaded, up to 20 every 2 s otherwise. Uploads get most of the rate-limit budget, and deleting never stops altogether. A failed deletion is counted on the blob (`attempts`, `last_error`), and blobs are taken fewest failures first, so one that keeps failing never holds up the rest. It works the same on the local store.
 4. **Pack compaction** (§6.6) reclaims packs that are mostly dead.

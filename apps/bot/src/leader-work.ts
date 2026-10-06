@@ -3,6 +3,7 @@ import {
   abandonUploads,
   ADMIN_TASK_QUEUE,
   BLOB_UPLOAD_QUEUE,
+  expireTrash,
   foldAllFolderStats,
   PostgresSampler,
   pruneMetrics,
@@ -29,7 +30,8 @@ import { storeBlobs } from './uploader.ts'
 // What only the leading bot does (DESIGN.md §11): pack small frames (§6.6),
 // store staged blobs, delete released ones (§6.4), clean up orphan messages
 // (§6.1), keep folder sizes current (§12.1), clean up after expired uploads
-// and sessions, and drop old metrics and audit entries.
+// and sessions, empty the trash of what has been there too long (§6.4), and
+// drop old metrics and audit entries.
 
 const FOLD_EVERY_MS = 2000
 const JANITOR_EVERY_MS = 10 * 60_000
@@ -158,8 +160,12 @@ export async function startLeaderWork(options: {
     }),
     repeat(FOLD_EVERY_MS, log, 'folding folder sizes', () => foldAllFolderStats(db)),
     repeat(JANITOR_EVERY_MS, log, 'cleaning up', () => cleanUp(db, staging)),
-    // On its own, so a failure here never holds back the clean-up above, nor the reverse.
+    // On their own, so a failure in one never holds back the others.
     repeat(JANITOR_EVERY_MS, log, 'dropping old metrics', () => pruneMetrics(db)),
+    repeat(JANITOR_EVERY_MS, log, 'emptying old trash', async () => {
+      const items = await emptyOldTrash(db, staging, config.trashRetentionDays)
+      if (items > 0) log.info({ items }, 'emptied items kept their days in the trash')
+    }),
   ]
   // The leader alone samples them, so the figures aren't counted once per bot.
   if (metrics) {
@@ -236,6 +242,20 @@ export async function cleanUp(db: Database, staging: Staging, now = Date.now()):
       if (!recorded.has(file.path)) await staging.remove(file.path)
     }
   }
+}
+
+/**
+ * Purges what has been in the trash longer than `retentionDays` (§6.4), and
+ * the staged frames of what it purged. Returns how many items went.
+ */
+export async function emptyOldTrash(
+  db: Database,
+  staging: Staging,
+  retentionDays: number,
+): Promise<number> {
+  const { items, versionIds } = await expireTrash(db, retentionDays)
+  for (const versionId of versionIds) await staging.removeVersion(versionId)
+  return items
 }
 
 /**

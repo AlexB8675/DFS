@@ -1,6 +1,9 @@
 import { sql } from 'drizzle-orm'
+import type { Database } from './client.ts'
 import { uuidArray } from './folder-stats.ts'
-import type { Executor, JournalRecord } from './journal.ts'
+import { appendJournal, type Executor, type JournalRecord } from './journal.ts'
+import { TREE_LOCK_NAMESPACE } from './locks.ts'
+import { auditLog } from './schema.ts'
 
 // Removing things for good (DESIGN.md §6.4): emptied trash, pruned versions,
 // expired uploads. Frames stop counting toward their blobs (a blob with nothing
@@ -112,6 +115,64 @@ export async function purgeSubtrees(
   await tx.execute(sql`DELETE FROM nodes WHERE id = ANY(${nodeIds})`)
   for (const id of rootIds) records.push({ kind: 'node.purge', record: { id } })
   return { versionIds, records }
+}
+
+/**
+ * Purges what has been in the trash longer than `retentionDays` (§6.4), as
+ * emptying the trash would: the oldest `limit` items at most, one drive per
+ * transaction, each logged as deleted by the system. Returns how many went,
+ * and the purged versions, whose staged frames the caller removes.
+ */
+export async function expireTrash(
+  db: Database,
+  retentionDays: number,
+  limit = 500,
+): Promise<{ items: number; versionIds: string[] }> {
+  const cutoff = sql`now() - make_interval(days => ${retentionDays}::int)`
+  const { rows: due } = await db.execute<{ owner_id: string; id: string }>(sql`
+    SELECT owner_id, id FROM nodes
+    WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoff}
+    ORDER BY deleted_at LIMIT ${limit}`)
+  let items = 0
+  const versionIds: string[] = []
+  for (const [ownerId, rows] of Map.groupBy(due, (row) => row.owner_id)) {
+    const purged = await db.transaction(async (tx) => {
+      // The drive's tree lock, as the API's trash and restore take it.
+      await tx.execute(
+        sql`SELECT pg_advisory_xact_lock(${TREE_LOCK_NAMESPACE}, hashtext(${ownerId}))`,
+      )
+      // Its owner may have restored or emptied some meanwhile.
+      const { rows: still } = await tx.execute<{ id: string; name: string; owner: string }>(sql`
+        SELECT node.id, node.name, account.display_name AS owner
+        FROM nodes node JOIN users account ON account.id = node.owner_id
+        WHERE node.id = ANY(${uuidArray(rows.map((row) => row.id))})
+          AND node.owner_id = ${ownerId} AND node.deleted_at < ${cutoff}`)
+      if (still.length === 0) return null
+      const { versionIds: versions, records } = await purgeSubtrees(
+        tx,
+        ownerId,
+        still.map((row) => row.id),
+      )
+      await tx.insert(auditLog).values(
+        still.map((row) => ({
+          userId: null,
+          action: 'node.purged',
+          nodeId: row.id,
+          meta: {
+            target: `${row.name} (${row.owner})`,
+            details: `after ${String(retentionDays)} days in the trash`,
+          },
+        })),
+      )
+      await appendJournal(tx, records)
+      return { count: still.length, versions }
+    })
+    // Counted once committed: staged frames of a purge rolled back must stay.
+    if (!purged) continue
+    items += purged.count
+    versionIds.push(...purged.versions)
+  }
+  return { items, versionIds }
 }
 
 /** Gives back bytes an upload had reserved (§5.1). */
