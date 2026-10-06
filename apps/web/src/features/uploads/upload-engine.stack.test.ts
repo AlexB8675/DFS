@@ -121,7 +121,8 @@ describe.skipIf(!apiBase)('the upload engine against the real API, with faults',
       for (const upload of items()) {
         const response = await checker.fetch('GET', `/files/${upload.nodeId ?? ''}/content`)
         const actual = new Uint8Array(await response.arrayBuffer())
-        const expected = new Uint8Array(await upload.file.arrayBuffer())
+        const picked = files.find((candidate) => candidate.name === upload.file.name)
+        const expected = new Uint8Array((await picked?.arrayBuffer()) ?? new ArrayBuffer(0))
         expect(sameBytes(actual, expected), `${upload.file.name} came back different`).toBe(true)
       }
       // Retried parts, streams and completions count once.

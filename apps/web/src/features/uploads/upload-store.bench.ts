@@ -10,6 +10,7 @@ for (const count of [10_000, 100_000]) {
       id: String(index),
       file,
       parentId: 'folder',
+      location: null,
       status: 'uploading',
       uploadedBytes: 0,
       nodeId: null,

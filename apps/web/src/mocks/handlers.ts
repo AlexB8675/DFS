@@ -215,6 +215,7 @@ export const handlers = [
       { status: 201 },
     ),
   ),
+  http.get('/api/uploads', ({ request }) => respond(request, () => db.unfinishedUploads())),
   http.get<Id>('/api/uploads/:id', ({ request, params }) =>
     respond(request, () => db.uploadStatus(params.id)),
   ),

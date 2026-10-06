@@ -24,6 +24,7 @@ for (const requests of [4, 6, 8]) {
       let inFlight = 0
       const transport: UploadTransport = {
         ensureFolders: () => Promise.resolve({}),
+        unfinished: () => Promise.resolve([]),
         createSessions: (uploads) =>
           Promise.resolve(
             uploads.map((_, index) => ({

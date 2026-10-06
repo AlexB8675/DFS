@@ -9,12 +9,14 @@ import {
   X,
   type LucideIcon,
 } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { toast } from 'sonner'
 import { useStore } from 'zustand'
 import { NodeIcon } from '@/components/node-icon'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 import { VirtualList } from '@/components/virtual-list'
+import { errorMessage } from '@/lib/api/client'
 import { formatBytes, formatCount, formatDuration } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { uploadEngine } from './upload-engine'
@@ -30,17 +32,25 @@ const UPLOAD_ROW_HEIGHT = 52
 /** How long "Cancel all" waits for the confirming second click. */
 const CONFIRM_MS = 3000
 
-/** A docked panel with the progress of every upload in this session. */
+/**
+ * A docked panel with the progress of every upload in this page, and of
+ * those a closed page left (§6.1).
+ */
 export function UploadPanel() {
   const items = useUploadStore((state) => state.items)
   const summary = useUploadStore((state) => state.summary)
   const bytesPerSecond = useUploadStore((state) => state.bytesPerSecond)
+  const open = useUploadStore((state) => state.open)
+  const setOpen = useUploadStore((state) => state.setOpen)
   const collapsed = useUploadStore((state) => state.collapsed)
   const setCollapsed = useUploadStore((state) => state.setCollapsed)
-
-  if (items.length === 0) return null
-
+  const notStarted = useUploadStore((state) => state.notStarted)
   const pending = summary.active + summary.paused > 0
+  useLeaveWarning(pending)
+
+  if (!open || items.length + notStarted === 0) return null
+
+  const stopped = summary.interrupted + notStarted
 
   return (
     <section
@@ -49,9 +59,9 @@ export function UploadPanel() {
     >
       <header className="flex items-center gap-0.5 py-2 pr-2 pl-4">
         <div className="min-w-0 flex-1" aria-live="polite">
-          <p className="truncate text-sm font-medium">{title(summary)}</p>
+          <p className="truncate text-sm font-medium">{title(summary, stopped)}</p>
           <p className="truncate text-xs text-muted-foreground tabular-nums">
-            {subtitle(summary, bytesPerSecond)}
+            {subtitle(summary, stopped, bytesPerSecond)}
           </p>
         </div>
         {summary.active > 0 && (
@@ -88,7 +98,9 @@ export function UploadPanel() {
             icon={X}
             label="Close"
             onClick={() => {
+              // What is still syncing or waiting for its file stays, for the header's button.
               uploadEngine.clearFinished()
+              setOpen(false)
             }}
           />
         )}
@@ -109,6 +121,7 @@ export function UploadPanel() {
         inert={collapsed}
       >
         <div className="overflow-hidden">
+          {stopped > 0 && <StoppedNote interrupted={summary.interrupted} notStarted={notStarted} />}
           {/* Virtualized: dropping a folder can queue thousands of files. */}
           <VirtualList
             role="list"
@@ -120,21 +133,97 @@ export function UploadPanel() {
             animateMoves
             renderItem={(entry) => <UploadRow entry={entry} />}
           />
+          {pending && (
+            <p className="border-t px-4 py-2 text-xs text-muted-foreground">
+              Closing this page stops the uploads. What arrived is kept for a day, to continue them
+              by choosing the files again.
+            </p>
+          )}
         </div>
       </div>
     </section>
   )
 }
 
-function title(summary: UploadSummary): string {
+/** Asks before the page goes while uploads are under way: closing it stops them. */
+function useLeaveWarning(pending: boolean) {
+  useEffect(() => {
+    if (!pending) return
+    const warn = (event: BeforeUnloadEvent) => {
+      event.preventDefault()
+    }
+    window.addEventListener('beforeunload', warn)
+    return () => {
+      window.removeEventListener('beforeunload', warn)
+    }
+  }, [pending])
+}
+
+/** The header's way back to the panel once it is closed, while it has something to show. */
+export function UploadsButton() {
+  const open = useUploadStore((state) => state.open)
+  const count = useUploadStore((state) => state.items.length + state.notStarted)
+  if (open || count === 0) return null
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      aria-label="Show uploads"
+      title="Show uploads"
+      className="animate-in fade-in-0 zoom-in-75 motion-bounce"
+      onClick={() => {
+        useUploadStore.getState().setOpen(true)
+        // Another page may have closed and left some since.
+        void uploadEngine.restore().catch(ignore)
+      }}
+    >
+      <CloudUpload />
+    </Button>
+  )
+}
+
+/** What a closed page left: how to continue it, or let it go. */
+function StoppedNote({ interrupted, notStarted }: { interrupted: number; notStarted: number }) {
+  return (
+    <div className="space-y-1 border-t px-4 py-2 text-xs text-muted-foreground">
+      {interrupted > 0 && (
+        <p>
+          What arrived is kept for a day. Choose each file again, or drop it into the same folder,
+          to continue from there.
+        </p>
+      )}
+      {notStarted > 0 && (
+        <div className="flex items-center gap-2">
+          <p className="min-w-0 flex-1">
+            {formatCount(notStarted, 'file')} hadn’t started. Add {notStarted === 1 ? 'it' : 'them'}{' '}
+            again to upload {notStarted === 1 ? 'it' : 'them'}.
+          </p>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="-my-1 h-7"
+            onClick={() => {
+              uploadEngine.discardNotStarted()
+            }}
+          >
+            Discard
+          </Button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function title(summary: UploadSummary, stopped: number): string {
   if (summary.active > 0) return `Uploading ${formatCount(summary.active, 'file')}`
   if (summary.paused > 0) return `${formatCount(summary.paused, 'upload')} paused`
+  if (stopped > 0) return `${formatCount(stopped, 'upload')} stopped`
   if (summary.failed > 0) return `${summary.done} uploaded, ${summary.failed} failed`
   if (summary.syncing > 0) return `Syncing ${formatCount(summary.syncing, 'file')} to Discord`
   return `${formatCount(summary.done, 'upload')} complete`
 }
 
-function subtitle(summary: UploadSummary, bytesPerSecond: number): string {
+function subtitle(summary: UploadSummary, stopped: number, bytesPerSecond: number): string {
   const percent = `${Math.round(summary.progress * 100)}%`
   if (summary.active > 0) {
     // Nothing sent for a few seconds: before the first byte, or the server holding back.
@@ -144,7 +233,8 @@ function subtitle(summary: UploadSummary, bytesPerSecond: number): string {
     return `${percent} · ${formatBytes(bytesPerSecond)}/s · ${left} left`
   }
   if (summary.paused > 0) return `${percent} · paused`
-  if (summary.syncing > 0) return 'Uploaded; your files are on their way to Discord.'
+  if (stopped > 0) return 'The page closed before they finished.'
+  if (summary.syncing > 0) return 'Uploaded. They reach Discord even if you close this page.'
   return 'Everything is stored on Discord.'
 }
 
@@ -260,6 +350,19 @@ function UploadRowActions({ item }: { item: UploadItem }) {
           {cancel}
         </div>
       )
+    case 'interrupted':
+      return (
+        <div className="flex items-center">
+          <ContinueButton item={item} />
+          <IconButton
+            icon={X}
+            label={`Discard ${name}`}
+            onClick={() => {
+              uploadEngine.cancel(item.id)
+            }}
+          />
+        </div>
+      )
     case 'failed':
       return (
         <div className="flex">
@@ -297,6 +400,39 @@ function UploadRowActions({ item }: { item: UploadItem }) {
     case 'canceled':
       return null
   }
+}
+
+/** Opens a file chooser for the file a closed page left partway; the same file continues it. */
+function ContinueButton({ item }: { item: UploadItem }) {
+  const input = useRef<HTMLInputElement>(null)
+  return (
+    <>
+      <input
+        ref={input}
+        type="file"
+        hidden
+        onChange={(event) => {
+          const file = event.target.files?.[0]
+          event.target.value = ''
+          if (!file) return
+          try {
+            uploadEngine.continueWith(item.id, file)
+          } catch (error) {
+            toast.error(errorMessage(error))
+          }
+        }}
+      />
+      <Button
+        variant="outline"
+        size="sm"
+        className="h-7"
+        title={`Choose “${item.file.name}” again to continue`}
+        onClick={() => input.current?.click()}
+      >
+        Continue…
+      </Button>
+    </>
+  )
 }
 
 /** A small circular progress indicator; the arc glides as the bytes go. */
@@ -364,6 +500,8 @@ function statusText(item: UploadItem): string {
       return item.retrying ? `Connection trouble, retrying… · ${progress}` : progress
     case 'paused':
       return `Paused · ${progress}`
+    case 'interrupted':
+      return `Stopped at ${progress}${item.location ? ` · ${item.location}` : ''}`
     case 'done':
       switch (item.syncState) {
         case 'stored':
@@ -379,4 +517,8 @@ function statusText(item: UploadItem): string {
     case 'canceled':
       return 'Canceled'
   }
+}
+
+function ignore(): void {
+  // The panel shows what it has; the next look asks again.
 }

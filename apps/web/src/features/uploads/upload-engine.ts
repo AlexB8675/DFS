@@ -1,12 +1,20 @@
-import type { SyncState, UploadSession } from '@dfs/shared'
+import { nameKey, type SyncState, type UnfinishedUpload, type UploadSession } from '@dfs/shared'
 import { queryClient } from '@/app/query-client'
 import { invalidateListings } from '@/features/drive/cache'
 import { markFresh } from '@/features/drive/list-motion'
 import { subscribeToResync, subscribeToSyncs } from '@/features/live-events/live-events'
 import { ApiError, errorMessage } from '@/lib/api/client'
+import { formatBytes } from '@/lib/format'
 import type { PickedFile } from './picked-files'
 import { isRetryable, MAX_ATTEMPTS, retryDelayMs } from './retry'
-import { isActive, useUploadStore, type UploadItem, type UploadStatus } from './upload-store'
+import {
+  isActive,
+  isSettled,
+  useUploadStore,
+  type FileInfo,
+  type UploadItem,
+  type UploadStatus,
+} from './upload-store'
 import { httpTransport, type UploadTransport } from './upload-transport'
 
 // Runs uploads as described in DESIGN.md §6.1 and §10.2:
@@ -22,6 +30,11 @@ import { httpTransport, type UploadTransport } from './upload-transport'
 // - A failed request is retried with exponential backoff, honouring
 //   `Retry-After` (503 when the server's staging area is full). A broken or
 //   paused stream starts again after the last part the server has.
+// - Closing or reloading the page stops it all. The server keeps what
+//   arrived for a day, and the next page lists it (`restore`): a file left
+//   partway continues once it is chosen again, or dropped again into the
+//   same folder. A page marks the sessions it works on with Web Locks, so
+//   another page of the browser doesn't take them for ones left behind.
 //
 // The engine keeps the authoritative state here and publishes it to the
 // upload store about ten times a second, so a big batch doesn't re-render
@@ -62,7 +75,9 @@ const LOOKUP_BATCH = 500
 
 interface Job {
   id: string
-  file: File
+  /** The file being sent; `null` for an upload a closed page left, until it is chosen again. */
+  file: File | null
+  info: FileInfo
   parentId: string
   status: UploadStatus
   session: UploadSession | null
@@ -117,6 +132,10 @@ export class UploadEngine {
   private creatingSessions = false
   private readonly preparingSessions = new Set<Job>()
   private syncRefresh: Promise<void> | null = null
+  private readonly locks = new SessionLocks()
+  /** Sessions a closed page left without a byte received, by upload ID. */
+  private readonly notStarted = new Map<string, UnfinishedUpload>()
+  private restoring: Promise<void> | null = null
 
   private readonly changes = new Map<string, Partial<UploadItem>>()
   private publishTimer: ReturnType<typeof setTimeout> | undefined
@@ -138,34 +157,118 @@ export class UploadEngine {
   async enqueue(parentId: string, files: PickedFile[]): Promise<void> {
     if (files.length === 0) return
     const folderIds = await this.ensureFolders(parentId, files)
+    const leftBehind = this.leftBehind()
     const items: UploadItem[] = []
     for (const { file, relativeDir } of files) {
-      const job: Job = {
-        id: crypto.randomUUID(),
-        file,
-        parentId: folderIds.get(relativeDir) ?? parentId,
-        status: 'queued',
-        session: null,
-        doneParts: new Set(),
-        controller: null,
-        recheck: false,
-        hashes: [],
-        hashing: null,
-        uploadedBytes: 0,
-        attempts: 0,
-        retryTimer: null,
-        completing: false,
-        checkingSession: false,
-        syncState: null,
-        syncNeedsRefresh: false,
-        error: null,
+      const folderId = folderIds.get(relativeDir) ?? parentId
+      // The same file where a closed page left it continues that upload.
+      const key = fileKey(folderId, file)
+      const left = leftBehind.get(key)
+      leftBehind.delete(key)
+      if (left && 'status' in left) {
+        this.continueWith(left.id, file)
+        continue
       }
+      const job = newJob(file, folderId)
       this.jobs.set(job.id, job)
-      this.needSession.push(job)
-      items.push({ ...toItem(job), id: job.id, file, parentId: job.parentId })
+      if (left) {
+        this.notStarted.delete(left.uploadId)
+        this.assign(job, sessionOf(left))
+        this.waiting.push(job)
+      } else {
+        this.needSession.push(job)
+      }
+      items.push(itemOf(job, null))
     }
     useUploadStore.getState().add(items)
+    useUploadStore.getState().setNotStarted(this.notStarted.size)
     this.pump()
+  }
+
+  /**
+   * Lists what a closed or reloaded page left on the server (§6.1): files
+   * partway, which continue once chosen again; files that hadn't started;
+   * and files still on their way to Discord. Uploads another page of this
+   * browser works on are its own.
+   */
+  restore(): Promise<void> {
+    this.restoring ??= this.loadUnfinished().finally(() => {
+      this.restoring = null
+    })
+    return this.restoring
+  }
+
+  private async loadUnfinished(): Promise<void> {
+    const [unfinished, held] = await Promise.all([this.transport.unfinished(), this.locks.held()])
+    const known = new Set(this.notStarted.keys())
+    for (const job of this.jobs.values()) if (job.session) known.add(job.session.uploadId)
+    const items: UploadItem[] = []
+    for (const upload of unfinished) {
+      if (known.has(upload.uploadId) || held.has(upload.uploadId)) continue
+      const session = sessionOf(upload)
+      if (upload.state === 'receiving' && upload.receivedBytes === 0) {
+        this.notStarted.set(upload.uploadId, upload)
+        this.locks.take(upload.uploadId)
+        continue
+      }
+      const info = { name: upload.name, size: upload.sizeBytes, type: upload.mimeType ?? '' }
+      const job = newJob(null, upload.parentId, info)
+      job.uploadedBytes = upload.receivedBytes
+      if (upload.state === 'completed') {
+        job.session = session
+        job.status = 'done'
+        job.syncState = 'syncing'
+      } else {
+        this.assign(job, session)
+        job.status = 'interrupted'
+        // Which parts arrived, it asks once it continues.
+        job.recheck = true
+      }
+      this.jobs.set(job.id, job)
+      items.push(itemOf(job, upload.location))
+    }
+    useUploadStore.getState().add(items)
+    useUploadStore.getState().setNotStarted(this.notStarted.size)
+    // A file may have reached Discord before live events were listened to.
+    if (items.some((item) => item.status === 'done')) void this.refreshSyncStates()
+  }
+
+  /** Continues an upload a closed page left partway, with its file chosen again. */
+  continueWith(id: string, file: File): void {
+    const job = this.jobs.get(id)
+    if (job?.status !== 'interrupted') return
+    if (fileKey(job.parentId, job.info) !== fileKey(job.parentId, file)) {
+      throw new Error(`Choose “${job.info.name}” (${formatBytes(job.info.size)}) to continue it.`)
+    }
+    job.file = file
+    job.status = 'queued'
+    job.attempts = 0
+    this.requeue(job)
+    this.publish(job)
+    this.pump()
+  }
+
+  /** Gives up the uploads a closed page left before they started. */
+  discardNotStarted(): void {
+    for (const upload of this.notStarted.values()) {
+      void this.transport.cancel(upload.uploadId).catch(ignore)
+      this.locks.release(upload.uploadId)
+      this.refreshFolder(upload.parentId)
+    }
+    this.notStarted.clear()
+    useUploadStore.getState().setNotStarted(0)
+  }
+
+  /** Files a closed page left, partway or not started, by folder, name and size. */
+  private leftBehind(): Map<string, Job | UnfinishedUpload> {
+    const left = new Map<string, Job | UnfinishedUpload>()
+    for (const upload of this.notStarted.values()) {
+      left.set(fileKey(upload.parentId, { name: upload.name, size: upload.sizeBytes }), upload)
+    }
+    for (const job of this.jobs.values()) {
+      if (job.status === 'interrupted') left.set(fileKey(job.parentId, job.info), job)
+    }
+    return left
   }
 
   pause(id: string): void {
@@ -201,7 +304,7 @@ export class UploadEngine {
         received(job, session, status.receivedParts)
       } catch (error) {
         // The session expired: start over with a new one.
-        if (job.session === session && isNotFound(error)) resetSession(job)
+        if (job.session === session && isNotFound(error)) this.forgetSession(job)
       } finally {
         job.checkingSession = false
       }
@@ -223,11 +326,15 @@ export class UploadEngine {
     this.cancelJobs([...this.jobs.values()])
   }
 
-  /** Drops finished, failed and canceled uploads from the list (and failed sessions from the server). */
+  /**
+   * Drops finished, failed and canceled uploads from the list (and failed
+   * sessions from the server). Those still syncing or waiting for their file stay.
+   */
   clearFinished(): void {
     const removed = new Set<string>()
     for (const job of this.jobs.values()) {
-      if (isActive(job.status) || job.status === 'paused') continue
+      if (isActive(job.status) || job.status === 'paused' || job.status === 'interrupted') continue
+      if (job.status === 'done' && !isSettled(job.syncState)) continue
       if (job.status === 'failed') this.dropSession(job)
       removed.add(job.id)
       this.jobs.delete(job.id)
@@ -371,7 +478,7 @@ export class UploadEngine {
   ): Promise<void> {
     let prepared = false
     try {
-      const bytes = await job.file.slice(0, session.chunkSize).arrayBuffer()
+      const bytes = await fileOf(job).slice(0, session.chunkSize).arrayBuffer()
       if (!this.canSend(job, session, controller)) return
       const hash = await sha256Hex(bytes)
       if (!this.canSend(job, session, controller)) return
@@ -425,7 +532,7 @@ export class UploadEngine {
       // Whatever the progress events didn't report counts now.
       progress(bytes.byteLength)
       job.doneParts.add(0)
-      job.uploadedBytes = job.file.size
+      job.uploadedBytes = job.info.size
       job.attempts = 0
       this.publish(job)
     } catch (error) {
@@ -468,14 +575,14 @@ export class UploadEngine {
       await this.transport.streamFile(
         session.uploadId,
         from,
-        job.file.slice(base),
+        fileOf(job).slice(base),
         controller.signal,
         progress,
       )
       if (job.session !== session) return
-      progress(job.file.size - base)
+      progress(job.info.size - base)
       for (let index = from; index < session.chunkCount; index += 1) job.doneParts.add(index)
-      job.uploadedBytes = job.file.size
+      job.uploadedBytes = job.info.size
       job.attempts = 0
       this.publish(job)
     } catch (error) {
@@ -493,11 +600,12 @@ export class UploadEngine {
     if (job.hashing) return job.hashing.done
     const controller = new AbortController()
     const hashes = job.hashes
+    const file = fileOf(job)
     const done = (async () => {
       for (let index = 0; index < session.chunkCount; index += 1) {
         if (hashes[index] !== undefined) continue
         const start = index * session.chunkSize
-        const bytes = await job.file.slice(start, start + session.chunkSize).arrayBuffer()
+        const bytes = await file.slice(start, start + session.chunkSize).arrayBuffer()
         controller.signal.throwIfAborted()
         hashes[index] = await sha256Hex(bytes)
       }
@@ -522,7 +630,7 @@ export class UploadEngine {
       if (controller.signal.aborted || sent <= counted) return
       this.recordSpeed(sent - counted)
       counted = sent
-      job.uploadedBytes = Math.min(job.file.size, base + sent)
+      job.uploadedBytes = Math.min(job.info.size, base + sent)
       this.publish(job)
     }
   }
@@ -533,7 +641,7 @@ export class UploadEngine {
     // again is accepted (§6.1), so a lost response is simply retried. A 404
     // means the session expired.
     if (isNotFound(error)) {
-      resetSession(job)
+      this.forgetSession(job)
       this.fail(job, 'The upload expired. Retry to start it again.')
       return
     }
@@ -573,7 +681,9 @@ export class UploadEngine {
       if (job.status !== 'uploading') return
       job.status = 'done'
       job.syncState = 'syncing'
-      job.uploadedBytes = job.file.size
+      job.uploadedBytes = job.info.size
+      // Complete, it is no page's to continue; the session stays for the sync state.
+      this.locks.release(session.uploadId)
       this.active = this.active.filter((candidate) => candidate !== job)
       this.publish(job)
       this.refreshFolder(job.parentId)
@@ -626,9 +736,9 @@ export class UploadEngine {
         this.transport.createSessions(
           batch.map((job) => ({
             parentId: job.parentId,
-            name: job.file.name,
-            sizeBytes: job.file.size,
-            mimeType: job.file.type || 'application/octet-stream',
+            name: job.info.name,
+            sizeBytes: job.info.size,
+            mimeType: job.info.type || 'application/octet-stream',
           })),
         ),
       )
@@ -638,7 +748,7 @@ export class UploadEngine {
           if (job.status === 'queued') this.fail(job, result?.error.message ?? 'Could not start.')
           return
         }
-        job.session = result.session
+        this.assign(job, result.session)
         if (job.status === 'canceled') this.dropSession(job)
         else if (job.status === 'queued') this.waiting.push(job)
         // A job paused meanwhile keeps its session for when it resumes.
@@ -689,8 +799,21 @@ export class UploadEngine {
   private dropSession(job: Job): void {
     if (!job.session) return
     void this.transport.cancel(job.session.uploadId).catch(ignore)
+    this.locks.release(job.session.uploadId)
     job.session = null
     this.refreshFolder(job.parentId)
+  }
+
+  /** Gives a job its session, which this page now works on. */
+  private assign(job: Job, session: UploadSession): void {
+    job.session = session
+    this.locks.take(session.uploadId)
+  }
+
+  /** The session expired: the job starts over with a new one if retried. */
+  private forgetSession(job: Job): void {
+    if (job.session) this.locks.release(job.session.uploadId)
+    resetSession(job)
   }
 
   // ── Pause, resume, cancel ────────────────────────────────────────────────
@@ -847,7 +970,36 @@ export class UploadEngine {
   }
 }
 
-function toItem(job: Job): Omit<UploadItem, 'id' | 'file' | 'parentId'> {
+function newJob(file: File | null, parentId: string, info: FileInfo | null = file): Job {
+  if (!info) throw new Error('A job needs its file, or what it was.')
+  return {
+    id: crypto.randomUUID(),
+    file,
+    info,
+    parentId,
+    status: 'queued',
+    session: null,
+    doneParts: new Set(),
+    controller: null,
+    recheck: false,
+    hashes: [],
+    hashing: null,
+    uploadedBytes: 0,
+    attempts: 0,
+    retryTimer: null,
+    completing: false,
+    checkingSession: false,
+    syncState: null,
+    syncNeedsRefresh: false,
+    error: null,
+  }
+}
+
+function itemOf(job: Job, location: string | null): UploadItem {
+  return { ...toItem(job), id: job.id, file: job.info, parentId: job.parentId, location }
+}
+
+function toItem(job: Job): Omit<UploadItem, 'id' | 'file' | 'parentId' | 'location'> {
   return {
     status: job.status,
     uploadedBytes: job.uploadedBytes,
@@ -895,7 +1047,69 @@ function resetSession(job: Job): void {
 
 function partSize(job: Job, session: UploadSession, index: number): number {
   const start = index * session.chunkSize
-  return Math.max(0, Math.min(session.chunkSize, job.file.size - start))
+  return Math.max(0, Math.min(session.chunkSize, job.info.size - start))
+}
+
+/** The bytes to send: only a job with its file is ever sent. */
+function fileOf(job: Job): File {
+  if (!job.file) throw new Error(`“${job.info.name}” has to be chosen again.`)
+  return job.file
+}
+
+/** One file in one folder, the way the server tells names apart. */
+function fileKey(parentId: string, file: Pick<FileInfo, 'name' | 'size'>): string {
+  return `${parentId}/${String(file.size)}/${nameKey(file.name)}`
+}
+
+function sessionOf(upload: UnfinishedUpload): UploadSession {
+  const { uploadId, nodeId, versionId, isNewVersion, chunkSize, chunkCount } = upload
+  return { uploadId, nodeId, versionId, isNewVersion, chunkSize, chunkCount }
+}
+
+const LOCK_PREFIX = 'dfs-upload:'
+
+/**
+ * The upload sessions this page works on, held as Web Locks: another page
+ * of the browser sees them taken, and they go with the page. Without Web
+ * Locks (outside a secure context), no page knows another's.
+ */
+class SessionLocks {
+  private readonly releases = new Map<string, () => void>()
+
+  take(uploadId: string): void {
+    const locks = webLocks()
+    if (!locks || this.releases.has(uploadId)) return
+    let release = ignore
+    // Released before it was granted, the lock goes as soon as it is.
+    const released = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    this.releases.set(uploadId, release)
+    locks
+      .request(LOCK_PREFIX + uploadId, { ifAvailable: true }, (lock) => (lock ? released : null))
+      .catch(ignore)
+  }
+
+  release(uploadId: string): void {
+    this.releases.get(uploadId)?.()
+    this.releases.delete(uploadId)
+  }
+
+  /** Sessions some page of this browser works on, this one's included. */
+  async held(): Promise<Set<string>> {
+    const locks = webLocks()
+    if (!locks) return new Set()
+    const { held = [] } = await locks.query().catch(() => ({ held: [] }))
+    return new Set(
+      held.flatMap((lock) =>
+        lock.name?.startsWith(LOCK_PREFIX) ? [lock.name.slice(LOCK_PREFIX.length)] : [],
+      ),
+    )
+  }
+}
+
+function webLocks(): LockManager | undefined {
+  return typeof navigator === 'undefined' ? undefined : (navigator as { locks?: LockManager }).locks
 }
 
 function isNotFound(error: unknown): boolean {

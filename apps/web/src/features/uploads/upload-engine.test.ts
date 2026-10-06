@@ -1,4 +1,4 @@
-import type { DriveNode, SyncState, UploadSession } from '@dfs/shared'
+import type { DriveNode, SyncState, UnfinishedUpload, UploadSession } from '@dfs/shared'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { queryClient } from '@/app/query-client'
 import { ApiError } from '@/lib/api/client'
@@ -53,6 +53,8 @@ function fakeApi() {
     sent,
     streamed,
     attempts: new Map<string, number>(),
+    /** What `GET /uploads` answers: uploads a closed page left. */
+    leftBehind: [] as UnfinishedUpload[],
   }
 
   const held = <T extends { release: () => void }>(
@@ -161,10 +163,52 @@ function fakeApi() {
       const state = parts.size === rest.chunkCount ? 'completed' : 'receiving'
       return Promise.resolve({ ...rest, state, receivedParts: [...parts] })
     },
+    unfinished: () => Promise.resolve(api.leftBehind),
     cancel: vi.fn<UploadTransport['cancel']>(() => Promise.resolve()),
     nodes: vi.fn<UploadTransport['nodes']>(() => Promise.resolve([])),
   }
   return { api, transport }
+}
+
+/** An upload a closed page left on the fake server, with its first `parts` parts received. */
+function leftBehind(
+  api: ReturnType<typeof fakeApi>['api'],
+  name: string,
+  size: number,
+  parts: number,
+  state: UnfinishedUpload['state'] = 'receiving',
+): UnfinishedUpload {
+  const session = {
+    uploadId: crypto.randomUUID(),
+    nodeId: crypto.randomUUID(),
+    versionId: crypto.randomUUID(),
+    isNewVersion: false,
+    chunkSize: CHUNK,
+    chunkCount: Math.ceil(size / CHUNK),
+  }
+  api.sessions.set(session.uploadId, {
+    ...session,
+    parts: new Set(Array.from({ length: parts }, (_, index) => index)),
+  })
+  const upload = {
+    ...session,
+    state,
+    name,
+    parentId: 'folder',
+    location: 'My Drive / folder',
+    sizeBytes: size,
+    mimeType: null,
+    receivedBytes: Math.min(size, parts * CHUNK),
+    expiresAt: new Date(Date.now() + 24 * 60 * 60_000).toISOString(),
+  }
+  api.leftBehind.push(upload)
+  return upload
+}
+
+function clearStore() {
+  useUploadStore.getState().remove(new Set(items().map((upload) => upload.id)))
+  useUploadStore.getState().apply(new Map(), 0)
+  useUploadStore.getState().setNotStarted(0)
 }
 
 function file(name: string, size: number) {
@@ -211,8 +255,99 @@ function driveNode(id: string, syncState: SyncState): DriveNode {
 
 describe('UploadEngine', () => {
   beforeEach(() => {
-    useUploadStore.getState().remove(new Set(items().map((upload) => upload.id)))
-    useUploadStore.getState().apply(new Map(), 0)
+    clearStore()
+  })
+
+  it('lists what a closed page left: partway, not started, and still syncing (§6.1)', async () => {
+    const { api, transport } = fakeApi()
+    leftBehind(api, 'big.bin', 10 * CHUNK + 1, 3)
+    leftBehind(api, 'small.txt', 2, 0)
+    const syncing = leftBehind(api, 'synced.bin', 2 * CHUNK, 2, 'completed')
+    vi.mocked(transport.nodes).mockResolvedValue([driveNode(syncing.nodeId, 'stored')])
+    const engine = new UploadEngine(transport)
+    await engine.restore()
+
+    expect(item('big.bin')).toMatchObject({
+      status: 'interrupted',
+      uploadedBytes: 3 * CHUNK,
+      location: 'My Drive / folder',
+    })
+    expect(useUploadStore.getState()).toMatchObject({ open: true, notStarted: 1 })
+    // Waiting for its file, it is no part of the progress.
+    expect(useUploadStore.getState().summary).toMatchObject({ interrupted: 1, active: 0 })
+    // It may have reached Discord before live events were listened to.
+    await vi.waitFor(() => {
+      expect(item('synced.bin').syncState).toBe('stored')
+    })
+
+    // Asked again, nothing doubles.
+    await engine.restore()
+    expect(items().filter((upload) => upload.file.name === 'big.bin')).toHaveLength(1)
+    expect(useUploadStore.getState().notStarted).toBe(1)
+    // Closing the panel keeps what waits for its file.
+    engine.clearFinished()
+    expect(items().map((upload) => upload.file.name)).toEqual(['big.bin'])
+  })
+
+  it('continues a file left partway once it is chosen again, from its first missing part', async () => {
+    const { api, transport } = fakeApi()
+    const left = leftBehind(api, 'big.bin', 10 * CHUNK + 1, 3)
+    const engine = new UploadEngine(transport)
+    await engine.restore()
+    expect(() => {
+      engine.continueWith(item('big.bin').id, file('big.bin', 10 * CHUNK).file)
+    }).toThrow('Choose “big.bin”')
+    expect(item('big.bin').status).toBe('interrupted')
+
+    const picked = file('big.bin', 10 * CHUNK + 1)
+    engine.continueWith(item('big.bin').id, picked.file)
+    await vi.waitFor(() => {
+      expect(item('big.bin').status).toBe('done')
+    })
+    expect(api.streamed).toEqual([{ uploadId: left.uploadId, from: 3 }])
+    expect(transport.createSessions).not.toHaveBeenCalled()
+    const bytes = new Uint8Array(await picked.file.arrayBuffer())
+    const hashes = await Promise.all(
+      Array.from({ length: 11 }, (_, index) =>
+        sha256Hex(bytes.slice(index * CHUNK, (index + 1) * CHUNK)),
+      ),
+    )
+    expect(transport.complete).toHaveBeenCalledExactlyOnceWith(left.uploadId, hashes)
+  })
+
+  it('continues what a closed page left when the same files are dropped again', async () => {
+    const { api, transport } = fakeApi()
+    const partway = leftBehind(api, 'big.bin', 10 * CHUNK + 1, 3)
+    const notStarted = leftBehind(api, 'Small.txt', 2, 0)
+    const engine = new UploadEngine(transport)
+    await engine.restore()
+    await engine.enqueue('folder', [
+      file('big.bin', 10 * CHUNK + 1),
+      file('small.txt', 2),
+      file('new.txt', 3),
+    ])
+
+    await vi.waitFor(() => {
+      expect(items().map((upload) => upload.status)).toEqual(['done', 'done', 'done'])
+    })
+    expect(api.streamed).toEqual([{ uploadId: partway.uploadId, from: 3 }])
+    expect(api.sent).toContainEqual({ uploadId: notStarted.uploadId, index: 0 })
+    const created = vi.mocked(transport.createSessions).mock.calls.flat(2)
+    expect(created.map((upload) => upload.name)).toEqual(['new.txt'])
+    expect(useUploadStore.getState().notStarted).toBe(0)
+  })
+
+  it('leaves the uploads another page of the browser works on', async () => {
+    const { api, transport } = fakeApi()
+    leftBehind(api, 'big.bin', 10 * CHUNK + 1, 3)
+    leftBehind(api, 'small.txt', 2, 0)
+    // The first page to look takes them; a page opened after it leaves them.
+    await new UploadEngine(transport).restore()
+    expect(items()).toHaveLength(1)
+    clearStore()
+    await new UploadEngine(transport).restore()
+    expect(items()).toEqual([])
+    expect(useUploadStore.getState().notStarted).toBe(0)
   })
 
   it('streams a larger file in one request, then completes it with every part’s hash', async () => {

@@ -2,6 +2,7 @@ import { Menu } from 'lucide-react'
 import { Link } from 'react-router'
 import { AppLogo } from '@/components/app-logo'
 import { Button } from '@/components/ui/button'
+import { UploadsButton } from '@/features/uploads/upload-panel'
 import { transitionLinkProps } from '@/lib/navigation'
 import { LiveIndicator } from './live-indicator'
 import { SearchBox } from './search-box'
@@ -35,6 +36,7 @@ export function Header({ onOpenNavigation }: HeaderProps) {
       </Link>
       <SearchBox className="min-w-0 flex-1 md:max-w-2xl" />
       <div className="ml-auto flex items-center gap-1">
+        <UploadsButton />
         <LiveIndicator />
         <ThemeMenu />
         <UserMenu />
