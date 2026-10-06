@@ -1,4 +1,5 @@
 import {
+  completeUploadSchema,
   createUploadBatchSchema,
   createUploadSchema,
   uploadBatchResultSchema,
@@ -83,9 +84,19 @@ export function uploadRoutes(app: FastifyInstance, _options: object, done: () =>
 
   routes.post(
     '/uploads/:id/complete',
-    { schema: { params: byId, response: noContent } },
+    {
+      // A hash per part: 12 MiB holds about 180,000 of them, a file of almost 2 TB.
+      bodyLimit: 12 * 1024 * 1024,
+      // Without a body, Fastify hands over `null`.
+      schema: { params: byId, body: completeUploadSchema.nullish(), response: noContent },
+    },
     async (request, reply) => {
-      await completeUpload(app, requireAuth(request.auth), request.params.id)
+      await completeUpload(
+        app,
+        requireAuth(request.auth),
+        request.params.id,
+        request.body?.partSha256,
+      )
       return reply.code(204).send(null)
     },
   )

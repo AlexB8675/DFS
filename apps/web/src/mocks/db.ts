@@ -706,8 +706,33 @@ export class MockDb {
     else this.save()
   }
 
-  completeUpload(uploadId: string): void {
+  /**
+   * `PUT /uploads/:id/content?from=`: every part from `from` to the end of
+   * the file in one body, each taken as `receivePart` takes one. The stream
+   * carries no hashes: completing the upload checks them.
+   */
+  async receiveStream(uploadId: string, from: number, body: ArrayBuffer): Promise<void> {
     const upload = this.upload(uploadId)
+    if (!Number.isInteger(from) || from < 0 || from >= upload.chunkCount) {
+      throw new MockApiError(400, 'invalid_part', 'The stream starts past the end of the file.')
+    }
+    if (body.byteLength !== upload.sizeBytes - from * upload.chunkSize) {
+      throw new MockApiError(400, 'invalid_part', 'The stream has the wrong length.')
+    }
+    for (let index = from; index < upload.chunkCount; index += 1) {
+      const start = (index - from) * upload.chunkSize
+      await this.receivePart(uploadId, index, body.slice(start, start + upload.chunkSize), null)
+    }
+  }
+
+  /**
+   * `POST /uploads/:id/complete`. With `partSha256`, every part's SHA-256 as
+   * the client read it, the parts are checked first: those that differ are
+   * dropped, to be sent again.
+   */
+  completeUpload(uploadId: string, partSha256?: readonly string[]): void {
+    const upload = this.upload(uploadId)
+    if (partSha256) this.checkParts(uploadId, upload, partSha256)
     if (upload.state === 'completed') return
     if (Object.keys(upload.receivedParts).length !== upload.chunkCount) {
       throw new MockApiError(409, 'incomplete_upload', 'Some parts have not been uploaded yet.')
@@ -741,6 +766,25 @@ export class MockDb {
       this.fileBytes.set(upload.nodeId, whole)
     }
     this.changed()
+  }
+
+  private checkParts(uploadId: string, upload: MockUpload, partSha256: readonly string[]): void {
+    if (partSha256.length !== upload.chunkCount) {
+      throw new MockApiError(400, 'invalid_request', 'There must be a hash for every part.')
+    }
+    const corrupted = Object.entries(upload.receivedParts)
+      .filter(([index, hash]) => partSha256[Number(index)] !== hash)
+      .map(([index]) => Number(index))
+    if (corrupted.length === 0) return
+    if (upload.state === 'completed') {
+      throw new MockApiError(409, 'part_conflict', 'This upload was completed with other bytes.')
+    }
+    for (const index of corrupted) {
+      Reflect.deleteProperty(upload.receivedParts, index)
+      this.receivedBytes.get(uploadId)?.delete(index)
+    }
+    this.save()
+    throw new MockApiError(400, 'hash_mismatch', 'Some parts were corrupted in transit.')
   }
 
   /** `DELETE /uploads/:id`. A completed upload stays: its file is in the drive now. */

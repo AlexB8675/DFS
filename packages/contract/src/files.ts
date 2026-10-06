@@ -53,6 +53,27 @@ export async function sendPart(
   })
 }
 
+/** Streams the file from part `from` to its end in one request, as the engine sends a larger file. */
+export async function streamFrom(
+  client: ApiClient,
+  session: UploadSession,
+  from: number,
+  bytes: Uint8Array<ArrayBuffer>,
+): Promise<void> {
+  await client.send('PUT', `/uploads/${session.uploadId}/content?from=${String(from)}`, {
+    body: bytes.slice(from * session.chunkSize),
+  })
+}
+
+/** Every part's SHA-256, which completing a streamed upload sends. */
+export function partHashes(session: UploadSession, bytes: Uint8Array<ArrayBuffer>) {
+  return Promise.all(
+    Array.from({ length: session.chunkCount }, (_, index) =>
+      sha256Hex(bytes.slice(index * session.chunkSize, (index + 1) * session.chunkSize)),
+    ),
+  )
+}
+
 /** Uploads a whole file: a session, every part, and completion when there is more than one. */
 export async function uploadFile(
   client: ApiClient,

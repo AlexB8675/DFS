@@ -3,6 +3,7 @@ import { chunkContext, fromSha256Hex, generateDek, sha256, uuidBytes } from '@df
 import {
   abandonUploads,
   appendJournal,
+  bigintArray,
   fileVersions,
   markFoldersDirty,
   nodeRecord,
@@ -335,12 +336,7 @@ export async function receivePart(
     throw new ApiError(400, 'invalid_part', 'Part index out of range.')
   }
   const upload = await findUpload(app.db, auth, uploadId, { partIndex: index })
-  if (index >= upload.chunk_count)
-    throw new ApiError(400, 'invalid_part', 'Part index out of range.')
-  const lastSize = upload.size_bytes - upload.chunk_size * (upload.chunk_count - 1)
-  if (body.length !== (index === upload.chunk_count - 1 ? lastSize : upload.chunk_size)) {
-    throw new ApiError(400, 'invalid_part', 'The part has the wrong size.')
-  }
+  checkPart(upload, index, body)
   const plainHash = await sha256(body)
   if (sha256Header !== undefined) {
     const expected = fromSha256Hex(sha256Header)
@@ -348,7 +344,78 @@ export async function receivePart(
       throw new ApiError(400, 'hash_mismatch', 'The part was corrupted in transit.')
     }
   }
+  await storePart(app, auth, upload, index, body, plainHash)
+}
 
+/**
+ * Where a streamed upload may start (`PUT /uploads/:id/content?from=`), and
+ * how many bytes must follow: every part from `from` to the end of the file.
+ */
+export async function streamStart(
+  app: FastifyInstance,
+  auth: Auth,
+  uploadId: string,
+  from: number,
+): Promise<{ chunkSize: number; chunkCount: number; bytes: number; completed: boolean }> {
+  const upload = await findUpload(app.db, auth, uploadId)
+  if (!Number.isInteger(from) || from < 0 || from >= upload.chunk_count) {
+    throw new ApiError(400, 'invalid_part', 'The stream starts past the end of the file.')
+  }
+  return {
+    chunkSize: upload.chunk_size,
+    chunkCount: upload.chunk_count,
+    bytes: upload.size_bytes - from * upload.chunk_size,
+    completed: upload.state === 'completed',
+  }
+}
+
+/**
+ * A part cut from a streamed upload, stored as `PUT /uploads/:id/parts/:index`
+ * stores one. The stream carries no hashes: completing the upload checks
+ * them all (`completeUpload`).
+ */
+export async function receiveStreamedPart(
+  app: FastifyInstance,
+  auth: Auth,
+  uploadId: string,
+  index: number,
+  body: Uint8Array,
+): Promise<void> {
+  const upload = await findUpload(app.db, auth, uploadId, { partIndex: index })
+  checkPart(upload, index, body)
+  await storePart(app, auth, upload, index, body, await sha256(body))
+}
+
+/** Staging backpressure (§6.1): a `503` the client waits out. */
+export function stagingFull(): ApiError {
+  return new ApiError(503, 'staging_full', 'The server is busy storing files. Try again shortly.', {
+    'retry-after': String(STAGING_RETRY_AFTER_SECONDS),
+  })
+}
+
+/** A part has an index of the upload, and exactly the size of that part. */
+function checkPart(upload: UploadRow, index: number, body: Uint8Array): void {
+  if (index >= upload.chunk_count)
+    throw new ApiError(400, 'invalid_part', 'Part index out of range.')
+  const lastSize = upload.size_bytes - upload.chunk_size * (upload.chunk_count - 1)
+  if (body.length !== (index === upload.chunk_count - 1 ? lastSize : upload.chunk_size)) {
+    throw new ApiError(400, 'invalid_part', 'The part has the wrong size.')
+  }
+}
+
+/**
+ * Encrypts a checked part into a frame and stages it durably before its
+ * chunk row commits. `upload` was read with this part's `received_hash`.
+ */
+async function storePart(
+  app: FastifyInstance,
+  auth: Auth,
+  upload: UploadRow,
+  index: number,
+  body: Uint8Array,
+  plainHash: Uint8Array,
+): Promise<void> {
+  const uploadId = upload.id
   // A retry of an acknowledged part needs no encryption, fsync or staging space.
   if (receivedPartMatches(upload.received_hash, plainHash)) {
     if (upload.chunk_count === 1 && upload.state !== 'completed') {
@@ -357,16 +424,7 @@ export async function receivePart(
     return
   }
   if (upload.state === 'completed') throw uploadCompleted()
-  if (await app.stagingLimit.isFull()) {
-    throw new ApiError(
-      503,
-      'staging_full',
-      'The server is busy storing files. Try again shortly.',
-      {
-        'retry-after': String(STAGING_RETRY_AFTER_SECONDS),
-      },
-    )
-  }
+  if (await app.stagingLimit.isFull()) throw stagingFull()
 
   const versionId = upload.version_id
   const key = await app.dataKeys.get(versionId, () =>
@@ -440,18 +498,67 @@ function uploadCompleted(): ApiError {
  * and its quota reservation turns into used bytes, in one transaction; its
  * frames go to the bot as blobs; versions past `VERSION_RETENTION` are purged.
  * Completing a completed upload changes nothing.
+ *
+ * With `partSha256`, every part's SHA-256 as the client read it, the parts
+ * are checked first: a streamed upload's only check of what arrived.
  */
 export async function completeUpload(
   app: FastifyInstance,
   auth: Auth,
   uploadId: string,
+  partSha256?: readonly string[],
 ): Promise<void> {
+  if (partSha256) await checkParts(app, auth, uploadId, partSha256)
   const queue = await app.queue.get()
   const pruned = await app.db.transaction(async (tx) => {
     const upload = await findUpload(tx, auth, uploadId, { lock: true })
     return finishUpload(app, tx, queue, auth, upload)
   })
   await removeStagedVersions(app, pruned)
+}
+
+/**
+ * Compares the parts received with the client's hashes of them. Parts that
+ * differ are dropped, and that commits before the `400 hash_mismatch`, so
+ * the client sends them again; a completed upload can't drop any.
+ */
+async function checkParts(
+  app: FastifyInstance,
+  auth: Auth,
+  uploadId: string,
+  partSha256: readonly string[],
+): Promise<void> {
+  const dropped = await app.db.transaction(async (tx) => {
+    const upload = await findUpload(tx, auth, uploadId, { lock: true })
+    if (partSha256.length !== upload.chunk_count) {
+      throw new ApiError(400, 'invalid_request', 'There must be a hash for every part.')
+    }
+    const { rows } = await tx.execute<{ idx: number; plain_sha256: Buffer }>(sql`
+      SELECT idx, plain_sha256 FROM chunks WHERE version_id = ${upload.version_id}`)
+    const corrupted = rows
+      .filter((row) => {
+        const expected = fromSha256Hex(partSha256[row.idx] ?? '')
+        return !expected || !row.plain_sha256.equals(expected)
+      })
+      .map((row) => row.idx)
+    if (corrupted.length === 0) return []
+    if (upload.state === 'completed') {
+      throw new ApiError(409, 'part_conflict', 'This upload was completed with other bytes.')
+    }
+    const { rows: staged } = await tx.execute<{ staged_path: string | null }>(sql`
+      DELETE FROM chunks WHERE version_id = ${upload.version_id} AND idx = ANY(${bigintArray(corrupted)})
+      RETURNING staged_path`)
+    return staged.flatMap((row) => row.staged_path ?? [])
+  })
+  if (dropped.length === 0) return
+  await Promise.all(
+    dropped.map((path) =>
+      app.staging.remove(path).catch((error: unknown) => {
+        app.log.warn({ err: error, path }, 'could not remove a corrupted staged frame')
+      }),
+    ),
+  )
+  throw new ApiError(400, 'hash_mismatch', 'Some parts were corrupted in transit.')
 }
 
 /**

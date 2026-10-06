@@ -260,9 +260,9 @@ $env:DFS_CHAOS_SEED = '20261005'
 pnpm --filter @dfs/web check:engine
 ```
 
-This injects failed requests, lost responses, and an outage. It checks that retry
-and resume recover all uploads, the downloads match byte for byte, and quota is
-counted once. It can take several minutes because it exercises real backoff.
+This injects failed requests, lost responses, a stream cut off partway, and an
+outage. It checks that retry and resume recover all uploads, from the parts the
+server kept, the downloads match byte for byte, and quota is counted once. It can take several minutes because it exercises real backoff.
 The seed replays the upload request faults; the bot's storage faults are random.
 
 Afterwards, restore your previous `BLOB_STORE`, restart `pnpm dev`, and remove the test
@@ -284,11 +284,12 @@ pnpm --filter @dfs/web check:performance
 ```
 
 The queue benchmark compares four progress updates in queues of 10,000 and
-100,000 files. The scheduler benchmark checks SHA-256, part counts and request
-limits while comparing preparation in request slots with bounded preparation
-ahead. Its 30 ms request latency is synthetic; it measures neither API nor
-storage throughput. It compares four, six and eight parallel parts without
-changing the application's defaults.
+100,000 files. The scheduler benchmark sends 32 small files of 1 MiB, checking
+SHA-256, duplicates and request limits, while comparing preparation in request
+slots with bounded preparation ahead. Its 30 ms request latency is synthetic; it
+measures neither API nor storage throughput. It compares four, six and eight
+requests in flight without changing the application's defaults. Larger files
+stream in one request each, with nothing to schedule between their parts.
 
 Run the native encryption and durable disk benchmark separately:
 

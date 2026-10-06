@@ -13,36 +13,38 @@ import { httpTransport, type UploadTransport } from './upload-transport'
 //
 // - Sessions are created a little ahead of time, 64 per `POST /uploads/batch`,
 //   so a small file costs one more request: its single PUT, which completes it.
-// - Up to 8 requests are in flight. Large files go one at a time, each with
-//   up to 4 parts in parallel; small files fill the other slots.
-// - Reads and hashes overlap requests, with at most two extra buffered parts
-//   and a 100 MiB plaintext budget (one oversized part may run alone).
+// - A file larger than one part streams in a single request, read from disk
+//   as it goes, one such file at a time. Its parts' hashes are worked out
+//   alongside, one part in memory, and checked when it completes.
+// - Up to 8 requests are in flight: small files fill the slots the stream
+//   leaves, read and hashed a little ahead within a 100 MiB budget.
+// - Progress counts bytes as the browser sends them, so it moves steadily.
 // - A failed request is retried with exponential backoff, honouring
-//   `Retry-After` (503 when the server's staging area is full).
-// - Pause keeps the session; resuming sends only the parts the server lacks.
+//   `Retry-After` (503 when the server's staging area is full). A broken or
+//   paused stream starts again after the last part the server has.
 //
 // The engine keeps the authoritative state here and publishes it to the
 // upload store about ten times a second, so a big batch doesn't re-render
-// the panel for every part.
+// the panel for every progress event.
 
 export interface UploadLimits {
   /** Requests in flight at once, across all files. */
   requests: number
-  /** Parts of one large file in flight at once. */
-  partsPerFile: number
+  /** Files larger than one part streaming at once. */
+  streams: number
   /** Sessions per `POST /uploads/batch` (the API allows up to 500). */
   sessionBatch: number
   /** The next batch of sessions is created when fewer than this many are ready. */
   sessionLowWater: number
-  /** Extra parts to read or hash ahead of the requests in flight. */
+  /** Extra small files to read and hash ahead of the requests in flight. */
   preparedParts: number
-  /** Plaintext bytes held by preparation and requests; one larger part may run alone. */
+  /** Small files' bytes held by preparation and requests; one larger file may run alone. */
   bufferedBytes: number
 }
 
 export const DEFAULT_LIMITS: UploadLimits = {
   requests: 8,
-  partsPerFile: 4,
+  streams: 1,
   sessionBatch: 64,
   sessionLowWater: 32,
   preparedParts: 2,
@@ -52,6 +54,8 @@ export const DEFAULT_LIMITS: UploadLimits = {
 const PUBLISH_MS = 100
 const REFRESH_MS = 1000
 const SPEED_WINDOW_MS = 5000
+/** The shortest time a speed is worked out over, so the first bytes don't read as a burst. */
+const SPEED_MIN_SPAN_MS = 250
 const ENSURE_BATCH = 500
 /** Nodes per `POST /nodes/lookup`, the API's limit. */
 const LOOKUP_BATCH = 500
@@ -62,18 +66,21 @@ interface Job {
   parentId: string
   status: UploadStatus
   session: UploadSession | null
-  /** Parts the server has. */
+  /** Parts the server has, as far as the engine knows. */
   doneParts: Set<number>
-  /** Next part to inspect; failed or aborted requests rewind it. */
-  nextPart: number
-  inFlight: Map<number, AbortController>
-  sending: number
+  /** What is in flight for the file: a small file's read and PUT, or its stream. */
+  controller: AbortController | null
+  /** A stream ended early: ask the server which parts it kept before sending more. */
+  recheck: boolean
+  /** A streamed file's part hashes, for completing it, worked out while it streams. */
+  hashes: string[]
+  hashing: { controller: AbortController; done: Promise<string[]> } | null
   uploadedBytes: number
-  /** Failed tries per part, for the backoff. */
-  attempts: Map<number, number>
+  /** Failed tries in a row, for the backoff. */
+  attempts: number
   retryTimer: ReturnType<typeof setTimeout> | null
   completing: boolean
-  /** A retry must reconcile receipts before it can send more parts. */
+  /** A retry must reconcile receipts before it can send more. */
   checkingSession: boolean
   /** After the upload: where the file is on its way to Discord. */
   syncState: SyncState | null
@@ -82,11 +89,13 @@ interface Job {
   error: string | null
 }
 
-interface PreparedPart {
+/** A small file read and hashed, ready for its PUT. */
+interface PreparedFile {
   job: Job
   session: UploadSession
-  index: number
   controller: AbortController
+  /** Bytes it holds of the budget. */
+  size: number
   bytes: ArrayBuffer
   hash: string
 }
@@ -99,12 +108,12 @@ export class UploadEngine {
   private needSession: Job[] = []
   /** Jobs with a session, waiting for a free slot. */
   private waiting: Job[] = []
-  /** Jobs sending parts. */
+  /** Jobs sending. */
   private active: Job[] = []
   private requests = 0
   private preparing = 0
   private bufferedBytes = 0
-  private readonly ready: PreparedPart[] = []
+  private readonly ready: PreparedFile[] = []
   private creatingSessions = false
   private readonly preparingSessions = new Set<Job>()
   private syncRefresh: Promise<void> | null = null
@@ -115,6 +124,8 @@ export class UploadEngine {
   private readonly foldersToRefresh = new Set<string>()
   private refreshTimer: ReturnType<typeof setTimeout> | undefined
   private samples: { at: number; bytes: number }[] = []
+  /** When sending last started after a pause in it, for the speed. */
+  private sendingSince = 0
 
   constructor(transport: UploadTransport = httpTransport, limits: UploadLimits = DEFAULT_LIMITS) {
     this.transport = transport
@@ -136,11 +147,12 @@ export class UploadEngine {
         status: 'queued',
         session: null,
         doneParts: new Set(),
-        nextPart: 0,
-        inFlight: new Map(),
-        sending: 0,
+        controller: null,
+        recheck: false,
+        hashes: [],
+        hashing: null,
         uploadedBytes: 0,
-        attempts: new Map(),
+        attempts: 0,
         retryTimer: null,
         completing: false,
         checkingSession: false,
@@ -178,7 +190,7 @@ export class UploadEngine {
     if (job?.status !== 'failed') return
     job.status = 'queued'
     job.error = null
-    job.attempts.clear()
+    job.attempts = 0
     this.publish(job)
     const session = job.session
     if (session) {
@@ -186,12 +198,7 @@ export class UploadEngine {
       try {
         const status = await this.transport.status(session.uploadId)
         if (this.jobs.get(id) !== job || job.session !== session) return
-        job.doneParts = new Set(status.receivedParts)
-        job.nextPart = 0
-        job.uploadedBytes = status.receivedParts.reduce(
-          (total, index) => total + partSize(job, status, index),
-          0,
-        )
+        received(job, session, status.receivedParts)
       } catch (error) {
         // The session expired: start over with a new one.
         if (job.session === session && isNotFound(error)) resetSession(job)
@@ -287,19 +294,25 @@ export class UploadEngine {
   // ── Scheduling ───────────────────────────────────────────────────────────
 
   private pump(): void {
-    this.sendReadyParts()
+    // Streams first: small files read ahead take whatever slots are left.
     for (const job of this.active) this.feed(job)
+    this.sendReady()
 
-    // Start waiting files while there is room. Large files go one at a time.
-    const sendingLarge = () => this.active.some((job) => isLarge(job))
-    for (let index = 0; index < this.waiting.length && this.canPrepare(0);) {
+    // Start waiting files while there is room: a larger file when a stream
+    // is free, a small one when it can be read ahead.
+    let streams = this.active.filter(isLarge).length
+    for (let index = 0; index < this.waiting.length;) {
       const job = this.waiting[index]
-      if (!job) break
-      if (isLarge(job) && sendingLarge()) {
-        index += 1
-        continue
+      if (!job?.session) break
+      if (isLarge(job)) {
+        if (streams >= this.limits.streams) {
+          index += 1
+          continue
+        }
+        streams += 1
+      } else if (!this.canPrepare(partSize(job, job.session, 0))) {
+        break
       }
-      if (job.session && !this.canPrepare(partSize(job, job.session, 0))) break
       this.waiting.splice(index, 1)
       this.start(job)
     }
@@ -320,59 +333,54 @@ export class UploadEngine {
     job.status = 'uploading'
     this.active.push(job)
     this.publish(job)
-    if (allPartsDone(job)) void this.finish(job)
-    else this.feed(job)
+    this.feed(job)
   }
 
-  /** Reads and hashes ahead, keeping at most one extra part of a large file. */
+  /** Starts what a file needs next: its stream, its small file's read, or its completion. */
   private feed(job: Job): void {
     const { session } = job
-    if (job.status !== 'uploading' || !session || job.retryTimer || job.completing) return
-    const limit = isLarge(job) ? this.limits.partsPerFile : 1
-    while (job.nextPart < session.chunkCount) {
-      if (job.inFlight.size >= limit + Math.min(1, this.limits.preparedParts)) return
-      const index = job.nextPart
-      if (job.doneParts.has(index) || job.inFlight.has(index)) {
-        job.nextPart += 1
-        continue
-      }
-      if (!this.canPrepare(partSize(job, session, index))) return
-      job.nextPart += 1
-      this.preparePart(job, session, index)
+    if (job.status !== 'uploading' || !session) return
+    if (job.retryTimer || job.completing || job.controller) return
+    if (allPartsDone(job)) void this.finish(job)
+    else if (isLarge(job)) {
+      if (this.requests < this.limits.requests) this.stream(job, session)
+    } else if (this.canPrepare(partSize(job, session, 0))) {
+      this.prepare(job, session)
     }
   }
 
-  private preparePart(job: Job, session: UploadSession, index: number): void {
+  // ── Small files: read, hash, one PUT ─────────────────────────────────────
+
+  private prepare(job: Job, session: UploadSession): void {
     const controller = new AbortController()
-    job.inFlight.set(index, controller)
-    const size = partSize(job, session, index)
+    const size = partSize(job, session, 0)
+    job.controller = controller
     this.bufferedBytes += size
     this.preparing += 1
-    void this.readPart(job, session, index, controller).finally(() => {
+    void this.read(job, session, controller, size).finally(() => {
       this.preparing -= 1
       this.pump()
     })
   }
 
-  private async readPart(
+  private async read(
     job: Job,
     session: UploadSession,
-    index: number,
     controller: AbortController,
+    size: number,
   ): Promise<void> {
     let prepared = false
     try {
-      const start = index * session.chunkSize
-      const bytes = await job.file.slice(start, start + session.chunkSize).arrayBuffer()
+      const bytes = await job.file.slice(0, session.chunkSize).arrayBuffer()
       if (!this.canSend(job, session, controller)) return
       const hash = await sha256Hex(bytes)
       if (!this.canSend(job, session, controller)) return
-      this.ready.push({ job, session, index, controller, bytes, hash })
+      this.ready.push({ job, session, controller, size, bytes, hash })
       prepared = true
     } catch (error) {
-      if (!controller.signal.aborted) this.handleFailure(job, session, index, error)
+      if (!controller.signal.aborted) this.handleFailure(job, error)
     } finally {
-      if (!prepared) this.releasePart(job, session, index, controller)
+      if (!prepared) this.release(job, controller, size)
     }
   }
 
@@ -385,77 +393,141 @@ export class UploadEngine {
     )
   }
 
-  private sendReadyParts(): void {
-    for (let offset = 0; offset < this.ready.length;) {
-      const part = this.ready[offset]
-      if (!part) break
-      const { job, session, index, controller } = part
-      if (
-        controller.signal.aborted ||
-        job.session !== session ||
-        job.status !== 'uploading' ||
-        job.retryTimer
-      ) {
+  private sendReady(): void {
+    while (this.ready.length > 0 && this.requests < this.limits.requests) {
+      const prepared = this.ready.shift()
+      if (!prepared) break
+      const { job, session, controller, size } = prepared
+      if (!this.canSend(job, session, controller)) {
         controller.abort()
-        this.ready.splice(offset, 1)
-        this.releasePart(job, session, index, controller)
+        this.release(job, controller, size)
         continue
       }
-      const limit = isLarge(job) ? this.limits.partsPerFile : 1
-      if (this.requests >= this.limits.requests || job.sending >= limit) {
-        offset += 1
-        continue
-      }
-      this.ready.splice(offset, 1)
       this.requests += 1
-      job.sending += 1
-      void this.uploadPart(part).finally(() => {
+      void this.put(prepared).finally(() => {
         this.requests -= 1
-        job.sending -= 1
-        this.releasePart(job, session, index, controller)
-        if (job.status === 'uploading' && job.inFlight.size === 0 && allPartsDone(job)) {
-          void this.finish(job)
-        }
+        this.release(job, controller, size)
         this.pump()
       })
     }
   }
 
-  private releasePart(
-    job: Job,
-    session: UploadSession,
-    index: number,
-    controller: AbortController,
-  ): void {
-    this.bufferedBytes -= partSize(job, session, index)
-    if (job.inFlight.get(index) === controller) job.inFlight.delete(index)
-    if (job.session === session && !job.doneParts.has(index)) {
-      job.nextPart = Math.min(job.nextPart, index)
-    }
+  private release(job: Job, controller: AbortController, size: number): void {
+    this.bufferedBytes -= size
+    if (job.controller === controller) job.controller = null
   }
 
-  private async uploadPart({
-    job,
-    session,
-    index,
-    controller,
-    bytes,
-    hash,
-  }: PreparedPart): Promise<void> {
+  private async put({ job, session, controller, bytes, hash }: PreparedFile): Promise<void> {
+    const progress = this.progress(job, controller, 0)
     try {
-      await this.transport.putPart(session.uploadId, index, bytes, hash, controller.signal)
-      if (job.session !== session || job.doneParts.has(index)) return
-      job.doneParts.add(index)
-      job.uploadedBytes += bytes.byteLength
-      job.attempts.delete(index)
-      this.recordSpeed(bytes.byteLength)
+      await this.transport.putPart(session.uploadId, 0, bytes, hash, controller.signal, progress)
+      if (job.session !== session) return
+      // Whatever the progress events didn't report counts now.
+      progress(bytes.byteLength)
+      job.doneParts.add(0)
+      job.uploadedBytes = job.file.size
+      job.attempts = 0
       this.publish(job)
     } catch (error) {
-      if (!controller.signal.aborted) this.handleFailure(job, session, index, error)
+      if (controller.signal.aborted) return
+      job.uploadedBytes = 0
+      this.handleFailure(job, error)
     }
   }
 
-  private handleFailure(job: Job, session: UploadSession, index: number, error: unknown): void {
+  // ── Larger files: one stream ─────────────────────────────────────────────
+
+  private stream(job: Job, session: UploadSession): void {
+    const controller = new AbortController()
+    job.controller = controller
+    this.requests += 1
+    void this.send(job, session, controller).finally(() => {
+      this.requests -= 1
+      if (job.controller === controller) job.controller = null
+      this.pump()
+    })
+  }
+
+  /** Streams the file from its first part the server lacks to its end. */
+  private async send(job: Job, session: UploadSession, controller: AbortController) {
+    try {
+      if (job.recheck) {
+        const status = await this.transport.status(session.uploadId)
+        if (!this.canSend(job, session, controller)) return
+        // A stream that stored more than the last one starts its tries afresh.
+        if (status.receivedParts.length > job.doneParts.size) job.attempts = 0
+        received(job, session, status.receivedParts)
+        this.publish(job)
+      }
+      const from = firstMissing(job, session)
+      if (from === session.chunkCount) return
+      // The hashes for completing it, read alongside; completing waits for them.
+      void this.partHashes(job, session).catch(() => undefined)
+      const base = from * session.chunkSize
+      const progress = this.progress(job, controller, base)
+      await this.transport.streamFile(
+        session.uploadId,
+        from,
+        job.file.slice(base),
+        controller.signal,
+        progress,
+      )
+      if (job.session !== session) return
+      progress(job.file.size - base)
+      for (let index = from; index < session.chunkCount; index += 1) job.doneParts.add(index)
+      job.uploadedBytes = job.file.size
+      job.attempts = 0
+      this.publish(job)
+    } catch (error) {
+      // The server keeps the parts that arrived whole; which those are, it says.
+      job.recheck = true
+      if (!controller.signal.aborted) this.handleFailure(job, error)
+    }
+  }
+
+  /**
+   * Every part's SHA-256, for completing a streamed file: one part read at a
+   * time, while it streams. A pass stopped by a pause carries on from there.
+   */
+  private partHashes(job: Job, session: UploadSession): Promise<string[]> {
+    if (job.hashing) return job.hashing.done
+    const controller = new AbortController()
+    const hashes = job.hashes
+    const done = (async () => {
+      for (let index = 0; index < session.chunkCount; index += 1) {
+        if (hashes[index] !== undefined) continue
+        const start = index * session.chunkSize
+        const bytes = await job.file.slice(start, start + session.chunkSize).arrayBuffer()
+        controller.signal.throwIfAborted()
+        hashes[index] = await sha256Hex(bytes)
+      }
+      return hashes
+    })()
+    const hashing = { controller, done }
+    job.hashing = hashing
+    done.catch(() => {
+      if (job.hashing === hashing) job.hashing = null
+    })
+    return done
+  }
+
+  // ── Both ─────────────────────────────────────────────────────────────────
+
+  /** Counts a request's body as it goes out: the file's progress, and the speed. */
+  private progress(job: Job, controller: AbortController, base: number): (sent: number) => void {
+    // After a pause in sending, the speed counts from now, not from the last bytes.
+    if (this.samples.length === 0) this.sendingSince = Date.now()
+    let counted = 0
+    return (sent) => {
+      if (controller.signal.aborted || sent <= counted) return
+      this.recordSpeed(sent - counted)
+      counted = sent
+      job.uploadedBytes = Math.min(job.file.size, base + sent)
+      this.publish(job)
+    }
+  }
+
+  private handleFailure(job: Job, error: unknown): void {
     if (job.status !== 'uploading') return
     // Sessions answer until they expire, also once complete, and a part sent
     // again is accepted (§6.1), so a lost response is simply retried. A 404
@@ -465,9 +537,9 @@ export class UploadEngine {
       this.fail(job, 'The upload expired. Retry to start it again.')
       return
     }
-    const attempts = (job.attempts.get(index) ?? 0) + 1
+    const attempts = job.attempts + 1
     if (isRetryable(error) && attempts <= MAX_ATTEMPTS) {
-      job.attempts.set(index, attempts)
+      job.attempts = attempts
       this.clearRetry(job)
       job.retryTimer = setTimeout(
         () => {
@@ -489,8 +561,14 @@ export class UploadEngine {
     job.completing = true
     try {
       // Single-part uploads complete on their own when the part arrives (§6.1).
+      // Others complete with their parts' hashes, which the server checks.
       if (session.chunkCount !== 1) {
-        await this.withRetries(() => this.transport.complete(session.uploadId))
+        const hashes = await this.partHashes(job, session)
+        if (job.session !== session || job.status !== 'uploading') return
+        await this.withRetries(
+          () => this.transport.complete(session.uploadId, hashes),
+          (error) => isRetryable(error) && !isCorrupted(error),
+        )
       }
       if (job.status !== 'uploading') return
       job.status = 'done'
@@ -506,7 +584,16 @@ export class UploadEngine {
         void (this.syncRefresh ?? Promise.resolve()).then(() => this.refreshSyncStates())
       }
     } catch (error) {
-      if (job.status === 'uploading') this.fail(job, errorMessage(error))
+      if (job.status !== 'uploading' || job.session !== session) return
+      if (isCorrupted(error)) {
+        // The server dropped the parts that arrived damaged: which those are,
+        // it says before they go again.
+        job.doneParts = new Set()
+        job.recheck = true
+        this.handleFailure(job, error)
+      } else {
+        this.fail(job, errorMessage(error))
+      }
     } finally {
       job.completing = false
       this.pump()
@@ -612,7 +699,7 @@ export class UploadEngine {
     const paused = new Set<Job>()
     for (const job of jobs) {
       if (!job || !isActive(job.status)) continue
-      this.abortParts(job)
+      this.abortRequests(job)
       this.clearRetry(job)
       job.status = 'paused'
       paused.add(job)
@@ -627,7 +714,7 @@ export class UploadEngine {
     for (const job of jobs.toReversed()) {
       if (job?.status !== 'paused') continue
       job.status = 'queued'
-      job.attempts.clear()
+      job.attempts = 0
       this.requeue(job)
       this.publish(job)
     }
@@ -638,7 +725,7 @@ export class UploadEngine {
     const canceled = new Set<Job>()
     for (const job of jobs) {
       if (job.status === 'done' || job.status === 'canceled') continue
-      this.abortParts(job)
+      this.abortRequests(job)
       this.clearRetry(job)
       job.status = 'canceled'
       this.dropSession(job)
@@ -657,7 +744,7 @@ export class UploadEngine {
   }
 
   private stop(job: Job): void {
-    this.abortParts(job)
+    this.abortRequests(job)
     this.clearRetry(job)
     this.removeFromQueues(new Set([job]))
   }
@@ -670,8 +757,11 @@ export class UploadEngine {
     this.active = this.active.filter(keep)
   }
 
-  private abortParts(job: Job): void {
-    for (const controller of job.inFlight.values()) controller.abort()
+  /** Stops a file's request, read or stream, and the hashing alongside a stream. */
+  private abortRequests(job: Job): void {
+    job.controller?.abort()
+    job.hashing?.controller.abort()
+    job.hashing = null
   }
 
   private clearRetry(job: Job): void {
@@ -680,12 +770,15 @@ export class UploadEngine {
     job.retryTimer = null
   }
 
-  private async withRetries<T>(work: () => Promise<T>): Promise<T> {
+  private async withRetries<T>(
+    work: () => Promise<T>,
+    retryable: (error: unknown) => boolean = isRetryable,
+  ): Promise<T> {
     for (let attempt = 1; ; attempt += 1) {
       try {
         return await work()
       } catch (error) {
-        if (!isRetryable(error) || attempt > MAX_ATTEMPTS) throw error
+        if (!retryable(error) || attempt > MAX_ATTEMPTS) throw error
         await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt, error)))
       }
     }
@@ -708,7 +801,7 @@ export class UploadEngine {
     const changes = new Map(this.changes)
     this.changes.clear()
     useUploadStore.getState().apply(changes, this.speed())
-    // Keep the speed current while sending, even when no part finishes for a
+    // Keep the speed current while sending, even when no bytes go for a
     // while. A separate timer, so it never delays a status change.
     if (this.active.length > 0) {
       this.speedTimer = setTimeout(() => {
@@ -721,14 +814,14 @@ export class UploadEngine {
     this.samples.push({ at: Date.now(), bytes })
   }
 
-  /** Bytes per second over the last few seconds. */
+  /** Bytes per second over the last few seconds, or since sending started if that is sooner. */
   private speed(): number {
     const now = Date.now()
     this.samples = this.samples.filter((sample) => now - sample.at < SPEED_WINDOW_MS)
-    const [oldest] = this.samples
-    if (!oldest) return 0
+    if (this.samples.length === 0) return 0
     const bytes = this.samples.reduce((total, sample) => total + sample.bytes, 0)
-    return (bytes * 1000) / Math.max(1000, now - oldest.at)
+    const since = Math.max(now - SPEED_WINDOW_MS, this.sendingSince)
+    return (bytes * 1000) / Math.max(SPEED_MIN_SPAN_MS, now - since)
   }
 
   /** Refreshes the listings of folders that gained files, at most once a second. */
@@ -765,6 +858,7 @@ function toItem(job: Job): Omit<UploadItem, 'id' | 'file' | 'parentId'> {
   }
 }
 
+/** Larger than one part: streamed. */
 function isLarge(job: Job): boolean {
   return (job.session?.chunkCount ?? 0) > 1
 }
@@ -773,10 +867,27 @@ function allPartsDone(job: Job): boolean {
   return job.session !== null && job.doneParts.size >= job.session.chunkCount
 }
 
+/** Where a stream starts: the first part the server doesn't have. */
+function firstMissing(job: Job, session: UploadSession): number {
+  let index = 0
+  while (index < session.chunkCount && job.doneParts.has(index)) index += 1
+  return index
+}
+
+/** What the server says it has (`GET /uploads/:id`). */
+function received(job: Job, session: UploadSession, parts: readonly number[]): void {
+  job.doneParts = new Set(parts)
+  job.recheck = false
+  job.uploadedBytes = parts.reduce((total, index) => total + partSize(job, session, index), 0)
+}
+
 function resetSession(job: Job): void {
   job.session = null
   job.doneParts = new Set()
-  job.nextPart = 0
+  job.recheck = false
+  job.hashing?.controller.abort()
+  job.hashing = null
+  job.hashes = []
   job.uploadedBytes = 0
   job.syncState = null
   job.syncNeedsRefresh = false
@@ -789,6 +900,11 @@ function partSize(job: Job, session: UploadSession, index: number): number {
 
 function isNotFound(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404
+}
+
+/** Parts arrived damaged, and the server dropped them (§6.1). */
+function isCorrupted(error: unknown): boolean {
+  return error instanceof ApiError && error.code === 'hash_mismatch'
 }
 
 function ignore(): void {

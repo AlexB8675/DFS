@@ -10,11 +10,13 @@
 	}
 
 	handle /api/* {
-		# One upload part, and headroom (§6.1).
-		request_body {
+		# One upload part, and headroom (§6.1). A file streamed whole is as
+		# large as the file: the API checks its length against the upload.
+		@bounded not path_regexp ^/api/uploads/[^/]+/content$
+		request_body @bounded {
 			max_size 12MiB
 		}
-		# Bodies stream both ways, unbuffered: uploaded parts, downloads,
+		# Bodies stream both ways, unbuffered: uploaded files, downloads,
 		# archives and live events. No compression here: it would drop the
 		# length downloads show their progress by, for bytes that don't shrink.
 		reverse_proxy api:3000 {

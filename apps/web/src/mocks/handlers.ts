@@ -3,6 +3,7 @@ import {
   createChannelSchema,
   createFolderSchema,
   createShareSchema,
+  completeUploadSchema,
   createUploadBatchSchema,
   createUploadSchema,
   createUserSchema,
@@ -238,9 +239,17 @@ export const handlers = [
       )
     }),
   ),
+  http.put<Id>('/api/uploads/:id/content', ({ request, params }) =>
+    respondEmpty(request, async () => {
+      const from = Number(new URL(request.url).searchParams.get('from') ?? 0)
+      await db.receiveStream(params.id, from, await request.arrayBuffer())
+    }),
+  ),
   http.post<Id>('/api/uploads/:id/complete', ({ request, params }) =>
-    respondEmpty(request, () => {
-      db.completeUpload(params.id)
+    respondEmpty(request, async () => {
+      const text = await request.text()
+      const input = completeUploadSchema.parse(text ? JSON.parse(text) : {})
+      db.completeUpload(params.id, input.partSha256)
     }),
   ),
   http.delete<Id>('/api/uploads/:id', ({ request, params }) =>

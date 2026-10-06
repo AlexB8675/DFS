@@ -97,6 +97,73 @@ export async function apiSend<T>(
   return schema ? schema.parse(await response.json()) : undefined
 }
 
+interface UploadOptions {
+  query?: QueryParams
+  headers?: Record<string, string>
+  signal?: AbortSignal
+  /** How many bytes of the body the browser has sent so far, as it sends them. */
+  onProgress?: (sentBytes: number) => void
+}
+
+/**
+ * PUTs a binary body to `/api{path}`, reporting its progress, and throws an
+ * `ApiError` unless it succeeds. A `Blob` is read from disk as it is sent,
+ * however large. XMLHttpRequest is the browser's only way to see a body go
+ * out; elsewhere (Node, in the checks) `fetch` sends it, without progress.
+ */
+export function apiUpload(
+  path: string,
+  body: Blob | ArrayBuffer,
+  options: UploadOptions = {},
+): Promise<void> {
+  const { query, signal, onProgress } = options
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    // A file's slice has no type of its own.
+    'Content-Type': 'application/octet-stream',
+    ...options.headers,
+  }
+  if (typeof XMLHttpRequest === 'undefined') {
+    return apiFetch(path, { method: 'PUT', query, body, headers, signal }).then(() => undefined)
+  }
+  if (csrfToken) headers['X-CSRF-Token'] = csrfToken
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason as Error)
+      return
+    }
+    const request = new XMLHttpRequest()
+    request.open('PUT', buildUrl(path, query))
+    for (const [name, value] of Object.entries(headers)) request.setRequestHeader(name, value)
+    if (onProgress) {
+      request.upload.addEventListener('progress', (event) => {
+        onProgress(event.loaded)
+      })
+    }
+    const abort = () => {
+      request.abort()
+    }
+    signal?.addEventListener('abort', abort, { once: true })
+    request.addEventListener('loadend', () => {
+      signal?.removeEventListener('abort', abort)
+      if (signal?.aborted) reject(signal.reason as Error)
+      // Like fetch, a request that got no answer is a TypeError: worth retrying.
+      else if (request.status === 0) reject(new TypeError('The upload couldn’t reach the server.'))
+      else if (request.status < 300) resolve()
+      else {
+        reject(
+          apiErrorFrom(
+            request.status,
+            parseJson(request.responseText),
+            request.getResponseHeader('Retry-After'),
+          ),
+        )
+      }
+    })
+    request.send(body)
+  })
+}
+
 function buildUrl(path: string, query: QueryParams = {}): string {
   const params = new URLSearchParams()
   for (const [key, value] of Object.entries(query)) {
@@ -108,18 +175,26 @@ function buildUrl(path: string, query: QueryParams = {}): string {
 
 async function toApiError(response: Response): Promise<ApiError> {
   const body: unknown = await response.json().catch(() => null)
+  return apiErrorFrom(response.status, body, response.headers.get('Retry-After'))
+}
+
+/** An answer's error, from its status, its JSON body and its `Retry-After` header. */
+function apiErrorFrom(status: number, body: unknown, retryAfter: string | null): ApiError {
   const parsed = apiErrorSchema.safeParse(body)
-  const retryAfterMs = parseRetryAfter(response.headers.get('Retry-After'))
+  const retryAfterMs = parseRetryAfter(retryAfter)
   if (parsed.success) {
     const { code, message } = parsed.data.error
-    return new ApiError(response.status, code, message, retryAfterMs)
+    return new ApiError(status, code, message, retryAfterMs)
   }
-  return new ApiError(
-    response.status,
-    'http_error',
-    `Request failed (${response.status}).`,
-    retryAfterMs,
-  )
+  return new ApiError(status, 'http_error', `Request failed (${status}).`, retryAfterMs)
+}
+
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
 }
 
 /** `Retry-After` is either a number of seconds or an HTTP date. Returns milliseconds from `now`. */

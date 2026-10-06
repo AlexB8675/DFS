@@ -8,9 +8,11 @@ import {
 import type { SuiteContext } from './context.ts'
 import {
   createFolder,
+  partHashes,
   sendPart,
   sha256Hex,
   startUpload,
+  streamFrom,
   text,
   uploadFile,
   workspace,
@@ -76,6 +78,70 @@ export function uploadTests({ describe, it, expect, owner, target }: SuiteContex
       expect(done).toMatchObject({ state: 'completed', receivedParts: [0, 1, 2] })
       const file = await client.call('GET', `/nodes/${session.nodeId}`, nodeSchema)
       expect(file.sizeBytes).toBe(bytes.length)
+    })
+
+    it('takes a large file streamed in one request, and checks every part at completion', async () => {
+      const client = await owner()
+      const root = await workspace(client)
+      const probe = await startUpload(client, root.id, 'probe.bin', 1)
+      const bytes = new Uint8Array(probe.chunkSize * 2 + 1000).map((_, i) => i % 251)
+      const session = await startUpload(client, root.id, 'streamed.bin', bytes.length)
+      const hashes = await partHashes(session, bytes)
+      const status = () => client.call('GET', `/uploads/${session.uploadId}`, uploadStatusSchema)
+
+      await streamFrom(client, session, 0, bytes)
+      expect(await status()).toMatchObject({ state: 'receiving', receivedParts: [0, 1, 2] })
+      // A part that doesn't match the client's hash is dropped, to be sent again.
+      const damaged = hashes.map((hash, index) => (index === 1 ? '0'.repeat(64) : hash))
+      expect(
+        await client.error('POST', `/uploads/${session.uploadId}/complete`, {
+          json: { partSha256: damaged },
+        }),
+      ).toEqual({ status: 400, code: 'hash_mismatch' })
+      expect(await status()).toMatchObject({ state: 'receiving', receivedParts: [0, 2] })
+      expect(
+        await client.error('POST', `/uploads/${session.uploadId}/complete`, {
+          json: { partSha256: hashes.slice(1) },
+        }),
+      ).toEqual({ status: 400, code: 'invalid_request' })
+
+      // Resumed from the first part missing; the part after it, sent again, is the same.
+      await streamFrom(client, session, 1, bytes)
+      await client.send('POST', `/uploads/${session.uploadId}/complete`, {
+        json: { partSha256: hashes },
+      })
+      // A lost answer is simply retried: the stream and the completion again.
+      await streamFrom(client, session, 0, bytes)
+      await client.send('POST', `/uploads/${session.uploadId}/complete`, {
+        json: { partSha256: hashes },
+      })
+      expect(await status()).toMatchObject({ state: 'completed', receivedParts: [0, 1, 2] })
+      const response = await client.fetch('GET', `/files/${session.nodeId}/content`)
+      const content = new Uint8Array(await response.arrayBuffer())
+      expect(await sha256Hex(content)).toBe(await sha256Hex(bytes))
+    })
+
+    it('refuses a stream that doesn’t fit its file, or comes without the CSRF token', async () => {
+      const client = await owner()
+      const root = await workspace(client)
+      const probe = await startUpload(client, root.id, 'probe.bin', 1)
+      const bytes = new Uint8Array(probe.chunkSize + 10).map((_, i) => i % 251)
+      const session = await startUpload(client, root.id, 'misfit.bin', bytes.length)
+      const content = `/uploads/${session.uploadId}/content`
+      const misfit = { status: 400, code: 'invalid_part' }
+
+      expect(await client.error('PUT', `${content}?from=2`, { body: bytes })).toEqual(misfit)
+      const longer = new Uint8Array(bytes.length + 1)
+      longer.set(bytes)
+      expect(await client.error('PUT', content, { body: longer })).toEqual(misfit)
+      expect(await client.error('PUT', content, { body: bytes.slice(0, -1) })).toEqual(misfit)
+      expect(await client.error('PUT', content, { body: bytes, withoutCsrf: true })).toEqual({
+        status: 403,
+        code: 'csrf_failed',
+      })
+      // None of it was taken.
+      const status = await client.call('GET', `/uploads/${session.uploadId}`, uploadStatusSchema)
+      expect(status.receivedParts).toEqual([])
     })
 
     it('takes a part sent again with the same bytes, and refuses other bytes', async () => {

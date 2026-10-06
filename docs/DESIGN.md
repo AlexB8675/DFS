@@ -132,7 +132,7 @@ flowchart LR
 
 - Three Docker networks: `internal` (`internal: true`, no internet, the fixed subnet `10.73.0.0/24`) for service-to-service traffic, `egress` for outbound Discord access (and the API's check of the internet, §16), and `edge` for Caddy, which publishes ports there and reaches Let's Encrypt (a container on an internal network alone can publish no port). Only `api` and `bot` join `egress`, and only `caddy` publishes ports. Postgres has no route to the internet at all.
 - **Route allowlist at the edge:** only `/api/*` is proxied to the API. Every other path is answered from the static SPA build, and unknown paths fall back to `index.html` so client-side routes such as `/s/:token` (public share pages) work. `/internal/*` and metrics paths get an explicit `404`. Nothing else reaches a backend service.
-- **Streaming:** request and response buffering is disabled for `/api/uploads/*/parts/*`, the content and archive routes (`/api/files/*/content`, `/api/s/*/files/*/content`, `*/archive`), and `/api/events` (SSE). The body size limit is **12 MiB** (one part plus headroom). Download and SSE routes have long timeouts.
+- **Streaming:** request and response buffering is disabled for uploads (`/api/uploads/*/content`, a whole file in one request, and `/api/uploads/*/parts/*`), the content and archive routes (`/api/files/*/content`, `/api/s/*/files/*/content`, `*/archive`), and `/api/events` (SSE). The body size limit is **12 MiB** (one part plus headroom), except for a file streamed whole, whose length the API checks against its upload. Download and SSE routes have long timeouts; an upload may stall for a minute (Caddy's `read_body_idle`) before Caddy cuts it.
 - **Client IP:** the API trusts `X-Forwarded-For` **only** from the Caddy container's address, fixed at `10.73.0.10` on the internal network (`TRUSTED_PROXY_CIDRS=10.73.0.10/32`), for rate limiting and audit logs.
 - **Share links** use the public URL (`PUBLIC_BASE_URL`), and the sign-in route checks `Origin` against it (§7.1).
 - *Later, optional:* the same images can be split across two hosts (edge on the VPS, core elsewhere over WireGuard/Tailscale) with `docker-compose.edge.yml` / `docker-compose.core.yml`. This is not built in v1.
@@ -381,9 +381,9 @@ stateDiagram-v2
 
 ## 6. Core Flows
 
-### 6.1 Upload (multipart, resumable, parallel)
+### 6.1 Upload (streamed, resumable)
 
-Uploads work like S3 multipart uploads. The browser slices the file into parts that are **exactly the version's chunk size**. Each part becomes one encrypted frame. **Plaintext never touches disk.**
+A file is stored in parts of **exactly the version's chunk size**, each one encrypted frame, as in an S3 multipart upload. A small file goes in a single `PUT` of its one part. A larger one **streams in one request** (`PUT /api/uploads/:id/content`), which the API cuts into parts as the bytes arrive: the browser sends the file straight from disk, and its progress counts the bytes as they go (D30). **Plaintext never touches disk.**
 
 ```mermaid
 sequenceDiagram
@@ -398,19 +398,19 @@ sequenceDiagram
     B->>A: POST /api/uploads {parentId, name, size, mime}
     A->>A: check name, reserve quota, create version (uploading), generate DEK
     A-->>B: {uploadId, chunkSize, chunkCount}
-    par up to 4 parts in parallel
-        B->>A: PUT /api/uploads/:id/parts/:idx (body, X-Part-SHA256)
-        A->>A: verify hash, AES-256-GCM encrypt → frame
-        alt large file (solo)
-            A->>S: write blobs/<blobId>.bin (1 frame)
-            A->>Q: enqueue blob.upload(blobId)
-        else small file (packable)
-            A->>S: write frames/<chunkId>.dfs
-        end
-        A-->>B: 204
+    alt small file: one part
+        B->>A: PUT /api/uploads/:id/parts/0 (body, X-Part-SHA256)
+    else larger file: one stream
+        B->>A: PUT /api/uploads/:id/content?from=0 (the file, read from disk as it goes)
     end
-    B->>A: POST /api/uploads/:id/complete
-    A->>A: version → syncing (downloadable from staging now)
+    loop each part, as its bytes arrive
+        A->>A: hash, AES-256-GCM encrypt → frame
+        A->>S: write frames/<versionId>/<idx>.dfs (durably, before its chunk row commits)
+    end
+    A-->>B: 204
+    B->>A: POST /api/uploads/:id/complete {partSha256} (a small file completes itself)
+    A->>A: check every part's hash, version → syncing (downloadable from staging now)
+    A->>Q: a large frame is a blob of its own: enqueue blob.upload(blobId)
     opt small files
         Bot->>S: packer concatenates frames → blobs/<blobId>.bin
         Bot->>Q: enqueue blob.upload(blobId)
@@ -429,17 +429,18 @@ sequenceDiagram
 
 **Details**
 
-- **Resume:** `GET /api/uploads/:id` returns the session with `receivedParts`, the part indexes already received. The client only re-sends the missing ones. Upload sessions expire after 24 h; a janitor job cleans up expired sessions and releases their reserved quota.
+- **Resume:** `GET /api/uploads/:id` returns the session with `receivedParts`, the part indexes already received. A broken or paused stream starts again at the first part missing (`?from=`): the API keeps every part that arrived whole, and drops the one cut short. Upload sessions expire after 24 h; a janitor job cleans up expired sessions and releases their reserved quota.
+- **A stream's integrity:** the stream carries no hashes. While it uploads, the browser reads the file a second time, one part at a time, and hashes each part; `POST /complete` sends them all (`partSha256`), and the API compares them with the parts it received. Parts that differ are dropped before the `400 hash_mismatch`, and the client streams again from the first one.
 - **Small files in bulk:** `POST /api/uploads/batch` creates up to 500 sessions in one call. It answers per upload, in request order (`{results: [{ok: true, session} | {ok: false, error}]}`), because a batch can partly fail: an invalid name, or the quota running out halfway (`507 quota_exceeded`). A single-part file is uploaded with one `PUT` and **auto-completes**, so uploading a small file costs 2 requests in total. Folder trees are created first with `POST /api/folders/ensure` (like `mkdir -p` for many paths in one transaction).
 - **Same name, new version (D20):** an upload whose name matches a non-trashed **file** in the target folder (by `name_key`, so ignoring case) creates a new version of that file instead of a new node. The node keeps its ID and its stored name, so links, shares and paths keep working. A matching **folder** is a `409 name_conflict`. Renames and moves still answer `409` on any clash; only uploads make versions.
   - The new version reserves its full size; old versions still count (D24), so there must be room for both.
   - `current_version_id` moves to the new version only when the upload completes, in the same transaction that turns the reservation into used bytes. Until then, readers and shares get the previous version.
   - Completing it moves versions beyond `VERSION_RETENTION` to `purging`, which frees their quota.
   - The upload session says which version it creates (`versionId`) and whether it is a new version of an existing file (`isNewVersion`, so the UI doesn't animate the row in as new). `GET /uploads/:id` answers until the session expires, also after completion (`state: 'receiving' | 'completed'`).
-- **Retries are harmless:** sending a part again is accepted, also after the upload completed, as long as its SHA-256 matches the part received (otherwise `409 upload_completed`); completing a completed upload is a no-op, and cancelling one leaves the file. A client whose response was lost simply retries, and a `404` means the session expired.
+- **Retries are harmless:** sending a part again, alone or in a stream, is accepted, also after the upload completed, as long as its SHA-256 matches the part received (otherwise `409 upload_completed`); completing a completed upload is a no-op, and cancelling one leaves the file. A client whose response was lost simply retries, and a `404` means the session expired.
 - **Idempotency:** Discord's `nonce` + `enforce_nonce` on message create prevents duplicate posts when a job retries within a short window: a retry reuses the blob's channel and its random nonce (random, since blob IDs repeat across databases sharing the bot). A reconciler reads its environment's registered channels (§4) every hour from where it last stopped, and deletes the bot's data messages carrying this database's `i` that no blob records (one posted again after the nonce window, say). It leaves messages younger than an hour alone, since an upload may still be recording them, and never adopts one: posting again is cheaper than checking a stray copy. Each channel is reconciled on its own, so one that is gone or out of reach doesn't keep the others from being cleaned.
 - **Channel selection:** the least busy enabled data channel, which spreads rate-limit buckets across channels. Each channel takes `UPLOAD_CHANNEL_CONCURRENCY` posts at a time (default 2), so a channel Discord slows down gets fewer blobs while the others keep going. The bot holds about 32 blobs at once to keep the channels busy, but reads a blob from staging only when its post starts, so waiting blobs take no memory.
-- **Backpressure:** if staging passes `STAGING_MAX_BYTES`, `PUT part` returns `503` with `Retry-After` (seconds or an HTTP date) and the client backs off. Staging cannot grow without limit when Discord is slower than the user's upload. What staging holds is counted one way everywhere (`stagedBytesSql` in `packages/db`): frames on their own, plus sealed packs waiting to be stored. The upload limit, the overview's staging alert and graph, and Admin → System all read it.
+- **Backpressure:** if staging passes `STAGING_MAX_BYTES`, `PUT part` returns `503` with `Retry-After` (seconds or an HTTP date) and the client backs off. A stream instead stops reading while staging is full, which pauses the browser's sending with it, and answers `503` only after 45 s, less than the minute Caddy lets an upload stall. Staging cannot grow without limit when Discord is slower than the user's upload. What staging holds is counted one way everywhere (`stagedBytesSql` in `packages/db`): frames on their own, plus sealed packs waiting to be stored. The upload limit, the overview's staging alert and graph, and Admin → System all read it.
 - **Read-your-writes:** a `syncing` version is fully readable. The download path reads frames from staging until their blob is `stored`.
 - **Progress:** the UI shows two phases. *Uploading* is browser→API. *Syncing to Discord* is in the background and streamed via SSE from `GET /api/events` (`nodes.synced`).
 - **Live events across API replicas:** the bot never talks to browsers, and a user's SSE stream can be on any API instance. Every state change the UI shows (version synced or failed, blob lost, quota changed) calls `pg_notify('dfs_events', …)` in the same transaction, so the event is delivered only if the change commits. Each API instance `LISTEN`s on one dedicated connection and forwards events to its own SSE clients for that user. Payloads stay small (user ID, event type, a few IDs; Postgres caps them at 8 KB). Bulk changes send one coalesced event per transaction (for example, per pack). Events are not durable: after a reconnect, the client refetches. Postgres serializes the commits of transactions that issue `NOTIFY`, so only transactions that are already infrequent send one: per pack, per batch, or rare events such as a lost blob. Per-file transactions, such as completing a small-file upload, don't notify. The uploading browser already knows about those, and it refetches the quota when a batch finishes.
@@ -514,7 +515,7 @@ Rename, move, create folder, and trash/restore are plain SQL transactions.
 
 | Mechanism | What it catches |
 |---|---|
-| Per-part plaintext SHA-256 (client→API) | Corruption in transit during upload |
+| Per-part plaintext SHA-256 (client→API: with each part's `PUT`, or with a stream's completion) | Corruption in transit during upload, and a stream cut into parts in the wrong place |
 | `frame_sha256` checked on every read | CDN, cache, or staging corruption |
 | `blobs.sha256` checked by the scrubber | Corrupted or truncated blobs |
 | AES-GCM authentication tag | Tampering with a frame or its header, wrong key, swapped or reordered chunks (the AAD binds the header, object type, version, and index, §7.3). Needs no DB, so it also protects recovery. |
@@ -667,7 +668,7 @@ All routes are under `/api`, use JSON unless noted, and are validated with Zod s
 | `POST /folders` `{parentId, name}` · `POST /folders/ensure` `{parentId, paths[]}` | Create folder / `mkdir -p` in bulk |
 | `PATCH /nodes/:id` `{name?, parentId?}` · `POST /nodes/move` `{ids[], parentId}` | Rename / move (single or bulk) |
 | `DELETE /nodes/:id` · `POST /nodes/trash` `{ids[]}` · `POST /nodes/:id/restore` · `GET /trash` · `DELETE /trash/:id` · `DELETE /trash` | Trash: move, restore, list, delete one item forever, empty |
-| `POST /uploads` · `POST /uploads/batch` (per-upload results) · `GET /uploads/:id` (`receivedParts`; also `state` and `versionId`, until the session expires) · `PUT /uploads/:id/parts/:idx` (binary) · `POST /uploads/:id/complete` · `DELETE /uploads/:id` | Multipart upload (§6.1) |
+| `POST /uploads` · `POST /uploads/batch` (per-upload results) · `GET /uploads/:id` (`receivedParts`; also `state` and `versionId`, until the session expires) · `PUT /uploads/:id/parts/:idx` (binary) · `PUT /uploads/:id/content?from=` (the file from part `from` to its end, streamed) · `POST /uploads/:id/complete` (`partSha256` for a streamed file) · `DELETE /uploads/:id` | Uploads (§6.1) |
 | `GET /files/:id/content` (Range) · `GET /files/:id/versions` · `POST /files/:id/versions/:vid/restore` | Content & versions |
 | `GET /folders/:id/archive` · `POST /archive` `{ids[]}` → `{url, fileName, expiresAt}` · `GET /archive/:ticket` | ZIP download. Several items get a short-lived, single-use link (D17), which the browser then downloads with a plain navigation |
 | `GET /search?q=&type=&cursor` | Name search (`pg_trgm`) |
@@ -729,11 +730,12 @@ Internal (bot), only reachable on `dfs_internal` and returning `404` at the edge
 
 - **Folder drops** walk the directory tree (`DataTransferItem.webkitGetAsEntry`) lazily, so dropping 100k files doesn't freeze the tab. The engine creates the folders with `POST /folders/ensure`, 500 paths per call.
 - **Sessions ahead of time:** sessions are created in batches (`POST /uploads/batch`, 64 per call, the next batch once fewer than 32 are ready, so few placeholder files exist at once), so the new files show up in their folders at once, marked as uploading, and a small file then costs a single `PUT`. A batch that partly fails fails only those files.
-- **Concurrency:** up to 8 requests in flight. Large (multi-part) files go one at a time, each with up to 4 parts in parallel; small files fill the remaining slots. All configurable.
-- **Retries:** each part is retried up to 6 times with exponential backoff (1 s doubling to 30 s, ±20% jitter), or exactly as long as `Retry-After` asks. Network errors, 408/425/429/5xx and `hash_mismatch` are retried; other 4xx fail the file. When the browser comes back online, waiting retries go at once. A single-part retry that finds its session gone checks the node, because the lost response may have been the one that completed it.
-- **Pause, resume, retry:** pausing aborts the file's in-flight parts but keeps its session; resuming sends only what's missing. Retrying a failed file asks `GET /uploads/:id` which parts arrived. Cancelling, or clearing a failed file from the panel, deletes its session, so no stuck "uploading" file is left behind.
-- Each part: `file.slice()` → SHA-256 with Web Crypto (`crypto.subtle.digest`, which runs off the main thread; parts are at most `CHUNK_SIZE`, so no streaming hasher is needed) → `PUT` with `X-Part-SHA256`. Progress counts finished parts, so it never goes backwards when parts finish out of order.
-- **No lag with big batches:** the engine keeps its own state and publishes it to the UI store at most ten times a second; the upload panel is virtualized. Speed is measured over the last 5 s.
+- **Concurrency:** up to 8 requests in flight. A file larger than one part streams in one request, one such file at a time; small files fill the remaining slots, read and hashed a little ahead (2 files, within 100 MiB). All configurable.
+- **Retries:** a failed request is retried up to 6 times with exponential backoff (1 s doubling to 30 s, ±20% jitter), or exactly as long as `Retry-After` asks; a stream that stored more parts than the try before counts afresh. Network errors, 408/425/429/5xx and `hash_mismatch` are retried; other 4xx fail the file. When the browser comes back online, waiting retries go at once. A single-part retry that finds its session gone checks the node, because the lost response may have been the one that completed it.
+- **Pause, resume, retry:** pausing aborts the file's request but keeps its session; resuming, or retrying a failed file, asks `GET /uploads/:id` which parts arrived and streams from the first one missing. Cancelling, or clearing a failed file from the panel, deletes its session, so no stuck "uploading" file is left behind.
+- **Small files:** `file.slice()` → SHA-256 with Web Crypto (`crypto.subtle.digest`, which runs off the main thread) → `PUT` with `X-Part-SHA256`. **Larger files:** `file.slice(from)` as an XMLHttpRequest body, which the browser reads from disk as it sends; the parts' hashes are worked out alongside, one part in memory, and go with `POST /complete`.
+- **Progress** counts bytes as the browser sends them (XMLHttpRequest's upload events; `fetch` reports none), so the bar and the speed move steadily. After a failure it goes back to the parts the server kept.
+- **No lag with big batches:** the engine keeps its own state and publishes it to the UI store at most ten times a second; the upload panel is virtualized. Speed is the bytes sent over the last 5 s, or since sending started if that is sooner; the panel says "starting…" before the first byte, and "waiting…" when nothing has gone for 5 s (staging full, or a connection retrying).
 - **Later:** upload IDs saved to IndexedDB, so after a page reload the user can re-select the same files and resume (matched by relative path + size + lastModified).
 
 ---
@@ -1029,5 +1031,6 @@ The numbers are the original milestones; the arrows are the order of work (D19):
 | D27 | Who may sign in | **People an admin made an account for**, with a username and a temporary password. They choose their own password at their first sign-in, which activates the account. No one needs a Discord account: Discord is only storage, and the server is private to the owner. Replaces Discord sign-in (OAuth) from earlier drafts. | §5, §7.1, §9, §10.1, §15 |
 | D28 | Admins and the owner | **Set in DFS** on the Users page. The owner is created on the server with `dfs owner`, is always an admin, and can't be demoted, disabled or reset from the app; the same command recovers the owner's password. | §5.1, §7.1, §9 |
 | D29 | Where metrics live | **In Postgres**, in a table of half-minute, minute and hour buckets that every process adds to, read by the admin's own graphs. Not Prometheus and Grafana: two more services to run, secure and back up on one VPS, and a second sign-in, for a few dozen series that Postgres keeps in a few hundred thousand rows. | §5, §9, §16 |
+| D30 | Sending a file | **One request per file**, streamed from disk, which the API cuts into parts as it arrives; progress from XMLHttpRequest's upload events. Parts sent four at a time showed progress only as each part finished, so the bar jumped and the speed fell to nothing between them; one stream keeps the connection busy and its progress true. Resuming starts at the first part missing, and the parts' hashes are checked at completion. Small files keep their single `PUT`. | §3.2, §6.1, §6.5, §10.2 |
 
 No open questions at this time.

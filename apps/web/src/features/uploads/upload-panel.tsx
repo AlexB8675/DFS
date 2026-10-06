@@ -137,7 +137,9 @@ function title(summary: UploadSummary): string {
 function subtitle(summary: UploadSummary, bytesPerSecond: number): string {
   const percent = `${Math.round(summary.progress * 100)}%`
   if (summary.active > 0) {
-    if (bytesPerSecond <= 0) return `${percent} · starting…`
+    // Nothing sent for a few seconds: before the first byte, or the server holding back.
+    if (bytesPerSecond <= 0)
+      return `${percent} · ${summary.progress > 0 ? 'waiting…' : 'starting…'}`
     const left = formatDuration(summary.remainingBytes / bytesPerSecond)
     return `${percent} · ${formatBytes(bytesPerSecond)}/s · ${left} left`
   }
@@ -297,7 +299,7 @@ function UploadRowActions({ item }: { item: UploadItem }) {
   }
 }
 
-/** A small circular progress indicator; the arc glides as parts finish. */
+/** A small circular progress indicator; the arc glides as the bytes go. */
 function ProgressRing({
   value,
   waiting,

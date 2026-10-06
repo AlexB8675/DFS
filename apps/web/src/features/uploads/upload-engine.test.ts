@@ -4,7 +4,7 @@ import { queryClient } from '@/app/query-client'
 import { ApiError } from '@/lib/api/client'
 import { DEFAULT_LIMITS, UploadEngine } from './upload-engine'
 import { useUploadStore } from './upload-store'
-import type { UploadTransport } from './upload-transport'
+import type { OnProgress, UploadTransport } from './upload-transport'
 
 /** Tiny parts, so a few bytes make a multi-part file. */
 const CHUNK = 4
@@ -16,24 +16,74 @@ interface Put {
   fail: (error: Error) => void
 }
 
+interface Stream {
+  uploadId: string
+  from: number
+  /** Bytes the stream carries: the file from part `from` on. */
+  size: number
+  /** Reports this many bytes sent, as the browser would. */
+  progress: (sent: number) => void
+  /** The server stores the next `parts` parts, whole, before the stream ends. */
+  store: (parts: number) => void
+  release: () => void
+  fail: (error: Error) => void
+}
+
 /**
- * An in-memory upload API. Each part PUT waits until the test releases it
- * (or `autoRelease` is on), so tests can look at what is in flight.
+ * An in-memory upload API. Each PUT or stream waits until the test releases
+ * it (or `autoRelease` is on), so tests can look at what is in flight.
  */
 function fakeApi() {
   const sessions = new Map<string, UploadSession & { parts: Set<number> }>()
   const pending: Put[] = []
+  const streams: Stream[] = []
   const sent: { uploadId: string; index: number }[] = []
+  const streamed: { uploadId: string; from: number }[] = []
   let inFlight = 0
   const api = {
     autoRelease: true,
     maxInFlight: 0,
     /** Decides how a PUT ends; return an error to fail it. */
     failPart: (_uploadId: string, _index: number, _attempt: number): Error | null => null,
+    /** Decides how a stream ends; return an error to fail it, with only the parts it stored. */
+    failStream: (_uploadId: string, _attempt: number): Error | null => null,
     sessions,
     pending,
+    streams,
     sent,
+    streamed,
     attempts: new Map<string, number>(),
+  }
+
+  const held = <T extends { release: () => void }>(
+    list: T[],
+    signal: AbortSignal,
+    make: (settle: (error: Error | null) => void) => T,
+    onSuccess: () => void,
+  ) => {
+    inFlight += 1
+    api.maxInFlight = Math.max(api.maxInFlight, inFlight)
+    return new Promise<void>((resolve, reject) => {
+      let settled = false
+      const settle = (error: Error | null) => {
+        if (settled) return
+        settled = true
+        inFlight -= 1
+        list.splice(list.indexOf(entry), 1)
+        if (error) {
+          reject(error)
+          return
+        }
+        onSuccess()
+        resolve()
+      }
+      const entry = make(settle)
+      list.push(entry)
+      signal.addEventListener('abort', () => {
+        settle(new DOMException('Aborted', 'AbortError'))
+      })
+      if (api.autoRelease) setTimeout(entry.release, 1)
+    })
   }
 
   const transport: UploadTransport = {
@@ -56,40 +106,52 @@ function fakeApi() {
       ),
     ),
     putPart: (uploadId, index, _body, _sha256, signal) => {
-      const key = `${uploadId}:${index}`
+      const key = `${uploadId}:${String(index)}`
       const attempt = (api.attempts.get(key) ?? 0) + 1
       api.attempts.set(key, attempt)
       sent.push({ uploadId, index })
-      inFlight += 1
-      api.maxInFlight = Math.max(api.maxInFlight, inFlight)
-      return new Promise<void>((resolve, reject) => {
-        let settled = false
-        const settle = (error: Error | null) => {
-          if (settled) return
-          settled = true
-          inFlight -= 1
-          pending.splice(pending.indexOf(put), 1)
-          if (error) {
-            reject(error)
-            return
-          }
-          sessions.get(uploadId)?.parts.add(index)
-          resolve()
-        }
-        const put: Put = {
+      return held(
+        pending,
+        signal,
+        (settle) => ({
           uploadId,
           index,
           release: () => {
             settle(api.failPart(uploadId, index, attempt))
           },
           fail: settle,
-        }
-        pending.push(put)
-        signal.addEventListener('abort', () => {
-          settle(new DOMException('Aborted', 'AbortError'))
-        })
-        if (api.autoRelease) setTimeout(put.release, 1)
-      })
+        }),
+        () => sessions.get(uploadId)?.parts.add(index),
+      )
+    },
+    streamFile: (uploadId, from, body, signal, onProgress?: OnProgress) => {
+      const attempt = (api.attempts.get(uploadId) ?? 0) + 1
+      api.attempts.set(uploadId, attempt)
+      streamed.push({ uploadId, from })
+      const session = sessions.get(uploadId)
+      let next = from
+      return held(
+        streams,
+        signal,
+        (settle) => ({
+          uploadId,
+          from,
+          size: body.size,
+          progress: (bytes) => onProgress?.(bytes),
+          store: (parts) => {
+            for (let stored = 0; stored < parts; stored += 1) session?.parts.add(next++)
+          },
+          release: () => {
+            settle(api.failStream(uploadId, attempt))
+          },
+          fail: settle,
+        }),
+        () => {
+          for (let index = from; index < (session?.chunkCount ?? 0); index += 1) {
+            session?.parts.add(index)
+          }
+        },
+      )
     },
     complete: vi.fn<UploadTransport['complete']>(() => Promise.resolve()),
     status: (uploadId) => {
@@ -106,7 +168,7 @@ function fakeApi() {
 }
 
 function file(name: string, size: number) {
-  return { file: new File([new Uint8Array(size)], name), relativeDir: '' }
+  return { file: new File([new Uint8Array(size).map((_, i) => i % 251)], name), relativeDir: '' }
 }
 
 function item(name: string) {
@@ -119,7 +181,18 @@ function items() {
   return useUploadStore.getState().items.map((entry) => entry.store.getState())
 }
 
+function stream(api: ReturnType<typeof fakeApi>['api']) {
+  const [first] = api.streams
+  if (!first) throw new Error('No stream in flight.')
+  return first
+}
+
 const busy = () => new ApiError(503, 'staging_full', 'Staging is full', 0)
+
+async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))
+  return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
 
 function driveNode(id: string, syncState: SyncState): DriveNode {
   return {
@@ -142,40 +215,133 @@ describe('UploadEngine', () => {
     useUploadStore.getState().apply(new Map(), 0)
   })
 
-  it('prepares ahead while a request waits, with a bounded number of buffered parts', async () => {
+  it('streams a larger file in one request, then completes it with every part’s hash', async () => {
+    const { api, transport } = fakeApi()
+    const engine = new UploadEngine(transport)
+    const picked = file('big.bin', 10 * CHUNK + 1)
+    await engine.enqueue('folder', [picked])
+
+    await vi.waitFor(() => {
+      expect(item('big.bin').status).toBe('done')
+    })
+    expect(api.streamed).toEqual([{ uploadId: expect.any(String) as string, from: 0 }])
+    expect(api.sent).toEqual([])
+    const bytes = new Uint8Array(await picked.file.arrayBuffer())
+    const hashes = await Promise.all(
+      Array.from({ length: 11 }, (_, index) =>
+        sha256Hex(bytes.slice(index * CHUNK, (index + 1) * CHUNK)),
+      ),
+    )
+    expect(transport.complete).toHaveBeenCalledExactlyOnceWith(api.streamed[0]?.uploadId, hashes)
+    expect(item('big.bin').uploadedBytes).toBe(10 * CHUNK + 1)
+  })
+
+  it('counts a stream’s bytes as they go, so its speed holds steady', async () => {
     const { api, transport } = fakeApi()
     api.autoRelease = false
-    const picked = file('ahead.bin', 12 * CHUNK)
-    const slices = vi.spyOn(picked.file, 'slice')
-    const engine = new UploadEngine(transport, { ...DEFAULT_LIMITS, requests: 1, partsPerFile: 1 })
+    const engine = new UploadEngine(transport)
     try {
-      await engine.enqueue('folder', [picked])
+      await engine.enqueue('folder', [file('steady.bin', 100 * CHUNK)])
       await vi.waitFor(() => {
-        expect(api.pending).toHaveLength(1)
-        expect(slices).toHaveBeenCalledTimes(2)
+        expect(api.streams).toHaveLength(1)
       })
-      await new Promise((resolve) => {
-        setTimeout(resolve, 20)
-      })
-      expect(slices).toHaveBeenCalledTimes(2)
-      const [first] = api.pending
-      if (!first) throw new Error('No part sending.')
-      first.release()
-      await vi.waitFor(() => {
-        expect(api.sent.map((part) => part.index)).toEqual([0, 1])
-        expect(slices).toHaveBeenCalledTimes(3)
-      })
-      expect(api.maxInFlight).toBe(1)
+      const speeds: number[] = []
+      const progress: number[] = []
+      for (let sent = CHUNK; sent < 60 * CHUNK; sent += CHUNK) {
+        stream(api).progress(sent)
+        await new Promise((resolve) => setTimeout(resolve, 15))
+        speeds.push(useUploadStore.getState().bytesPerSecond)
+        progress.push(item('steady.bin').uploadedBytes)
+      }
+      // From the first publish on, the speed never falls to nothing between parts.
+      expect(speeds.slice(speeds.findIndex((speed) => speed > 0)).every((speed) => speed > 0)).toBe(
+        true,
+      )
+      expect(progress.at(-1)).toBeGreaterThan(40 * CHUNK)
+      expect(
+        progress.every((bytes, index) => index === 0 || bytes >= (progress[index - 1] ?? 0)),
+      ).toBe(true)
     } finally {
       engine.cancelAll()
-      slices.mockRestore()
     }
   })
 
-  it('bounds memory across tiny files as well as large parts', async () => {
+  it('starts a broken stream again after the parts the server kept', async () => {
     const { api, transport } = fakeApi()
     api.autoRelease = false
-    const picked = Array.from({ length: 30 }, (_, index) => file(`bounded-${index}`, CHUNK))
+    const engine = new UploadEngine(transport)
+    await engine.enqueue('folder', [file('broken.bin', 8 * CHUNK)])
+    await vi.waitFor(() => {
+      expect(api.streams).toHaveLength(1)
+    })
+    stream(api).progress(4 * CHUNK)
+    stream(api).store(3)
+    api.autoRelease = true
+    stream(api).fail(new TypeError('The connection dropped.'))
+
+    await vi.waitFor(
+      () => {
+        expect(item('broken.bin').status).toBe('done')
+      },
+      { timeout: 5000 },
+    )
+    expect(api.streamed.map((sent) => sent.from)).toEqual([0, 3])
+  })
+
+  it('pauses a stream and resumes after the parts the server kept', async () => {
+    const { api, transport } = fakeApi()
+    api.autoRelease = false
+    const engine = new UploadEngine(transport)
+    await engine.enqueue('folder', [file('movie.mkv', 8 * CHUNK)])
+    await vi.waitFor(() => {
+      expect(api.streams).toHaveLength(1)
+    })
+    stream(api).progress(3 * CHUNK)
+    stream(api).store(2)
+    engine.pause(item('movie.mkv').id)
+
+    await vi.waitFor(() => {
+      expect(item('movie.mkv')).toMatchObject({ status: 'paused', uploadedBytes: 3 * CHUNK })
+    })
+    expect(api.streams).toHaveLength(0)
+
+    api.autoRelease = true
+    engine.resume(item('movie.mkv').id)
+    await vi.waitFor(() => {
+      expect(item('movie.mkv').status).toBe('done')
+    })
+    expect(api.streamed.map((sent) => sent.from)).toEqual([0, 2])
+    expect(transport.complete).toHaveBeenCalledOnce()
+  })
+
+  it('sends the parts that arrived damaged again, and completes', async () => {
+    const { api, transport } = fakeApi()
+    let checked = 0
+    const complete = vi.fn<UploadTransport['complete']>((uploadId) => {
+      checked += 1
+      if (checked > 1) return Promise.resolve()
+      // The server dropped part 1, whose bytes didn't match.
+      api.sessions.get(uploadId)?.parts.delete(1)
+      return Promise.reject(new ApiError(400, 'hash_mismatch', 'Damaged.'))
+    })
+    const engine = new UploadEngine({ ...transport, complete })
+    await engine.enqueue('folder', [file('damaged.bin', 4 * CHUNK)])
+
+    await vi.waitFor(
+      () => {
+        expect(item('damaged.bin').status).toBe('done')
+      },
+      { timeout: 5000 },
+    )
+    expect(api.streamed.map((sent) => sent.from)).toEqual([0, 1])
+    expect(complete).toHaveBeenCalledTimes(2)
+    expect(complete.mock.calls[1]?.[1]).toEqual(complete.mock.calls[0]?.[1])
+  })
+
+  it('bounds memory across tiny files', async () => {
+    const { api, transport } = fakeApi()
+    api.autoRelease = false
+    const picked = Array.from({ length: 30 }, (_, index) => file(`bounded-${String(index)}`, CHUNK))
     const slices = picked.map(({ file }) => vi.spyOn(file, 'slice'))
     const engine = new UploadEngine(transport, {
       ...DEFAULT_LIMITS,
@@ -208,7 +374,7 @@ describe('UploadEngine', () => {
   it('bounds prepared tiny files by count even when the byte budget has room', async () => {
     const { api, transport } = fakeApi()
     api.autoRelease = false
-    const picked = Array.from({ length: 30 }, (_, index) => file(`tiny-${index}`, 1))
+    const picked = Array.from({ length: 30 }, (_, index) => file(`tiny-${String(index)}`, 1))
     const slices = picked.map(({ file }) => vi.spyOn(file, 'slice'))
     const engine = new UploadEngine(transport, { ...DEFAULT_LIMITS, requests: 1 })
     try {
@@ -318,7 +484,7 @@ describe('UploadEngine', () => {
       bufferedBytes: CHUNK,
     })
     try {
-      await engine.enqueue('folder', [file('hash-pause.bin', 3 * CHUNK)])
+      await engine.enqueue('folder', [file('hash-pause.bin', CHUNK)])
       await hashing.promise
       const upload = item('hash-pause.bin')
       engine.pause(upload.id)
@@ -327,65 +493,12 @@ describe('UploadEngine', () => {
       await vi.waitFor(() => {
         expect(item('hash-pause.bin').status).toBe('done')
       })
-      expect(api.sent.map((part) => part.index)).toEqual([0, 1, 2])
-      expect(item('hash-pause.bin').uploadedBytes).toBe(3 * CHUNK)
+      expect(api.sent.map((part) => part.index)).toEqual([0])
+      expect(item('hash-pause.bin').uploadedBytes).toBe(CHUNK)
     } finally {
       release.resolve(undefined)
       engine.cancelAll()
       spy.mockRestore()
-    }
-  })
-
-  it('does not count a late response again after retry reconciled its receipt', async () => {
-    const { api, transport } = fakeApi()
-    api.autoRelease = false
-    const completed = Promise.withResolvers<undefined>()
-    const putPart: UploadTransport['putPart'] = (uploadId, index, bytes, hash, signal) => {
-      if (index === 0) {
-        // The server accepted this part, but the response ignores cancellation.
-        api.sessions.get(uploadId)?.parts.add(index)
-        return transport.putPart(uploadId, index, bytes, hash, new AbortController().signal)
-      }
-      return transport.putPart(uploadId, index, bytes, hash, signal)
-    }
-    const complete = vi.fn(() => completed.promise)
-    const engine = new UploadEngine(
-      { ...transport, putPart, complete },
-      { ...DEFAULT_LIMITS, requests: 2, partsPerFile: 2 },
-    )
-    try {
-      await engine.enqueue('folder', [file('late.bin', 2 * CHUNK)])
-      await vi.waitFor(() => {
-        expect(api.pending).toHaveLength(2)
-      })
-      const late = api.pending.find((part) => part.index === 0)
-      if (!late) throw new Error('Missing late response.')
-      api.pending
-        .find((part) => part.index === 1)
-        ?.fail(new ApiError(400, 'test_failure', 'Try again.'))
-      await vi.waitFor(() => {
-        expect(item('late.bin').status).toBe('failed')
-      })
-      api.autoRelease = true
-      await engine.retry(item('late.bin').id)
-      await vi.waitFor(() => {
-        expect(api.sent).toHaveLength(3)
-      })
-      late.release()
-      await vi.waitFor(() => {
-        expect(complete).toHaveBeenCalledOnce()
-      })
-      await new Promise((resolve) => {
-        setTimeout(resolve, 150)
-      })
-      expect(item('late.bin').uploadedBytes).toBe(2 * CHUNK)
-      completed.resolve(undefined)
-      await vi.waitFor(() => {
-        expect(item('late.bin').status).toBe('done')
-      })
-    } finally {
-      completed.resolve(undefined)
-      engine.cancelAll()
     }
   })
 
@@ -409,8 +522,8 @@ describe('UploadEngine', () => {
       .mockResolvedValueOnce({})
     const engine = new UploadEngine({ ...transport, ensureFolders })
     const files = Array.from({ length: 501 }, (_, index) => ({
-      ...file(`photo-${index}.jpg`, 2),
-      relativeDir: `photos-${index}`,
+      ...file(`photo-${String(index)}.jpg`, 2),
+      relativeDir: `photos-${String(index)}`,
     }))
 
     await expect(engine.enqueue('folder', files)).rejects.toThrow('photos-500')
@@ -464,25 +577,12 @@ describe('UploadEngine', () => {
     ])
   })
 
-  it('sends a large file’s parts in parallel, at most 4 at a time, then completes it', async () => {
-    const { api, transport } = fakeApi()
-    const engine = new UploadEngine(transport)
-    await engine.enqueue('folder', [file('big.bin', 10 * CHUNK)])
-
-    await vi.waitFor(() => {
-      expect(item('big.bin').status).toBe('done')
-    })
-    expect(api.maxInFlight).toBe(DEFAULT_LIMITS.partsPerFile)
-    expect(transport.complete).toHaveBeenCalledTimes(1)
-    expect(item('big.bin').uploadedBytes).toBe(10 * CHUNK)
-  })
-
   it('creates sessions in batches and sends small files 8 at a time, with no complete call', async () => {
     const { api, transport } = fakeApi()
     const engine = new UploadEngine(transport)
     await engine.enqueue(
       'folder',
-      Array.from({ length: 20 }, (_, index) => file(`small-${index}.txt`, 2)),
+      Array.from({ length: 20 }, (_, index) => file(`small-${String(index)}.txt`, 2)),
     )
 
     await vi.waitFor(() => {
@@ -494,7 +594,27 @@ describe('UploadEngine', () => {
     expect(transport.complete).not.toHaveBeenCalled()
   })
 
-  it('schedules a long upload with work proportional to its part count', async () => {
+  it('streams one larger file at a time while small files fill the other slots', async () => {
+    const { api, transport } = fakeApi()
+    api.autoRelease = false
+    const engine = new UploadEngine(transport)
+    try {
+      await engine.enqueue('folder', [
+        file('first.bin', 3 * CHUNK),
+        file('second.bin', 3 * CHUNK),
+        ...Array.from({ length: 10 }, (_, index) => file(`note-${String(index)}.txt`, 2)),
+      ])
+      await vi.waitFor(() => {
+        expect(api.streams).toHaveLength(1)
+        expect(api.pending).toHaveLength(DEFAULT_LIMITS.requests - 1)
+      })
+      expect(item('second.bin').status).toBe('queued')
+    } finally {
+      engine.cancelAll()
+    }
+  })
+
+  it('works through a long file in work proportional to its part count', async () => {
     const { api, transport } = fakeApi()
     const engine = new UploadEngine(transport)
     const parts = 1000
@@ -507,9 +627,9 @@ describe('UploadEngine', () => {
         },
         { timeout: 5000 },
       )
-      expect(api.sent).toHaveLength(parts)
-      expect(new Set(api.sent.map((part) => part.index)).size).toBe(parts)
-      // Repeatedly scanning completed parts makes this grow quadratically.
+      expect(api.streamed).toHaveLength(1)
+      expect(vi.mocked(transport.complete).mock.calls[0]?.[1]).toHaveLength(parts)
+      // Repeatedly scanning received parts makes this grow quadratically.
       const checks = membership.mock.calls.filter(([value]) => typeof value === 'number').length
       expect(checks).toBeLessThan(parts * 20)
     } finally {
@@ -536,71 +656,51 @@ describe('UploadEngine', () => {
     expect(createSessions).toHaveBeenCalledTimes(1)
   })
 
-  it('retries a part the server turned away, as soon as Retry-After allows', async () => {
+  it('streams again when the server turns it away, as soon as Retry-After allows', async () => {
     const { api, transport } = fakeApi()
-    api.failPart = (_uploadId, index, attempt) => (index === 1 && attempt <= 2 ? busy() : null)
+    api.failStream = (_uploadId, attempt) => (attempt <= 2 ? busy() : null)
     const engine = new UploadEngine(transport)
     await engine.enqueue('folder', [file('flaky.bin', 3 * CHUNK)])
 
     await vi.waitFor(() => {
       expect(item('flaky.bin').status).toBe('done')
     })
-    expect(api.sent.filter((put) => put.index === 1)).toHaveLength(3)
+    expect(api.streamed.map((sent) => sent.from)).toEqual([0, 0, 0])
   })
 
-  it('retries an early part that fails after all later parts have finished', async () => {
-    const { api, transport } = fakeApi()
-    const firstPart = Promise.withResolvers<undefined>()
-    const sent: number[] = []
-    let held = false
-    const engine = new UploadEngine({
-      ...transport,
-      putPart: (uploadId, index, body, hash, signal) => {
-        sent.push(index)
-        if (index === 0 && !held) {
-          held = true
-          return firstPart.promise
-        }
-        return transport.putPart(uploadId, index, body, hash, signal)
-      },
-    })
-    await engine.enqueue('folder', [file('out-of-order.bin', 10 * CHUNK)])
-    await vi.waitFor(() => {
-      expect(api.sent).toHaveLength(9)
-      expect(api.pending).toHaveLength(0)
-    })
-    firstPart.reject(busy())
-    await vi.waitFor(() => {
-      expect(item('out-of-order.bin').status).toBe('done')
-    })
-    expect(sent.toSorted((a, b) => a - b)).toEqual([0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
-    expect(sent.at(-1)).toBe(0)
-    expect(item('out-of-order.bin').uploadedBytes).toBe(10 * CHUNK)
-  })
-
-  it('gives up after repeated failures, then resumes with only the missing parts', async () => {
+  it('gives up after repeated failures, then resumes after the parts the server kept', async () => {
     const { api, transport } = fakeApi()
     let broken = true
-    api.failPart = (_uploadId, index) => (broken && index === 2 ? busy() : null)
-    const engine = new UploadEngine(transport)
+    api.failStream = () => (broken ? busy() : null)
+    const engine = new UploadEngine({
+      ...transport,
+      streamFile: (uploadId, from, body, signal, onProgress) => {
+        // The first try stores two parts before it breaks; the rest store nothing.
+        const sending = transport.streamFile(uploadId, from, body, signal, onProgress)
+        if (api.streamed.length === 1) api.streams.at(-1)?.store(2)
+        return sending
+      },
+    })
     await engine.enqueue('folder', [file('stuck.bin', 4 * CHUNK)])
 
-    await vi.waitFor(() => {
-      expect(item('stuck.bin').status).toBe('failed')
-    })
-    // The first try, then six retries.
-    expect(api.sent.filter((put) => put.index === 2)).toHaveLength(7)
+    await vi.waitFor(
+      () => {
+        expect(item('stuck.bin').status).toBe('failed')
+      },
+      { timeout: 5000 },
+    )
+    // The first try, then six retries since the last that stored anything.
+    expect(api.streamed.map((sent) => sent.from)).toEqual([0, 2, 2, 2, 2, 2, 2, 2])
 
     broken = false
-    const before = api.sent.length
     await engine.retry(item('stuck.bin').id)
     await vi.waitFor(() => {
       expect(item('stuck.bin').status).toBe('done')
     })
-    expect(api.sent.slice(before).map((put) => put.index)).toEqual([2])
+    expect(api.streamed.at(-1)?.from).toBe(2)
   })
 
-  it('retries a part whose response was lost; the server accepts it again (§6.1)', async () => {
+  it('retries a small file whose response was lost; the server accepts it again (§6.1)', async () => {
     const { api, transport } = fakeApi()
     api.failPart = (_uploadId, _index, attempt) => (attempt === 1 ? busy() : null)
     const engine = new UploadEngine(transport)
@@ -615,42 +715,14 @@ describe('UploadEngine', () => {
   it('fails an upload whose session expired', async () => {
     const { api, transport } = fakeApi()
     api.failPart = () => new ApiError(404, 'upload_not_found', 'Gone')
+    api.failStream = () => new ApiError(404, 'upload_not_found', 'Gone')
     const engine = new UploadEngine(transport)
-    await engine.enqueue('folder', [file('late.txt', 3)])
+    await engine.enqueue('folder', [file('late.txt', 3), file('late.bin', 3 * CHUNK)])
 
     await vi.waitFor(() => {
       expect(item('late.txt').status).toBe('failed')
+      expect(item('late.bin').status).toBe('failed')
     })
-  })
-
-  it('pauses without losing finished parts, and resumes from there', async () => {
-    const { api, transport } = fakeApi()
-    api.autoRelease = false
-    const engine = new UploadEngine(transport)
-    await engine.enqueue('folder', [file('movie.mkv', 8 * CHUNK)])
-
-    await vi.waitFor(() => {
-      expect(api.pending).toHaveLength(4)
-    })
-    const finished = api.pending.slice(0, 2).map((put) => put.index)
-    for (const put of api.pending.slice(0, 2)) put.release()
-    engine.pause(item('movie.mkv').id)
-
-    await vi.waitFor(() => {
-      expect(item('movie.mkv')).toMatchObject({ status: 'paused', uploadedBytes: 2 * CHUNK })
-    })
-    expect(api.pending).toHaveLength(0)
-
-    api.autoRelease = true
-    const before = api.sent.length
-    engine.resume(item('movie.mkv').id)
-    await vi.waitFor(() => {
-      expect(item('movie.mkv').status).toBe('done')
-    })
-    const resent = api.sent.slice(before).map((put) => put.index)
-    expect(resent).toHaveLength(6)
-    expect(resent).not.toContain(finished[0])
-    expect(resent).not.toContain(finished[1])
   })
 
   it('cancelling deletes the upload on the server', async () => {
@@ -659,17 +731,17 @@ describe('UploadEngine', () => {
     const engine = new UploadEngine(transport)
     await engine.enqueue('folder', [file('oops.bin', 4 * CHUNK)])
     await vi.waitFor(() => {
-      expect(api.pending.length).toBeGreaterThan(0)
+      expect(api.streams).toHaveLength(1)
     })
-    const [put] = api.pending
+    const { uploadId } = stream(api)
 
     engine.cancel(item('oops.bin').id)
 
     await vi.waitFor(() => {
       expect(item('oops.bin').status).toBe('canceled')
     })
-    expect(transport.cancel).toHaveBeenCalledWith(put?.uploadId)
-    expect(api.pending).toHaveLength(0)
+    expect(transport.cancel).toHaveBeenCalledWith(uploadId)
+    expect(api.streams).toHaveLength(0)
   })
 
   it('fails only the uploads a batch rejected', async () => {
@@ -754,10 +826,10 @@ describe('UploadEngine', () => {
       ...transport,
       putPart: async (uploadId, index, body, hash, signal) => {
         await transport.putPart(uploadId, index, body, hash, signal)
-        if (parts === 1) stored(uploadId)
+        stored(uploadId)
       },
-      complete: async (uploadId) => {
-        await transport.complete(uploadId)
+      complete: async (uploadId, partSha256) => {
+        await transport.complete(uploadId, partSha256)
         stored(uploadId)
       },
     })
@@ -826,41 +898,40 @@ describe('UploadEngine', () => {
 
   it('waits for retry receipts when paused and resumed while checking the session', async () => {
     const { api, transport } = fakeApi()
-    api.failPart = (_uploadId, index) =>
-      index === 1 ? new ApiError(400, 'rejected', 'Part rejected') : null
+    api.failStream = () => new ApiError(400, 'rejected', 'Stream rejected')
     const receipt = Promise.withResolvers<Awaited<ReturnType<UploadTransport['status']>>>()
     const status = vi.fn<UploadTransport['status']>(() => receipt.promise)
-    const engine = new UploadEngine({ ...transport, status })
+    const engine = new UploadEngine({
+      ...transport,
+      streamFile: (uploadId, from, body, signal, onProgress) => {
+        const sending = transport.streamFile(uploadId, from, body, signal, onProgress)
+        if (api.streamed.length === 1) api.streams.at(-1)?.store(1)
+        return sending
+      },
+      status,
+    })
     await engine.enqueue('folder', [file('retry.bin', 3 * CHUNK)])
     await vi.waitFor(() => {
       expect(item('retry.bin').status).toBe('failed')
     })
     const upload = item('retry.bin')
-    const uploadId = api.sent[0]?.uploadId ?? ''
+    const uploadId = api.streamed[0]?.uploadId ?? ''
     const snapshot = await transport.status(uploadId)
-    const before = api.sent.length
-    api.failPart = () => null
+    expect(snapshot.receivedParts).toEqual([0])
+    const before = api.streamed.length
+    api.failStream = () => null
     const retrying = engine.retry(upload.id)
     engine.pause(upload.id)
     engine.resume(upload.id)
     await new Promise((resolve) => setTimeout(resolve, 20))
-    expect(api.sent).toHaveLength(before)
+    expect(api.streamed).toHaveLength(before)
 
     receipt.resolve(snapshot)
     await retrying
     await vi.waitFor(() => {
       expect(item('retry.bin')).toMatchObject({ status: 'done', uploadedBytes: 3 * CHUNK })
     })
-    const missing = Array.from({ length: 3 }, (_, index) => index).filter(
-      (index) => !snapshot.receivedParts.includes(index),
-    )
-    // Independent parts may finish preparation in any order.
-    expect(
-      api.sent
-        .slice(before)
-        .map((put) => put.index)
-        .sort((left, right) => left - right),
-    ).toEqual(missing)
+    expect(api.streamed.slice(before).map((sent) => sent.from)).toEqual([1])
     expect(transport.complete).toHaveBeenCalledTimes(1)
   })
 

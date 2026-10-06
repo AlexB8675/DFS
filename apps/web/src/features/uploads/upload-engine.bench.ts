@@ -3,52 +3,54 @@ import { DEFAULT_LIMITS, UploadEngine } from './upload-engine'
 import { useUploadStore } from './upload-store'
 import type { UploadTransport } from './upload-transport'
 
-// Synthetic 30 ms part requests isolate preparation and scheduling from the
-// API, disk and network. Check the live stack before raising production limits.
+// Synthetic 30 ms requests for 32 small files of 1 MiB isolate their reading,
+// hashing and scheduling from the API, disk and network. Check the live stack
+// before raising production limits. Larger files stream in one request each,
+// with nothing to schedule between parts.
 const chunk = new Uint8Array(1024 * 1024).fill(7)
-const file = new File(
-  Array.from({ length: 32 }, () => chunk),
-  'benchmark.bin',
-)
+const files = Array.from({ length: 32 }, (_, index) => ({
+  file: new File([chunk], `benchmark-${String(index)}.bin`),
+  relativeDir: '',
+}))
 
-for (const parts of [4, 6, 8]) {
-  test(`${String(parts)} parallel parts, 32 MiB upload`, async ({ bench }) => {
+for (const requests of [4, 6, 8]) {
+  test(`${String(requests)} requests, 32 small files of 1 MiB`, async ({ bench }) => {
     const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', chunk)), (byte) =>
       byte.toString(16).padStart(2, '0'),
     ).join('')
     const upload = async (preparedParts: number) => {
       const finished = Promise.withResolvers<undefined>()
-      const received = new Set<number>()
-      let requests = 0
+      const received = new Set<string>()
+      let inFlight = 0
       const transport: UploadTransport = {
         ensureFolders: () => Promise.resolve({}),
-        createSessions: () =>
-          Promise.resolve([
-            {
-              ok: true,
+        createSessions: (uploads) =>
+          Promise.resolve(
+            uploads.map((_, index) => ({
+              ok: true as const,
               session: {
-                uploadId: 'upload',
-                nodeId: 'node',
-                versionId: 'version',
+                uploadId: `upload-${String(index)}`,
+                nodeId: `node-${String(index)}`,
+                versionId: `version-${String(index)}`,
                 isNewVersion: false,
                 chunkSize: chunk.length,
-                chunkCount: 32,
+                chunkCount: 1,
               },
-            },
-          ]),
-        putPart: async (_uploadId, index, bytes, sha256, signal) => {
+            })),
+          ),
+        putPart: async (uploadId, _index, bytes, sha256, signal) => {
           if (
             signal.aborted ||
             bytes.byteLength !== chunk.length ||
             sha256 !== hash ||
-            received.has(index)
+            received.has(uploadId)
           ) {
-            const error = new Error('Invalid or duplicate benchmark part.')
+            const error = new Error('Invalid or duplicate benchmark file.')
             finished.reject(error)
             throw error
           }
-          requests += 1
-          if (requests > parts) {
+          inFlight += 1
+          if (inFlight > requests) {
             const error = new Error('Benchmark exceeded its request limit.')
             finished.reject(error)
             throw error
@@ -56,28 +58,21 @@ for (const parts of [4, 6, 8]) {
           await new Promise((resolve) => {
             setTimeout(resolve, 30)
           })
-          received.add(index)
-          requests -= 1
+          received.add(uploadId)
+          inFlight -= 1
+          if (received.size === files.length) finished.resolve(undefined)
         },
-        complete: () => {
-          if (received.size !== 32) finished.reject(new Error('Benchmark lost a part.'))
-          else finished.resolve(undefined)
-          return Promise.resolve()
-        },
+        streamFile: () => Promise.reject(new Error('Unexpected stream.')),
+        complete: () => Promise.reject(new Error('Unexpected completion.')),
         status: () => Promise.reject(new Error('Unexpected retry.')),
         cancel: () => Promise.resolve(),
         nodes: () => Promise.resolve([]),
       }
-      const engine = new UploadEngine(transport, {
-        ...DEFAULT_LIMITS,
-        requests: parts * 2,
-        partsPerFile: parts,
-        preparedParts,
-      })
+      const engine = new UploadEngine(transport, { ...DEFAULT_LIMITS, requests, preparedParts })
       try {
-        await engine.enqueue('folder', [{ file, relativeDir: '' }])
+        await engine.enqueue('folder', files)
         await finished.promise
-        // Let the engine consume its completion before clearing the panel.
+        // Let the engine consume its last answer before clearing the panel.
         await new Promise((resolve) => {
           setTimeout(resolve, 0)
         })
@@ -96,7 +91,7 @@ for (const parts of [4, 6, 8]) {
       warmupIterations: 1,
     })
     console.info(
-      `[INFO] ${String(parts)} parts: ${results.get(current.name).latency.mean.toFixed(1)} ms → ${results.get(pipeline.name).latency.mean.toFixed(1)} ms. Synthetic latency; no server or storage.`,
+      `[INFO] ${String(requests)} requests: ${results.get(current.name).latency.mean.toFixed(1)} ms → ${results.get(pipeline.name).latency.mean.toFixed(1)} ms. Synthetic latency; no server or storage.`,
     )
   })
 }

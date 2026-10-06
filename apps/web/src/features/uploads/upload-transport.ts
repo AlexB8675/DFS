@@ -8,7 +8,10 @@ import {
   type UploadBatchResult,
   type UploadSessionStatus,
 } from '@dfs/shared'
-import { apiFetch, apiGet, apiSend } from '@/lib/api/client'
+import { apiGet, apiSend, apiUpload } from '@/lib/api/client'
+
+/** Told how many bytes of a request's body have gone out so far. */
+export type OnProgress = (sentBytes: number) => void
 
 /**
  * The upload API calls (§6.1), behind an interface so the upload engine can
@@ -18,14 +21,25 @@ export interface UploadTransport {
   ensureFolders: (parentId: string, paths: string[]) => Promise<Record<string, string>>
   /** Up to 500 sessions per call, answered per upload. */
   createSessions: (uploads: CreateUploadInput[]) => Promise<UploadBatchResult['results']>
+  /** One part with its SHA-256: a small file's only request, which completes it. */
   putPart: (
     uploadId: string,
     index: number,
     body: ArrayBuffer,
     sha256: string,
     signal: AbortSignal,
+    onProgress?: OnProgress,
   ) => Promise<void>
-  complete: (uploadId: string) => Promise<void>
+  /** A larger file in one request: every part from `from` to its end (`body`). */
+  streamFile: (
+    uploadId: string,
+    from: number,
+    body: Blob,
+    signal: AbortSignal,
+    onProgress?: OnProgress,
+  ) => Promise<void>
+  /** With every part's SHA-256 for a streamed file, which the server checks. */
+  complete: (uploadId: string, partSha256?: string[]) => Promise<void>
   /** The parts the server already has, to resume. */
   status: (uploadId: string) => Promise<UploadSessionStatus>
   cancel: (uploadId: string) => Promise<void>
@@ -38,15 +52,16 @@ export const httpTransport: UploadTransport = {
     apiSend('POST', '/folders/ensure', { parentId, paths }, ensureFoldersResultSchema),
   createSessions: async (uploads) =>
     (await apiSend('POST', '/uploads/batch', { uploads }, uploadBatchResultSchema)).results,
-  putPart: async (uploadId, index, body, sha256, signal) => {
-    await apiFetch(`/uploads/${uploadId}/parts/${index}`, {
-      method: 'PUT',
-      body,
-      headers: { 'Content-Type': 'application/octet-stream', 'X-Part-SHA256': sha256 },
+  putPart: (uploadId, index, body, sha256, signal, onProgress) =>
+    apiUpload(`/uploads/${uploadId}/parts/${String(index)}`, body, {
+      headers: { 'X-Part-SHA256': sha256 },
       signal,
-    })
-  },
-  complete: (uploadId) => apiSend('POST', `/uploads/${uploadId}/complete`),
+      onProgress,
+    }),
+  streamFile: (uploadId, from, body, signal, onProgress) =>
+    apiUpload(`/uploads/${uploadId}/content`, body, { query: { from }, signal, onProgress }),
+  complete: (uploadId, partSha256) =>
+    apiSend('POST', `/uploads/${uploadId}/complete`, partSha256 && { partSha256 }),
   status: (uploadId) => apiGet(`/uploads/${uploadId}`, uploadStatusSchema),
   cancel: (uploadId) => apiSend('DELETE', `/uploads/${uploadId}`),
   nodes: async (nodeIds) =>

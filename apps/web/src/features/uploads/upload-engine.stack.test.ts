@@ -2,7 +2,7 @@ import { ApiClient, workspace } from '@dfs/contract'
 import { sessionSchema } from '@dfs/shared'
 import { describe, expect, it } from 'vitest'
 import { apiSend, setCsrfToken } from '@/lib/api/client'
-import { DEFAULT_LIMITS, UploadEngine } from './upload-engine'
+import { UploadEngine } from './upload-engine'
 import { useUploadStore, type UploadItem } from './upload-store'
 import { httpTransport } from './upload-transport'
 
@@ -57,15 +57,16 @@ describe.skipIf(!apiBase)('the upload engine against the real API, with faults',
         ...Array.from({ length: 30 }, (_, index) =>
           file(`small-${String(index)}.txt`, 1 + index * 97),
         ),
-        // Three parts each: lost answers to parts and completions, and resuming.
+        // Three parts each, streamed: broken streams, lost answers to streams
+        // and completions, and resuming.
         file('large-1.bin', 25 * 1024 * 1024),
         file('large-2.bin', 25 * 1024 * 1024),
       ]
-      // One part at a time, so the outage below lands in the middle of a file.
-      const engine = new UploadEngine(httpTransport, { ...DEFAULT_LIMITS, partsPerFile: 1 })
+      const engine = new UploadEngine(httpTransport)
       network.troubled = true
-      // An outage from the first large file's second part: part requests fail
-      // until their uploads give up, as a browser losing its connection would see.
+      // An outage from the middle of the first stream: it breaks after a part
+      // and a half, then uploads fail until they give up, as a browser losing
+      // its connection would see.
       network.outage = 'armed'
       await engine.enqueue(
         folder.id,
@@ -77,7 +78,7 @@ describe.skipIf(!apiBase)('the upload engine against the real API, with faults',
       await until(() => item('large-1.bin')?.status === 'failed', 'the outage to fail large-1.bin')
       expect(item('large-1.bin')?.uploadedBytes).toBeGreaterThan(0)
       network.outage = 'off'
-      // Resume failed uploads, as the panel's Retry does: only missing parts go again.
+      // Resume failed uploads, as the panel's Retry does: from the first missing part.
       const resumed = new Set<string>()
       await until(
         async () => {
@@ -97,7 +98,7 @@ describe.skipIf(!apiBase)('the upload engine against the real API, with faults',
       network.troubled = false
       console.info(
         `${String(network.failed)} requests failed, ${String(network.lostAnswers)} answers were lost, ` +
-          `${String(network.outageFailures)} parts hit the outage; resumed ${[...resumed].join(', ')}. ` +
+          `${String(network.outageFailures)} uploads hit the outage; resumed ${[...resumed].join(', ')}. ` +
           `Uploaded after ${elapsed()}.`,
       )
       expect(resumed).toContain('large-1.bin')
@@ -123,7 +124,7 @@ describe.skipIf(!apiBase)('the upload engine against the real API, with faults',
         const expected = new Uint8Array(await upload.file.arrayBuffer())
         expect(sameBytes(actual, expected), `${upload.file.name} came back different`).toBe(true)
       }
-      // Retried parts and completions count once.
+      // Retried parts, streams and completions count once.
       const total = files.reduce((sum, picked) => sum + picked.size, 0)
       expect((await usedBytes(checker)) - usedBefore).toBe(total)
     },
@@ -143,7 +144,7 @@ function chaosNetwork(base: string, seed: number) {
   const random = mulberry32(seed)
   const network = {
     troubled: false,
-    /** `armed` turns `on` at the first request for a file's second part (or later). */
+    /** `armed` breaks the next stream partway through, and turns `on`. */
     outage: 'off' as 'off' | 'armed' | 'on',
     failed: 0,
     lostAnswers: 0,
@@ -159,8 +160,21 @@ function chaosNetwork(base: string, seed: number) {
       headers.set('Cookie', [...cookies].map(([name, value]) => `${name}=${value}`).join('; '))
     }
     const upload = network.troubled && input.startsWith('/api/uploads')
-    if (upload && network.outage === 'armed' && /\/parts\/[1-9]/.test(input)) network.outage = 'on'
-    if (upload && network.outage === 'on' && input.includes('/parts/')) {
+    const sending = /\/(parts\/\d+|content)(\?|$)/.test(input)
+    if (upload && network.outage === 'armed' && input.includes('/content')) {
+      network.outage = 'on'
+      // The connection drops a part and a half into the stream: the server
+      // keeps the whole part.
+      const response = realFetch(new URL(input, base), {
+        ...init,
+        headers,
+        body: cutShort(init.body as Blob, 15 * 1024 * 1024),
+        duplex: 'half',
+      } as RequestInit)
+      await response.then((answer) => answer.body?.cancel()).catch(() => undefined)
+      throw new TypeError('Chaos: the connection dropped.')
+    }
+    if (upload && network.outage === 'on' && sending) {
       // A proxy answering for a server it can't reach; retry at once, to fail fast.
       network.outageFailures += 1
       return Response.json(
@@ -189,6 +203,29 @@ function chaosNetwork(base: string, seed: number) {
     return response
   }
   return network
+}
+
+/** A body that sends the first `bytes` of `blob`, then fails, as a dropped connection does. */
+function cutShort(blob: Blob, bytes: number): ReadableStream<Uint8Array> {
+  const reader = blob.stream().getReader()
+  let sent = 0
+  return new ReadableStream({
+    async pull(controller) {
+      const { done, value } = await reader.read()
+      if (done) {
+        controller.close()
+        return
+      }
+      const room = bytes - sent
+      sent += value.length
+      if (value.length < room) {
+        controller.enqueue(value)
+        return
+      }
+      controller.enqueue(value.slice(0, room))
+      controller.error(new Error('Chaos: the connection dropped.'))
+    },
+  })
 }
 
 function items(): UploadItem[] {

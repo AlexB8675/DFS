@@ -253,6 +253,16 @@ export const uploadStatusSchema = uploadSessionSchema.extend({
 })
 export type UploadSessionStatus = z.infer<typeof uploadStatusSchema>
 
+/**
+ * `POST /uploads/:id/complete`, optionally with every part's SHA-256 as the
+ * client read it: a streamed upload (`PUT /uploads/:id/content`) is checked
+ * here, and parts that differ are dropped to be sent again.
+ */
+export const completeUploadSchema = z.object({
+  partSha256: z.array(z.string().regex(/^[0-9a-f]{64}$/)).optional(),
+})
+export type CompleteUploadInput = z.infer<typeof completeUploadSchema>
+
 // ── Downloads ────────────────────────────────────────────────────────────────
 
 /**

@@ -23,6 +23,7 @@ import { eventRoutes } from './routes/events.ts'
 import { healthRoutes } from './routes/health.ts'
 import { nodeRoutes } from './routes/nodes.ts'
 import { shareRoutes } from './routes/shares.ts'
+import { uploadStreamRoutes } from './routes/upload-stream.ts'
 import { uploadRoutes } from './routes/uploads.ts'
 import { StagingLimit } from './staging.ts'
 
@@ -73,6 +74,7 @@ const UNTIMED_ROUTES = new Set([
   '/api/folders/:id/archive',
   '/api/archive/:token',
   '/api/uploads/:id/parts/:index',
+  '/api/uploads/:id/content',
   '/api/s/:token/files/:id/content',
   '/api/s/:token/archive',
 ])
@@ -192,6 +194,7 @@ export async function buildApp({
   await app.register(adminRoutes, { prefix: '/api' })
   await app.register(nodeRoutes, { prefix: '/api' })
   await app.register(uploadRoutes, { prefix: '/api' })
+  await app.register(uploadStreamRoutes, { prefix: '/api' })
   await app.register(eventRoutes, { prefix: '/api' })
   await app.register(contentRoutes, { prefix: '/api' })
   await app.register(shareRoutes, { prefix: '/api' })
