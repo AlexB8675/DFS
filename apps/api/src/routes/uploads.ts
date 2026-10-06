@@ -3,7 +3,6 @@ import {
   createUploadBatchSchema,
   createUploadSchema,
   uploadBatchResultSchema,
-  unfinishedUploadListSchema,
   uploadSessionSchema,
   uploadStatusSchema,
 } from '@dfs/shared'
@@ -17,7 +16,6 @@ import {
   createUpload,
   createUploads,
   receivePart,
-  unfinishedUploads,
   uploadStatus,
 } from '../uploads/uploads.ts'
 
@@ -54,10 +52,6 @@ export function uploadRoutes(app: FastifyInstance, _options: object, done: () =>
       const session = await createUpload(app, requireAuth(request.auth), request.body)
       return reply.code(201).send(session)
     },
-  )
-
-  routes.get('/uploads', { schema: { response: { 200: unfinishedUploadListSchema } } }, (request) =>
-    unfinishedUploads(app, requireAuth(request.auth)),
   )
 
   routes.get(

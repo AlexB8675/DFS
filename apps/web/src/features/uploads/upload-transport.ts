@@ -1,16 +1,14 @@
 import {
   ensureFoldersResultSchema,
   nodeListSchema,
-  unfinishedUploadListSchema,
   uploadBatchResultSchema,
   uploadStatusSchema,
   type CreateUploadInput,
   type DriveNode,
-  type UnfinishedUpload,
   type UploadBatchResult,
   type UploadSessionStatus,
 } from '@dfs/shared'
-import { apiGet, apiSend, apiUpload } from '@/lib/api/client'
+import { apiFetch, apiGet, apiSend, apiUpload } from '@/lib/api/client'
 
 /** Told how many bytes of a request's body have gone out so far. */
 export type OnProgress = (sentBytes: number) => void
@@ -44,9 +42,8 @@ export interface UploadTransport {
   complete: (uploadId: string, partSha256?: string[]) => Promise<void>
   /** The parts the server already has, to resume. */
   status: (uploadId: string) => Promise<UploadSessionStatus>
-  /** What a closed or reloaded page left: uploads still receiving, and files still syncing. */
-  unfinished: () => Promise<UnfinishedUpload[]>
-  cancel: (uploadId: string) => Promise<void>
+  /** With `keepalive`, the request outlives the page that sends it. */
+  cancel: (uploadId: string, options?: { keepalive?: boolean }) => Promise<void>
   /** The visible ones of these nodes, up to 500; any that are gone are left out. */
   nodes: (nodeIds: string[]) => Promise<DriveNode[]>
 }
@@ -67,8 +64,9 @@ export const httpTransport: UploadTransport = {
   complete: (uploadId, partSha256) =>
     apiSend('POST', `/uploads/${uploadId}/complete`, partSha256 && { partSha256 }),
   status: (uploadId) => apiGet(`/uploads/${uploadId}`, uploadStatusSchema),
-  unfinished: () => apiGet('/uploads', unfinishedUploadListSchema),
-  cancel: (uploadId) => apiSend('DELETE', `/uploads/${uploadId}`),
+  cancel: async (uploadId, options) => {
+    await apiFetch(`/uploads/${uploadId}`, { method: 'DELETE', keepalive: options?.keepalive })
+  },
   nodes: async (nodeIds) =>
     (await apiSend('POST', '/nodes/lookup', { ids: nodeIds }, nodeListSchema)).items,
 }

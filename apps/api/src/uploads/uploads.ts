@@ -21,7 +21,6 @@ import {
   formatBytes,
   nameKey,
   type CreateUploadInput,
-  type UnfinishedUpload,
   type UploadBatchResult,
   type UploadSession,
   type UploadSessionStatus,
@@ -32,7 +31,7 @@ import { fromDrizzle, type PgBoss } from 'pg-boss'
 import { audit } from '../audit.ts'
 import type { Auth } from '../auth/sessions.ts'
 import { ApiError } from '../errors.ts'
-import { folderLocations, notFound, VISIBLE } from '../nodes/read.ts'
+import { notFound, VISIBLE } from '../nodes/read.ts'
 import { checkedName, lockDrive, nameConflict } from '../nodes/write.ts'
 import { removeStagedVersions } from '../staging.ts'
 import { stageFrame } from './stage-frame.ts'
@@ -320,64 +319,6 @@ export async function uploadStatus(
     state: upload.state,
     receivedParts: rows.map((row) => row.idx),
   }
-}
-
-/** Unfinished uploads a page lists at once; more than this many is a page from long ago. */
-const UNFINISHED_LIMIT = 1000
-
-/**
- * `GET /uploads`: what a closed or reloaded page left behind (§6.1), oldest
- * first. Uploads still receiving, and completed ones whose file is still on
- * its way to Discord.
- */
-export async function unfinishedUploads(
-  app: FastifyInstance,
-  auth: Auth,
-): Promise<UnfinishedUpload[]> {
-  const { rows } = await app.db.execute<
-    SessionColumns & {
-      parent_id: string | null
-      state: UploadRow['state']
-      size_bytes: number
-      name: string
-      mime_type: string | null
-      received_bytes: number
-      expires_at: string
-    }
-  >(sql`
-    SELECT session.id, session.node_id, n.parent_id, n.name, n.mime_type, session.version_id,
-      version.version_no, session.state, version.size_bytes::float8 AS size_bytes,
-      version.chunk_size, version.chunk_count, session.expires_at::text AS expires_at,
-      (SELECT coalesce(sum(plain_size), 0)::float8 FROM chunks
-        WHERE version_id = session.version_id) AS received_bytes
-    FROM upload_sessions session
-    JOIN file_versions version ON version.id = session.version_id
-    JOIN nodes n ON n.id = session.node_id
-    WHERE session.user_id = ${auth.user.id} AND session.expires_at > now() AND ${VISIBLE}
-      AND (session.state = 'receiving' OR version.state = 'syncing')
-    ORDER BY session.created_at, session.id
-    LIMIT ${UNFINISHED_LIMIT}`)
-  const locations = await folderLocations(
-    app.db,
-    rows.flatMap((row) => row.parent_id ?? []),
-  )
-  return rows.flatMap((row) =>
-    row.parent_id
-      ? [
-          {
-            ...toSession(row),
-            state: row.state,
-            name: row.name,
-            parentId: row.parent_id,
-            location: locations.get(row.parent_id) ?? '',
-            sizeBytes: row.size_bytes,
-            mimeType: row.mime_type,
-            receivedBytes: row.received_bytes,
-            expiresAt: new Date(row.expires_at).toISOString(),
-          },
-        ]
-      : [],
-  )
 }
 
 /**
@@ -757,12 +698,7 @@ async function findUpload(
   return upload
 }
 
-type SessionColumns = Pick<
-  UploadRow,
-  'id' | 'node_id' | 'version_id' | 'version_no' | 'chunk_size' | 'chunk_count'
->
-
-function toSession(upload: SessionColumns): UploadSession {
+function toSession(upload: UploadRow): UploadSession {
   return {
     uploadId: upload.id,
     nodeId: upload.node_id,

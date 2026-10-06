@@ -254,27 +254,6 @@ export const uploadStatusSchema = uploadSessionSchema.extend({
 export type UploadSessionStatus = z.infer<typeof uploadStatusSchema>
 
 /**
- * `GET /uploads`: what a closed or reloaded page left behind, oldest first.
- * Uploads still receiving, partway or not started, which a page can continue
- * with the same file; and completed ones whose file is still on its way to
- * Discord.
- */
-export const unfinishedUploadSchema = uploadSessionSchema.extend({
-  state: z.enum(['receiving', 'completed']),
-  name: z.string(),
-  parentId: id,
-  /** The folder it goes into, as a path: "My Drive / Photos". */
-  location: z.string(),
-  sizeBytes: byteCount,
-  mimeType: z.string().nullable(),
-  receivedBytes: byteCount,
-  /** When a receiving upload is given up. */
-  expiresAt: timestamp,
-})
-export type UnfinishedUpload = z.infer<typeof unfinishedUploadSchema>
-export const unfinishedUploadListSchema = z.array(unfinishedUploadSchema)
-
-/**
  * `POST /uploads/:id/complete`, optionally with every part's SHA-256 as the
  * client read it: a streamed upload (`PUT /uploads/:id/content`) is checked
  * here, and parts that differ are dropped to be sent again.

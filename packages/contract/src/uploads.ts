@@ -2,7 +2,6 @@ import {
   nodePageSchema,
   nodeSchema,
   sessionSchema,
-  unfinishedUploadListSchema,
   uploadBatchResultSchema,
   uploadStatusSchema,
 } from '@dfs/shared'
@@ -20,15 +19,7 @@ import {
 } from './files.ts'
 
 /** Multipart uploads and versions (DESIGN.md §6.1, D20, D24). */
-export function uploadTests({
-  describe,
-  it,
-  expect,
-  owner,
-  newUser,
-  activated,
-  target,
-}: SuiteContext): void {
+export function uploadTests({ describe, it, expect, owner, target }: SuiteContext): void {
   describe('uploads (§6.1)', () => {
     it('uploads a small file in one request; it syncs and counts toward its folder', async () => {
       const client = await owner()
@@ -87,42 +78,6 @@ export function uploadTests({
       expect(done).toMatchObject({ state: 'completed', receivedParts: [0, 1, 2] })
       const file = await client.call('GET', `/nodes/${session.nodeId}`, nodeSchema)
       expect(file.sizeBytes).toBe(bytes.length)
-    })
-
-    it('lists what a closed page left: partway, not started, but not stored (§6.1)', async () => {
-      const client = await owner()
-      const root = await workspace(client)
-      const notStarted = await startUpload(client, root.id, 'not-started.bin', 1)
-      const bytes = new Uint8Array(notStarted.chunkSize * 2 + 1000).map((_, i) => i % 251)
-      const partway = await startUpload(client, root.id, 'partway.bin', bytes.length)
-      await sendPart(client, partway, 0, bytes)
-      const stored = await uploadFile(client, root.id, 'stored.txt', text('stored'))
-      await target().settle()
-      const cancelled = await startUpload(client, root.id, 'cancelled.bin', 10)
-      await client.send('DELETE', `/uploads/${cancelled.uploadId}`)
-
-      const listed = await client.call('GET', '/uploads', unfinishedUploadListSchema)
-      expect(listed.find((upload) => upload.uploadId === partway.uploadId)).toMatchObject({
-        state: 'receiving',
-        nodeId: partway.nodeId,
-        name: 'partway.bin',
-        parentId: root.id,
-        sizeBytes: bytes.length,
-        receivedBytes: partway.chunkSize,
-        chunkCount: 3,
-      })
-      expect(listed.find((upload) => upload.uploadId === notStarted.uploadId)).toMatchObject({
-        state: 'receiving',
-        receivedBytes: 0,
-      })
-      const ids = listed.map((upload) => upload.uploadId)
-      expect(ids).not.toContain(stored.uploadId)
-      expect(ids).not.toContain(cancelled.uploadId)
-
-      // Another user's uploads are theirs alone.
-      const { username, temporaryPassword } = await newUser(client)
-      const other = await activated(username, temporaryPassword)
-      expect(await other.call('GET', '/uploads', unfinishedUploadListSchema)).toEqual([])
     })
 
     it('takes a large file streamed in one request, and checks every part at completion', async () => {

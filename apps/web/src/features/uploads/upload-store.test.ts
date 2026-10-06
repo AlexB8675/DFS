@@ -12,7 +12,6 @@ function item(
     id: crypto.randomUUID(),
     file: new File([new Uint8Array(size)], 'file.bin'),
     parentId: 'folder',
-    location: null,
     status,
     uploadedBytes,
     nodeId: null,

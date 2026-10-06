@@ -1,10 +1,9 @@
-import { useEffect, useState, type CSSProperties } from 'react'
+import { useState, type CSSProperties } from 'react'
 import { Outlet } from 'react-router'
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet'
 import { DragLayer } from '@/features/drag/drag-layer'
 import { DriveDialogs } from '@/features/drive/dialogs/drive-dialogs'
 import { useLiveEvents } from '@/features/live-events/use-live-events'
-import { uploadEngine } from '@/features/uploads/upload-engine'
 import { UploadPanel } from '@/features/uploads/upload-panel'
 import { usePreferences } from '@/lib/preferences'
 import { Header } from './header'
@@ -16,10 +15,6 @@ export function AppShell() {
   const sidebarWidth = usePreferences((state) => state.sidebarWidth)
   const [navigationOpen, setNavigationOpen] = useState(false)
   useLiveEvents()
-  // What a closed or reloaded page left: partway uploads, and files still syncing (§6.1).
-  useEffect(() => {
-    uploadEngine.restore().catch(() => undefined)
-  }, [])
 
   const closeNavigation = () => {
     setNavigationOpen(false)

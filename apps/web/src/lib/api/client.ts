@@ -49,11 +49,13 @@ interface RequestOptions {
   body?: BodyInit
   headers?: Record<string, string>
   signal?: AbortSignal
+  /** The request outlives the page that sends it (a small body only). */
+  keepalive?: boolean
 }
 
 /** Sends a request to `/api{path}` and throws an `ApiError` unless it succeeds. */
 export async function apiFetch(path: string, options: RequestOptions = {}): Promise<Response> {
-  const { method = 'GET', query, json, body, signal } = options
+  const { method = 'GET', query, json, body, signal, keepalive } = options
   const headers = new Headers(options.headers)
   headers.set('Accept', 'application/json')
   if (method !== 'GET' && csrfToken) headers.set('X-CSRF-Token', csrfToken)
@@ -64,7 +66,13 @@ export async function apiFetch(path: string, options: RequestOptions = {}): Prom
     payload = JSON.stringify(json)
   }
 
-  const response = await fetch(buildUrl(path, query), { method, headers, body: payload, signal })
+  const response = await fetch(buildUrl(path, query), {
+    method,
+    headers,
+    body: payload,
+    signal,
+    keepalive,
+  })
   if (!response.ok) throw await toApiError(response)
   return response
 }

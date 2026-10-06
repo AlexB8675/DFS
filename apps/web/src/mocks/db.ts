@@ -27,7 +27,6 @@ import {
   type StorageChannel,
   type TrashItem,
   type UpdateShareInput,
-  type UnfinishedUpload,
   type UploadBatchResult,
   type UploadSession,
   type UploadSessionStatus,
@@ -153,8 +152,6 @@ export const CHUNK_SIZE = 10 * 1024 * 1024 - 128 * 1024
 const CSRF_TOKEN = 'mock-csrf-token'
 /** Archive links from `POST /archive` work once, for a minute (§9). */
 const ARCHIVE_TICKET_MS = 60_000
-/** Upload sessions are given up a day after they start (§6.1). */
-const UPLOAD_LIFETIME_MS = 24 * 60 * 60_000
 /** `VERSION_RETENTION` (§15): previous versions kept after a new one completes. */
 const VERSION_RETENTION = 3
 
@@ -676,41 +673,6 @@ export class MockDb {
         .map(Number)
         .toSorted((a, b) => a - b),
     }
-  }
-
-  /**
-   * `GET /uploads`: what a closed or reloaded page left behind, oldest first.
-   * Uploads still receiving, and completed ones still syncing to Discord.
-   */
-  unfinishedUploads(): UnfinishedUpload[] {
-    const now = Date.now()
-    return Object.values(this.state.uploads)
-      .flatMap((upload): UnfinishedUpload[] => {
-        const node = this.state.nodes[upload.nodeId]
-        if (node?.ownerId !== this.state.userId || !isVisible(node) || !node.parentId) return []
-        const expiresAt = Date.parse(node.createdAt) + UPLOAD_LIFETIME_MS
-        const syncing = upload.state === 'completed' && node.syncState === 'syncing'
-        if (expiresAt <= now || (upload.state !== 'receiving' && !syncing)) return []
-        const receivedBytes = Object.keys(upload.receivedParts).reduce(
-          (total, index) =>
-            total + Math.min(upload.chunkSize, upload.sizeBytes - Number(index) * upload.chunkSize),
-          0,
-        )
-        return [
-          {
-            ...this.uploadSession(upload),
-            state: upload.state,
-            name: node.name,
-            parentId: node.parentId,
-            location: this.location(node),
-            sizeBytes: upload.sizeBytes,
-            mimeType: upload.mimeType,
-            receivedBytes,
-            expiresAt: new Date(expiresAt).toISOString(),
-          },
-        ]
-      })
-      .toSorted((a, b) => a.expiresAt.localeCompare(b.expiresAt))
   }
 
   /**

@@ -2,24 +2,14 @@ import type { SyncState } from '@dfs/shared'
 import { create } from 'zustand'
 import { createStore, type StoreApi } from 'zustand/vanilla'
 
-/**
- * `interrupted`: a closed or reloaded page left it partway; it continues once
- * its file is chosen again (§6.1).
- */
-export type UploadStatus =
-  'queued' | 'uploading' | 'paused' | 'interrupted' | 'done' | 'failed' | 'canceled'
-
-/** What the panel shows of a file: one picked here, or one a closed page left on the server. */
-export type FileInfo = Pick<File, 'name' | 'size' | 'type'>
+export type UploadStatus = 'queued' | 'uploading' | 'paused' | 'done' | 'failed' | 'canceled'
 
 /** One file in the upload panel. The upload engine owns the real state and publishes it here. */
 export interface UploadItem {
   id: string
-  file: FileInfo
+  file: File
   /** Folder the file is uploaded into. */
   parentId: string
-  /** That folder as a path, for uploads a closed page left; `null` for files picked here. */
-  location: string | null
   status: UploadStatus
   uploadedBytes: number
   /** The file's node, once the server created its upload session. */
@@ -48,15 +38,12 @@ interface UploadState {
   /** Whether the panel shows; closed, the header's button brings it back. */
   open: boolean
   collapsed: boolean
-  /** Uploads a closed page left before they started: sessions without a byte. */
-  notStarted: number
   add: (items: UploadItem[]) => void
   /** Applies a batch of changes from the engine in one render. */
   apply: (changes: ReadonlyMap<string, Partial<UploadItem>>, bytesPerSecond: number) => void
   remove: (ids: ReadonlySet<string>) => void
   setOpen: (open: boolean) => void
   setCollapsed: (collapsed: boolean) => void
-  setNotStarted: (count: number) => void
 }
 
 /** Progress costs O(changed uploads), independent of the size of the queue. */
@@ -67,7 +54,6 @@ export function createUploadStore() {
     uploadedBytes: 0,
     active: 0,
     paused: 0,
-    interrupted: 0,
     done: 0,
     syncing: 0,
     failed: 0,
@@ -77,7 +63,6 @@ export function createUploadStore() {
     total: entries.size,
     active: totals.active,
     paused: totals.paused,
-    interrupted: totals.interrupted,
     done: totals.done,
     syncing: totals.syncing,
     failed: totals.failed,
@@ -95,7 +80,6 @@ export function createUploadStore() {
     bytesPerSecond: 0,
     open: false,
     collapsed: false,
-    notStarted: 0,
     add: (items) => {
       const added: UploadEntry[] = []
       for (const item of items) {
@@ -154,9 +138,6 @@ export function createUploadStore() {
     setCollapsed: (collapsed) => {
       set({ collapsed })
     },
-    setNotStarted: (count) => {
-      set((state) => ({ notStarted: count, open: count > state.notStarted || state.open }))
-    },
   }))
 }
 
@@ -167,7 +148,6 @@ interface UploadTotals {
   uploadedBytes: number
   active: number
   paused: number
-  interrupted: number
   done: number
   syncing: number
   failed: number
@@ -176,11 +156,6 @@ interface UploadTotals {
 
 function adjust(totals: UploadTotals, item: UploadItem, direction: 1 | -1): void {
   if (item.status === 'canceled') return
-  // Not under way until their files are chosen again, so not in the progress.
-  if (item.status === 'interrupted') {
-    totals.interrupted += direction
-    return
-  }
   totals.totalBytes += direction * item.file.size
   totals.uploadedBytes += direction * item.uploadedBytes
   if (isActive(item.status)) totals.active += direction
@@ -213,8 +188,6 @@ export interface UploadSummary {
   total: number
   active: number
   paused: number
-  /** Left partway by a closed page, waiting for their files (not in the progress). */
-  interrupted: number
   done: number
   /** Uploaded, still on their way to Discord. */
   syncing: number
@@ -230,17 +203,12 @@ export function summarize(items: readonly UploadItem[]): UploadSummary {
   let uploadedBytes = 0
   let active = 0
   let paused = 0
-  let interrupted = 0
   let done = 0
   let syncing = 0
   let failed = 0
   let remainingBytes = 0
   for (const item of items) {
     if (item.status === 'canceled') continue
-    if (item.status === 'interrupted') {
-      interrupted += 1
-      continue
-    }
     totalBytes += item.file.size
     uploadedBytes += item.uploadedBytes
     if (isActive(item.status)) active += 1
@@ -258,7 +226,6 @@ export function summarize(items: readonly UploadItem[]): UploadSummary {
     total: items.length,
     active,
     paused,
-    interrupted,
     done,
     syncing,
     failed,
