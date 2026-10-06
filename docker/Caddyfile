@@ -28,11 +28,12 @@
 		root * /srv
 		encode zstd gzip
 		# Built assets carry their hash in their name; the app itself is
-		# checked again each time, so a new version shows at once.
+		# never stored, so even a page restored from the browser's history
+		# loads the version deployed now.
 		@assets path /assets/*
 		header @assets Cache-Control "public, max-age=31536000, immutable"
 		@app not path /assets/*
-		header @app Cache-Control "no-cache"
+		header @app Cache-Control "no-store"
 		try_files {path} /index.html
 		file_server
 	}

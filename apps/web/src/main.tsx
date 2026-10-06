@@ -4,6 +4,7 @@ import { App } from '@/app/app'
 import { createAppRouter } from '@/app/router'
 import { followHistoryDirection } from '@/lib/navigation'
 import { initTheme } from '@/lib/theme'
+import { watchForNewVersion } from '@/lib/version-check'
 import { enableMocking } from '@/mocks/enable'
 import './index.css'
 
@@ -23,3 +24,6 @@ createRoot(root).render(
     <App router={router} />
   </StrictMode>,
 )
+
+// A page older than the deployed app reloads, or offers to.
+if (import.meta.env.PROD) watchForNewVersion()
