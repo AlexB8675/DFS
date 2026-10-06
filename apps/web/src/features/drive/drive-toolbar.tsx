@@ -44,7 +44,9 @@ export function DriveToolbar({ title, nodes, sortable = true }: DriveToolbarProp
 
 function SelectionActions({ targets }: { targets: DriveNode[] }) {
   const clear = useSelection((state) => state.clear)
-  const actions = useNodeMenu(targets, null).filter((action) => action.key !== 'open')
+  const actions = useNodeMenu(targets, null).filter(
+    (action) => action.key !== 'open' && !action.menuOnly,
+  )
 
   return (
     <div className="flex animate-in items-center gap-1 duration-150 ease-smooth fade-in-0">

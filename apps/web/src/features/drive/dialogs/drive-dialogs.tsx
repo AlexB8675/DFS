@@ -16,6 +16,8 @@ export function DriveDialogs() {
       return <RenameDialog node={dialog.node} onClose={close} />
     case 'move':
       return <MoveDialog nodes={dialog.nodes} onClose={close} />
+    case 'copy':
+      return <MoveDialog nodes={dialog.nodes} copy onClose={close} />
     case 'share':
       return <ShareDialog node={dialog.node} onClose={close} />
     case undefined:

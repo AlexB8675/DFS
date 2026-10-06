@@ -20,6 +20,8 @@ describe('formatDate', () => {
 
   it('uses relative wording for the last hour', () => {
     expect(formatDate(new Date(2026, 9, 3, 15, 29, 45).toISOString(), now)).toBe('Just now')
+    // Stamped by a server whose clock runs a little ahead.
+    expect(formatDate(new Date(2026, 9, 3, 15, 30, 2).toISOString(), now)).toBe('Just now')
     expect(formatDate(new Date(2026, 9, 3, 15, 18).toISOString(), now)).toBe('12 minutes ago')
   })
 

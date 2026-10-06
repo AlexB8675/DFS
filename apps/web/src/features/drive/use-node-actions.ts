@@ -3,15 +3,20 @@ import { toast } from 'sonner'
 import { useCurrentUser } from '@/features/auth/session'
 import { pickFiles } from '@/features/uploads/picked-files'
 import { enqueueUploads } from '@/features/uploads/upload-engine'
+import { queryClient } from '@/app/query-client'
 import { errorMessage } from '@/lib/api/client'
+import { formatCount } from '@/lib/format'
 import { useTransitionNavigate } from '@/lib/navigation'
 import {
   downloadNodes,
   isArchiveDownload,
+  nodeKeys,
+  useCopyNodes,
   useMoveNodes,
   useRestoreNodes,
   useTrashNodes,
 } from './api'
+import { useClipboard } from './clipboard'
 import { useDialogStore } from './dialogs/dialog-store'
 import { animateOut } from './list-motion'
 
@@ -32,8 +37,20 @@ export function useNodeActions() {
   const { rootFolderId } = useCurrentUser()
   const openDialog = useDialogStore((state) => state.open)
   const moveNodes = useMoveNodes()
+  const copyNodes = useCopyNodes()
   const trashNodes = useTrashNodes()
   const restoreNodes = useRestoreNodes()
+  const putAside = useClipboard((state) => state.put)
+  const clearClipboard = useClipboard((state) => state.clear)
+
+  /** A folder to paste into, named for the confirmation: as given, or as far as the cache knows it. */
+  function folderTarget(folderId: string, name?: string): MoveTarget {
+    if (name) return { id: folderId, name }
+    if (folderId === rootFolderId) return { id: folderId, name: 'My Drive' }
+    const node = queryClient.getQueryData<DriveNode>(nodeKeys.node(folderId))
+    const path = queryClient.getQueryData<{ id: string; name: string }[]>(nodeKeys.path(folderId))
+    return { id: folderId, name: node?.name ?? path?.at(-1)?.name ?? 'this folder' }
+  }
 
   async function download(nodes: DriveNode[]) {
     if (!isArchiveDownload(nodes)) {
@@ -97,6 +114,47 @@ export function useNodeActions() {
     }
   }
 
+  /** Copies into a folder (D31); `made` words the confirmation. */
+  async function copyInto(
+    nodes: DriveNode[],
+    target: MoveTarget,
+    made = `Copied ${subject(nodes)} to “${target.name}”`,
+  ) {
+    try {
+      const { items, skipped } = await copyNodes.mutateAsync({ nodes, parentId: target.id })
+      const leftOut =
+        skipped > 0
+          ? `${formatCount(skipped, 'file')} couldn’t be read and ${skipped === 1 ? 'was' : 'were'} left out.`
+          : undefined
+      if (items.length === 0) toast.error('Nothing was copied', { description: leftOut })
+      else toast.success(made, { description: leftOut })
+    } catch (error) {
+      toast.error('Could not copy', { description: errorMessage(error) })
+    }
+  }
+
+  /** "Make a copy": each item copied into its own folder, as `name (1)`. */
+  async function duplicate(nodes: DriveNode[]) {
+    const byParent = Map.groupBy(nodes, (node) => node.parentId)
+    for (const [parentId, group] of byParent) {
+      if (!parentId) continue
+      await copyInto(group, { id: parentId, name: '' }, `Made a copy of ${subject(group)}`)
+    }
+  }
+
+  /** Pastes what Cut or Copy put aside: a cut moves (once), a copy copies (again and again). */
+  async function paste(folderId: string, name?: string) {
+    const { clipboard } = useClipboard.getState()
+    if (!clipboard) return
+    const target = folderTarget(folderId, name)
+    if (clipboard.mode === 'copy') {
+      await copyInto(clipboard.nodes, target)
+      return
+    }
+    clearClipboard()
+    await moveTo(clipboard.nodes, target)
+  }
+
   async function moveToTrash(nodes: DriveNode[]) {
     const ids = nodes.map((node) => node.id)
     await animateOut(ids)
@@ -138,6 +196,27 @@ export function useNodeActions() {
       openDialog({ type: 'move', nodes })
     },
     moveTo: (nodes: DriveNode[], target: MoveTarget) => void moveTo(nodes, target),
+    copyTo: (nodes: DriveNode[]) => {
+      openDialog({ type: 'copy', nodes })
+    },
+    copyInto: (nodes: DriveNode[], target: MoveTarget) => void copyInto(nodes, target),
+    duplicate: (nodes: DriveNode[]) => void duplicate(nodes),
+    cut: (nodes: DriveNode[]) => {
+      putAside('cut', nodes)
+      toast(
+        `${capitalize(subject(nodes))} cut: paste to move ${nodes.length === 1 ? 'it' : 'them'}`,
+      )
+    },
+    copy: (nodes: DriveNode[]) => {
+      putAside('copy', nodes)
+      toast(`${capitalize(subject(nodes))} copied: paste to make a copy`)
+    },
+    /** Into `folderId`; its `name` for the confirmation, if at hand. */
+    paste: (folderId: string, name?: string) => void paste(folderId, name),
+    /** Forgets a cut, so its items stop looking faded. */
+    cancelCut: () => {
+      if (useClipboard.getState().clipboard?.mode === 'cut') clearClipboard()
+    },
     share: (node: DriveNode) => {
       openDialog({ type: 'share', node })
     },

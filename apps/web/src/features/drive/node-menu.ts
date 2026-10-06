@@ -1,7 +1,11 @@
 import type { DriveNode } from '@dfs/shared'
 import {
+  ClipboardPaste,
+  Copy,
+  CopyPlus,
   Download,
   FileArchive,
+  Files,
   FileUp,
   FolderInput,
   FolderOpen,
@@ -9,11 +13,17 @@ import {
   FolderSearch,
   FolderUp,
   Pencil,
+  Scissors,
   Share2,
   Trash2,
   type LucideIcon,
 } from 'lucide-react'
+import { useClipboard } from './clipboard'
 import { useNodeActions } from './use-node-actions'
+
+/** The modifier shortcuts are shown with: ⌘ on Apple devices, Ctrl elsewhere. */
+const MOD =
+  typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.userAgent) ? '⌘' : 'Ctrl+'
 
 export interface MenuAction {
   key: string
@@ -23,6 +33,8 @@ export interface MenuAction {
   destructive?: boolean
   /** Draws a divider above this action. */
   separated?: boolean
+  /** Left out of the selection toolbar, which has room for the main actions only. */
+  menuOnly?: boolean
   onSelect: () => void
 }
 
@@ -37,9 +49,25 @@ export function useNodeMenu(
   { reveal = false }: { /** Adds "Show in folder", for search results. */ reveal?: boolean } = {},
 ): MenuAction[] {
   const actions = useNodeActions()
+  const clipboard = useClipboard((state) => state.clipboard)
+  const pasteLabel = clipboard?.mode === 'cut' ? 'Paste (move here)' : 'Paste'
 
   if (targets.length === 0) {
     if (!folderId) return []
+    const paste: MenuAction[] = clipboard
+      ? [
+          {
+            key: 'paste',
+            label: pasteLabel,
+            icon: ClipboardPaste,
+            shortcut: `${MOD}V`,
+            separated: true,
+            onSelect: () => {
+              actions.paste(folderId)
+            },
+          },
+        ]
+      : []
     return [
       {
         key: 'new-folder',
@@ -66,6 +94,7 @@ export function useNodeMenu(
           actions.uploadFolder(folderId)
         },
       },
+      ...paste,
     ]
   }
 
@@ -125,10 +154,60 @@ export function useNodeMenu(
   }
   menu.push(
     {
+      key: 'cut',
+      label: 'Cut',
+      icon: Scissors,
+      shortcut: `${MOD}X`,
+      separated: true,
+      menuOnly: true,
+      onSelect: () => {
+        actions.cut(targets)
+      },
+    },
+    {
+      key: 'copy',
+      label: 'Copy',
+      icon: Copy,
+      shortcut: `${MOD}C`,
+      menuOnly: true,
+      onSelect: () => {
+        actions.copy(targets)
+      },
+    },
+  )
+  if (clipboard && single?.kind === 'folder') {
+    menu.push({
+      key: 'paste-into',
+      label: clipboard.mode === 'cut' ? 'Paste into folder (move)' : 'Paste into folder',
+      icon: ClipboardPaste,
+      menuOnly: true,
+      onSelect: () => {
+        actions.paste(single.id, single.name)
+      },
+    })
+  }
+  menu.push(
+    {
+      key: 'duplicate',
+      label: 'Make a copy',
+      icon: CopyPlus,
+      menuOnly: true,
+      onSelect: () => {
+        actions.duplicate(targets)
+      },
+    },
+    {
+      key: 'copy-to',
+      label: 'Copy to…',
+      icon: Files,
+      onSelect: () => {
+        actions.copyTo(targets)
+      },
+    },
+    {
       key: 'move',
       label: 'Move to…',
       icon: FolderInput,
-      separated: !single,
       onSelect: () => {
         actions.move(targets)
       },

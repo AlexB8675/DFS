@@ -61,7 +61,7 @@ export function NodeList({
     folderId,
     { reveal: showLocation },
   )
-  const handleKeyDown = useListKeyboard(nodes, columns, onBack)
+  const handleKeyDown = useListKeyboard(nodes, columns, onBack, folderId)
   const activeIndex = nodes.findIndex((node) => node.id === activeId)
 
   function handleSelect(event: MouseEvent, node: DriveNode) {
@@ -119,7 +119,14 @@ export function NodeList({
             <ListHeader showLocation={showLocation} sortable={sortable} />
           )}
           {nodes.length === 0 ? (
-            empty
+            // Focusable, so an empty folder still takes Ctrl+V and Backspace.
+            <div
+              tabIndex={0}
+              className="flex min-h-0 flex-1 flex-col outline-none"
+              onKeyDown={handleKeyDown}
+            >
+              {empty}
+            </div>
           ) : (
             <VirtualList
               // A new list per view mode, so switching list/grid fades too.
