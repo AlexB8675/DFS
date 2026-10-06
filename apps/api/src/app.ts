@@ -9,6 +9,7 @@ import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod
 import type pg from 'pg'
 import { registerAccess } from './auth/access.ts'
 import { RateLimiter } from './auth/rate-limit.ts'
+import { Checks } from './checks.ts'
 import { CdnBlobReader } from './content/cdn-reader.ts'
 import { FrameCache, MemoryBudget } from './content/frame-cache.ts'
 import { registerErrorHandling } from './errors.ts'
@@ -50,6 +51,8 @@ declare module 'fastify' {
     readBudget: MemoryBudget | null
     /** What this instance does, for the admin's graphs (§16). */
     metrics: Metrics
+    /** How Discord and the internet answer; `main.ts` starts them once listening (§16). */
+    checks: Checks
   }
 }
 
@@ -148,11 +151,14 @@ export async function buildApp({
   app.decorate('frameCache', frameCache)
   if (frameCache) metrics.gauge('cache.bytes', () => frameCache.bytes)
   app.decorate('readBudget', new MemoryBudget(READ_AHEAD_BYTES))
+  const checks = new Checks(metrics)
+  app.decorate('checks', checks)
   const savingMetrics = metrics.start(db, app.log)
-  // Open event streams would keep the server from closing.
-  app.addHook('preClose', (done) => {
+  // Open event streams would keep the server from closing; a check of
+  // itself would find it closing.
+  app.addHook('preClose', async () => {
     events.endStreams()
-    done()
+    await checks.stop()
   })
   app.addHook('onClose', async () => {
     await events.stop()
@@ -166,13 +172,15 @@ export async function buildApp({
   })
   app.addHook('onResponse', (request, reply, done) => {
     const route = request.routeOptions.url
-    // Container health checks would drown out what people do.
+    // Health checks, the container's and the API's own, aren't counted: they
+    // would drown out what people do. They are timed, so there is always an
+    // answer to time (§16).
     if (route !== '/api/health') {
       metrics.record('http.requests')
       if (reply.statusCode >= 500) metrics.record('http.server_errors')
       else if (reply.statusCode >= 400) metrics.record('http.client_errors')
-      if (!UNTIMED_ROUTES.has(route ?? '')) metrics.time('http.ms', reply.elapsedTime)
     }
+    if (!UNTIMED_ROUTES.has(route ?? '')) metrics.time('http.ms', reply.elapsedTime)
     done()
   })
 

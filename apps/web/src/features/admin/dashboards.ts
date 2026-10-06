@@ -2,8 +2,8 @@ import type { ChartSpec } from './metrics'
 
 // What the admin's graphs show (§16). A thing keeps its colour on every
 // graph: what browsers send is 1, what reaches Discord 2, what browsers get
-// back 3; the API is 1 and the bot 2. Lines that mean trouble wear status
-// colours, never next to series colours.
+// back 3; the API is 1 and the bot 2; next to Discord, the internet is 1.
+// Lines that mean trouble wear status colours, never next to series colours.
 
 const throughput: ChartSpec = {
   title: 'Throughput',
@@ -161,7 +161,8 @@ export const MONITORING_SECTIONS: DashboardSection[] = [
       },
       {
         title: 'Response time',
-        description: 'How long answers take; downloads and uploads aren’t timed.',
+        description:
+          'How long answers take, with the API’s own check every 10 s; downloads and uploads aren’t timed.',
         format: 'ms',
         lines: [
           { label: 'Median', color: 1, series: 'http.ms:p50' },
@@ -184,6 +185,31 @@ export const MONITORING_SECTIONS: DashboardSection[] = [
         description: 'Browsers listening for changes.',
         format: 'count',
         lines: [{ label: 'Open event streams', color: 1, series: 'events.streams:avg' }],
+      },
+    ],
+  },
+  {
+    title: 'Network',
+    description:
+      'How quickly Discord and the internet answer the API, which checks them every 10 s.',
+    charts: [
+      {
+        title: 'Answer time',
+        description: 'The median check: a new connection, then a request answered.',
+        format: 'ms',
+        lines: [
+          { label: 'Discord', color: 2, series: 'check.discord.ms:p50' },
+          { label: 'Internet', color: 1, series: 'check.internet.ms:p50' },
+        ],
+      },
+      {
+        title: 'Failed checks',
+        description: 'Per minute: checks with no answer in 5 s, or a server error.',
+        format: 'perMinute',
+        lines: [
+          { label: 'Discord', color: 'critical', series: 'check.discord.failures:rate' },
+          { label: 'Internet', color: 'serious', series: 'check.internet.failures:rate' },
+        ],
       },
     ],
   },

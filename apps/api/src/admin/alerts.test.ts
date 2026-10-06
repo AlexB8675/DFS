@@ -12,6 +12,7 @@ const calm: AlertFigures = {
   failingDeletions: 0,
   database: { connections: 12, maxConnections: 100, oldestTransactionSeconds: 2, longLockWaits: 0 },
   lastHour: { rateLimited: 3, serverErrors: 0, cdnFailures: 0, postFailures: 0, deadlocks: 0 },
+  network: { discordDown: false, internetDown: false },
 }
 
 describe('health alerts (DESIGN.md §16)', () => {
@@ -83,6 +84,18 @@ describe('health alerts (DESIGN.md §16)', () => {
       database: { ...calm.database, connections: 96 },
     })
     expect(alert).toMatchObject({ code: 'db_connections', level: 'critical' })
+  })
+
+  it('says when Discord doesn’t answer, and when the whole server is cut off, once', () => {
+    const raised = (discordDown: boolean, internetDown: boolean) =>
+      healthAlerts({ ...calm, network: { discordDown, internetDown } }).map((alert) => [
+        alert.code,
+        alert.level,
+      ])
+    expect(raised(true, false)).toEqual([['discord_unreachable', 'critical']])
+    expect(raised(true, true)).toEqual([['offline', 'critical']])
+    // DFS works on while only the internet check fails: the overview's dot says so.
+    expect(raised(false, true)).toEqual([])
   })
 
   it('makes a nearly full staging critical', () => {

@@ -14,6 +14,7 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { audit } from '../audit.ts'
 import type { Auth } from '../auth/sessions.ts'
+import { reach } from '../checks.ts'
 import { isUniqueViolation } from '../db-errors.ts'
 import { ApiError } from '../errors.ts'
 import { FAILING_DELETE_ATTEMPTS, healthAlerts } from './alerts.ts'
@@ -132,6 +133,13 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
   const local = app.config.blobStore !== 'discord'
   const latest = recent.rows[0]
   const cacheReads = (latest?.hits ?? 0) + (latest?.misses ?? 0)
+  const discordCheck = app.checks.reading('discord')
+  const internetCheck = app.checks.reading('internet')
+  const discord = reach(discordCheck)
+  const lost =
+    figures.lostBlobs > 0
+      ? `${String(figures.lostBlobs)} lost ${figures.lostBlobs === 1 ? 'blob' : 'blobs'}`
+      : null
   return {
     checkedAt: new Date().toISOString(),
     alerts: healthAlerts({
@@ -156,6 +164,10 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
         postFailures: latest?.post_failures ?? 0,
         deadlocks: latest?.deadlocks ?? 0,
       },
+      network: {
+        discordDown: !local && discordCheck.down,
+        internetDown: internetCheck.down,
+      },
     }),
     services: [
       { name: 'API', status: 'ok', detail: `up ${uptime()}` },
@@ -165,16 +177,14 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
         status: 'ok',
         detail: `PostgreSQL · ${formatBytes(figures.databaseBytes)}`,
       },
-      {
-        name: local ? 'Blob store' : 'Discord',
-        status: figures.lostBlobs > 0 ? 'degraded' : 'ok',
-        detail:
-          figures.lostBlobs > 0
-            ? `${String(figures.lostBlobs)} lost ${figures.lostBlobs === 1 ? 'blob' : 'blobs'}`
-            : local
-              ? 'Local files'
-              : 'Connected',
-      },
+      local
+        ? { name: 'Blob store', status: lost ? 'degraded' : 'ok', detail: lost ?? 'Local files' }
+        : {
+            name: 'Discord',
+            status: lost && discord.status === 'ok' ? 'degraded' : discord.status,
+            detail: lost ? `${lost} · ${discord.detail}` : discord.detail,
+          },
+      { name: 'Internet', ...reach(internetCheck) },
     ],
     queue: {
       pendingJobs: figures.pendingJobs,

@@ -307,14 +307,15 @@ export class AdminMockDb extends MockDb {
         { name: 'API', status: 'ok', detail: 'v0.5 · up 3 days' },
         { name: 'Bot', status: 'ok', detail: `Gateway ${Math.round(jitter(38, 95))} ms` },
         { name: 'Database', status: 'ok', detail: 'PostgreSQL 18 · 2.3 GB' },
+        // As the API's checks see them (§16): the median answer of the last minute.
         {
           name: 'Discord',
           status: lost.length > 0 ? 'degraded' : 'ok',
           detail:
-            lost.length > 0
-              ? `${lost.length} lost blob${lost.length === 1 ? '' : 's'}`
-              : 'All blobs reachable',
+            (lost.length > 0 ? `${lost.length} lost blob${lost.length === 1 ? '' : 's'} · ` : '') +
+            `${Math.round(jitter(80, 120))} ms`,
         },
+        { name: 'Internet', status: 'ok', detail: `${Math.round(jitter(10, 20))} ms` },
       ],
       queue: {
         pendingJobs: syncing.length,

@@ -50,14 +50,39 @@ export interface AlertFigures {
     postFailures: number
     deadlocks: number
   }
+  /**
+   * The API's checks (§16): down once its last three got no answer. Discord
+   * is never down with a local blob store, which doesn't need it.
+   */
+  network: { discordDown: boolean; internetDown: boolean }
 }
 
 export const FAILING_DELETE_ATTEMPTS = LIMITS.deleteAttempts
 
 export function healthAlerts(figures: AlertFigures): SystemAlert[] {
   const alerts: SystemAlert[] = []
-  const { bot, lastHour, database } = figures
+  const { bot, lastHour, database, network } = figures
 
+  // Discord and the internet both silent is the server's network: one alert.
+  if (network.discordDown) {
+    alerts.push(
+      network.internetDown
+        ? {
+            code: 'offline',
+            level: 'critical',
+            title: 'The server can’t reach the internet',
+            detail:
+              'Neither Discord nor the internet answers the API’s checks: nothing reaches Discord, and files that aren’t cached can’t be read.',
+          }
+        : {
+            code: 'discord_unreachable',
+            level: 'critical',
+            title: 'Discord isn’t answering',
+            detail:
+              'The API’s checks get no answer: nothing reaches Discord, and files that aren’t cached can’t be read, until it does.',
+          },
+    )
+  }
   if (bot.status === 'down') {
     alerts.push({
       code: 'bot_down',

@@ -8,12 +8,17 @@ const healthSchema = z.object({
   database: z.enum(['ok', 'unreachable']),
 })
 
-/** `GET /api/health`: the API is up, and whether it can reach Postgres. */
+/**
+ * `GET /api/health`: the API is up, and whether it can reach Postgres. Asked
+ * every few seconds, by the container and by the API itself (§16), so only
+ * trouble is logged.
+ */
 export function healthRoutes(app: FastifyInstance, _options: object, done: () => void): void {
   app.withTypeProvider<ZodTypeProvider>().get(
     '/health',
     {
       config: { access: 'public' },
+      logLevel: 'warn',
       schema: { response: { 200: healthSchema, 503: healthSchema } },
     },
     async (request, reply) => {

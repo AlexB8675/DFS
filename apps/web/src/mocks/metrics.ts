@@ -32,6 +32,8 @@ const LEVELS: Partial<Record<MetricName, number>> = {
   'events.streams': 6,
   'auth.sign_ins': 0.004,
   'auth.failed_sign_ins': 0.001,
+  'check.discord.failures': 0.002,
+  'check.internet.failures': 0.001,
   'api.rss': 210 * MB,
   'api.heap': 96 * MB,
   'api.cpu': 0.12,
@@ -55,6 +57,13 @@ const LEVELS: Partial<Record<MetricName, number>> = {
   'queue.pending': 4,
   'db.bytes': 2.3 * GB,
   'sessions.count': 9,
+}
+
+/** A typical median per timing, in milliseconds: the API's answers, and its checks. */
+const MEDIANS: Partial<Record<MetricName, number>> = {
+  'http.ms': 9,
+  'check.discord.ms': 95,
+  'check.internet.ms': 14,
 }
 
 /** Average amount per event, for reading counters as `events`. */
@@ -119,7 +128,7 @@ function value(
   const wobble = 0.75 + 0.5 * noise(seed)
 
   if (info.kind === 'timing') {
-    const median = 9 * wobble
+    const median = (MEDIANS[name] ?? 9) * wobble
     switch (reading) {
       case 'p50':
         return median

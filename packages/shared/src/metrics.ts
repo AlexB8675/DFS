@@ -9,7 +9,9 @@ import { z } from 'zod'
  *   the amounts (`rate`) or of the events (`events`).
  * - `gauge`: a level, sampled now and then: read as its average or peak.
  * - `timing`: durations in milliseconds, also counted in fixed buckets, so
- *   percentiles can be read over any range and across processes.
+ *   percentiles can be read over any range and across processes. A bucket
+ *   with nothing timed has no data: what must always have a figure is timed
+ *   on a schedule, as the API's checks are.
  */
 export type MetricKind = 'counter' | 'gauge' | 'timing'
 export type MetricUnit = 'bytes' | 'count' | 'ms' | 'ratio'
@@ -42,8 +44,18 @@ export const METRICS = {
   'http.requests': byApi('counter', 'count', 'Requests'),
   'http.client_errors': byApi('counter', 'count', 'Refused requests (4xx)'),
   'http.server_errors': byApi('counter', 'count', 'Failed requests (5xx)'),
-  /** Requests that answer at once; downloads, uploaded parts and event streams aren't timed. */
+  /**
+   * Requests that answer at once, health checks included: the API checks
+   * itself every 10 s, so there is always one. Downloads, uploaded parts and
+   * event streams aren't timed.
+   */
   'http.ms': byApi('timing', 'ms', 'Response time'),
+  /** The API's checks every 10 s (`apps/api/src/checks.ts`): a request on a new connection. */
+  'check.discord.ms': byApi('timing', 'ms', 'Discord’s answer time'),
+  'check.internet.ms': byApi('timing', 'ms', 'The internet’s answer time'),
+  /** Checks with no answer in 5 s, or a server error. */
+  'check.discord.failures': byApi('counter', 'count', 'Failed checks of Discord'),
+  'check.internet.failures': byApi('counter', 'count', 'Failed checks of the internet'),
   'downloads.bytes': byApi('counter', 'bytes', 'Sent to browsers'),
   'uploads.bytes': byApi('counter', 'bytes', 'Received from browsers'),
   'cache.hits': byApi('counter', 'count', 'Frame cache hits'),

@@ -28,7 +28,10 @@ describe('API with a database', () => {
     expect(response.headers['x-request-id']).toMatch(/^[0-9a-f-]{36}$/)
   })
 
-  it('counts and times what it answers, leaving health checks out (§16)', async () => {
+  it('counts and times what it answers; health checks are timed, not counted (§16)', async () => {
+    // Only what this test asks.
+    await app.metrics.flush(app.db)
+    await app.db.execute(sql`DELETE FROM metrics`)
     await app.inject({ method: 'GET', url: '/api/health' })
     expect((await app.inject({ method: 'GET', url: '/api/auth/me' })).statusCode).toBe(401)
     await app.metrics.flush(app.db)
@@ -38,7 +41,7 @@ describe('API with a database', () => {
     const recorded = new Map(rows.map((row) => [row.name, row]))
     expect(recorded.get('http.requests')?.sum).toBe(1)
     expect(recorded.get('http.client_errors')?.sum).toBe(1)
-    expect(recorded.get('http.ms')?.count).toBe(1)
+    expect(recorded.get('http.ms')?.count).toBe(2)
     expect(recorded.get('api.rss')?.sum).toBeGreaterThan(0)
   })
 })

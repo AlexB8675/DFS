@@ -112,7 +112,8 @@ services:
     volumes:
       - staging:/data/staging
       - cache:/data/cache
-    # The CDN, out, for reading files back; Caddy, in, over the internal network.
+    # Discord, out: its CDN, for reading files back, and its API with the
+    # internet, for the checks (§16). Caddy, in, over the internal network.
     networks: [internal, egress]
     depends_on:
       migrate:

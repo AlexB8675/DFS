@@ -1,6 +1,6 @@
 import { sessions, users } from '@dfs/db'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
-import { eq } from 'drizzle-orm'
+import { eq, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest'
 import { buildApp } from '../app.ts'
@@ -60,6 +60,17 @@ function heldVerification() {
   return { entered: entered.promise, release: result.resolve }
 }
 
+/**
+ * How long an account stays locked, by the database's clock, which set the
+ * lock: Docker's on a developer machine may run a little ahead of this one.
+ */
+async function lockedFor(id: string): Promise<number> {
+  const { rows } = await app.db.execute<{ ms: number }>(sql`
+    SELECT (extract(epoch FROM sign_in_locked_until - now()) * 1000)::float8 AS ms
+    FROM users WHERE id = ${id}`)
+  return rows[0]?.ms ?? 0
+}
+
 /** Where the test's sessions come from. */
 const client = { ip: 'address', userAgent: undefined }
 
@@ -94,7 +105,7 @@ describe('sign-in races', () => {
 
     const [current] = await app.db.select().from(users).where(eq(users.id, user.id))
     expect(current?.failedSignIns).toBe(12)
-    const remaining = (current?.signInLockedUntil?.getTime() ?? 0) - Date.now()
+    const remaining = await lockedFor(user.id)
     expect(remaining).toBeGreaterThan(235_000)
     expect(remaining).toBeLessThanOrEqual(240_000)
   })
@@ -109,7 +120,7 @@ describe('sign-in races', () => {
 
     const [current] = await app.db.select().from(users).where(eq(users.id, user.id))
     expect(current?.failedSignIns).toBe(1001)
-    const remaining = (current?.signInLockedUntil?.getTime() ?? 0) - Date.now()
+    const remaining = await lockedFor(user.id)
     expect(remaining).toBeGreaterThan(3_595_000)
     expect(remaining).toBeLessThanOrEqual(3_600_000)
   })
