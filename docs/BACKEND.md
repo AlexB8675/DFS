@@ -248,6 +248,7 @@ The admin pages grow from a status page into the place to watch and run DFS, bef
 
 - [ ] GC (`blob.delete`), compaction (`blob.compact`), scrubber (`blob.verify`), tamper alerts in `#dfs-log`.
 - [x] Journal flush to Discord (DESIGN §8): the API seals batches into `journal_batches`, the leading bot posts them to `#dfs-journal`, an alert says when it falls behind, Admin → System shows it. Done 2026-10-07.
+- [ ] Journal the version of an empty file. A zero-byte upload's version is `stored` as soon as it completes, and only the bot's uploader journals `version.stored`, once a version's blobs are on Discord, so an empty file's version is never journaled: recovery would know the file but not its version. Completion should journal it (found 2026-10-07).
 - [ ] Nightly snapshots with manifests and backup pointers (DESIGN §8).
 - [ ] `dfs recover` and the recovery drill of DESIGN §17.
 
