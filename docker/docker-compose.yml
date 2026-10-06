@@ -1,0 +1,188 @@
+# Production on one host (DESIGN.md §3.2, §13.2): caddy, api, bot, postgres,
+# and migrate, which runs once before the API and the bot start. Settings
+# come from docker/.env (from .env.example); secrets are files in DFS_SECRETS
+# (/etc/dfs/secrets), mounted read-only in /run/secrets. Only Caddy publishes
+# ports; Postgres has no way out at all.
+#
+#   docker compose -f docker/docker-compose.yml up -d --build
+name: dfs
+
+x-logging: &logging # The disk is shared with staging and the database: logs stay small.
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: '5'
+
+x-server: &server
+  build:
+    context: ..
+    dockerfile: docker/server.Dockerfile
+  image: dfs-server
+  restart: unless-stopped
+  logging: *logging
+
+x-settings: &settings
+  BLOB_STORE: ${BLOB_STORE:-discord}
+  DISCORD_GUILD_ID: ${DISCORD_GUILD_ID:-}
+  DISCORD_CATEGORY_NAME: ${DISCORD_CATEGORY_NAME:-DFS}
+  STAGING_DIR: /data/staging
+  STAGING_MAX_BYTES: ${STAGING_MAX_BYTES:-30GiB}
+  LOCAL_BLOB_DIR: /data/blobs
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  DATABASE_URL_FILE: /run/secrets/dfs_database_url
+  INTERNAL_RPC_SECRET_FILE: /run/secrets/dfs_internal_rpc_secret
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    # Keeps the slowest statements for Admin → Database (§16).
+    command: ['postgres', '-c', 'shared_preload_libraries=pg_stat_statements']
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dfs
+      POSTGRES_DB: dfs
+      POSTGRES_PASSWORD_FILE: /run/secrets/dfs_postgres_password
+    secrets: [dfs_postgres_password]
+    volumes:
+      # From PostgreSQL 18 the data is under /var/lib/postgresql/18, so the
+      # volume goes one level up, where pg_upgrade can reach both versions.
+      - postgres-data:/var/lib/postgresql
+    shm_size: 256mb
+    networks: [internal]
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U dfs -d dfs']
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    logging: *logging
+
+  migrate:
+    <<: *server
+    command: ['node', 'packages/db/src/bin/migrate.ts']
+    restart: 'no'
+    environment:
+      DATABASE_URL_FILE: /run/secrets/dfs_database_url
+    secrets: [dfs_database_url]
+    networks: [internal]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  bot:
+    <<: *server
+    command: ['node', 'apps/bot/src/main.ts']
+    environment:
+      <<: *settings
+      DISCORD_BOT_TOKEN_FILE: /run/secrets/dfs_discord_bot_token
+    secrets: [dfs_database_url, dfs_internal_rpc_secret, dfs_discord_bot_token]
+    volumes:
+      - staging:/data/staging
+    # Discord, out; nothing in.
+    networks: [internal, egress]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://localhost:3001/internal/health', { headers: { authorization:
+          'Bearer ' + require('fs').readFileSync('/run/secrets/dfs_internal_rpc_secret',
+          'utf8').trim() } }).then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  api:
+    <<: *server
+    command: ['node', 'apps/api/src/main.ts']
+    environment:
+      <<: *settings
+      PUBLIC_BASE_URL: https://${DFS_DOMAIN:?set DFS_DOMAIN in docker/.env}
+      BOT_INTERNAL_URL: http://bot:3001
+      # Caddy's address: only it may say who the client is (§3.2).
+      TRUSTED_PROXY_CIDRS: 10.73.0.10/32
+      CACHE_DIR: /data/cache
+      CACHE_MAX_BYTES: ${CACHE_MAX_BYTES:-15GiB}
+      MASTER_KEY_FILE: /run/secrets/dfs_master_key
+    secrets: [dfs_database_url, dfs_internal_rpc_secret, dfs_master_key]
+    volumes:
+      - staging:/data/staging
+      - cache:/data/cache
+    # The CDN, out, for reading files back; Caddy, in, over the internal network.
+    networks: [internal, egress]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://localhost:3000/api/health').then((r) => process.exit(r.ok ? 0 : 1),
+          () => process.exit(1))
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  caddy:
+    build:
+      context: ..
+      dockerfile: docker/caddy.Dockerfile
+    image: dfs-caddy
+    restart: unless-stopped
+    environment:
+      DFS_DOMAIN: ${DFS_DOMAIN:?set DFS_DOMAIN in docker/.env}
+    ports:
+      - '80:80'
+      - '443:443'
+      - '443:443/udp'
+    volumes:
+      # Its certificates and keys.
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      internal:
+        ipv4_address: 10.73.0.10
+      edge: {}
+    depends_on: [api]
+    logging: *logging
+
+networks:
+  # Service to service, with no route to the internet (§3.2). A fixed subnet,
+  # so the API can trust Caddy's address alone.
+  internal:
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.73.0.0/24
+  # The API and the bot, out to Discord.
+  egress: {}
+  # Caddy: the ports it publishes, and Let's Encrypt.
+  edge: {}
+
+volumes:
+  postgres-data:
+  staging:
+  cache:
+  caddy-data:
+  caddy-config:
+
+# Files on the host (docs/DEPLOY.md): one value each, readable by the
+# container's user (uid 1000 for the API and the bot, 70 for Postgres).
+secrets:
+  dfs_postgres_password:
+    file: ${DFS_SECRETS:-/etc/dfs/secrets}/postgres_password
+  dfs_database_url:
+    file: ${DFS_SECRETS:-/etc/dfs/secrets}/database_url
+  dfs_internal_rpc_secret:
+    file: ${DFS_SECRETS:-/etc/dfs/secrets}/internal_rpc_secret
+  dfs_discord_bot_token:
+    file: ${DFS_SECRETS:-/etc/dfs/secrets}/discord_bot_token
+  dfs_master_key:
+    file: ${DFS_SECRETS:-/etc/dfs/secrets}/master_key

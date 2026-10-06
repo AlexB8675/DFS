@@ -1,0 +1,45 @@
+# The edge (DESIGN.md §3.2): HTTPS for DFS_DOMAIN, with a certificate Caddy
+# gets and renews itself. Only /api/* reaches a service, the API; /internal/*
+# and metrics paths are a 404; everything else is the web app, whose routes
+# (such as /s/:token) all fall back to index.html.
+
+{$DFS_DOMAIN} {
+	@blocked path /internal /internal/* /metrics /metrics/*
+	handle @blocked {
+		respond 404
+	}
+
+	handle /api/* {
+		# One upload part, and headroom (§6.1).
+		request_body {
+			max_size 12MiB
+		}
+		# Bodies stream both ways, unbuffered: uploaded parts, downloads,
+		# archives and live events. No compression here: it would drop the
+		# length downloads show their progress by, for bytes that don't shrink.
+		reverse_proxy api:3000 {
+			flush_interval -1
+		}
+	}
+
+	handle {
+		root * /srv
+		encode zstd gzip
+		# Built assets carry their hash in their name; the app itself is
+		# checked again each time, so a new version shows at once.
+		@assets path /assets/*
+		header @assets Cache-Control "public, max-age=31536000, immutable"
+		@app not path /assets/*
+		header @app Cache-Control "no-cache"
+		try_files {path} /index.html
+		file_server
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+}

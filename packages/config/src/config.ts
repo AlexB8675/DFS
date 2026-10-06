@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { z } from 'zod'
 import { deriveSizes, FRAME_OVERHEAD_BYTES, GiB, MiB, parseByteSize } from './sizes.ts'
@@ -168,6 +169,35 @@ const envSchema = z.object({
   TRUSTED_PROXY_CIDRS: setting(z.string().default('127.0.0.1/32,::1/128')),
 })
 
+/**
+ * Secrets that may come from a file instead, as Compose mounts them in
+ * /run/secrets (DESIGN.md §13.2): `DATABASE_URL_FILE` holds `DATABASE_URL`.
+ */
+const SECRET_FILES = ['DATABASE_URL', 'INTERNAL_RPC_SECRET', 'DISCORD_BOT_TOKEN'] as const
+
+/** The environment with each `<NAME>_FILE` read into `<NAME>`, without its line ending. */
+function withSecretFiles(
+  env: Record<string, string | undefined>,
+  problems: string[],
+): Record<string, string | undefined> {
+  const resolved = { ...env }
+  for (const name of SECRET_FILES) {
+    const file = env[`${name}_FILE`]
+    if (!file) continue
+    if (env[name]) {
+      problems.push(`${name}: set it or ${name}_FILE, not both`)
+      continue
+    }
+    try {
+      resolved[name] = readFileSync(file, 'utf8').trim()
+    } catch {
+      // The path only: never the contents.
+      problems.push(`${name}_FILE: can't read ${file}`)
+    }
+  }
+  return resolved
+}
+
 export interface LoadOptions {
   /** Which process is starting; production checks what that process needs. */
   service: Service
@@ -181,16 +211,17 @@ export interface LoadOptions {
  * read the real one.
  */
 export function loadConfig(env: Record<string, string | undefined>, options: LoadOptions): Config {
-  const parsed = envSchema.safeParse(env)
+  const problems: string[] = []
+  const parsed = envSchema.safeParse(withSecretFiles(env, problems))
   if (!parsed.success) {
-    throw new ConfigError(
-      parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`),
-    )
+    throw new ConfigError([
+      ...problems,
+      ...parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`),
+    ])
   }
   const raw = parsed.data
   const production = raw.NODE_ENV === 'production'
   const defaults = production ? PRODUCTION : DEVELOPMENT
-  const problems: string[] = []
 
   function required(name: 'DATABASE_URL' | 'INTERNAL_RPC_SECRET'): string {
     const value = raw[name] ?? (production ? undefined : DEVELOPMENT[name])
@@ -202,7 +233,9 @@ export function loadConfig(env: Record<string, string | undefined>, options: Loa
   }
 
   const databaseUrl = required('DATABASE_URL')
-  const internalRpcSecret = required('INTERNAL_RPC_SECRET')
+  // Only the API and the bot talk to each other; commands and migrations don't.
+  const internalRpcSecret =
+    options.service === 'cli' && !raw.INTERNAL_RPC_SECRET ? '' : required('INTERNAL_RPC_SECRET')
   if (production && internalRpcSecret && internalRpcSecret.length < 32) {
     problems.push('INTERNAL_RPC_SECRET: use at least 32 random characters')
   }

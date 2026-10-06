@@ -130,10 +130,10 @@ flowchart LR
     A -.->|"egress network, outbound 443"| D
 ```
 
-- Two Docker networks: `dfs_internal` (`internal: true`, no internet) for service-to-service traffic, and `dfs_egress` for outbound Discord access. Only `api` and `bot` join `dfs_egress`, and only `caddy` publishes ports. Postgres has no route to the internet at all.
+- Three Docker networks: `internal` (`internal: true`, no internet, the fixed subnet `10.73.0.0/24`) for service-to-service traffic, `egress` for outbound Discord access, and `edge` for Caddy, which publishes ports there and reaches Let's Encrypt (a container on an internal network alone can publish no port). Only `api` and `bot` join `egress`, and only `caddy` publishes ports. Postgres has no route to the internet at all.
 - **Route allowlist at the edge:** only `/api/*` is proxied to the API. Every other path is answered from the static SPA build, and unknown paths fall back to `index.html` so client-side routes such as `/s/:token` (public share pages) work. `/internal/*` and metrics paths get an explicit `404`. Nothing else reaches a backend service.
 - **Streaming:** request and response buffering is disabled for `/api/uploads/*/parts/*`, the content and archive routes (`/api/files/*/content`, `/api/s/*/files/*/content`, `*/archive`), and `/api/events` (SSE). The body size limit is **12 MiB** (one part plus headroom). Download and SSE routes have long timeouts.
-- **Client IP:** the API trusts `X-Forwarded-For` **only** from the Caddy container's address (`TRUSTED_PROXY_CIDRS`), for rate limiting and audit logs.
+- **Client IP:** the API trusts `X-Forwarded-For` **only** from the Caddy container's address, fixed at `10.73.0.10` on the internal network (`TRUSTED_PROXY_CIDRS=10.73.0.10/32`), for rate limiting and audit logs.
 - **Share links** use the public URL (`PUBLIC_BASE_URL`), and the sign-in route checks `Origin` against it (§7.1).
 - *Later, optional:* the same images can be split across two hosts (edge on the VPS, core elsewhere over WireGuard/Tailscale) with `docker-compose.edge.yml` / `docker-compose.core.yml`. This is not built in v1.
 
@@ -814,7 +814,8 @@ Expected profile (D7): **few users (≤ ~20), many files.** The design targets *
 - **Container runtime:** Docker Engine + Compose plugin from Docker's official Fedora repository (recommended for Compose parity with dev). The Compose files also avoid features that break under Podman (`podman compose`), so Podman stays possible.
 - **SELinux** (enforcing by default on Fedora): data lives in **named volumes**, and configs (Caddyfile, built SPA) are **baked into images**, so no SELinux relabeling (`:Z`) is needed. Any bind mount that is added later must use `:Z`.
 - **firewalld:** allow only `ssh`, `http`, `https` (plus `443/udp` for HTTP/3). Docker writes its own iptables/nftables rules for published ports. That is fine here because only Caddy publishes ports.
-- **Secrets:** `/etc/dfs/secrets/*` (mode `0600`, root-owned) are mounted as Compose `secrets:`. Nothing sensitive goes into images or environment files committed to git.
+- **Secrets:** one file each in `/etc/dfs/secrets` (`postgres_password`, `database_url`, `internal_rpc_secret`, `discord_bot_token`, `master_key`), mounted read-only as Compose `secrets:` in `/run/secrets`, and read through `DATABASE_URL_FILE`, `INTERNAL_RPC_SECRET_FILE` and `DISCORD_BOT_TOKEN_FILE` (§15) and `MASTER_KEY_FILE`. Each service gets only the ones it uses. Outside Swarm, Compose mounts the files as they are on the host, so each is mode `0400` and owned by the user of the container reading it: uid 1000 for the API and the bot, 70 for Postgres; on SELinux, the directory carries the `container_file_t` label. The master key is made by `dfs master-key` and kept off the server too. Nothing sensitive goes into images (`.dockerignore` leaves out `.env` files and `.data`) or into files committed to git; the settings that aren't secret are in `docker/.env`, from `docker/.env.example`.
+- **Images:** `docker/server.Dockerfile` (the API, the bot and the migration: one image, three commands, keeping the workspace's layout, since Node runs the TypeScript sources and won't strip types under `node_modules`) and `docker/caddy.Dockerfile` (Caddy with the Caddyfile and the built web app). Both run without root; logs rotate at 10 MB, five files each.
 - **Lifecycle:** `restart: unless-stopped` and Docker enabled via systemd (`systemctl enable --now docker`). Updates: `git pull && docker compose build && docker compose up -d`. Migrations run automatically in a one-shot `migrate` service before `api`/`bot` start.
 - **Code (D26):** a private GitHub repository. The VPS pulls it with a read-only deploy key. There is no CI: `pnpm check` (format, typecheck, lint, tests) runs locally before pushing.
 - **Host hardening:** `dnf-automatic` security updates, SSH key-only login, fail2ban (optional), and a non-root deploy user in the `docker` group.
@@ -891,7 +892,7 @@ The **`BlobStore` interface** (`put(blob) → ref`, `get(ref, range?) → stream
 | `PACK_TARGET_BYTES` | `BLOB_MAX_BYTES` − 256 KiB | soft target: seal a pack once it reaches this size. Packs never exceed `BLOB_MAX_BYTES` |
 | `PACK_MAX_WAIT_MS` | `30000` | seal a partial pack after this long. Staging serves the files meanwhile, so waiting only delays when they are safe in Discord; files that trickle in within half a minute share a message instead of taking one each |
 | `COMPACT_THRESHOLD` | `0.3` | live/size ratio below which packs are compacted |
-| `MASTER_KEY_FILE` | `/run/secrets/dfs_master_key` | api only. Holds the current key and every retired key, each with its `key_id` (§7.3) |
+| `MASTER_KEY_FILE` | `/run/secrets/dfs_master_key` | api only. Holds the current key and every retired key, each with its `key_id` (§7.3). `dfs master-key <file>` makes a new one, never over an existing file |
 | `STAGING_DIR` / `STAGING_MAX_BYTES` | `/data/staging` / `20 GiB` | shared volume |
 | `CACHE_DIR` / `CACHE_MAX_BYTES` | `/data/cache` / `5 GiB` | per api instance |
 | `UPLOAD_CHANNEL_CONCURRENCY` | `2` | in-flight uploads per channel |
@@ -906,6 +907,8 @@ The **`BlobStore` interface** (`put(blob) → ref`, `get(ref, range?) → stream
 | `API_PORT` / `BOT_PORT` | `3000` / `3001` | |
 | `TRUSTED_PROXY_CIDRS` | `127.0.0.1/32,::1/128` | addresses allowed to set `X-Forwarded-*`. Production sets the subnet of the Compose network Caddy is on; otherwise every request seems to come from Caddy |
 | `LOG_LEVEL` | `info` | |
+
+**Secrets from files:** `DATABASE_URL`, `INTERNAL_RPC_SECRET` and `DISCORD_BOT_TOKEN` may each come from a file instead, named by `<NAME>_FILE` (as Compose mounts them, §13.2), without its line ending; setting both is an error. Commands and migrations need only the database: the API–bot secret is required of the API and the bot alone.
 
 **Development defaults:** with `NODE_ENV` set to `development` (the default) or `test`, every setting has a default that works with `docker/docker-compose.dev.yml`: `DATABASE_URL` points at it, `INTERNAL_RPC_SECRET` has a fixed development value, `PUBLIC_BASE_URL` is the Vite dev server (`http://localhost:5173`), `MASTER_KEY_FILE` is `./.data/master-key.json` (created on first start if missing, in development only), `BOT_INTERNAL_URL` is `http://localhost:3001`, `BLOB_STORE` is `local`, `DISCORD_CATEGORY_NAME` is `DFS Dev`, `DISCORD_GATEWAY` is `off` (D25), and staging and the cache live under `./.data`. Relative directories resolve against the repository root. Production has no defaults for the database and the secrets, and requires `INTERNAL_RPC_SECRET` to be at least 32 characters.
 

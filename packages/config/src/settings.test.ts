@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { loadConfig } from './config.ts'
 import { describeSettings } from './settings.ts'
@@ -40,6 +43,25 @@ describe('describeSettings (§15)', () => {
     for (const secret of ['a-secret-password', 'an-internal-secret', 'a-bot-token']) {
       expect(shown).not.toContain(secret)
     }
+  })
+
+  it('counts a secret given as a file as set, if the file holds one', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'dfs-settings-'))
+    const file = (name: string, contents: string) => {
+      writeFileSync(path.join(dir, name), contents)
+      return path.join(dir, name)
+    }
+    const fromFiles = describeSettings(loadConfig(env, { service: 'api', rootDir: '/srv/dfs' }), {
+      MASTER_KEY_FILE: '/run/secrets/dfs_master_key',
+      DATABASE_URL_FILE: file('database_url', 'postgres://dfs:a-password@postgres/dfs\n'),
+      DISCORD_BOT_TOKEN_FILE: file('discord_bot_token', '\n'),
+      INTERNAL_RPC_SECRET_FILE: path.join(dir, 'missing'),
+    })
+    expect(fromFiles.secrets.filter((secret) => secret.set).map((secret) => secret.key)).toEqual([
+      'DATABASE_URL',
+      'MASTER_KEY_FILE',
+    ])
+    expect(JSON.stringify(fromFiles)).not.toContain('a-password')
   })
 
   it('says which service reads each, so only those both read are compared', () => {

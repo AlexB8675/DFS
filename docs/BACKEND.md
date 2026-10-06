@@ -28,7 +28,7 @@ Settled for this plan and recorded in [DESIGN.md §19](DESIGN.md#19-decisions-lo
 | D27 | **Username and password accounts, made by an admin** with a temporary password; no Discord accounts. Users choose their own password at first sign-in. | Password sign-in, the limited first session, and creating users and resetting passwords on the admin side (§4.2, §7). |
 | D28 | **Admins are set in DFS;** the owner, made on the server with `dfs owner`, is always an admin. | The `dfs owner` command and the owner protections in the admin routes (§4.2). |
 
-The Discord server and application already exist and serve both environments; §6 lists what to configure. The VPS is available, with more than 150 GB of disk (§4.5).
+The Discord server and application already exist and serve both environments; §6 lists what to configure. The VPS is available: Fedora 43, 6 cores, 11 GB of memory and a 100 GB disk (§4.5).
 
 ---
 
@@ -230,12 +230,12 @@ The admin pages grow from a status page into the place to watch and run DFS, bef
 
 **Tasks**
 
-- [ ] Dockerfiles for api, bot and the web build; `docker-compose.yml` with caddy, api, bot, postgres and the one-shot `migrate`; the Caddyfile with the route allowlist and streaming settings (DESIGN §3.2, §13.2). Postgres starts with `shared_preload_libraries=pg_stat_statements`, as in development, for Admin → Database.
+- [x] Dockerfiles for api, bot and the web build; `docker-compose.yml` with caddy, api, bot, postgres and the one-shot `migrate`; the Caddyfile with the route allowlist and streaming settings (DESIGN §3.2, §13.2). Postgres starts with `shared_preload_libraries=pg_stat_statements`, as in development, for Admin → Database. Secrets come from files (`*_FILE`), and `dfs master-key` makes the master key. Checked on this PC with local storage (TESTING.md): only Caddy publishes ports, `/internal/*` is a 404, sign-in works over HTTPS, and the end-to-end check passes through Caddy.
 - [ ] Secrets in `/etc/dfs/secrets`, the master key generated and backed up outside the VPS, `PUBLIC_BASE_URL`, and `dfs owner` to make your account.
-- [ ] `NODE_ENV=production` in the images, so no development default applies (DESIGN §15); a fixed subnet for the internal Compose network, with `TRUSTED_PROXY_CIDRS` set to it, so sign-in limits and the audit log see real client addresses.
+- [x] `NODE_ENV=production` in the images, so no development default applies (DESIGN §15); a fixed subnet for the internal Compose network, with `TRUSTED_PROXY_CIDRS` set to Caddy's address on it, so sign-in limits and the audit log see real client addresses. To check on the VPS: Docker Desktop shows its own gateway for every client, so only a real host proves it; no AAAA record until IPv6 keeps client addresses too.
 - [ ] Getting the code: a read-only deploy key for the GitHub repository; updates stay `git pull && docker compose up -d --build` (DESIGN §13.2).
-- [ ] Sizes for this VPS (more than 150 GB of disk): `STAGING_MAX_BYTES=50GiB` and `CACHE_MAX_BYTES=20GiB`, leaving room for Postgres, images and the OS. Check them against the real disk size and the DB estimate of DESIGN §12.2 before going live.
-- [ ] Host setup: Docker, firewalld, SSH keys only, automatic security updates.
+- [ ] Sizes for this VPS: its disk turned out to be 100 GB (91 GB free), not more than 150, so `STAGING_MAX_BYTES=30GiB` and `CACHE_MAX_BYTES=15GiB` (the defaults in `docker/.env.example`), leaving room for Postgres, images and the OS. Check them against the DB estimate of DESIGN §12.2 before going live.
+- [ ] Host setup: Docker Engine and its Compose plugin from Docker's repository. The hardening of DESIGN §13.2 (firewalld, SSH keys only, automatic updates) is left out by the owner's choice (2026-10-06): the VPS serves other uses too. Only Caddy's ports 80 and 443 are DFS's; nothing else of DFS listens.
 
 **Done when**
 

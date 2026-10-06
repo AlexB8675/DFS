@@ -1,0 +1,19 @@
+# What never goes into an image (DESIGN.md §13.2): dependencies (each image
+# installs its own), local data with the development master key, settings
+# and secrets, build output, and history.
+**/node_modules
+.data
+.env
+.env.*
+**/.env
+**/.env.*
+!**/.env.example
+**/dist
+**/coverage
+**/.turbo
+**/.vite
+**/*.tsbuildinfo
+**/*.log
+.git
+.claude
+docker/.env

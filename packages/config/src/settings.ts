@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import type { Config } from './config.ts'
 
 // The settings in effect, for Admin → System (DESIGN.md §15): a fixed list
@@ -47,11 +48,22 @@ function size(bytes: number): string {
   return `${String(bytes)} bytes`
 }
 
+/** Whether a secret's file has a value in it; read only to tell, never kept. */
+function holdsValue(file: string | undefined): boolean {
+  if (!file) return false
+  try {
+    return readFileSync(file, 'utf8').trim() !== ''
+  } catch {
+    return false
+  }
+}
+
 export function describeSettings(
   config: Config,
   env: Record<string, string | undefined>,
 ): { settings: SettingView[]; secrets: SecretView[] } {
-  const given = (key: string) => (env[key] ?? '') !== ''
+  // A secret may come from a file instead (`DATABASE_URL_FILE`): set if it holds something.
+  const given = (key: string) => (env[key] ?? '') !== '' || holdsValue(env[`${key}_FILE`])
   const entry = (
     group: SettingGroup,
     usedBy: SettingUser,

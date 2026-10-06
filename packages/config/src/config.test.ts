@@ -1,3 +1,5 @@
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ConfigError, loadConfig, type LoadOptions } from './config.ts'
@@ -86,6 +88,46 @@ describe('loadConfig', () => {
     expect(
       problems({ ...production, INTERNAL_RPC_SECRET: 'short' }, { ...api, service: 'bot' }),
     ).toEqual(['INTERNAL_RPC_SECRET: use at least 32 random characters'])
+  })
+
+  it('needs only the database for commands and migrations in production', () => {
+    const cli = { ...api, service: 'cli' as const }
+    expect(problems({ NODE_ENV: 'production' }, cli)).toEqual([
+      'DATABASE_URL: required in production',
+    ])
+    expect(
+      loadConfig({ NODE_ENV: 'production', DATABASE_URL: 'postgres://dfs@postgres/dfs' }, cli)
+        .databaseUrl,
+    ).toBe('postgres://dfs@postgres/dfs')
+  })
+
+  it('reads secrets from files, as Compose mounts them', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'dfs-config-'))
+    const file = (name: string, contents: string) => {
+      writeFileSync(path.join(dir, name), contents)
+      return path.join(dir, name)
+    }
+    const env = {
+      NODE_ENV: 'production',
+      BLOB_STORE: 'local',
+      DATABASE_URL_FILE: file('database_url', 'postgres://dfs:a-password@postgres/dfs\n'),
+      INTERNAL_RPC_SECRET_FILE: file('rpc', `${'s'.repeat(32)}\n`),
+    }
+    expect(loadConfig(env, { ...api, service: 'bot' })).toMatchObject({
+      databaseUrl: 'postgres://dfs:a-password@postgres/dfs',
+      internalRpcSecret: 's'.repeat(32),
+    })
+    const unreadable = path.join(dir, 'missing')
+    expect(
+      problems(
+        { ...env, INTERNAL_RPC_SECRET: 'x'.repeat(32), DATABASE_URL_FILE: unreadable },
+        { ...api, service: 'bot' },
+      ),
+    ).toEqual([
+      `DATABASE_URL_FILE: can't read ${unreadable}`,
+      'INTERNAL_RPC_SECRET: set it or INTERNAL_RPC_SECRET_FILE, not both',
+      'DATABASE_URL: required in production',
+    ])
   })
 
   it('takes the chaos blob store in development only', () => {

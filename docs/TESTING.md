@@ -183,6 +183,35 @@ Get-FileHash -Algorithm SHA256 'C:\path\to\original.bin'
 Get-FileHash -Algorithm SHA256 'C:\path\to\downloaded.bin'
 ```
 
+## Run the production stack locally
+
+The images and `docker/docker-compose.yml` can run on this PC, with local
+storage and throwaway secrets, before they go to the VPS. Never with Discord:
+production's category is `DFS`, and a throwaway database would leave messages
+there that production never cleans up.
+
+1. In a scratch folder, make `secrets/` with one value per file:
+   `postgres_password` (random hex), `database_url`
+   (`postgres://dfs:<that password>@postgres:5432/dfs`), `internal_rpc_secret`
+   (64 random hex characters), an empty `discord_bot_token`, and `master_key`
+   from `pnpm dfs master-key <folder>/secrets/master_key`.
+2. Next to it, `local.env` with `DFS_DOMAIN=localhost`,
+   `DFS_SECRETS=<folder>/secrets` and `BLOB_STORE=local`, and `local.yml`
+   giving the API and the bot a shared `blobs:/data/blobs` volume.
+3. Start it under a project name of its own:
+
+```powershell
+docker compose -p dfs-local -f docker/docker-compose.yml -f <folder>/local.yml --env-file <folder>/local.env up -d --build
+```
+
+Caddy serves `https://localhost` with a certificate of its own, so tools must
+skip the check (`curl -k`, or `NODE_TLS_REJECT_UNAUTHORIZED=0` for one run of
+the end-to-end check with `DFS_API=https://localhost` and
+`DFS_ORIGIN=https://localhost`). Make an account with
+`docker compose ... run --rm --no-deps api node apps/api/src/cli.ts owner`.
+`/internal/health` and `/metrics` must answer 404, and `docker compose ... ps`
+must show ports on Caddy only. Remove it all with `docker compose ... down -v`.
+
 ## Run the live end-to-end checks
 
 Keep `pnpm dev` running. In a second terminal, apply the pnpm PATH line above and
