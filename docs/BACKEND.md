@@ -209,13 +209,13 @@ The admin pages grow from a status page into the place to watch and run DFS, bef
 - [x] **2 · Dashboards:** graphs on the overview with a time range, alerts for what needs attention (worked out by the API, with the health), and a Monitoring tab for traffic, Discord, reading back, storage, the database, the processes and people. Graphs are the web app's own SVG, with a crosshair, keyboard reading and a table view. A Database tab watches PostgreSQL: its statistics sampled into the metrics, what runs now (with Cancel and End), the slowest statements (`pg_stat_statements`), tables, unused indexes and settings, and alerts for connections, long transactions, lock waits and deadlocks.
 - [x] **3 · Storage control:** an Admin → Storage tab replaces Channels. Tasks go to the leading bot through the `admin.task` queue (one at a time, run once, refused while no bot leads, dropped after 10 minutes waiting): create a channel in the category, check the Discord layout, seal packs, clean up orphans, give uploads that gave up one more try, try failing deletions now, and recover a lost blob from the CDN's cache, which works only for blobs read lately (checked live: a deleted message's attachment is served only through a link that read it before; lost blobs now keep that link). The page lists failing uploads and deletions with their errors, and lost blobs with their files. A partial index on lost blobs (migration 0011) keeps the overview's 5 s refresh cheap.
 - [x] **4 · People and access:** an Admin → Access tab: everyone signed in (sessions now keep their address, browser and last use; migration 0012), each signed out at once; every share link, without its token, turned off by an admin; uploads under way, given up by an admin. A user's page has their sessions and Sign out everywhere. The audit log filters by kind of action and by words. Only the owner signs the owner out, and the asking session can't end itself.
-- [ ] **5 · System:** the settings in effect, from a list of keys that are safe to show; the Discord layout; maintenance such as clearing the frame cache.
+- [x] **5 · System:** an Admin → System tab: the settings in effect from a fixed list in `packages/config`, compared with the bot's (`/internal/settings`), secrets as set or not; the Discord layout with Check the layout; staging and the frame cache, which can be cleared. The Database tab vacuums a table on demand.
 
 **Done when**
 
-- With a stack running, the graphs show its traffic, Discord's answers and the storage growing, and agree with the overview's figures.
-- Every task that needed the command line after setup (except creating the owner) can be done from the admin pages, and each is in the audit log.
-- The mock API serves every new route, and the contract suite checks both.
+- [ ] With a stack running, the graphs show its traffic, Discord's answers and the storage growing, and agree with the overview's figures. Traffic, storage and the overview's figures were seen on local storage; Discord's answers are recorded (checked in the database) but no graph of them has been looked at yet: on the first run with Discord storage, or at the deployment.
+- [x] Every task that needed the command line after setup (except creating the owner) can be done from the admin pages, and each is in the audit log.
+- [x] The mock API serves every new route, and the contract suite checks both.
 
 ### 4.5 First deployment (from M5, D23)
 

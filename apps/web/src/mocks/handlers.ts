@@ -318,6 +318,15 @@ export const handlers = [
     respond(request, () => db.adminTask(params.id)),
   ),
   http.get('/api/admin/database', ({ request }) => respond(request, () => db.databaseStatus())),
+  http.post<{ name: string }>('/api/admin/database/tables/:name/vacuum', ({ request, params }) =>
+    respondEmpty(request, () => {
+      db.vacuumTable(params.name)
+    }),
+  ),
+  http.get('/api/admin/system', ({ request }) => respond(request, () => db.systemInfo())),
+  http.post('/api/admin/system/cache/clear', ({ request }) =>
+    respond(request, () => db.clearFrameCache()),
+  ),
   http.post<{ pid: string; how: string }>(
     '/api/admin/database/sessions/:pid/:how',
     ({ request, params }) =>

@@ -92,6 +92,19 @@ describe('Admin → Database (§16)', () => {
     }
   })
 
+  it('vacuums a table it lists, by name, and nothing else', async () => {
+    await admin.send('POST', '/admin/database/tables/nodes/vacuum')
+    const status = await admin.call('GET', '/admin/database', databaseStatusSchema)
+    expect(status.tables.find((table) => table.name === 'nodes')?.lastVacuumAt).not.toBeNull()
+    for (const name of ['no_such_table', 'nodes; DROP TABLE users', 'pg_catalog.pg_class']) {
+      expect(
+        await admin.error('POST', `/admin/database/tables/${encodeURIComponent(name)}/vacuum`),
+      ).toEqual({ status: 404, code: 'not_found' })
+    }
+    const log = await admin.call('GET', '/admin/audit?limit=1', auditPageSchema)
+    expect(log.items[0]).toMatchObject({ action: 'database.vacuumed', target: 'nodes' })
+  })
+
   it('keeps the slowest statements, normalized', async () => {
     const status = await admin.call('GET', '/admin/database', databaseStatusSchema)
     expect(status.statements.unavailable).toBeNull()

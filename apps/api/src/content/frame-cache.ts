@@ -84,6 +84,27 @@ export class FrameCache {
     return this.#bytes
   }
 
+  /** Frames on disk. */
+  get frames(): number {
+    return this.#entries.size
+  }
+
+  /**
+   * Admin → System: lets every frame go, after those on their way to the disk
+   * are written. Frames read later are cached again. Returns the bytes freed.
+   */
+  async clear(): Promise<number> {
+    await this.ready()
+    await this.idle()
+    const freed = this.#bytes
+    const keys = [...this.#entries.keys()]
+    this.#entries.clear()
+    this.#bytes = 0
+    // A file a download has open on Windows stays until the next start finds it.
+    for (const key of keys) await rm(this.#file(key), { force: true }).catch(() => undefined)
+    return freed
+  }
+
   /** Whether a frame is cached, as far as the cache knows without reading it. */
   has(frameSha256: Uint8Array): boolean {
     const key = Buffer.from(frameSha256).toString('hex')

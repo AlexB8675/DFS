@@ -7,6 +7,7 @@ import {
   type AdminTask,
   type AdminTaskRequest,
   type StorageStatus,
+  type SystemInfo,
 } from '@dfs/shared'
 import type {
   AdminUser,
@@ -655,6 +656,86 @@ export class AdminMockDb extends MockDb {
 
   /** Database connections an admin cancelled or ended, gone from the made-up list. */
   private readonly endedSessions = new Set<number>()
+
+  /** Bytes in the made-up frame cache; clearing empties it. */
+  private cachedBytes = Math.round(3.4 * GB)
+
+  /** Made-up settings as a development stack would have them (§15). */
+  systemInfo(): SystemInfo {
+    this.requireAdmin()
+    const setting = (
+      group: SystemInfo['settings'][number]['group'],
+      key: string,
+      value: string,
+      set = false,
+    ) => ({ key, group, value, set, botValue: null })
+    return {
+      environment: 'development',
+      instanceId: '2c750f2e9fd4',
+      node: 'v24.14.1',
+      apiStartedAt: new Date(Date.now() - 3 * DAY).toISOString(),
+      settings: [
+        setting('General', 'NODE_ENV', 'development'),
+        setting('General', 'LOG_LEVEL', 'info'),
+        setting('General', 'PUBLIC_BASE_URL', 'http://localhost:5173'),
+        setting('Storage', 'BLOB_STORE', 'discord', true),
+        setting('Storage', 'DISCORD_CATEGORY_NAME', 'DFS Dev', true),
+        setting('Storage', 'DISCORD_GATEWAY', 'off', true),
+        setting('Storage', 'UPLOAD_CHANNEL_CONCURRENCY', '2'),
+        setting('Storage', 'PACK_MAX_WAIT_MS', '30000'),
+        setting('Disks', 'STAGING_DIR', 'D:\\dfs\\.data\\staging'),
+        setting('Disks', 'STAGING_MAX_BYTES', '100 GiB', true),
+        setting('Disks', 'CACHE_DIR', 'D:\\dfs\\.data\\cache'),
+        setting('Disks', 'CACHE_MAX_BYTES', '5 GiB'),
+        setting('Accounts', 'DEFAULT_QUOTA_BYTES', '100 GiB'),
+        setting('Accounts', 'VERSION_RETENTION', '3'),
+        setting('Durability', 'SCRUB_REQUESTS_PER_HOUR', '600'),
+      ],
+      botSettings: true,
+      secrets: [
+        { key: 'DATABASE_URL', set: false },
+        { key: 'INTERNAL_RPC_SECRET', set: false },
+        { key: 'DISCORD_BOT_TOKEN', set: true },
+        { key: 'MASTER_KEY_FILE', set: false },
+      ],
+      discord: {
+        guildId: '100000000000000002',
+        categoryName: 'DFS Dev',
+        gateway: false,
+        channels: this.state.channels.map((channel) => ({
+          name: channel.name,
+          kind: 'data' as const,
+          discordChannelId: channel.discordChannelId,
+          enabled: channel.enabled,
+        })),
+      },
+      staging: { dir: 'D:\\dfs\\.data\\staging', usedBytes: 0, maxBytes: STAGING_MAX_BYTES },
+      frameCache: {
+        dir: 'D:\\dfs\\.data\\cache',
+        usedBytes: this.cachedBytes,
+        maxBytes: CACHE_MAX_BYTES,
+        frames: Math.round(this.cachedBytes / (10 * 1024 * 1024)),
+      },
+    }
+  }
+
+  clearFrameCache(): { freedBytes: number } {
+    this.requireAdmin()
+    const freedBytes = this.cachedBytes
+    this.cachedBytes = 0
+    this.audit('system.cache_cleared', 'Frame cache', formatBytes(freedBytes))
+    this.save()
+    return { freedBytes }
+  }
+
+  vacuumTable(name: string): void {
+    this.requireAdmin()
+    if (!mockDatabaseStatus(this.endedSessions).tables.some((table) => table.name === name)) {
+      throw new MockApiError(404, 'not_found', 'No such table.')
+    }
+    this.audit('database.vacuumed', name)
+    this.save()
+  }
 
   /** Made-up PostgreSQL figures (§16). */
   databaseStatus(): DatabaseStatus {

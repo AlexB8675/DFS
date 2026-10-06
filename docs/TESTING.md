@@ -161,7 +161,12 @@ Use disposable folders and files for these checks:
     click asks to sign in again. Share a file as that user, then turn the link
     off from Access: opening the link says it was turned off. In the audit
     log, choose Sharing and type the file's name.
-13. Open Admin → Database. In a terminal, hold a query open:
+13. Open Admin → System. The settings match your `.env`, marked set or default,
+    and no secret shows its value. Clear the frame cache after downloading a
+    file stored in Discord: the cache shows 0 B, and the next download reads
+    from Discord again. On Admin → Database, vacuum a table: its Vacuumed
+    column says just now.
+14. Open Admin → Database. In a terminal, hold a query open:
     `docker exec -it dfs-dev-postgres-1 psql -U dfs -d dfs -c "SELECT pg_sleep(120)"`.
     Within 10 s it shows under Running now; Cancel query stops it (psql says
     `canceling statement due to user request`), and the audit log records it.

@@ -114,6 +114,22 @@ describe('FrameCache (DESIGN.md §6.2)', () => {
   })
 })
 
+describe('FrameCache.clear', () => {
+  it('lets every frame go, and caches what is read after', async () => {
+    const cache = open(10_000)
+    await cache.ready()
+    const a = await frame(8)
+    const b = await frame(9)
+    for (const { bytes, hash } of [a, b]) await cache.load(hash, () => Promise.resolve(bytes))
+    expect(await cache.clear()).toBe(200)
+    expect({ bytes: cache.bytes, frames: cache.frames }).toEqual({ bytes: 0, frames: 0 })
+    expect(await files()).toEqual([])
+    const fetch = vi.fn(() => Promise.resolve(a.bytes))
+    await cache.load(a.hash, fetch)
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+})
+
 describe('MemoryBudget', () => {
   it('gives out room until it runs out, and takes it back once', () => {
     const budget = new MemoryBudget(100)

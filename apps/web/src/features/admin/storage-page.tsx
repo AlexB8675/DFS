@@ -14,7 +14,7 @@ import {
   ScanSearch,
   Wrench,
 } from 'lucide-react'
-import { useEffect, useRef, type ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import { Link } from 'react-router'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -24,8 +24,9 @@ import { Spinner } from '@/components/ui/spinner'
 import { errorMessage } from '@/lib/api/client'
 import { formatBytes, formatDate, formatFullDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
-import { afterTask, isFinished, storageQuery, tasksQuery, useStartTask } from './api'
+import { isFinished, storageQuery, tasksQuery, useStartTask } from './api'
 import { ChannelsSection } from './channels-page'
+import { taskLabel, useTaskResults } from './task-results'
 
 /**
  * `/admin/storage`: the channels, what is stuck between staging and Discord,
@@ -145,31 +146,6 @@ export function StoragePage() {
       </div>
     </div>
   )
-}
-
-/** Says how each task ended once it does, and refreshes what it may have changed. */
-function useTaskResults(tasks: AdminTask[] | undefined): void {
-  const underWay = useRef(new Set<string>())
-  useEffect(() => {
-    let finished = false
-    for (const task of tasks ?? []) {
-      if (!isFinished(task)) {
-        underWay.current.add(task.id)
-        continue
-      }
-      if (!underWay.current.delete(task.id)) continue
-      finished = true
-      const label = taskLabel(task)
-      if (task.state === 'done') toast.success(label, { description: task.result })
-      else toast.error(`${label} failed`, { description: task.result })
-    }
-    if (finished) void afterTask()
-  }, [tasks])
-}
-
-function taskLabel(task: AdminTask): string {
-  const label = ADMIN_TASK_LABELS[task.kind]
-  return task.blobId ? `${label} (${task.blobId})` : label
 }
 
 function TaskButton({

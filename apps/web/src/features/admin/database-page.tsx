@@ -1,6 +1,6 @@
 import type { DatabaseSession, DatabaseStatus } from '@dfs/shared'
 import { useQuery } from '@tanstack/react-query'
-import { Ban, MoreHorizontal, Power, TriangleAlert } from 'lucide-react'
+import { Ban, MoreHorizontal, Power, Sparkles, TriangleAlert } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import { toast } from 'sonner'
 import {
@@ -22,11 +22,12 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Spinner } from '@/components/ui/spinner'
 import { errorMessage } from '@/lib/api/client'
 import { formatBytes, formatDate, formatDuration, formatFullDate } from '@/lib/format'
 import { usePreferences } from '@/lib/preferences'
 import { cn } from '@/lib/utils'
-import { databaseQuery, useSignalSession } from './api'
+import { databaseQuery, useSignalSession, useVacuumTable } from './api'
 import { MetricChart } from './charts/metric-chart'
 import { RangePicker } from './charts/range-picker'
 import { formatValue } from './charts/scales'
@@ -353,7 +354,7 @@ function Details({ status }: { status: DatabaseStatus }) {
         wide
       >
         <Table
-          head={['Table', 'Rows', 'Dead rows', 'Size', 'Indexes', 'Vacuumed', 'Index use']}
+          head={['Table', 'Rows', 'Dead rows', 'Size', 'Indexes', 'Vacuumed', 'Index use', '']}
           rows={status.tables.map((table) => {
             const deadShare = table.deadRows / Math.max(1, table.rows + table.deadRows)
             const scans = table.seqScans + table.indexScans
@@ -380,6 +381,7 @@ function Details({ status }: { status: DatabaseStatus }) {
                 'never'
               ),
               scans === 0 ? '—' : formatValue(table.indexScans / scans, 'percent'),
+              <VacuumButton key="vacuum" name={table.name} />,
             ]
           })}
         />
@@ -414,6 +416,32 @@ function Details({ status }: { status: DatabaseStatus }) {
         </dl>
       </Panel>
     </section>
+  )
+}
+
+/** Vacuums and analyzes a table now, rather than when autovacuum gets to it. */
+function VacuumButton({ name }: { name: string }) {
+  const vacuum = useVacuumTable()
+  const busy = vacuum.isPending
+  return (
+    <Button
+      variant="ghost"
+      size="xs"
+      disabled={busy}
+      title={`Vacuum and analyze ${name} now`}
+      onClick={() => {
+        vacuum.mutate(name, {
+          onSuccess: () => {
+            toast.success(`Vacuumed ${name}`)
+          },
+          onError: (error) => {
+            toast.error(`Couldn’t vacuum ${name}`, { description: errorMessage(error) })
+          },
+        })
+      }}
+    >
+      {busy ? <Spinner /> : <Sparkles />} Vacuum
+    </Button>
   )
 }
 

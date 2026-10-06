@@ -57,6 +57,8 @@ const ACTIONS: Record<string, { label: string; icon: LucideIcon; tone?: string }
   'session.ended': { label: 'Signed a session out', icon: LogOut, tone: 'text-amber-500' },
   'user.signed_out': { label: 'Signed out everywhere', icon: LogOut, tone: 'text-amber-500' },
   'upload.cancelled': { label: 'Gave up an upload', icon: XCircle, tone: 'text-amber-500' },
+  'database.vacuumed': { label: 'Vacuumed a table', icon: Database },
+  'system.cache_cleared': { label: 'Cleared the frame cache', icon: Database },
   'database.query_cancelled': {
     label: 'Cancelled a query',
     icon: Database,
@@ -82,7 +84,7 @@ const CATEGORIES = [
   {
     value: 'system',
     label: 'System',
-    actions: ['channel.', 'task.', 'database.', 'blob.', 'backup.', 'scrub.'],
+    actions: ['channel.', 'task.', 'database.', 'system.', 'blob.', 'backup.', 'scrub.'],
   },
 ] as const
 

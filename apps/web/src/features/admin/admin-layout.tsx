@@ -9,6 +9,7 @@ const TABS = [
   { to: '/admin/access', label: 'Access' },
   { to: '/admin/storage', label: 'Storage' },
   { to: '/admin/database', label: 'Database' },
+  { to: '/admin/system', label: 'System' },
   { to: '/admin/audit', label: 'Audit log' },
 ]
 

@@ -14,6 +14,7 @@ import {
   storageChannelSchema,
   storageStatusSchema,
   systemHealthSchema,
+  systemInfoSchema,
   userUsageSchema,
   type CreateChannelInput,
   type AdminTask,
@@ -98,6 +99,39 @@ export async function afterTask(): Promise<void> {
       queryClient.invalidateQueries({ queryKey: ['admin', key] }),
     ),
   )
+}
+
+/** Admin → System (§15): the settings in effect, the Discord layout, the disks. */
+export const systemQuery = queryOptions({
+  queryKey: ['admin', 'system'],
+  queryFn: ({ signal }) => apiGet('/admin/system', systemInfoSchema, { signal }),
+})
+
+const clearedSchema = z.object({ freedBytes: z.number() })
+
+export function useClearFrameCache() {
+  return useMutation({
+    mutationFn: () => apiSend('POST', '/admin/system/cache/clear', undefined, clearedSchema),
+    onSettled: () =>
+      Promise.all(
+        ['system', 'health', 'audit'].map((key) =>
+          queryClient.invalidateQueries({ queryKey: ['admin', key] }),
+        ),
+      ),
+  })
+}
+
+/** Vacuums and analyzes a table of the Database page's list. */
+export function useVacuumTable() {
+  return useMutation({
+    mutationFn: (name: string) =>
+      apiSend('POST', `/admin/database/tables/${encodeURIComponent(name)}/vacuum`),
+    onSettled: () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['admin', 'database'] }),
+        queryClient.invalidateQueries({ queryKey: ['admin', 'audit'] }),
+      ]),
+  })
 }
 
 /** PostgreSQL now (§16): connections, running queries, tables. */

@@ -1,5 +1,5 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
-import type { Config } from '@dfs/config'
+import { describeSettings, type Config } from '@dfs/config'
 import { createDatabase, createPool, Metrics, recordProcess } from '@dfs/db'
 import { refreshUrlsSchema } from '@dfs/shared'
 import { adoptChannel, BlobStoreError, ChannelRefusedError, discordProblem } from '@dfs/storage'
@@ -124,6 +124,9 @@ export function createBot({
     role: election.state,
     queue: boss ? 'running' : 'stopped',
   }))
+
+  // Admin → System compares them with the API's: the safe ones only, never secrets.
+  server.get('/internal/settings', () => describeSettings(config, process.env).settings)
 
   // Admin → Channels (DESIGN.md §4, D25): a channel registered by hand must
   // be in this environment's category; it is made private to the bot.

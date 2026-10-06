@@ -249,6 +249,25 @@ function errorCode(error: unknown): unknown {
 }
 
 /**
+ * `POST /admin/database/tables/:name/vacuum`: vacuums and analyzes one of
+ * the tables the page lists, by the name it shows there. Vacuum doesn't
+ * block reading or writing it; on a large table it takes a while.
+ */
+export async function vacuumTable(app: FastifyInstance, admin: Auth, name: string): Promise<void> {
+  const { rows } = await app.db.execute<{ schema: string; table: string }>(sql`
+    SELECT schemaname AS schema, relname AS table FROM pg_stat_user_tables
+    WHERE CASE WHEN schemaname = 'public' THEN relname ELSE schemaname || '.' || relname END
+      = ${name}`)
+  const [found] = rows
+  if (!found) throw new ApiError(404, 'not_found', 'No such table.')
+  // Names from the catalog, quoted as identifiers: never text from the request.
+  await app.db.execute(
+    sql`VACUUM (ANALYZE) ${sql.identifier(found.schema)}.${sql.identifier(found.table)}`,
+  )
+  await audit(app.db, { actorId: admin.user.id, action: 'database.vacuumed', target: name })
+}
+
+/**
  * Cancels a connection's query, or ends the connection: only this database's
  * client connections, never the one asking. Audited. A connection idle in a
  * transaction has no query to cancel, and PostgreSQL would ignore the

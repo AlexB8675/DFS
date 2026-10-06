@@ -13,6 +13,7 @@ import {
   shareLinkPageSchema,
   shareLinkSchema,
   storageStatusSchema,
+  systemInfoSchema,
   systemHealthSchema,
   trashPageSchema,
   userUsageSchema,
@@ -197,6 +198,36 @@ export function adminTests({
       expect(await admin.error('GET', '/admin/audit?actions=DROP%20TABLE')).toEqual({
         status: 400,
         code: 'invalid_request',
+      })
+    })
+
+    it('shows the settings in effect, and only whether secrets are set (§15)', async () => {
+      const admin = await owner()
+      const system = await admin.call('GET', '/admin/system', systemInfoSchema)
+      const keys = system.settings.map((setting) => setting.key)
+      expect(keys).toContain('STAGING_MAX_BYTES')
+      for (const secret of ['DATABASE_URL', 'INTERNAL_RPC_SECRET', 'DISCORD_BOT_TOKEN']) {
+        expect(keys).not.toContain(secret)
+      }
+      expect(system.secrets.map((secret) => secret.key)).toContain('DATABASE_URL')
+      expect(system.instanceId.length).toBeGreaterThan(0)
+
+      // A frame cache is cleared; local storage has none.
+      const cleared = await admin.fetch('POST', '/admin/system/cache/clear')
+      expect([200, 409]).toContain(cleared.status)
+      await cleared.body?.cancel()
+
+      const { username, temporaryPassword } = await newUser(admin)
+      const user = await activated(username, temporaryPassword)
+      expect(await user.error('GET', '/admin/system')).toEqual({ status: 403, code: 'forbidden' })
+    })
+
+    it('vacuums a listed table, and no other (§16)', async () => {
+      const admin = await owner()
+      await admin.send('POST', '/admin/database/tables/nodes/vacuum')
+      expect(await admin.error('POST', '/admin/database/tables/no_such_table/vacuum')).toEqual({
+        status: 404,
+        code: 'not_found',
       })
     })
 

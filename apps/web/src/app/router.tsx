@@ -119,6 +119,12 @@ export function createAppRouter() {
               }),
             },
             {
+              path: 'system',
+              lazy: async () => ({
+                Component: (await import('@/features/admin/system-page')).SystemPage,
+              }),
+            },
+            {
               path: 'audit',
               lazy: async () => ({
                 Component: (await import('@/features/admin/audit-page')).AuditPage,

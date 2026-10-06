@@ -681,6 +681,52 @@ export const storageStatusSchema = z.object({
 })
 export type StorageStatus = z.infer<typeof storageStatusSchema>
 
+// ── System (§15) ─────────────────────────────────────────────────────────────
+
+/** `GET /admin/system`: what this DFS is, how it is set up, and its disks. */
+export const systemInfoSchema = z.object({
+  environment: z.enum(['development', 'test', 'production']),
+  /** This database's name for itself, which its Discord messages carry (§4). */
+  instanceId: z.string(),
+  node: z.string(),
+  apiStartedAt: timestamp,
+  /** The settings in effect, from a fixed list of those safe to show. */
+  settings: z.array(
+    z.object({
+      key: z.string(),
+      group: z.enum(['General', 'Storage', 'Disks', 'Accounts', 'Durability']),
+      value: z.string(),
+      set: z.boolean(),
+      /** The bot's value, when it differs from the API's. */
+      botValue: z.string().nullable(),
+    }),
+  ),
+  /** Whether the bot answered with its own settings to compare. */
+  botSettings: z.boolean(),
+  /** Only whether each is set: never a value. */
+  secrets: z.array(z.object({ key: z.string(), set: z.boolean() })),
+  discord: z.object({
+    guildId: z.string().nullable(),
+    categoryName: z.string(),
+    gateway: z.boolean(),
+    /** Every registered channel: data, and the journal, backup and log ones. */
+    channels: z.array(
+      z.object({
+        name: z.string(),
+        kind: z.enum(['data', 'journal', 'backup', 'log']),
+        discordChannelId: z.string(),
+        enabled: z.boolean(),
+      }),
+    ),
+  }),
+  staging: z.object({ dir: z.string(), usedBytes: byteCount, maxBytes: byteCount }),
+  /** This API instance's frame cache; `null` with local storage, which needs none. */
+  frameCache: z
+    .object({ dir: z.string(), usedBytes: byteCount, maxBytes: byteCount, frames: count })
+    .nullable(),
+})
+export type SystemInfo = z.infer<typeof systemInfoSchema>
+
 // ── PostgreSQL (§16) ─────────────────────────────────────────────────────────
 
 /** A connection doing something: running a query, or holding a transaction open. */

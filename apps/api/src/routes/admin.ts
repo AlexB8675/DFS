@@ -25,6 +25,7 @@ import {
   storageChannelListSchema,
   storageChannelSchema,
   storageStatusSchema,
+  systemInfoSchema,
   systemHealthSchema,
   updateChannelSchema,
   updateUserSchema,
@@ -44,7 +45,8 @@ import {
   revokeShareAsAdmin,
   signOutUser,
 } from '../admin/access.ts'
-import { databaseStatus, signalSession } from '../admin/database.ts'
+import { databaseStatus, signalSession, vacuumTable } from '../admin/database.ts'
+import { clearFrameCache, systemInfo } from '../admin/system-info.ts'
 import { getTask, listTasks, startTask, storageStatus } from '../admin/storage.ts'
 import {
   auditLog,
@@ -293,6 +295,38 @@ export function adminRoutes(app: FastifyInstance, _options: object, done: () => 
     '/admin/database',
     { config: admin, schema: { response: { 200: databaseStatusSchema } } },
     () => databaseStatus(app),
+  )
+
+  routes.post(
+    '/admin/database/tables/:name/vacuum',
+    {
+      config: admin,
+      schema: {
+        params: z.object({ name: z.string().min(1).max(130) }),
+        response: noContent,
+      },
+    },
+    async (request, reply) => {
+      await vacuumTable(app, requireAuth(request.auth), request.params.name)
+      return reply.code(204).send(null)
+    },
+  )
+
+  // ── System ─────────────────────────────────────────────────────────────────
+
+  routes.get(
+    '/admin/system',
+    { config: admin, schema: { response: { 200: systemInfoSchema } } },
+    () => systemInfo(app),
+  )
+
+  routes.post(
+    '/admin/system/cache/clear',
+    {
+      config: admin,
+      schema: { response: { 200: z.object({ freedBytes: z.number().min(0) }) } },
+    },
+    async (request) => ({ freedBytes: await clearFrameCache(app, requireAuth(request.auth)) }),
   )
 
   const byPid = z.object({
