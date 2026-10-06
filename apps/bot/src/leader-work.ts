@@ -28,8 +28,8 @@ import { storeBlobs } from './uploader.ts'
 
 // What only the leading bot does (DESIGN.md §11): pack small frames (§6.6),
 // store staged blobs, delete released ones (§6.4), clean up orphan messages
-// (§6.1), keep folder sizes current (§12.1), and clean up after expired
-// uploads and sessions.
+// (§6.1), keep folder sizes current (§12.1), clean up after expired uploads
+// and sessions, and drop old metrics and audit entries.
 
 const FOLD_EVERY_MS = 2000
 const JANITOR_EVERY_MS = 10 * 60_000
@@ -204,14 +204,16 @@ export async function startLeaderWork(options: {
 }
 
 /**
- * Gives up uploads past their 24 hours, forgets ended sessions, and removes
- * pack files a crash left before their pack was recorded.
+ * Gives up uploads past their 24 hours, forgets ended sessions and audit
+ * entries older than a year, and removes pack files a crash left before their
+ * pack was recorded.
  */
 export async function cleanUp(db: Database, staging: Staging, now = Date.now()): Promise<void> {
   await db.execute(
     sql`DELETE FROM upload_sessions WHERE expires_at <= now() AND state = 'completed'`,
   )
   await db.execute(sql`DELETE FROM sessions WHERE expires_at <= now()`)
+  await db.execute(sql`DELETE FROM audit_log WHERE at < now() - interval '1 year'`)
   const versions = await db.transaction(async (tx) => {
     const { rows } = await tx.execute<{ id: string }>(sql`
       SELECT id FROM upload_sessions

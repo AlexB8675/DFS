@@ -430,7 +430,11 @@ export const auditLog = pgTable(
     meta: jsonb('meta').notNull().default({}),
     at: timestamptz('at').notNull().defaultNow(),
   },
-  (t) => [index('audit_log_user_id').on(t.userId)],
+  (t) => [
+    index('audit_log_user_id').on(t.userId),
+    // The janitor drops entries older than a year (§7.5).
+    index('audit_log_at').on(t.at),
+  ],
 )
 
 /**

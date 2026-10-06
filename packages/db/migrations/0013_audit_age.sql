@@ -1,0 +1,1 @@
+CREATE INDEX "audit_log_at" ON "audit_log" USING btree ("at");
