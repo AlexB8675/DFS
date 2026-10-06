@@ -32,12 +32,16 @@ export async function listSessions(
     user_agent: string | null
     limited: boolean
     current: boolean
+    can_sign_out: boolean
   }>(sql`
     SELECT left(session.id, ${KEY_LENGTH}) AS key, session.user_id,
       account.display_name AS user_name, session.created_at::text AS created_at,
       session.last_seen_at::text AS last_seen_at, session.expires_at::text AS expires_at,
       session.ip, session.user_agent, account.password_expires_at IS NOT NULL AS limited,
-      session.id = ${admin.sessionId} AS current
+      session.id = ${admin.sessionId} AS current,
+      -- As endSessionAsAdmin allows: never this session, and the owner's only by the owner.
+      session.id <> ${admin.sessionId} AND (NOT account.is_owner OR ${admin.user.isOwner})
+        AS can_sign_out
     FROM sessions session JOIN users account ON account.id = session.user_id
     WHERE session.expires_at > now() ${userId ? sql`AND session.user_id = ${userId}` : sql``}
     ORDER BY coalesce(session.last_seen_at, session.created_at) DESC LIMIT 500`)
@@ -52,6 +56,7 @@ export async function listSessions(
     userAgent: row.user_agent,
     limited: row.limited,
     current: row.current,
+    canSignOut: row.can_sign_out,
   }))
 }
 
@@ -175,10 +180,13 @@ export async function revokeShareAsAdmin(
   const { rows } = await app.db.execute<ShareRow>(sql`${SELECT_SHARES} WHERE share.id = ${id}`)
   const [share] = rows
   if (!share) throw new ApiError(404, 'not_found', 'No such link.')
-  await app.db
+  const revoked = await app.db
     .update(shareLinks)
     .set({ revokedAt: new Date() })
     .where(and(eq(shareLinks.id, id), isNull(shareLinks.revokedAt)))
+    .returning({ id: shareLinks.id })
+  // Off already: nothing changed, so nothing to note.
+  if (revoked.length === 0) return
   await audit(app.db, {
     actorId: admin.user.id,
     action: 'share.revoked',
@@ -237,12 +245,15 @@ export async function cancelUploadAsAdmin(
   id: string,
 ): Promise<void> {
   const { found, staged } = await app.db.transaction(async (tx) => {
+    // Locked, as the deletion below would lock it first anyway (locks.ts): an
+    // upload completing meanwhile finishes before this looks, or waits.
     const { rows } = await tx.execute<{ file_name: string; user_name: string }>(sql`
       SELECT node.name AS file_name, account.display_name AS user_name
       FROM upload_sessions upload
       JOIN nodes node ON node.id = upload.node_id
       JOIN users account ON account.id = upload.user_id
-      WHERE upload.id = ${id} AND upload.state = 'receiving'`)
+      WHERE upload.id = ${id} AND upload.state = 'receiving'
+      FOR UPDATE OF upload`)
     const [upload] = rows
     return { found: upload, staged: upload ? await abandonUploads(tx, [id]) : [] }
   })

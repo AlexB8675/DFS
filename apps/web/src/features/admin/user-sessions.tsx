@@ -3,6 +3,16 @@ import { useQuery } from '@tanstack/react-query'
 import { LogOut, MonitorSmartphone } from 'lucide-react'
 import { useState } from 'react'
 import { toast } from 'sonner'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import {
   Sheet,
@@ -24,6 +34,7 @@ import { adminSessionsQuery, useSignOutUser } from './api'
  */
 export function UserSessions({ user, viewerIsOwner }: { user: AdminUser; viewerIsOwner: boolean }) {
   const [open, setOpen] = useState(false)
+  const [confirming, setConfirming] = useState(false)
   const sessions = useQuery({ ...adminSessionsQuery(user.id), enabled: open })
   const signOut = useSignOutUser()
   const protectedOwner = user.isOwner && !viewerIsOwner
@@ -61,6 +72,28 @@ export function UserSessions({ user, viewerIsOwner }: { user: AdminUser; viewerI
               disabled={protectedOwner || signOut.isPending || sessions.data?.length === 0}
               title={protectedOwner ? 'Only the owner can sign the owner out.' : undefined}
               onClick={() => {
+                setConfirming(true)
+              }}
+            >
+              {signOut.isPending ? <Spinner /> : <LogOut />} Sign out everywhere
+            </Button>
+          </SheetFooter>
+        </SheetContent>
+      </Sheet>
+      <AlertDialog open={confirming} onOpenChange={setConfirming}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Sign {user.displayName} out everywhere?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Every session ends at once, and uploads under way stop until {user.displayName} signs
+              in again. If these are your own, this session stays.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep them</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => {
                 signOut.mutate(user.id, {
                   onSuccess: ({ ended }) => {
                     toast.success(
@@ -75,11 +108,11 @@ export function UserSessions({ user, viewerIsOwner }: { user: AdminUser; viewerI
                 })
               }}
             >
-              {signOut.isPending ? <Spinner /> : <LogOut />} Sign out everywhere
-            </Button>
-          </SheetFooter>
-        </SheetContent>
-      </Sheet>
+              Sign out everywhere
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   )
 }

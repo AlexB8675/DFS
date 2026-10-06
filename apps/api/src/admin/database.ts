@@ -1,3 +1,4 @@
+import { hasErrorCode } from '@dfs/db'
 import type { DatabaseStatus } from '@dfs/shared'
 import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
@@ -225,27 +226,23 @@ async function slowestStatements(app: FastifyInstance): Promise<DatabaseStatus['
       })),
     }
   } catch (error) {
-    const code = errorCode(error)
-    // 42P01: the extension isn't created; 55000: the library isn't loaded.
-    if (code === '42P01' || code === '55000') {
+    // The extension isn't created (42P01), or the library isn't loaded (55000).
+    if (hasErrorCode(error, '42P01')) {
       return {
         unavailable:
-          code === '42P01'
-            ? 'The pg_stat_statements extension isn’t installed: a superuser can run CREATE EXTENSION pg_stat_statements; in this database.'
-            : 'Start PostgreSQL with shared_preload_libraries = pg_stat_statements to keep statement statistics.',
+          'The pg_stat_statements extension isn’t installed: a superuser can run CREATE EXTENSION pg_stat_statements; in this database.',
+        items: [],
+      }
+    }
+    if (hasErrorCode(error, '55000')) {
+      return {
+        unavailable:
+          'Start PostgreSQL with shared_preload_libraries = pg_stat_statements to keep statement statistics.',
         items: [],
       }
     }
     throw error
   }
-}
-
-function errorCode(error: unknown): unknown {
-  for (let current: unknown = error; current instanceof Error; current = current.cause) {
-    const { code } = current as { code?: unknown }
-    if (code !== undefined) return code
-  }
-  return undefined
 }
 
 /**

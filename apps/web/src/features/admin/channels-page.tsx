@@ -4,6 +4,16 @@ import { Hash, Plus } from 'lucide-react'
 import { useActionState, useState } from 'react'
 import { toast } from 'sonner'
 import { ListSkeleton } from '@/components/list-skeleton'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import {
@@ -42,6 +52,7 @@ export function ChannelsSection({
 }) {
   const channels = useQuery(channelsQuery)
   const [adding, setAdding] = useState(false)
+  const [confirming, setConfirming] = useState(false)
 
   return (
     <Card size="sm">
@@ -60,7 +71,13 @@ export function ChannelsSection({
           >
             Add by ID
           </Button>
-          <Button size="sm" disabled={!discord || creating} onClick={onCreate}>
+          <Button
+            size="sm"
+            disabled={!discord || creating}
+            onClick={() => {
+              setConfirming(true)
+            }}
+          >
             {creating ? <Spinner /> : <Plus />} Create channel
           </Button>
         </CardAction>
@@ -102,6 +119,22 @@ export function ChannelsSection({
           }}
         />
       )}
+      <AlertDialog open={confirming} onOpenChange={setConfirming}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Create a storage channel?</AlertDialogTitle>
+            <AlertDialogDescription>
+              The bot adds the next storage channel to this environment’s category in Discord,
+              private to it, and new blobs start going there within a minute. Once it holds some, it
+              has to stay: disabling it here keeps it readable.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Not now</AlertDialogCancel>
+            <AlertDialogAction onClick={onCreate}>Create it</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Card>
   )
 }

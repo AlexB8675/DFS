@@ -12,9 +12,18 @@ import { storeAllStagedBlobs, type UploaderDeps } from './uploader.ts'
 export async function settleBlobs(
   deps: UploaderDeps & { sizes: { blobMaxBytes: number; packTargetBytes: number } },
 ): Promise<void> {
-  const { db, staging, sizes } = deps
-  await new Packer({ db, staging, sizes, maxWaitMs: 0 }).sealDue({ force: true })
+  await sealPacks(deps)
   await storeAllStagedBlobs(deps)
+}
+
+/** Packs every waiting frame, leaving the packs in staging for the bot to store. Tests only. */
+export async function sealPacks(deps: {
+  db: Database
+  staging: Staging
+  sizes: { blobMaxBytes: number; packTargetBytes: number }
+}): Promise<number> {
+  const { db, staging, sizes } = deps
+  return new Packer({ db, staging, sizes, maxWaitMs: 0 }).sealDue({ force: true })
 }
 
 /**

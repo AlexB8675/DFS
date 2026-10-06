@@ -1,4 +1,4 @@
-import type { Executor } from '@dfs/db'
+import { stagedBytesSql, type Executor } from '@dfs/db'
 import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 
@@ -48,12 +48,9 @@ export class StagingLimit {
 
   async #check(now: number): Promise<boolean> {
     // Frames on their own, and sealed packs waiting to be stored.
-    const { rows } = await this.#db.execute<{ bytes: number }>(sql`
-      SELECT (
-        (SELECT coalesce(sum(frame_size), 0) FROM chunks WHERE staged_path IS NOT NULL) +
-        (SELECT coalesce(sum(size_bytes), 0) FROM blobs
-          WHERE kind = 'pack' AND state IN ('staged', 'uploading') AND staged_path IS NOT NULL)
-      )::float8 AS bytes`)
+    const { rows } = await this.#db.execute<{ bytes: number }>(
+      sql`SELECT ${stagedBytesSql()}::float8 AS bytes`,
+    )
     this.#full = (rows[0]?.bytes ?? 0) >= this.#maxBytes
     this.#checkedAt = now
     return this.#full

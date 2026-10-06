@@ -384,6 +384,7 @@ export class AdminMockDb extends MockDb {
             : 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1',
         limited: user.temporaryPasswordExpiresAt !== null,
         current: user.id === admin.id,
+        canSignOut: user.id !== admin.id && (!user.isOwner || admin.isOwner),
       }))
       .filter((session) => !this.signedOutSessions.has(session.key))
   }
@@ -463,8 +464,10 @@ export class AdminMockDb extends MockDb {
     const share = this.state.shares.find((candidate) => candidate.id === id)
     const node = share && this.state.nodes[share.nodeId]
     if (!share || !node) throw new MockApiError(404, 'not_found', 'No such link.')
+    // Off already: nothing changes, and nothing is noted.
+    if (share.revokedAt) return
     const owner = this.state.users.find((user) => user.id === node.ownerId)
-    share.revokedAt ??= new Date().toISOString()
+    share.revokedAt = new Date().toISOString()
     this.audit('share.revoked', node.name, `${owner?.displayName ?? 'Someone'}’s link`)
     this.save()
   }
@@ -665,38 +668,39 @@ export class AdminMockDb extends MockDb {
     this.requireAdmin()
     const setting = (
       group: SystemInfo['settings'][number]['group'],
+      usedBy: SystemInfo['settings'][number]['usedBy'],
       key: string,
       value: string,
       set = false,
-    ) => ({ key, group, value, set, botValue: null })
+    ) => ({ key, group, value, set, usedBy, botValue: null })
     return {
       environment: 'development',
       instanceId: '2c750f2e9fd4',
       node: 'v24.14.1',
       apiStartedAt: new Date(Date.now() - 3 * DAY).toISOString(),
       settings: [
-        setting('General', 'NODE_ENV', 'development'),
-        setting('General', 'LOG_LEVEL', 'info'),
-        setting('General', 'PUBLIC_BASE_URL', 'http://localhost:5173'),
-        setting('Storage', 'BLOB_STORE', 'discord', true),
-        setting('Storage', 'DISCORD_CATEGORY_NAME', 'DFS Dev', true),
-        setting('Storage', 'DISCORD_GATEWAY', 'off', true),
-        setting('Storage', 'UPLOAD_CHANNEL_CONCURRENCY', '2'),
-        setting('Storage', 'PACK_MAX_WAIT_MS', '30000'),
-        setting('Disks', 'STAGING_DIR', 'D:\\dfs\\.data\\staging'),
-        setting('Disks', 'STAGING_MAX_BYTES', '100 GiB', true),
-        setting('Disks', 'CACHE_DIR', 'D:\\dfs\\.data\\cache'),
-        setting('Disks', 'CACHE_MAX_BYTES', '5 GiB'),
-        setting('Accounts', 'DEFAULT_QUOTA_BYTES', '100 GiB'),
-        setting('Accounts', 'VERSION_RETENTION', '3'),
-        setting('Durability', 'SCRUB_REQUESTS_PER_HOUR', '600'),
+        setting('General', 'both', 'NODE_ENV', 'development'),
+        setting('General', 'both', 'LOG_LEVEL', 'info'),
+        setting('General', 'api', 'PUBLIC_BASE_URL', 'http://localhost:5173'),
+        setting('Storage', 'both', 'BLOB_STORE', 'discord', true),
+        setting('Storage', 'bot', 'DISCORD_CATEGORY_NAME', 'DFS Dev', true),
+        setting('Storage', 'bot', 'DISCORD_GATEWAY', 'off', true),
+        setting('Storage', 'bot', 'UPLOAD_CHANNEL_CONCURRENCY', '2'),
+        setting('Storage', 'bot', 'PACK_MAX_WAIT_MS', '30000'),
+        setting('Disks', 'both', 'STAGING_DIR', 'D:\\dfs\\.data\\staging'),
+        setting('Disks', 'api', 'STAGING_MAX_BYTES', '100 GiB', true),
+        setting('Disks', 'api', 'CACHE_DIR', 'D:\\dfs\\.data\\cache'),
+        setting('Disks', 'api', 'CACHE_MAX_BYTES', '5 GiB'),
+        setting('Accounts', 'api', 'DEFAULT_QUOTA_BYTES', '100 GiB'),
+        setting('Accounts', 'api', 'VERSION_RETENTION', '3'),
+        setting('Durability', 'both', 'SCRUB_REQUESTS_PER_HOUR', '600'),
       ],
       botSettings: true,
       secrets: [
-        { key: 'DATABASE_URL', set: false },
-        { key: 'INTERNAL_RPC_SECRET', set: false },
-        { key: 'DISCORD_BOT_TOKEN', set: true },
-        { key: 'MASTER_KEY_FILE', set: false },
+        { key: 'DATABASE_URL', usedBy: 'both', set: false },
+        { key: 'INTERNAL_RPC_SECRET', usedBy: 'both', set: false },
+        { key: 'DISCORD_BOT_TOKEN', usedBy: 'bot', set: true },
+        { key: 'MASTER_KEY_FILE', usedBy: 'api', set: false },
       ],
       discord: {
         guildId: '100000000000000002',

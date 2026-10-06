@@ -55,6 +55,32 @@ describe('bot', () => {
     expect((await call(`Bearer ${secret}`)).statusCode).toBe(200)
   })
 
+  it('tells Admin → System the settings it reads, and only whether its secrets are set (§15)', async () => {
+    const response = await bot.server.inject({
+      method: 'GET',
+      url: '/internal/settings',
+      headers: { authorization: `Bearer ${secret}` },
+    })
+    const body = response.json<{
+      settings: { key: string; value: string; set: boolean }[]
+      secrets: { key: string; set: boolean }[]
+      discord: { guildId: string | null; categoryName: string; gateway: boolean }
+    }>()
+    const keys = body.settings.map((setting) => setting.key)
+    // What only the API reads isn't the bot's to say.
+    expect(keys).toEqual(expect.arrayContaining(['BLOB_STORE', 'STAGING_DIR', 'PACK_MAX_WAIT_MS']))
+    expect(keys).not.toContain('PUBLIC_BASE_URL')
+    expect(keys).not.toContain('CACHE_DIR')
+    expect(body.secrets.map((entry) => entry.key)).toEqual([
+      'DATABASE_URL',
+      'INTERNAL_RPC_SECRET',
+      'DISCORD_BOT_TOKEN',
+    ])
+    expect(body.discord).toEqual({ guildId: null, categoryName: 'DFS Dev', gateway: false })
+    expect(response.body).not.toContain(secret)
+    expect(response.body).not.toContain(database.url)
+  })
+
   it('signs CDN URLs only for Discord storage, for a bounded number of blobs', async () => {
     const refresh = (blobIds: unknown) =>
       bot.server.inject({

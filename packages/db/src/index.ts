@@ -1,5 +1,6 @@
 export * from './channels.ts'
 export * from './client.ts'
+export * from './errors.ts'
 export * from './events.ts'
 export * from './folder-stats.ts'
 export * from './ids.ts'

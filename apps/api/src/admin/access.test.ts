@@ -65,8 +65,17 @@ describe('Admin → Access (§9)', () => {
     const owner = await client('owner')
     const helper = await client('helper')
     const sessions = await helper.call('GET', '/admin/sessions', adminSessionListSchema)
-    const ownerKey = sessions.find((session) => session.userName === 'owner')?.key ?? ''
+    const ownerSession = sessions.find((session) => session.userName === 'owner')
     const ownKey = sessions.find((session) => session.current)?.key ?? ''
+    const ownerKey = ownerSession?.key ?? ''
+    // The page offers only what the API allows.
+    const owners = sessions.filter((session) => session.userName === 'owner')
+    expect(owners.length).toBeGreaterThan(0)
+    expect(owners.some((session) => session.canSignOut)).toBe(false)
+    expect(sessions.find((session) => session.current)?.canSignOut).toBe(false)
+    const asOwner = await owner.call('GET', '/admin/sessions', adminSessionListSchema)
+    const elsewhere = asOwner.find((session) => session.userName === 'owner' && !session.current)
+    expect(elsewhere?.canSignOut).toBe(true)
     expect(await helper.error('DELETE', `/admin/sessions/${ownerKey}`)).toEqual({
       status: 409,
       code: 'owner_protected',

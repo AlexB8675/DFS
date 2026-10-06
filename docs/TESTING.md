@@ -153,8 +153,9 @@ Use disposable folders and files for these checks:
     for things that haven't happened yet are flat, never broken.
 11. Open Admin → Storage. Seal packs now while uploading small files: the task
     shows as waiting, then done with how many packs it sealed, and the audit log
-    records it. With Discord storage, Create channel adds the next `storage-NN`
-    to `DFS Dev`; stop the bot and a task is refused until it is back.
+    records it. With Discord storage, Create channel asks first, then adds the
+    next `storage-NN` to `DFS Dev`; clicking a task again while it waits says
+    it is under way. Stop the bot and a task is refused until it is back.
 12. Open Admin → Access in one browser, signed in as an admin, and sign in
     as another user in a private window. The second session shows with its
     browser and address; Sign out ends it, and the private window's next
@@ -162,7 +163,9 @@ Use disposable folders and files for these checks:
     off from Access: opening the link says it was turned off. In the audit
     log, choose Sharing and type the file's name.
 13. Open Admin → System. The settings match your `.env`, marked set or default,
-    and no secret shows its value. Clear the frame cache after downloading a
+    and with the service that reads them where only one does; no secret shows
+    its value. Stop the bot: the page says it didn't answer, and the bot's
+    secret shows as unknown. Clear the frame cache after downloading a
     file stored in Discord: the cache shows 0 B, and the next download reads
     from Discord again. On Admin → Database, vacuum a table: its Vacuumed
     column says just now.

@@ -1,7 +1,7 @@
 import type { SystemInfo } from '@dfs/shared'
 import { useQuery } from '@tanstack/react-query'
-import { CircleCheck, CircleMinus, Eraser, TriangleAlert, Wrench } from 'lucide-react'
-import { useState, type ReactNode } from 'react'
+import { CircleCheck, CircleHelp, CircleMinus, Eraser, TriangleAlert, Wrench } from 'lucide-react'
+import { useState } from 'react'
 import { toast } from 'sonner'
 import {
   AlertDialog,
@@ -15,7 +15,6 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Progress } from '@/components/ui/progress'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '@/components/ui/spinner'
@@ -23,6 +22,7 @@ import { errorMessage } from '@/lib/api/client'
 import { formatBytes, formatDate, formatFullDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { isFinished, systemQuery, tasksQuery, useClearFrameCache, useStartTask } from './api'
+import { Section } from './section'
 import { useTaskResults } from './task-results'
 
 const GROUPS: SystemInfo['settings'][number]['group'][] = [
@@ -33,6 +33,13 @@ const GROUPS: SystemInfo['settings'][number]['group'][] = [
   'Durability',
 ]
 
+/** A setting or secret only one service reads. */
+const ONLY: Record<SystemInfo['settings'][number]['usedBy'], string | null> = {
+  api: 'API only',
+  bot: 'bot only',
+  both: null,
+}
+
 const KINDS: Record<SystemInfo['discord']['channels'][number]['kind'], string> = {
   data: 'Storage',
   journal: 'Journal',
@@ -42,8 +49,9 @@ const KINDS: Record<SystemInfo['discord']['channels'][number]['kind'], string> =
 
 /**
  * `/admin/system`: what this DFS is and how it is set up (§15): its Discord
- * layout, its disks with the frame cache to clear, the settings in effect
- * (the bot's too, where they differ), and whether its secrets are set.
+ * layout, its disks with the frame cache to clear, the settings in effect as
+ * the service reading each has it (the bot's too, where both read one and
+ * they differ), and whether its secrets are set.
  */
 export function SystemPage() {
   const system = useQuery(systemQuery)
@@ -92,9 +100,9 @@ function SystemView({ system }: { system: SystemInfo }) {
         <p className="flex items-start gap-2 rounded-xl border border-status-warning/60 bg-card px-4 py-3 text-sm">
           <TriangleAlert className="mt-0.5 size-4 shrink-0 text-status-warning" aria-hidden />
           <span>
-            The bot runs with different settings from the API:{' '}
-            {differing.map((setting) => setting.key).join(', ')}. Both should read the same
-            environment.
+            The API and the bot read these differently:{' '}
+            {differing.map((setting) => setting.key).join(', ')}. Both read them, so both must have
+            the same values.
           </span>
         </p>
       )}
@@ -108,8 +116,8 @@ function SystemView({ system }: { system: SystemInfo }) {
         title="Settings"
         description={
           system.botSettings
-            ? 'In effect in the API, and the same in the bot unless marked. Secrets aren’t listed here.'
-            : 'In effect in the API. The bot didn’t answer, so its settings aren’t compared.'
+            ? 'As the service reading each has it; where both read one, the bot’s is shown if it differs. Secrets aren’t listed here.'
+            : 'The bot didn’t answer, so those it reads are shown as the API has them, and none are compared.'
         }
       >
         <div className="grid gap-5">
@@ -129,6 +137,11 @@ function SystemView({ system }: { system: SystemInfo }) {
                         {!setting.set && (
                           <span className="text-xs text-muted-foreground">default</span>
                         )}
+                        {ONLY[setting.usedBy] && (
+                          <span className="text-xs text-muted-foreground">
+                            {ONLY[setting.usedBy]}
+                          </span>
+                        )}
                         {setting.botValue !== null && (
                           <Badge variant="outline" className="text-status-warning">
                             bot: {setting.botValue}
@@ -145,19 +158,26 @@ function SystemView({ system }: { system: SystemInfo }) {
 
       <Section
         title="Secrets"
-        description="Whether each is set; their values never leave the server. In development, the unset ones have safe defaults."
+        description="Whether each is set in the service that uses it; their values never leave the server. In development, the unset ones have safe defaults."
       >
         <ul className="grid gap-1.5 text-sm sm:grid-cols-2">
           {system.secrets.map((secret) => (
             <li key={secret.key} className="flex items-center gap-2">
-              {secret.set ? (
+              {secret.set === null ? (
+                <CircleHelp className="size-4 text-muted-foreground" aria-hidden />
+              ) : secret.set ? (
                 <CircleCheck className="size-4 text-status-good" aria-hidden />
               ) : (
                 <CircleMinus className="size-4 text-muted-foreground" aria-hidden />
               )}
               <span className="font-mono text-xs">{secret.key}</span>
               <span className="text-xs text-muted-foreground">
-                {secret.set ? 'set' : 'not set'}
+                {secret.set === null
+                  ? 'unknown: the bot didn’t answer'
+                  : secret.set
+                    ? 'set'
+                    : 'not set'}
+                {ONLY[secret.usedBy] && ` · ${ONLY[secret.usedBy] ?? ''}`}
               </span>
             </li>
           ))}
@@ -171,9 +191,9 @@ function DiscordCard({ system, discord }: { system: SystemInfo; discord: boolean
   const tasks = useQuery(tasksQuery)
   const start = useStartTask()
   useTaskResults(tasks.data)
-  const checking = (tasks.data ?? []).some(
-    (task) => task.kind === 'discord.setup' && !isFinished(task),
-  )
+  const checking =
+    (start.isPending && start.variables.kind === 'discord.setup') ||
+    (tasks.data ?? []).some((task) => task.kind === 'discord.setup' && !isFinished(task))
 
   return (
     <Section
@@ -351,28 +371,5 @@ function Chip({ label, detail, title }: { label: string; detail: string; title?:
       <span className="font-medium">{label}</span>
       <span className="text-muted-foreground">{detail}</span>
     </li>
-  )
-}
-
-function Section({
-  title,
-  description,
-  action,
-  children,
-}: {
-  title: string
-  description: string
-  action?: ReactNode
-  children: ReactNode
-}) {
-  return (
-    <Card size="sm">
-      <CardHeader>
-        <CardTitle>{title}</CardTitle>
-        <p className="text-xs text-muted-foreground">{description}</p>
-        {action && <CardAction>{action}</CardAction>}
-      </CardHeader>
-      <CardContent>{children}</CardContent>
-    </Card>
   )
 }

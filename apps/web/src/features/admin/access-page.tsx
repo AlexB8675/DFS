@@ -1,7 +1,7 @@
 import type { AdminSession, AdminShare, AdminUpload } from '@dfs/shared'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
-import { CircleCheck, KeyRound, LogOut, Link2Off, XCircle } from 'lucide-react'
-import { useState, type ReactNode } from 'react'
+import { KeyRound, LogOut, Link2Off, XCircle } from 'lucide-react'
+import { useState } from 'react'
 import { Link } from 'react-router'
 import { toast } from 'sonner'
 import {
@@ -16,7 +16,6 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Progress } from '@/components/ui/progress'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
@@ -31,6 +30,7 @@ import {
   useEndSession,
   useRevokeShareAsAdmin,
 } from './api'
+import { AllClear, Section } from './section'
 
 /** An action that can't be undone, waiting for the admin to confirm it. */
 interface Confirmation {
@@ -87,29 +87,6 @@ export function AccessPage() {
         </AlertDialogContent>
       </AlertDialog>
     </div>
-  )
-}
-
-function Section({
-  title,
-  description,
-  action,
-  children,
-}: {
-  title: string
-  description: string
-  action?: ReactNode
-  children: ReactNode
-}) {
-  return (
-    <Card size="sm">
-      <CardHeader>
-        <CardTitle>{title}</CardTitle>
-        <p className="text-xs text-muted-foreground">{description}</p>
-        {action && <CardAction>{action}</CardAction>}
-      </CardHeader>
-      <CardContent>{children}</CardContent>
-    </Card>
   )
 }
 
@@ -179,7 +156,8 @@ export function SessionList({
               )}
             </span>
           </span>
-          {!session.current && (
+          {/* The owner's are the owner's to end, and this one is signed out from the menu. */}
+          {session.canSignOut && (
             <Button
               variant="outline"
               size="sm"
@@ -249,7 +227,7 @@ function Shares({ onConfirm }: { onConfirm: (confirmation: Confirmation) => void
       {!shares.data ? (
         <Skeleton className="h-24 rounded-lg" />
       ) : items.length === 0 ? (
-        <Quiet>{active ? 'No link is working.' : 'No one has shared anything.'}</Quiet>
+        <AllClear>{active ? 'No link is working.' : 'No one has shared anything.'}</AllClear>
       ) : (
         <div className="grid gap-3">
           <div className="overflow-x-auto">
@@ -362,7 +340,7 @@ function Uploads({ onConfirm }: { onConfirm: (confirmation: Confirmation) => voi
       {!uploads.data ? (
         <Skeleton className="h-16 rounded-lg" />
       ) : uploads.data.length === 0 ? (
-        <Quiet>Nothing is uploading.</Quiet>
+        <AllClear>Nothing is uploading.</AllClear>
       ) : (
         <ul className="grid gap-3">
           {uploads.data.map((upload) => (
@@ -415,13 +393,5 @@ function UploadRow({ upload, onCancel }: { upload: AdminUpload; onCancel: () => 
         className="h-1.5"
       />
     </li>
-  )
-}
-
-function Quiet({ children }: { children: ReactNode }) {
-  return (
-    <p className="flex items-center gap-2 text-sm text-muted-foreground">
-      <CircleCheck className="size-4 text-status-good" aria-hidden /> {children}
-    </p>
   )
 }

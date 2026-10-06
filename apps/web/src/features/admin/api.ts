@@ -95,7 +95,7 @@ export function useStartTask() {
 /** What a finished task may have changed. */
 export async function afterTask(): Promise<void> {
   await Promise.all(
-    ['storage', 'channels', 'health'].map((key) =>
+    ['storage', 'channels', 'health', 'system'].map((key) =>
       queryClient.invalidateQueries({ queryKey: ['admin', key] }),
     ),
   )

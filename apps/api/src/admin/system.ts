@@ -8,7 +8,7 @@ import {
   type StorageChannel,
   type SystemHealth,
 } from '@dfs/shared'
-import { storageChannels, systemFigures } from '@dfs/db'
+import { storageChannels, storageTotals, systemFigures, type StorageTotals } from '@dfs/db'
 import { eq, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
@@ -20,7 +20,31 @@ import { FAILING_DELETE_ATTEMPTS, healthAlerts } from './alerts.ts'
 
 // The admin overview, storage channels and the audit log (DESIGN.md §9).
 
-const startedAt = Date.now()
+/** When this API instance started. */
+export const apiStartedAt = new Date()
+
+/** How long the overview's storage totals are shared: they change slowly, and cost a scan. */
+const TOTALS_FOR_MS = 30_000
+const recentTotalsByApp = new WeakMap<
+  FastifyInstance,
+  { at: number; totals: Promise<StorageTotals> }
+>()
+
+/**
+ * The pass over `blobs`, made at most every `TOTALS_FOR_MS` however many
+ * admins watch the overview; everything else it shows is read as it is now.
+ */
+function recentTotals(app: FastifyInstance, now = Date.now()): Promise<StorageTotals> {
+  const kept = recentTotalsByApp.get(app)
+  if (kept && now - kept.at < TOTALS_FOR_MS) return kept.totals
+  const totals = storageTotals(app.db)
+  recentTotalsByApp.set(app, { at: now, totals })
+  // A failure isn't kept: the next look tries again.
+  void totals.catch(() => {
+    if (recentTotalsByApp.get(app)?.totals === totals) recentTotalsByApp.delete(app)
+  })
+  return totals
+}
 
 /**
  * `GET /admin/health`: alerts, services, queue, sync backlog, staging, cache,
@@ -29,7 +53,7 @@ const startedAt = Date.now()
 export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> {
   const [bot, figures, recent, troubles, database] = await Promise.all([
     botHealth(app),
-    systemFigures(app.db),
+    systemFigures(app.db, () => recentTotals(app)),
     // From the metrics: what reached Discord lately, the cache's hits this
     // last hour, and the failures of the last hour that make alerts.
     app.db.execute<{
@@ -61,7 +85,8 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
         AND name IN ('discord.posted', 'cache.hits', 'cache.misses', 'discord.429',
           'http.server_errors', 'cdn.failures', 'discord.post_failures', 'pg.deadlocks')`),
     // Blobs waiting to be deleted, and those lost, each read through an index:
-    // the newest lost ones, and how many versions all of them held.
+    // the newest lost ones with the files they held, and how many files
+    // can't be downloaded: those whose current version is in one.
     app.db.execute<{
       failing_deletions: number
       lost_files: number
@@ -70,13 +95,17 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
       SELECT
         (SELECT count(*)::int FROM blobs
           WHERE state = 'deleting' AND attempts >= ${FAILING_DELETE_ATTEMPTS}) AS failing_deletions,
-        (SELECT count(DISTINCT chunk.version_id)::int
+        (SELECT count(DISTINCT node.id)::int
           FROM blobs blob JOIN chunks chunk ON chunk.blob_id = blob.id
+          JOIN file_versions version ON version.id = chunk.version_id
+          JOIN nodes node ON node.id = version.node_id AND node.current_version_id = version.id
           WHERE blob.state = 'lost') AS lost_files,
         coalesce((
           SELECT json_agg(json_build_object(
             'id', blob.id::text, 'channel', channel.name, 'lostAt', blob.lost_at,
-            'files', (SELECT count(DISTINCT version_id) FROM chunks WHERE blob_id = blob.id)
+            'files', (SELECT count(DISTINCT version.node_id)
+              FROM chunks chunk JOIN file_versions version ON version.id = chunk.version_id
+              WHERE chunk.blob_id = blob.id)
           ) ORDER BY blob.lost_at DESC NULLS LAST)
           FROM (SELECT * FROM blobs WHERE state = 'lost'
             ORDER BY lost_at DESC NULLS LAST LIMIT 50) blob
@@ -382,7 +411,7 @@ export async function auditLog(app: FastifyInstance, query: AuditQuery): Promise
 }
 
 function uptime(): string {
-  const minutes = Math.floor((Date.now() - startedAt) / 60_000)
+  const minutes = Math.floor((Date.now() - apiStartedAt.getTime()) / 60_000)
   if (minutes < 60) return `${String(minutes)} min`
   const hours = Math.floor(minutes / 60)
   return hours < 48 ? `${String(hours)} h` : `${String(Math.floor(hours / 24))} days`

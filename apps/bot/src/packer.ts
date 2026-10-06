@@ -48,7 +48,9 @@ export class Packer {
    * Seals every pack that is due, and returns how many. A pack is due once it
    * reaches `PACK_TARGET_BYTES`, when the frames left waiting don't fit in
    * it, or when its oldest frame has waited `PACK_MAX_WAIT_MS`. `force`
-   * seals what is waiting at once, for tests.
+   * seals what is waiting at once: Admin → Storage's Seal packs now, and
+   * tests. Two calls at once are safe: each skips the frames the other has
+   * locked.
    */
   async sealDue({ force = false, now = Date.now() } = {}): Promise<number> {
     let sealed = 0

@@ -508,6 +508,11 @@ export const adminSessionSchema = z.object({
   limited: z.boolean(),
   /** The session asking. */
   current: z.boolean(),
+  /**
+   * Whether the admin asking may sign it out: not the session asking, and
+   * the owner's only when the owner asks.
+   */
+  canSignOut: z.boolean(),
 })
 export type AdminSession = z.infer<typeof adminSessionSchema>
 export const adminSessionListSchema = z.array(adminSessionSchema)
@@ -672,7 +677,7 @@ export const storageStatusSchema = z.object({
           ownerId: id,
           ownerName: z.string(),
           parentId: id.nullable(),
-          /** Whether the lost version is the file's current one, not an older one. */
+          /** Whether the file's current version is lost, rather than only older ones. */
           current: z.boolean(),
         }),
       ),
@@ -683,6 +688,9 @@ export type StorageStatus = z.infer<typeof storageStatusSchema>
 
 // ── System (§15) ─────────────────────────────────────────────────────────────
 
+/** Which service reads a setting or a secret. */
+export const settingUserSchema = z.enum(['api', 'bot', 'both'])
+
 /** `GET /admin/system`: what this DFS is, how it is set up, and its disks. */
 export const systemInfoSchema = z.object({
   environment: z.enum(['development', 'test', 'production']),
@@ -690,21 +698,31 @@ export const systemInfoSchema = z.object({
   instanceId: z.string(),
   node: z.string(),
   apiStartedAt: timestamp,
-  /** The settings in effect, from a fixed list of those safe to show. */
+  /**
+   * The settings in effect, from a fixed list of those safe to show. One
+   * read by the bot alone is as the bot has it, once it answers.
+   */
   settings: z.array(
     z.object({
       key: z.string(),
       group: z.enum(['General', 'Storage', 'Disks', 'Accounts', 'Durability']),
       value: z.string(),
       set: z.boolean(),
-      /** The bot's value, when it differs from the API's. */
+      usedBy: settingUserSchema,
+      /** For a setting both read: the bot's value, when it differs from the API's. */
       botValue: z.string().nullable(),
     }),
   ),
-  /** Whether the bot answered with its own settings to compare. */
+  /** Whether the bot answered with its own settings. */
   botSettings: z.boolean(),
-  /** Only whether each is set: never a value. */
-  secrets: z.array(z.object({ key: z.string(), set: z.boolean() })),
+  /**
+   * Only whether each is set, as the service using it has it: never a
+   * value. `null` for the bot's while it doesn't answer.
+   */
+  secrets: z.array(
+    z.object({ key: z.string(), usedBy: settingUserSchema, set: z.boolean().nullable() }),
+  ),
+  /** As the bot has them, once it answers: the API reads them only to show them. */
   discord: z.object({
     guildId: z.string().nullable(),
     categoryName: z.string(),

@@ -154,6 +154,8 @@ export async function startLeaderWork(options: {
     }),
     repeat(FOLD_EVERY_MS, log, 'folding folder sizes', () => foldAllFolderStats(db)),
     repeat(JANITOR_EVERY_MS, log, 'cleaning up', () => cleanUp(db, staging)),
+    // On its own, so a failure here never holds back the clean-up above, nor the reverse.
+    repeat(JANITOR_EVERY_MS, log, 'dropping old metrics', () => pruneMetrics(db)),
   ]
   // The leader alone samples them, so the figures aren't counted once per bot.
   if (metrics) {
@@ -194,16 +196,14 @@ export async function startLeaderWork(options: {
 }
 
 /**
- * Gives up uploads past their 24 hours, forgets ended sessions, removes
- * pack files a crash left before their pack was recorded, and drops metrics
- * past their keeping.
+ * Gives up uploads past their 24 hours, forgets ended sessions, and removes
+ * pack files a crash left before their pack was recorded.
  */
 export async function cleanUp(db: Database, staging: Staging, now = Date.now()): Promise<void> {
   await db.execute(
     sql`DELETE FROM upload_sessions WHERE expires_at <= now() AND state = 'completed'`,
   )
   await db.execute(sql`DELETE FROM sessions WHERE expires_at <= now()`)
-  await pruneMetrics(db, now)
   const versions = await db.transaction(async (tx) => {
     const { rows } = await tx.execute<{ id: string }>(sql`
       SELECT id FROM upload_sessions

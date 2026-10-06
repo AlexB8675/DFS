@@ -71,6 +71,12 @@ describe('health alerts (DESIGN.md §16)', () => {
     )
   })
 
+  it('says when lost blobs held only older versions, which leaves every file readable', () => {
+    const [alert] = healthAlerts({ ...calm, lostBlobs: 1, lostFiles: 0 })
+    expect(alert).toMatchObject({ code: 'lost_blobs', level: 'critical', title: '1 lost blob' })
+    expect(alert?.detail).toMatch(/only older versions: every file can still be downloaded/)
+  })
+
   it('makes almost no database connections left critical', () => {
     const [alert] = healthAlerts({
       ...calm,

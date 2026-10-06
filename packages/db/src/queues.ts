@@ -12,10 +12,6 @@ export interface BlobUploadJob {
   blobId: number
 }
 
-/**
- * Retries with backoff: about 10 tries over a few hours. New jobs NOTIFY,
- * so the bot starts on them at once instead of at its next poll.
- */
 /** An admin task: what it is, and who asked. */
 export interface AdminTaskJob {
   kind: string
@@ -35,6 +31,10 @@ export const ADMIN_TASK_QUEUE = {
   notify: true,
 } as const
 
+/**
+ * Retries with backoff: about 10 tries over a few hours. New jobs NOTIFY,
+ * so the bot starts on them at once instead of at its next poll.
+ */
 export const BLOB_UPLOAD_QUEUE = {
   retryLimit: 10,
   retryDelay: 5,

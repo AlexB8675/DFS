@@ -20,6 +20,11 @@ export const LOCKS = {
   journal: 3,
   /** Held while folder sizes are recomputed, so two recomputations never interleave. */
   folderStats: 4,
+  /**
+   * Taken while an admin task is queued, so two requests at once can't both
+   * find none of its kind under way (Admin → Storage).
+   */
+  adminTask: 5,
 } as const
 
 /**

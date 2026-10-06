@@ -209,7 +209,16 @@ The admin pages grow from a status page into the place to watch and run DFS, bef
 - [x] **2 · Dashboards:** graphs on the overview with a time range, alerts for what needs attention (worked out by the API, with the health), and a Monitoring tab for traffic, Discord, reading back, storage, the database, the processes and people. Graphs are the web app's own SVG, with a crosshair, keyboard reading and a table view. A Database tab watches PostgreSQL: its statistics sampled into the metrics, what runs now (with Cancel and End), the slowest statements (`pg_stat_statements`), tables, unused indexes and settings, and alerts for connections, long transactions, lock waits and deadlocks.
 - [x] **3 · Storage control:** an Admin → Storage tab replaces Channels. Tasks go to the leading bot through the `admin.task` queue (one at a time, run once, refused while no bot leads, dropped after 10 minutes waiting): create a channel in the category, check the Discord layout, seal packs, clean up orphans, give uploads that gave up one more try, try failing deletions now, and recover a lost blob from the CDN's cache, which works only for blobs read lately (checked live: a deleted message's attachment is served only through a link that read it before; lost blobs now keep that link). The page lists failing uploads and deletions with their errors, and lost blobs with their files. A partial index on lost blobs (migration 0011) keeps the overview's 5 s refresh cheap.
 - [x] **4 · People and access:** an Admin → Access tab: everyone signed in (sessions now keep their address, browser and last use; migration 0012), each signed out at once; every share link, without its token, turned off by an admin; uploads under way, given up by an admin. A user's page has their sessions and Sign out everywhere. The audit log filters by kind of action and by words. Only the owner signs the owner out, and the asking session can't end itself.
-- [x] **5 · System:** an Admin → System tab: the settings in effect from a fixed list in `packages/config`, compared with the bot's (`/internal/settings`), secrets as set or not; the Discord layout with Check the layout; staging and the frame cache, which can be cleared. The Database tab vacuums a table on demand.
+- [x] **5 · System:** an Admin → System tab: the settings in effect from a fixed list in `packages/config`, each marked with the service that reads it; the bot's own (`/internal/settings`) for those only it reads, and compared for those both read; secrets as set or not in the service using them; the Discord layout with Check the layout; staging and the frame cache, which can be cleared. The Database tab vacuums a table on demand.
+- [x] **Review of the admin console (2026-10-06):**
+  - staging counts sealed packs waiting for Discord everywhere, as the upload limit does;
+  - one admin task of a kind at a time, checked under a lock, and Create channel asks first;
+  - System refreshes after a task, and compares only the settings both services read;
+  - only the sessions an admin may end show Sign out, and Sign out everywhere asks first;
+  - an upload given up, or a link turned off, is audited only when something changed;
+  - lost blobs list each file once, and the alert counts only files whose current version is lost;
+  - the overview's pass over `blobs` is shared for 30 s;
+  - old metrics are dropped in a loop of their own.
 
 **Done when**
 

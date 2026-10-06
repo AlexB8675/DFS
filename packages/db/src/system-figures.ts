@@ -1,26 +1,47 @@
-import { sql } from 'drizzle-orm'
+import { sql, type SQL } from 'drizzle-orm'
 import type { Database } from './client.ts'
+import { isMissingTable } from './errors.ts'
 import type { Metrics } from './metrics.ts'
 import { QUEUES } from './queues.ts'
 
 // The state of the whole system in figures (DESIGN.md §16): the admin
 // overview shows them as they are, and the leading bot samples them into the
 // metrics once a minute. Every query reads an index or a small table, except
-// the blob totals, one pass over `blobs` (a row per 10 MiB stored, or per pack).
+// the storage totals, one pass over `blobs` (a row per 10 MiB stored, or per
+// pack), which the overview may take from a while ago.
 
-export interface SystemFigures {
-  /** Versions waiting to reach Discord, and their bytes. */
-  syncFiles: number
-  syncBytes: number
-  stagedBytes: number
+/**
+ * What staging holds, as one SQL expression: frames on their own, and sealed
+ * packs waiting to be stored (a solo blob's file is its frame's). The upload
+ * limit refuses uploads by it, and the admin pages show it.
+ */
+export function stagedBytesSql(): SQL {
+  return sql`(
+    (SELECT coalesce(sum(frame_size), 0) FROM chunks WHERE staged_path IS NOT NULL) +
+    (SELECT coalesce(sum(size_bytes), 0) FROM blobs
+      WHERE kind = 'pack' AND state IN ('staged', 'uploading') AND staged_path IS NOT NULL)
+  )`
+}
+
+/** The pass over `blobs`: what is stored, and what waits to be stored or deleted. */
+export interface StorageTotals {
   /** Stored blobs, how many of them are packs, their bytes and how many of those are still used. */
   blobs: number
   packs: number
   storedBytes: number
   liveBytes: number
-  /** Blobs waiting to be stored, waiting to be deleted, and lost. */
+  /** Blobs waiting to be stored, and waiting to be deleted. */
   waitingBlobs: number
   deletingBlobs: number
+}
+
+export interface SystemFigures extends StorageTotals {
+  /** Versions waiting to reach Discord, and their bytes. */
+  syncFiles: number
+  syncBytes: number
+  /** Frames and sealed packs in staging (`stagedBytesSql`). */
+  stagedBytes: number
+  /** Blobs whose message was deleted in Discord. */
   lostBlobs: number
   /** Upload jobs waiting, how long the oldest has, and those that gave up. */
   pendingJobs: number
@@ -33,40 +54,59 @@ export interface SystemFigures {
   sessions: number
 }
 
-export async function systemFigures(db: Database): Promise<SystemFigures> {
-  const [figures, queue] = await Promise.all([
-    db.execute<Omit<SystemFigures, 'pendingJobs' | 'oldestPendingSeconds' | 'failedJobs'>>(sql`
+/**
+ * The system's figures. `totals` gives the pass over `blobs`: by default made
+ * now, or one from a while ago where the figures are read often.
+ */
+export async function systemFigures(
+  db: Database,
+  totals: () => Promise<StorageTotals> = () => storageTotals(db),
+): Promise<SystemFigures> {
+  const [figures, storage, queue] = await Promise.all([
+    db.execute<
+      Omit<
+        SystemFigures,
+        keyof StorageTotals | 'pendingJobs' | 'oldestPendingSeconds' | 'failedJobs'
+      >
+    >(sql`
       SELECT
         (SELECT count(*)::float8 FROM file_versions WHERE state = 'syncing') AS "syncFiles",
         (SELECT coalesce(sum(size_bytes), 0)::float8 FROM file_versions WHERE state = 'syncing')
           AS "syncBytes",
-        (SELECT coalesce(sum(frame_size), 0)::float8 FROM chunks WHERE staged_path IS NOT NULL)
-          AS "stagedBytes",
-        blob.*,
+        ${stagedBytesSql()}::float8 AS "stagedBytes",
+        -- Through the index of lost blobs: always as it is now.
+        (SELECT count(*)::float8 FROM blobs WHERE state = 'lost') AS "lostBlobs",
         pg_database_size(current_database())::float8 AS "databaseBytes",
         account.*,
         (SELECT coalesce(sum(stats.file_count), 0)::float8
           FROM users JOIN folder_stats stats ON stats.node_id = users.root_node_id) AS files,
         (SELECT count(*)::float8 FROM sessions WHERE expires_at > now()) AS sessions
       FROM (
-        SELECT
-          count(*) FILTER (WHERE state = 'stored')::float8 AS blobs,
-          count(*) FILTER (WHERE state = 'stored' AND kind = 'pack')::float8 AS packs,
-          coalesce(sum(size_bytes) FILTER (WHERE state = 'stored'), 0)::float8 AS "storedBytes",
-          coalesce(sum(live_bytes) FILTER (WHERE state = 'stored'), 0)::float8 AS "liveBytes",
-          count(*) FILTER (WHERE state IN ('staged', 'uploading'))::float8 AS "waitingBlobs",
-          count(*) FILTER (WHERE state = 'deleting')::float8 AS "deletingBlobs",
-          count(*) FILTER (WHERE state = 'lost')::float8 AS "lostBlobs"
-        FROM blobs
-      ) blob, (
         SELECT count(*)::float8 AS users, coalesce(sum(used_bytes), 0)::float8 AS "fileBytes"
         FROM users
       ) account`),
+    totals(),
     queueFigures(db),
   ])
   const [row] = figures.rows
   if (!row) throw new Error('The system figures query returned nothing.')
-  return { ...row, ...queue }
+  return { ...row, ...storage, ...queue }
+}
+
+/** One pass over `blobs`. */
+export async function storageTotals(db: Database): Promise<StorageTotals> {
+  const { rows } = await db.execute<Pick<StorageTotals, keyof StorageTotals>>(sql`
+    SELECT
+      count(*) FILTER (WHERE state = 'stored')::float8 AS blobs,
+      count(*) FILTER (WHERE state = 'stored' AND kind = 'pack')::float8 AS packs,
+      coalesce(sum(size_bytes) FILTER (WHERE state = 'stored'), 0)::float8 AS "storedBytes",
+      coalesce(sum(live_bytes) FILTER (WHERE state = 'stored'), 0)::float8 AS "liveBytes",
+      count(*) FILTER (WHERE state IN ('staged', 'uploading'))::float8 AS "waitingBlobs",
+      count(*) FILTER (WHERE state = 'deleting')::float8 AS "deletingBlobs"
+    FROM blobs`)
+  const [row] = rows
+  if (!row) throw new Error('The storage totals query returned nothing.')
+  return row
 }
 
 /**
@@ -93,18 +133,9 @@ async function queueFigures(
       failedJobs: row?.failed ?? 0,
     }
   } catch (error) {
-    if (!missingTable(error)) throw error
+    if (!isMissingTable(error)) throw error
     return { pendingJobs: 0, oldestPendingSeconds: 0, failedJobs: 0 }
   }
-}
-
-/** `undefined_table` or `invalid_schema_name`, in the error or what drizzle wrapped. */
-function missingTable(error: unknown): boolean {
-  for (let current: unknown = error; current instanceof Error; current = current.cause) {
-    const { code } = current as { code?: unknown }
-    if (code === '42P01' || code === '3F000') return true
-  }
-  return false
 }
 
 /** Samples the system's figures into the metrics; the leading bot does, once a minute. */

@@ -1,4 +1,4 @@
-import { QUEUES, type AdminTaskJob } from '@dfs/db'
+import { isMissingTable, LOCK_NAMESPACE, LOCKS, QUEUES, type AdminTaskJob } from '@dfs/db'
 import {
   ADMIN_TASK_LABELS,
   adminTaskKindSchema,
@@ -9,6 +9,7 @@ import {
 } from '@dfs/shared'
 import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
+import { fromDrizzle } from 'pg-boss'
 import { audit } from '../audit.ts'
 import type { Auth } from '../auth/sessions.ts'
 import { ApiError } from '../errors.ts'
@@ -32,7 +33,8 @@ export async function storageStatus(app: FastifyInstance): Promise<StorageStatus
       FROM blobs blob LEFT JOIN storage_channels channel ON channel.id = blob.channel_id
       WHERE blob.state = 'deleting' AND blob.attempts > 0
       ORDER BY blob.attempts DESC, blob.id LIMIT 100`),
-    // The newest lost blobs, each with the first files it held: current versions first.
+    // The newest lost blobs, each with the first files it held, once each:
+    // those whose current version is lost first.
     app.db.execute<{
       blob_id: string
       channel: string | null
@@ -45,14 +47,15 @@ export async function storageStatus(app: FastifyInstance): Promise<StorageStatus
         FROM blobs blob LEFT JOIN storage_channels channel ON channel.id = blob.channel_id
         WHERE blob.state = 'lost' ORDER BY blob.lost_at DESC NULLS LAST LIMIT 50
       ), affected AS (
-        SELECT DISTINCT chunk.blob_id, version.id AS version_id, node.id AS node_id, node.name,
-          node.parent_id, node.owner_id, owner.display_name AS owner_name,
-          node.current_version_id IS NOT DISTINCT FROM version.id AS current
+        SELECT chunk.blob_id, node.id AS node_id, node.name, node.parent_id, node.owner_id,
+          owner.display_name AS owner_name,
+          bool_or(node.current_version_id IS NOT DISTINCT FROM version.id) AS current
         FROM lost
         JOIN chunks chunk ON chunk.blob_id = lost.id
         JOIN file_versions version ON version.id = chunk.version_id
         JOIN nodes node ON node.id = version.node_id
         JOIN users owner ON owner.id = node.owner_id
+        GROUP BY chunk.blob_id, node.id, owner.id
       ), ranked AS (
         SELECT *,
           row_number() OVER (PARTITION BY blob_id ORDER BY current DESC, name) AS rank,
@@ -130,7 +133,7 @@ async function failingUploads(app: FastifyInstance): Promise<StorageStatus['uplo
     }))
   } catch (error) {
     // pg-boss's tables come with the bot's first start.
-    if (errorCode(error) === '42P01' || errorCode(error) === '3F000') return []
+    if (isMissingTable(error)) return []
     throw error
   }
 }
@@ -168,7 +171,9 @@ export async function getTask(app: FastifyInstance, id: string): Promise<AdminTa
 
 /**
  * `POST /admin/tasks`: queues a task for the leading bot. Refused while no
- * bot leads with its queue running, so a task never runs long after it was asked for.
+ * bot leads with its queue running, so a task never runs long after it was
+ * asked for, and while one of its kind (for the same blob) waits or runs, so
+ * a second click never creates a second channel.
  */
 export async function startTask(
   app: FastifyInstance,
@@ -182,6 +187,7 @@ export async function startTask(
       'This needs Discord storage, and DFS stores blobs elsewhere here.',
     )
   }
+  // Before taking the lock below: the bot may take its time to answer.
   const bot = await botHealth(app)
   if (bot.status !== 'ok') {
     throw new ApiError(
@@ -190,19 +196,38 @@ export async function startTask(
       `The bot can’t take tasks now (${bot.detail}); try again once it leads.`,
     )
   }
+  const blobId = 'blobId' in request ? request.blobId : undefined
   const data: AdminTaskJob = {
     kind: request.kind,
-    ...('blobId' in request && { blobId: request.blobId }),
+    ...(blobId !== undefined && { blobId }),
     requestedBy: admin.user.displayName,
   }
   const boss = await app.queue.get()
-  const id = await boss.send(QUEUES.adminTask, data)
-  if (!id) throw new Error('The job queue didn’t take the task.')
-  await audit(app.db, {
-    actorId: admin.user.id,
-    action: 'task.started',
-    target: ADMIN_TASK_LABELS[request.kind],
-    details: 'blobId' in request ? `blob ${request.blobId}` : undefined,
+  const id = await app.db.transaction(async (tx) => {
+    // One request at a time looks for a task under way, then queues its own.
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(${LOCK_NAMESPACE}, ${LOCKS.adminTask})`)
+    const { rows: underWay } = await tx.execute(sql`
+      SELECT 1 FROM pgboss.job
+      WHERE name = ${QUEUES.adminTask} AND state IN ('created', 'retry', 'active')
+        AND data->>'kind' = ${request.kind}
+        ${blobId === undefined ? sql`` : sql`AND data->>'blobId' = ${blobId}`}
+      LIMIT 1`)
+    if (underWay.length > 0) {
+      throw new ApiError(
+        409,
+        'task_running',
+        'That task is already waiting for the bot or running. One the bot never takes is dropped after 10 minutes; one cut short by a bot stopping, after 15.',
+      )
+    }
+    const queued = await boss.send(QUEUES.adminTask, data, { db: fromDrizzle(tx, sql) })
+    if (!queued) throw new Error('The job queue didn’t take the task.')
+    await audit(tx, {
+      actorId: admin.user.id,
+      action: 'task.started',
+      target: ADMIN_TASK_LABELS[request.kind],
+      details: blobId === undefined ? undefined : `blob ${blobId}`,
+    })
+    return queued
   })
   return getTask(app, id)
 }
@@ -229,12 +254,4 @@ function task(row: TaskRow): AdminTask | null {
     createdAt: new Date(row.created_on).toISOString(),
     finishedAt: row.completed_on ? new Date(row.completed_on).toISOString() : null,
   }
-}
-
-function errorCode(error: unknown): unknown {
-  for (let current: unknown = error; current instanceof Error; current = current.cause) {
-    const { code } = current as { code?: unknown }
-    if (code !== undefined) return code
-  }
-  return undefined
 }

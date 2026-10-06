@@ -120,6 +120,7 @@ export function adminTests({
       const sessions = await admin.call('GET', '/admin/sessions', adminSessionListSchema)
       const own = sessions.filter((session) => session.current)
       expect(own).toHaveLength(1)
+      expect(own[0]?.canSignOut).toBe(false)
       expect(await admin.error('DELETE', `/admin/sessions/${own[0]?.key ?? ''}`)).toEqual({
         status: 409,
         code: 'self_change',
@@ -159,6 +160,10 @@ export function adminTests({
       expect(active.items.map((share) => share.id)).not.toContain(link.id)
       const log = await admin.call('GET', '/admin/audit?actions=share.&limit=1', auditPageSchema)
       expect(log.items[0]).toMatchObject({ action: 'share.revoked', target: 'beach.jpg' })
+      // Turning it off again changes nothing, so the log notes nothing more.
+      await admin.send('DELETE', `/admin/shares/${link.id}`)
+      const again = await admin.call('GET', '/admin/audit?actions=share.&limit=1', auditPageSchema)
+      expect(again.items[0]?.id).toBe(log.items[0]?.id)
     })
 
     it('lists uploads under way, and gives one up (§9)', async () => {

@@ -125,8 +125,21 @@ export function createBot({
     queue: boss ? 'running' : 'stopped',
   }))
 
-  // Admin → System compares them with the API's: the safe ones only, never secrets.
-  server.get('/internal/settings', () => describeSettings(config, process.env).settings)
+  // Admin → System (§15): the safe settings this bot reads, as it has them,
+  // and whether its secrets are set, never their values.
+  server.get('/internal/settings', () => {
+    const { settings, secrets } = describeSettings(config, process.env)
+    const { guildId, categoryName, gateway } = config.discord
+    return {
+      settings: settings
+        .filter((setting) => setting.usedBy !== 'api')
+        .map(({ key, value, set }) => ({ key, value, set })),
+      secrets: secrets
+        .filter((secret) => secret.usedBy !== 'api')
+        .map(({ key, set }) => ({ key, set })),
+      discord: { guildId, categoryName, gateway },
+    }
+  })
 
   // Admin → Channels (DESIGN.md §4, D25): a channel registered by hand must
   // be in this environment's category; it is made private to the bot.

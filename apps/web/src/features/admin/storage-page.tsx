@@ -18,7 +18,7 @@ import type { ReactNode } from 'react'
 import { Link } from 'react-router'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
-import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '@/components/ui/spinner'
 import { errorMessage } from '@/lib/api/client'
@@ -26,6 +26,7 @@ import { formatBytes, formatDate, formatFullDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { isFinished, storageQuery, tasksQuery, useStartTask } from './api'
 import { ChannelsSection } from './channels-page'
+import { AllClear, Section } from './section'
 import { taskLabel, useTaskResults } from './task-results'
 
 /**
@@ -38,12 +39,20 @@ export function StoragePage() {
   const start = useStartTask()
   const discord = storage.data?.blobStore === 'discord'
 
-  /** Whether a task of this kind (for this blob) is under way. */
-  const busy = (kind: AdminTaskKind, blobId?: string) =>
-    (tasks.data ?? []).some(
+  /** Whether a task of this kind (for this blob) is being asked for, or is under way. */
+  const busy = (kind: AdminTaskKind, blobId?: string) => {
+    const asking = start.isPending ? start.variables : undefined
+    if (
+      asking?.kind === kind &&
+      (blobId === undefined || ('blobId' in asking && asking.blobId === blobId))
+    ) {
+      return true
+    }
+    return (tasks.data ?? []).some(
       (task) =>
         task.kind === kind && !isFinished(task) && (blobId === undefined || task.blobId === blobId),
     )
+  }
   const run = (kind: AdminTaskKind, blobId?: string) => {
     const request = kind === 'blob.recover' ? { kind, blobId: blobId ?? '' } : { kind }
     start.mutate(request, {
@@ -210,37 +219,6 @@ function RecentTasks({ tasks }: { tasks: AdminTask[] | undefined }) {
   )
 }
 
-function Section({
-  title,
-  description,
-  action,
-  children,
-}: {
-  title: string
-  description: string
-  action?: ReactNode
-  children: ReactNode
-}) {
-  return (
-    <Card size="sm">
-      <CardHeader>
-        <CardTitle>{title}</CardTitle>
-        <p className="text-xs text-muted-foreground">{description}</p>
-        {action && <CardAction>{action}</CardAction>}
-      </CardHeader>
-      <CardContent>{children}</CardContent>
-    </Card>
-  )
-}
-
-function Empty({ children }: { children: ReactNode }) {
-  return (
-    <p className="flex items-center gap-2 text-sm text-muted-foreground">
-      <CircleCheck className="size-4 text-status-good" aria-hidden /> {children}
-    </p>
-  )
-}
-
 function Uploads({
   uploads,
   retrying,
@@ -264,7 +242,7 @@ function Uploads({
       }
     >
       {uploads.length === 0 ? (
-        <Empty>Every upload reaches Discord.</Empty>
+        <AllClear>Every upload reaches Discord.</AllClear>
       ) : (
         <Rows
           head={['Blob', 'Size', 'Tries', 'Last error']}
@@ -314,7 +292,7 @@ function Deletions({
       }
     >
       {deletions.length === 0 ? (
-        <Empty>Every released blob was deleted.</Empty>
+        <AllClear>Every released blob was deleted.</AllClear>
       ) : (
         <Rows
           head={['Blob', 'Channel', 'Tries', 'Last error']}
@@ -352,7 +330,7 @@ function Lost({
       description="Their messages were deleted in Discord. Recovering reads the blob back from Discord’s CDN, which keeps a deleted attachment only if it was downloaded lately, and only for a while: usually it can’t."
     >
       {lost.length === 0 ? (
-        <Empty>Nothing was lost.</Empty>
+        <AllClear>Nothing was lost.</AllClear>
       ) : (
         <ul className="grid gap-3">
           {lost.map((blob) => (
@@ -378,7 +356,7 @@ function Lost({
               </div>
               <ul className="grid gap-1 text-sm">
                 {blob.files.map((file) => (
-                  <li key={`${file.nodeId}-${String(file.current)}`} className="flex gap-2">
+                  <li key={file.nodeId} className="flex gap-2">
                     {file.parentId ? (
                       <Link
                         to={`/admin/users/${file.ownerId}/folders/${file.parentId}`}
