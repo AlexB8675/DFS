@@ -1,4 +1,5 @@
 import {
+  aliveUploadsSchema,
   changePasswordSchema,
   createChannelSchema,
   createFolderSchema,
@@ -214,6 +215,12 @@ export const handlers = [
       },
       { status: 201 },
     ),
+  ),
+  // The mock keeps uploads while it runs: there is no janitor to tell.
+  http.post('/api/uploads/alive', ({ request }) =>
+    respondEmpty(request, async () => {
+      aliveUploadsSchema.parse(await request.json())
+    }),
   ),
   http.get<Id>('/api/uploads/:id', ({ request, params }) =>
     respond(request, () => db.uploadStatus(params.id)),

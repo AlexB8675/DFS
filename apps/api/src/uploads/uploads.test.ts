@@ -12,7 +12,7 @@ import type { Auth } from '../auth/sessions.ts'
 import { readVersion, type ReadableVersion } from '../content/reader.ts'
 import { testConfig } from '../testing/config.ts'
 import { seedUser } from '../testing/seed.ts'
-import { cancelUpload, createUploads, receivePart } from './uploads.ts'
+import { cancelUpload, createUploads, keepUploadsAlive, receivePart } from './uploads.ts'
 
 let database: TestDatabase
 let app: FastifyInstance
@@ -386,6 +386,46 @@ describe('receiving parts', () => {
       await received
       spy.mockRestore()
     }
+  })
+})
+
+describe('uploads living in their page (§6.1)', () => {
+  async function idle(...uploadIds: string[]) {
+    await app.db.execute(sql`
+      UPDATE upload_sessions SET alive_at = now() - interval '1 hour'
+      WHERE id = ANY(${`{${uploadIds.join(',')}}`}::uuid[])`)
+  }
+
+  async function quietFor(uploadId: string): Promise<number> {
+    const { rows } = await app.db.execute<{ seconds: number }>(sql`
+      SELECT extract(epoch FROM now() - alive_at)::float8 AS seconds
+      FROM upload_sessions WHERE id = ${uploadId}`)
+    return rows[0]?.seconds ?? Number.NaN
+  }
+
+  it('keeps an upload its page still holds, and one that receives parts', async () => {
+    const held = await start(app.config.sizes.chunkSize + 10)
+    const completed = await start(3)
+    await receivePart(app, auth, completed.uploadId, 0, Buffer.from('abc'), undefined)
+    const receiving = await start(app.config.sizes.chunkSize + 10)
+    await idle(held.uploadId, completed.uploadId, receiving.uploadId)
+
+    await keepUploadsAlive(app, auth, [held.uploadId, completed.uploadId])
+    expect(await quietFor(held.uploadId)).toBeLessThan(60)
+    // Complete, it is no page's to keep.
+    expect(await quietFor(completed.uploadId)).toBeGreaterThan(3000)
+
+    await receivePart(app, auth, receiving.uploadId, 1, Buffer.from('0123456789'), undefined)
+    expect(await quietFor(receiving.uploadId)).toBeLessThan(60)
+  })
+
+  it('keeps only the caller’s uploads', async () => {
+    const mine = await start(app.config.sizes.chunkSize + 10)
+    await idle(mine.uploadId)
+    await keepUploadsAlive(app, { ...auth, user: { ...auth.user, id: crypto.randomUUID() } }, [
+      mine.uploadId,
+    ])
+    expect(await quietFor(mine.uploadId)).toBeGreaterThan(3000)
   })
 })
 

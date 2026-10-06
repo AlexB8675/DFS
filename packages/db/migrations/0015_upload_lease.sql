@@ -1,0 +1,2 @@
+ALTER TABLE "upload_sessions" ADD COLUMN "alive_at" timestamp with time zone DEFAULT now() NOT NULL;--> statement-breakpoint
+CREATE INDEX "upload_sessions_idle" ON "upload_sessions" USING btree ("alive_at") WHERE "upload_sessions"."state" = 'receiving';

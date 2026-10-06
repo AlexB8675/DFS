@@ -1,5 +1,6 @@
 import type { Config } from '@dfs/config'
 import {
+  abandonIdleUploads,
   abandonUploads,
   ADMIN_TASK_QUEUE,
   BLOB_UPLOAD_QUEUE,
@@ -38,6 +39,13 @@ import { storeBlobs } from './uploader.ts'
 
 const FOLD_EVERY_MS = 2000
 const JANITOR_EVERY_MS = 10 * 60_000
+/**
+ * An upload lives in its page, which says every minute that it is open
+ * (§6.1): one quiet this long closed without cancelling, crashed or went
+ * offline, and its half file goes from its folder.
+ */
+const IDLE_UPLOAD_MINUTES = 10
+const IDLE_UPLOADS_EVERY_MS = 60_000
 const PACK_EVERY_MS = 1000
 const COLLECT_EVERY_MS = 2000
 /** Deletes per round while blobs wait to be stored, and while none do (§6.4). */
@@ -169,6 +177,9 @@ export async function startLeaderWork(options: {
       await journalUploader.run()
     }),
     repeat(JANITOR_EVERY_MS, log, 'cleaning up', () => cleanUp(db, staging)),
+    repeat(IDLE_UPLOADS_EVERY_MS, log, 'giving up uploads whose page is gone', async () => {
+      await giveUpIdleUploads(db, staging)
+    }),
     // On their own, so a failure in one never holds back the others.
     repeat(JANITOR_EVERY_MS, log, 'dropping old metrics', () => pruneMetrics(db)),
     repeat(JANITOR_EVERY_MS, log, 'dropping posted journal records', async () => {
@@ -254,6 +265,12 @@ export async function cleanUp(db: Database, staging: Staging, now = Date.now()):
       if (!recorded.has(file.path)) await staging.remove(file.path)
     }
   }
+}
+
+/** Gives up uploads whose page went quiet (§6.1), and removes their staged frames. */
+export async function giveUpIdleUploads(db: Database, staging: Staging): Promise<void> {
+  const versions = await abandonIdleUploads(db, IDLE_UPLOAD_MINUTES)
+  for (const versionId of versions) await staging.removeVersion(versionId)
 }
 
 /**

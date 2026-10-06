@@ -154,6 +154,7 @@ function fakeApi() {
       )
     },
     complete: vi.fn<UploadTransport['complete']>(() => Promise.resolve()),
+    alive: vi.fn<UploadTransport['alive']>(() => Promise.resolve()),
     status: (uploadId) => {
       const session = sessions.get(uploadId)
       if (!session) return Promise.reject(new ApiError(404, 'upload_not_found', 'Gone'))
@@ -778,6 +779,32 @@ describe('UploadEngine', () => {
     await vi.waitFor(() => {
       expect(items().map((upload) => upload.file.name)).toEqual(['syncing.txt'])
     })
+  })
+
+  it('says every minute that the page is open, while it holds an upload not complete', async () => {
+    vi.useFakeTimers()
+    try {
+      const { api, transport } = fakeApi()
+      api.autoRelease = false
+      const engine = new UploadEngine(transport)
+      await engine.enqueue('folder', [file('long.bin', 4 * CHUNK)])
+      await vi.waitFor(() => {
+        expect(api.streams).toHaveLength(1)
+      })
+      const { uploadId } = stream(api)
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(transport.alive).toHaveBeenCalledExactlyOnceWith([uploadId])
+      // Paused, it still holds its upload.
+      engine.pause(item('long.bin').id)
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(transport.alive).toHaveBeenCalledTimes(2)
+      // Cancelled, there is nothing left to keep, and it stops.
+      engine.cancel(item('long.bin').id)
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(transport.alive).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('fails only the uploads a batch rejected', async () => {

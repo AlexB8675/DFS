@@ -7,7 +7,7 @@ import { Staging } from '@dfs/storage'
 import { sql } from 'drizzle-orm'
 import type pg from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, inject, it, vi } from 'vitest'
-import { cleanUp, emptyOldTrash, onTheClock } from './leader-work.ts'
+import { cleanUp, emptyOldTrash, giveUpIdleUploads, onTheClock } from './leader-work.ts'
 import { uploadedFiles } from './testing.ts'
 
 // The leader samples the system once in each half-minute bucket (DESIGN §16):
@@ -102,6 +102,37 @@ describe('cleanUp', () => {
     expect(journaled[0]?.count).toBe(1)
     // Nothing else is due.
     expect(await emptyOldTrash(db, staging, 30)).toBe(0)
+  })
+
+  it('gives up uploads whose page went quiet for ten minutes, and keeps those it hears of', async () => {
+    const staging = new Staging(path.join(directory, 'staging'))
+    const { ownerId, files } = await uploadedFiles(db, staging, [100, 200])
+    const [quiet, heard] = files
+    if (!quiet || !heard) throw new Error('No test files.')
+    // As a first upload still receiving: no current version, its bytes reserved.
+    for (const [file, age] of [
+      [quiet, '11 minutes'],
+      [heard, '2 minutes'],
+    ] as const) {
+      await db.execute(sql`UPDATE nodes SET current_version_id = NULL WHERE id = ${file.nodeId}`)
+      await db.execute(
+        sql`UPDATE file_versions SET state = 'uploading' WHERE id = ${file.versionId}`,
+      )
+      await db.execute(sql`
+        INSERT INTO upload_sessions (user_id, node_id, version_id, reserved_bytes, expires_at, alive_at)
+        VALUES (${ownerId}, ${file.nodeId}, ${file.versionId}, 1000, now() + interval '1 day',
+          now() - ${age}::interval)`)
+    }
+    await db.execute(sql`UPDATE users SET reserved_bytes = 2000 WHERE id = ${ownerId}`)
+
+    await giveUpIdleUploads(db, staging)
+    const { rows: left } = await db.execute<{ id: string }>(sql`
+      SELECT id FROM nodes WHERE id = ANY(ARRAY[${quiet.nodeId}, ${heard.nodeId}]::uuid[])`)
+    expect(left.map((row) => row.id)).toEqual([heard.nodeId])
+    await expect(staging.read(staging.framePath(quiet.versionId, 0))).rejects.toThrow()
+    const { rows: owner } = await db.execute<{ reserved: number }>(sql`
+      SELECT reserved_bytes::float8 AS reserved FROM users WHERE id = ${ownerId}`)
+    expect(owner[0]?.reserved).toBe(1000)
   })
 
   it('keeps the audit log for a year', async () => {

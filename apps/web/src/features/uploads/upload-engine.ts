@@ -30,6 +30,8 @@ import { httpTransport, type UploadTransport } from './upload-transport'
 //   paused stream starts again after the last part the server has.
 // - Uploads live in their page, as on any website: closing or reloading it
 //   cancels them, and the server forgets what had arrived (`cancelOnLeave`).
+//   While it holds any, the page says every minute that it is still open;
+//   the server gives up uploads whose page went quiet without cancelling.
 //
 // The engine keeps the authoritative state here and publishes it to the
 // upload store about ten times a second, so a big batch doesn't re-render
@@ -60,6 +62,10 @@ export const DEFAULT_LIMITS: UploadLimits = {
 }
 
 const PUBLISH_MS = 100
+/** How often a page says its uploads are still open; ten quiet minutes give them up (§6.1). */
+const ALIVE_EVERY_MS = 60_000
+/** Sessions per `POST /uploads/alive`, the API's limit. */
+const ALIVE_BATCH = 500
 const REFRESH_MS = 1000
 const SPEED_WINDOW_MS = 5000
 /** The shortest time a speed is worked out over, so the first bytes don't read as a burst. */
@@ -125,6 +131,7 @@ export class UploadEngine {
   private creatingSessions = false
   private readonly preparingSessions = new Set<Job>()
   private syncRefresh: Promise<void> | null = null
+  private aliveTimer: ReturnType<typeof setInterval> | null = null
 
   private readonly changes = new Map<string, Partial<UploadItem>>()
   private publishTimer: ReturnType<typeof setTimeout> | undefined
@@ -299,9 +306,36 @@ export class UploadEngine {
    * server's janitor, a day later.
    */
   cancelOnLeave(): void {
+    for (const uploadId of this.heldSessions()) {
+      void this.transport.cancel(uploadId, { keepalive: true }).catch(ignore)
+    }
+  }
+
+  /** Sessions this page holds that the server would keep: every upload not complete or cancelled. */
+  private heldSessions(): string[] {
+    const ids: string[] = []
     for (const job of this.jobs.values()) {
       if (!job.session || job.status === 'done' || job.status === 'canceled') continue
-      void this.transport.cancel(job.session.uploadId, { keepalive: true }).catch(ignore)
+      ids.push(job.session.uploadId)
+    }
+    return ids
+  }
+
+  /** Says the page is open every minute, from its first session until it holds none. */
+  private keepAlive(): void {
+    this.aliveTimer ??= setInterval(() => void this.sayAlive(), ALIVE_EVERY_MS)
+  }
+
+  private async sayAlive(): Promise<void> {
+    const ids = this.heldSessions()
+    if (ids.length === 0) {
+      if (this.aliveTimer) clearInterval(this.aliveTimer)
+      this.aliveTimer = null
+      return
+    }
+    // Missing one is harmless: the server waits ten minutes.
+    for (let start = 0; start < ids.length; start += ALIVE_BATCH) {
+      await this.transport.alive(ids.slice(start, start + ALIVE_BATCH)).catch(ignore)
     }
   }
 
@@ -668,6 +702,7 @@ export class UploadEngine {
         else if (job.status === 'queued') this.waiting.push(job)
         // A job paused meanwhile keeps its session for when it resumes.
       })
+      this.keepAlive()
       // The new files show up in their folders right away, marked as uploading.
       // New files pop in; a new version of a file already listed doesn't (D20).
       markFresh(

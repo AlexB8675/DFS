@@ -254,6 +254,13 @@ export const uploadStatusSchema = uploadSessionSchema.extend({
 export type UploadSessionStatus = z.infer<typeof uploadStatusSchema>
 
 /**
+ * `POST /uploads/alive`: the page holding these uploads is still open. An
+ * upload lives in its page; one whose page says nothing for ten minutes,
+ * and gets no part, is given up (§6.1).
+ */
+export const aliveUploadsSchema = z.object({ ids: z.array(id).min(1).max(500) })
+
+/**
  * `POST /uploads/:id/complete`, optionally with every part's SHA-256 as the
  * client read it: a streamed upload (`PUT /uploads/:id/content`) is checked
  * here, and parts that differ are dropped to be sent again.

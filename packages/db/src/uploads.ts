@@ -1,4 +1,6 @@
 import { sql } from 'drizzle-orm'
+import type { Database } from './client.ts'
+import { notifyEvent } from './events.ts'
 import { markFoldersDirty, uuidArray } from './folder-stats.ts'
 import { appendJournal, type Executor, type JournalRecord } from './journal.ts'
 import { purgeSubtrees, purgeVersions, releaseReservation } from './purge.ts'
@@ -88,4 +90,38 @@ export async function abandonUploads(
   }
   await appendJournal(tx, records)
   return staged
+}
+
+/**
+ * Gives up uploads whose page has said nothing for `idleMinutes` (§6.1): it
+ * closed without cancelling them, crashed or lost its network. At most
+ * `limit` at a time; their open folders are told the files went. Returns
+ * the versions whose staged frames the caller removes.
+ */
+export async function abandonIdleUploads(
+  db: Database,
+  idleMinutes: number,
+  limit = 500,
+): Promise<string[]> {
+  return db.transaction(async (tx) => {
+    const { rows } = await tx.execute<{ id: string; user_id: string; parent_id: string | null }>(
+      sql`
+        SELECT session.id, session.user_id, node.parent_id
+        FROM upload_sessions session JOIN nodes node ON node.id = session.node_id
+        WHERE session.state = 'receiving'
+          AND session.alive_at < now() - make_interval(mins => ${idleMinutes}::int)
+        ORDER BY session.id LIMIT ${limit}
+        FOR UPDATE OF session SKIP LOCKED`,
+    )
+    if (rows.length === 0) return []
+    const staged = await abandonUploads(
+      tx,
+      rows.map((row) => row.id),
+    )
+    for (const [userId, sessions] of Map.groupBy(rows, (row) => row.user_id)) {
+      const parentIds = [...new Set(sessions.flatMap((row) => row.parent_id ?? []))]
+      await notifyEvent(tx, { userId, type: 'nodes.changed', payload: { parentIds } })
+    }
+    return staged
+  })
 }

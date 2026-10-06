@@ -42,6 +42,8 @@ export interface UploadTransport {
   complete: (uploadId: string, partSha256?: string[]) => Promise<void>
   /** The parts the server already has, to resume. */
   status: (uploadId: string) => Promise<UploadSessionStatus>
+  /** Says the page holding these uploads is still open, up to 500 at a time. */
+  alive: (uploadIds: string[]) => Promise<void>
   /** With `keepalive`, the request outlives the page that sends it. */
   cancel: (uploadId: string, options?: { keepalive?: boolean }) => Promise<void>
   /** The visible ones of these nodes, up to 500; any that are gone are left out. */
@@ -64,6 +66,7 @@ export const httpTransport: UploadTransport = {
   complete: (uploadId, partSha256) =>
     apiSend('POST', `/uploads/${uploadId}/complete`, partSha256 && { partSha256 }),
   status: (uploadId) => apiGet(`/uploads/${uploadId}`, uploadStatusSchema),
+  alive: (uploadIds) => apiSend('POST', '/uploads/alive', { ids: uploadIds }),
   cancel: async (uploadId, options) => {
     await apiFetch(`/uploads/${uploadId}`, { method: 'DELETE', keepalive: options?.keepalive })
   },

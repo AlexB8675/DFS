@@ -1,4 +1,5 @@
 import {
+  aliveUploadsSchema,
   completeUploadSchema,
   createUploadBatchSchema,
   createUploadSchema,
@@ -13,6 +14,7 @@ import { requireAuth } from '../auth/access.ts'
 import {
   cancelUpload,
   completeUpload,
+  keepUploadsAlive,
   createUpload,
   createUploads,
   receivePart,
@@ -51,6 +53,15 @@ export function uploadRoutes(app: FastifyInstance, _options: object, done: () =>
     async (request, reply) => {
       const session = await createUpload(app, requireAuth(request.auth), request.body)
       return reply.code(201).send(session)
+    },
+  )
+
+  routes.post(
+    '/uploads/alive',
+    { schema: { body: aliveUploadsSchema, response: noContent } },
+    async (request, reply) => {
+      await keepUploadsAlive(app, requireAuth(request.auth), request.body.ids)
+      return reply.code(204).send(null)
     },
   )
 

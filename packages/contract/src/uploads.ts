@@ -80,6 +80,17 @@ export function uploadTests({ describe, it, expect, owner, target }: SuiteContex
       expect(file.sizeBytes).toBe(bytes.length)
     })
 
+    it('hears that a page still holds its uploads, and refuses what isn’t a list of them', async () => {
+      const client = await owner()
+      const root = await workspace(client)
+      const session = await startUpload(client, root.id, 'held.bin', 10)
+      await client.send('POST', '/uploads/alive', { json: { ids: [session.uploadId] } })
+      expect(await client.error('POST', '/uploads/alive', { json: { ids: [] } })).toEqual({
+        status: 400,
+        code: 'invalid_request',
+      })
+    })
+
     it('takes a large file streamed in one request, and checks every part at completion', async () => {
       const client = await owner()
       const root = await workspace(client)

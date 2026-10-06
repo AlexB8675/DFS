@@ -395,10 +395,18 @@ export const uploadSessions = pgTable(
     createdAt: timestamptz('created_at').notNull().defaultNow(),
     /** 24 h after creation; answers `GET /uploads/:id` until then, also once completed. */
     expiresAt: timestamptz('expires_at').notNull(),
+    /**
+     * When its page last said it is still open, or a part last arrived. An
+     * upload lives in its page (§6.1): one silent for long is given up.
+     */
+    aliveAt: timestamptz('alive_at').notNull().defaultNow(),
   },
   (t) => [
     index('upload_sessions_user_id').on(t.userId),
     index('upload_sessions_expires_at').on(t.expiresAt),
+    index('upload_sessions_idle')
+      .on(t.aliveAt)
+      .where(sql`${t.state} = 'receiving'`),
   ],
 )
 

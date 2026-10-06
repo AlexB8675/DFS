@@ -322,6 +322,23 @@ export async function uploadStatus(
 }
 
 /**
+ * `POST /uploads/alive`: the caller's page still holds these uploads (§6.1).
+ * Sessions being completed or purged right now are skipped, not waited for.
+ */
+export async function keepUploadsAlive(
+  app: FastifyInstance,
+  auth: Auth,
+  ids: readonly string[],
+): Promise<void> {
+  await app.db.execute(sql`
+    UPDATE upload_sessions SET alive_at = now()
+    WHERE id IN (
+      SELECT id FROM upload_sessions
+      WHERE id = ANY(${uuidArray(ids)}) AND user_id = ${auth.user.id} AND state = 'receiving'
+      ORDER BY id FOR UPDATE SKIP LOCKED)`)
+}
+
+/**
  * `PUT /uploads/:id/parts/:index`. The part is checked, encrypted into a frame
  * and written to staging durably before the 204, so an acknowledged part
  * survives a crash. Sending a part again is accepted, also after completion.
@@ -459,6 +476,10 @@ async function storePart(
             ${Buffer.from(frameHash)}, ${stagedPath})
           ON CONFLICT (version_id, idx) DO NOTHING RETURNING idx`)
         attempt.published = inserted.rows.length > 0
+        // A part arriving is as good as its page saying it is open.
+        if (attempt.published) {
+          await tx.execute(sql`UPDATE upload_sessions SET alive_at = now() WHERE id = ${uploadId}`)
+        }
       }
       if (!attempt.published) {
         // Only racing retries need another lookup. Read after taking the lock:
