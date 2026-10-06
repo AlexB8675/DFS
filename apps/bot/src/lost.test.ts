@@ -181,8 +181,8 @@ describe('/dfs setup', () => {
       { content: string },
     ]
     // The category existed; its other channels were made, and all registered.
-    expect(reply.content).toContain('• created #storage-01')
-    expect(reply.content).toContain('Registered for storage: storage-01')
+    expect(reply.content).toContain('• Created #storage-01.')
+    expect(reply.content).toContain('• Registered storage-01, storage-02')
     const { rows } = await db.execute<{ count: number }>(
       sql`SELECT count(*)::int AS count FROM storage_channels`,
     )

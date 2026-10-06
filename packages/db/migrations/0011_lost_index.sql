@@ -1,0 +1,1 @@
+CREATE INDEX "blobs_lost" ON "blobs" USING btree ("lost_at") WHERE "blobs"."state" = 'lost';

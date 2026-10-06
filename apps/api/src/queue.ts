@@ -1,5 +1,5 @@
 import type { Config } from '@dfs/config'
-import { BLOB_UPLOAD_QUEUE, QUEUES } from '@dfs/db'
+import { ADMIN_TASK_QUEUE, BLOB_UPLOAD_QUEUE, QUEUES } from '@dfs/db'
 import type { FastifyBaseLogger } from 'fastify'
 import { PgBoss } from 'pg-boss'
 
@@ -45,6 +45,7 @@ export class JobQueue {
     try {
       await boss.start()
       await boss.createQueue(QUEUES.blobUpload, BLOB_UPLOAD_QUEUE)
+      await boss.createQueue(QUEUES.adminTask, ADMIN_TASK_QUEUE)
       return boss
     } catch (error) {
       await boss.stop({ graceful: false }).catch(() => undefined)

@@ -1,4 +1,5 @@
 import {
+  adminTaskListSchema,
   auditPageSchema,
   databaseStatusSchema,
   METRICS,
@@ -6,6 +7,7 @@ import {
   nodePageSchema,
   storageChannelListSchema,
   storageChannelSchema,
+  storageStatusSchema,
   systemHealthSchema,
   trashPageSchema,
   userUsageSchema,
@@ -105,6 +107,29 @@ export function adminTests({
     it('reports the system’s health', async () => {
       const health = await (await owner()).call('GET', '/admin/health', systemHealthSchema)
       expect(health.services.length).toBeGreaterThan(0)
+    })
+
+    it('reports what is stuck in storage, and takes only known tasks (§9)', async () => {
+      const admin = await owner()
+      const status = await admin.call('GET', '/admin/storage', storageStatusSchema)
+      expect(['discord', 'local', 'chaos']).toContain(status.blobStore)
+      expect(Array.isArray(await admin.call('GET', '/admin/tasks', adminTaskListSchema))).toBe(true)
+      for (const json of [{ kind: 'everything.delete' }, { kind: 'blob.recover' }]) {
+        expect(await admin.error('POST', '/admin/tasks', { json })).toEqual({
+          status: 400,
+          code: 'invalid_request',
+        })
+      }
+      expect(await admin.error('GET', `/admin/tasks/${crypto.randomUUID()}`)).toEqual({
+        status: 404,
+        code: 'not_found',
+      })
+
+      const { username, temporaryPassword } = await newUser(admin)
+      const user = await activated(username, temporaryPassword)
+      for (const path of ['/admin/storage', '/admin/tasks']) {
+        expect(await user.error('GET', path)).toEqual({ status: 403, code: 'forbidden' })
+      }
     })
 
     it('shows PostgreSQL as it is, and signals only its real connections (§16)', async () => {

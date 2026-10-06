@@ -28,11 +28,12 @@ const DISCORD_EPOCH = 1_420_070_400_000n
 /**
  * A Discord server in memory that answers the REST routes DFS uses, with a
  * CDN behind it (`fetch`), so tests never need a token or touch the real
- * server. It behaves as the contract test found Discord does: a repeated
- * nonce returns the first message, the CDN honours Range requests, a
- * deleted message's attachment stays signable and served, and messages after
- * an ID come oldest first but listed newest first. IDs are snowflakes of the
- * moment they were made. Tests only.
+ * server. It behaves as Discord was found to: a repeated nonce returns the
+ * first message, the CDN honours Range requests, and messages after an ID
+ * come oldest first but listed newest first. A deleted message's attachment
+ * can still be signed, but the CDN serves it only through a link that served
+ * it before the deletion (its cache); one never read is gone at once. IDs
+ * are snowflakes of the moment they were made. Tests only.
  */
 export class FakeDiscord implements DiscordRest {
   readonly botId = '100000000000000001'
@@ -54,6 +55,10 @@ export class FakeDiscord implements DiscordRest {
   /** The time new IDs are made at; set it to make messages from the past. */
   clock: () => number = () => Date.now()
   readonly #signed = new Set<string>()
+  /** Signed links that served an attachment: the CDN's cache. */
+  readonly #served = new Set<string>()
+  /** Attachments of deleted messages, by unsigned URL. */
+  readonly #deleted = new Set<string>()
   #sequence = 0n
 
   addChannel(
@@ -168,6 +173,9 @@ export class FakeDiscord implements DiscordRest {
         (found) => found.channel_id === message[1] && found.id === message[2],
       )
       if (index < 0) return refuse(404, 10008, 'Unknown Message', 'DELETE', route)
+      for (const attachment of this.messages[index]?.attachments ?? []) {
+        this.#deleted.add(attachment.url)
+      }
       this.messages.splice(index, 1)
       return answer(undefined)
     }
@@ -180,9 +188,13 @@ export class FakeDiscord implements DiscordRest {
     const url = new URL(input instanceof Request ? input.url : input)
     const data = this.cdn.get(`${url.origin}${url.pathname}`)
     if (!data) return Promise.resolve(new Response('Not found', { status: 404 }))
-    if (!this.#signed.has(url.href)) {
+    const gone =
+      !this.#signed.has(url.href) ||
+      (this.#deleted.has(`${url.origin}${url.pathname}`) && !this.#served.has(url.href))
+    if (gone) {
       return Promise.resolve(new Response('This content is no longer available.', { status: 404 }))
     }
+    this.#served.add(url.href)
     const range = /^bytes=(\d+)-(\d+)$/.exec(new Headers(init?.headers).get('range') ?? '')
     if (!range || this.ignoreRange) return Promise.resolve(new Response(data.slice()))
     const start = Number(range[1])

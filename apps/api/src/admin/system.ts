@@ -26,7 +26,7 @@ const startedAt = Date.now()
  * storage and lost blobs.
  */
 export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> {
-  const [bot, figures, recent, troubles, database, lost] = await Promise.all([
+  const [bot, figures, recent, troubles, database] = await Promise.all([
     botHealth(app),
     systemFigures(app.db),
     // From the metrics: what reached Discord lately, the cache's hits this
@@ -59,14 +59,28 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
       WHERE step = ${METRIC_STEPS.minute} AND at >= now() - interval '1 hour'
         AND name IN ('discord.posted', 'cache.hits', 'cache.misses', 'discord.429',
           'http.server_errors', 'cdn.failures', 'discord.post_failures', 'pg.deadlocks')`),
-    // Both read the blobs waiting to be deleted (an index) or those lost (rare).
-    app.db.execute<{ failing_deletions: number; lost_files: number }>(sql`
+    // Blobs waiting to be deleted, and those lost, each read through an index:
+    // the newest lost ones, and how many versions all of them held.
+    app.db.execute<{
+      failing_deletions: number
+      lost_files: number
+      lost: { id: string; channel: string | null; lostAt: string | null; files: number }[]
+    }>(sql`
       SELECT
         (SELECT count(*)::int FROM blobs
           WHERE state = 'deleting' AND attempts >= ${FAILING_DELETE_ATTEMPTS}) AS failing_deletions,
         (SELECT count(DISTINCT chunk.version_id)::int
           FROM blobs blob JOIN chunks chunk ON chunk.blob_id = blob.id
-          WHERE blob.state = 'lost') AS lost_files`),
+          WHERE blob.state = 'lost') AS lost_files,
+        coalesce((
+          SELECT json_agg(json_build_object(
+            'id', blob.id::text, 'channel', channel.name, 'lostAt', blob.lost_at,
+            'files', (SELECT count(DISTINCT version_id) FROM chunks WHERE blob_id = blob.id)
+          ) ORDER BY blob.lost_at DESC NULLS LAST)
+          FROM (SELECT * FROM blobs WHERE state = 'lost'
+            ORDER BY lost_at DESC NULLS LAST LIMIT 50) blob
+          LEFT JOIN storage_channels channel ON channel.id = blob.channel_id
+        ), '[]') AS lost`),
     // PostgreSQL's connections: how many of the limit, and the stuck ones.
     app.db.execute<{
       connections: number
@@ -84,16 +98,6 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
       FROM pg_stat_activity
       WHERE datname = current_database() AND backend_type = 'client backend'
         AND pid <> pg_backend_pid()`),
-    app.db.execute<{
-      id: string
-      channel: string | null
-      lost_at: string | null
-      files: number
-    }>(sql`
-      SELECT blob.id::text AS id, channel.name AS channel, blob.lost_at::text AS lost_at,
-        (SELECT count(DISTINCT version_id)::int FROM chunks WHERE blob_id = blob.id) AS files
-      FROM blobs blob LEFT JOIN storage_channels channel ON channel.id = blob.channel_id
-      WHERE blob.state = 'lost' ORDER BY blob.lost_at DESC NULLS LAST LIMIT 50`),
   ])
   const local = app.config.blobStore !== 'discord'
   const latest = recent.rows[0]
@@ -167,11 +171,11 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
     // The scrubber, journal flushes and backups arrive with M4.
     scrubber: { lastRunAt: null, checkedBlobs: 0, totalBlobs: figures.blobs, problems: 0 },
     backups: { lastBackupAt: null, lastJournalFlushAt: null },
-    lostBlobs: lost.rows.map((row) => ({
-      blobId: row.id,
-      channelName: row.channel ?? 'local',
-      detectedAt: row.lost_at ? new Date(row.lost_at).toISOString() : new Date().toISOString(),
-      affectedFiles: row.files,
+    lostBlobs: (troubles.rows[0]?.lost ?? []).map((blob) => ({
+      blobId: blob.id,
+      channelName: blob.channel ?? 'local',
+      detectedAt: blob.lostAt ? new Date(blob.lostAt).toISOString() : new Date().toISOString(),
+      affectedFiles: blob.files,
     })),
   }
 }
@@ -215,7 +219,7 @@ async function adoptChannel(app: FastifyInstance, discordChannelId: string): Pro
 
 const botHealthSchema = z.object({ role: z.string(), queue: z.string() })
 
-async function botHealth(app: FastifyInstance): Promise<SystemHealth['services'][number]> {
+export async function botHealth(app: FastifyInstance): Promise<SystemHealth['services'][number]> {
   try {
     const response = await fetch(`${app.config.botInternalUrl}/internal/health`, {
       headers: { authorization: `Bearer ${app.config.internalRpcSecret}` },

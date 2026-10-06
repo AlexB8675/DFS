@@ -15,7 +15,7 @@ import {
 } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Link } from 'react-router'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Progress } from '@/components/ui/progress'
 import { Skeleton } from '@/components/ui/skeleton'
 import { formatBytes, formatDate, formatDuration, formatFullDate } from '@/lib/format'
@@ -205,6 +205,14 @@ function HealthView({ health }: { health: SystemHealth }) {
             <CardTitle className="flex items-center gap-2">
               <TriangleAlert className="size-4 text-destructive" /> Lost blobs
             </CardTitle>
+            <CardAction>
+              <Link
+                to="/admin/storage"
+                className="flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
+              >
+                Their files, and recovering them <ArrowRight className="size-3.5" aria-hidden />
+              </Link>
+            </CardAction>
           </CardHeader>
           <CardContent>
             <table className="w-full text-sm">

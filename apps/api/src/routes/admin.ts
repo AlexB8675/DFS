@@ -1,4 +1,7 @@
 import {
+  adminTaskListSchema,
+  adminTaskRequestSchema,
+  adminTaskSchema,
   adminUserPageSchema,
   adminUserSchema,
   auditPageSchema,
@@ -17,6 +20,7 @@ import {
   sortOrderSchema,
   storageChannelListSchema,
   storageChannelSchema,
+  storageStatusSchema,
   systemHealthSchema,
   updateChannelSchema,
   updateUserSchema,
@@ -28,6 +32,7 @@ import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
 import { adminNode, anyVisibleNode, moderate, userUsage } from '../admin/browse.ts'
 import { databaseStatus, signalSession } from '../admin/database.ts'
+import { getTask, listTasks, startTask, storageStatus } from '../admin/storage.ts'
 import {
   auditLog,
   createChannel,
@@ -154,6 +159,34 @@ export function adminRoutes(app: FastifyInstance, _options: object, done: () => 
       schema: { querystring: metricsQuerySchema, response: { 200: metricSeriesSchema } },
     },
     (request) => readMetrics(app.db, request.query.range, request.query.series),
+  )
+
+  routes.get(
+    '/admin/storage',
+    { config: admin, schema: { response: { 200: storageStatusSchema } } },
+    () => storageStatus(app),
+  )
+
+  routes.get(
+    '/admin/tasks',
+    { config: admin, schema: { response: { 200: adminTaskListSchema } } },
+    () => listTasks(app),
+  )
+
+  routes.post(
+    '/admin/tasks',
+    {
+      config: admin,
+      schema: { body: adminTaskRequestSchema, response: { 202: adminTaskSchema } },
+    },
+    async (request, reply) =>
+      reply.code(202).send(await startTask(app, requireAuth(request.auth), request.body)),
+  )
+
+  routes.get(
+    '/admin/tasks/:id',
+    { config: admin, schema: { params: byId, response: { 200: adminTaskSchema } } },
+    (request) => getTask(app, request.params.id),
   )
 
   routes.get(

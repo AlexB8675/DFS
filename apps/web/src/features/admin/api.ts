@@ -1,4 +1,6 @@
 import {
+  adminTaskListSchema,
+  adminTaskSchema,
   adminUserPageSchema,
   adminUserSchema,
   auditPageSchema,
@@ -7,9 +9,12 @@ import {
   nodePathSchema,
   storageChannelListSchema,
   storageChannelSchema,
+  storageStatusSchema,
   systemHealthSchema,
   userUsageSchema,
   type CreateChannelInput,
+  type AdminTask,
+  type AdminTaskRequest,
   type CreateUserInput,
   type StorageChannel,
   type UpdateUserInput,
@@ -43,6 +48,51 @@ export const healthQuery = queryOptions({
   refetchInterval: HEALTH_REFRESH_MS,
   staleTime: 0,
 })
+
+/** Admin → Storage (§9): what is stuck between staging and Discord, and what was lost. */
+export const storageQuery = queryOptions({
+  queryKey: ['admin', 'storage'],
+  queryFn: ({ signal }) => apiGet('/admin/storage', storageStatusSchema, { signal }),
+  refetchInterval: 30_000,
+})
+
+/** The latest tasks; while one is under way, they are checked every second. */
+export const tasksQuery = queryOptions({
+  queryKey: ['admin', 'tasks'],
+  queryFn: ({ signal }) => apiGet('/admin/tasks', adminTaskListSchema, { signal }),
+  refetchInterval: (query) =>
+    query.state.data?.some((task) => task.state === 'pending' || task.state === 'running')
+      ? 1000
+      : 30_000,
+})
+
+export function isFinished(task: AdminTask): boolean {
+  return task.state === 'done' || task.state === 'failed'
+}
+
+/** Asks the leading bot to do something now; the tasks list follows it. */
+export function useStartTask() {
+  return useMutation({
+    mutationFn: (request: AdminTaskRequest) =>
+      apiSend('POST', '/admin/tasks', request, adminTaskSchema),
+    onSuccess: (task) => {
+      queryClient.setQueryData<AdminTask[]>(tasksQuery.queryKey, (tasks) => [
+        task,
+        ...(tasks ?? []).filter((other) => other.id !== task.id),
+      ])
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ['admin', 'audit'] }),
+  })
+}
+
+/** What a finished task may have changed. */
+export async function afterTask(): Promise<void> {
+  await Promise.all(
+    ['storage', 'channels', 'health'].map((key) =>
+      queryClient.invalidateQueries({ queryKey: ['admin', key] }),
+    ),
+  )
+}
 
 /** PostgreSQL now (§16): connections, running queries, tables. */
 export const databaseQuery = queryOptions({

@@ -7,6 +7,7 @@ import {
   createUploadSchema,
   createUserSchema,
   ensureFoldersSchema,
+  adminTaskRequestSchema,
   loginSchema,
   lookupNodesSchema,
   metricsQuerySchema,
@@ -305,6 +306,16 @@ export const handlers = [
     }),
   ),
   http.get('/api/admin/health', ({ request }) => respond(request, () => db.health())),
+  http.get('/api/admin/storage', ({ request }) => respond(request, () => db.storageStatus())),
+  http.get('/api/admin/tasks', ({ request }) => respond(request, () => db.adminTasks())),
+  http.post('/api/admin/tasks', ({ request }) =>
+    respond(request, async () => db.startTask(adminTaskRequestSchema.parse(await request.json())), {
+      status: 202,
+    }),
+  ),
+  http.get<Id>('/api/admin/tasks/:id', ({ request, params }) =>
+    respond(request, () => db.adminTask(params.id)),
+  ),
   http.get('/api/admin/database', ({ request }) => respond(request, () => db.databaseStatus())),
   http.post<{ pid: string; how: string }>(
     '/api/admin/database/sessions/:pid/:how',

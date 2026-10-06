@@ -27,7 +27,9 @@ export async function markLost(
   return db.transaction(async (tx) => {
     // Blob rows first, then their versions in ID order, as storing does.
     const { rows: blobs } = await tx.execute<{ id: number; channel: string }>(sql`
-      UPDATE blobs SET state = 'lost', lost_at = now(), cdn_url = NULL, cdn_url_expires_at = NULL
+      -- The last signed link stays: if the CDN still has the attachment, it is
+      -- only through a link that read it before the message went.
+      UPDATE blobs SET state = 'lost', lost_at = now()
       FROM storage_channels channel
       WHERE blobs.channel_id = channel.id AND channel.discord_channel_id = ${discordChannelId}
         AND blobs.state = 'stored'

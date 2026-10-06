@@ -124,6 +124,56 @@ export async function ensureDiscordLayout(
   return { categoryId, channels, changes }
 }
 
+/** Discord's limit on the channels in one category. */
+const CATEGORY_LIMIT = 50
+
+/**
+ * Admin → Storage: adds a data channel to this environment's category, named
+ * after the last one (`storage-04` after `storage-03`), private to the bot
+ * like the others. The category must exist: `dfs setup` makes it.
+ */
+export async function createDataChannel(
+  rest: DiscordRest,
+  guildId: string,
+  categoryName: string,
+): Promise<DiscordChannel> {
+  const existing = (await rest.get(Routes.guildChannels(guildId))) as Channel[]
+  const categories = existing.filter(
+    (channel) => channel.type === ChannelType.GuildCategory && channel.name === categoryName,
+  )
+  const [category] = categories
+  if (!category || categories.length > 1) {
+    throw new ChannelRefusedError(
+      category
+        ? `The server has ${String(categories.length)} categories named “${categoryName}”. Rename or delete all but one first.`
+        : `There is no “${categoryName}” category yet. Check the Discord layout first, which makes it.`,
+    )
+  }
+  const inside = existing.filter((channel) => channel.parent_id === category.id)
+  if (inside.length >= CATEGORY_LIMIT) {
+    throw new ChannelRefusedError(
+      `“${categoryName}” already holds ${String(CATEGORY_LIMIT)} channels, as many as Discord allows in a category.`,
+    )
+  }
+  const numbers = inside
+    .map((channel) => /^storage-(\d+)$/.exec(channel.name)?.[1])
+    .filter((digits) => digits !== undefined)
+    .map(Number)
+  const name = `storage-${String(Math.max(-1, ...numbers) + 1).padStart(2, '0')}`
+  const bot = (await rest.get(Routes.user())) as APIUser
+  const channel = (await rest.post(Routes.guildChannels(guildId), {
+    body: {
+      name,
+      type: ChannelType.GuildText,
+      parent_id: category.id,
+      topic: DATA_TOPIC,
+      permission_overwrites: privateTo(bot.id, guildId),
+    },
+    reason: 'dfs: Admin → Storage',
+  })) as Channel
+  return { discordChannelId: channel.id, name, kind: 'data' }
+}
+
 /** A channel registered by hand that isn't one this environment may use. */
 export class ChannelRefusedError extends Error {
   constructor(message: string) {

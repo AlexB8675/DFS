@@ -10,6 +10,7 @@ import {
   History,
   KeyRound,
   LogIn,
+  Play,
   ScanSearch,
   ShieldAlert,
   TriangleAlert,
@@ -46,6 +47,7 @@ const ACTIONS: Record<string, { label: string; icon: LucideIcon; tone?: string }
   'channel.created': { label: 'Added channel', icon: Hash },
   'channel.enabled': { label: 'Enabled channel', icon: Hash },
   'channel.disabled': { label: 'Disabled channel', icon: Hash, tone: 'text-amber-500' },
+  'task.started': { label: 'Ran a task', icon: Play },
   'database.query_cancelled': {
     label: 'Cancelled a query',
     icon: Database,

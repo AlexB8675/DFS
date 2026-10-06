@@ -1,6 +1,7 @@
 import type { Config } from '@dfs/config'
 import {
   abandonUploads,
+  ADMIN_TASK_QUEUE,
   BLOB_UPLOAD_QUEUE,
   foldAllFolderStats,
   PostgresSampler,
@@ -8,6 +9,7 @@ import {
   QUEUES,
   sampleSystem,
   textArray,
+  type AdminTaskJob,
   type BlobUploadJob,
   type Database,
   type Metrics,
@@ -21,6 +23,7 @@ import { keepGateway } from './gateway.ts'
 import { Packer } from './packer.ts'
 import { reconcileOrphans } from './reconciler.ts'
 import { instanceId, type BotStorage } from './storage.ts'
+import { runAdminTask } from './tasks.ts'
 import { storeBlobs } from './uploader.ts'
 
 // What only the leading bot does (DESIGN.md §11): pack small frames (§6.6),
@@ -120,6 +123,24 @@ export async function startLeaderWork(options: {
     },
     log,
   })
+
+  // Admin → Storage: one task at a time, each once (ADMIN_TASK_QUEUE).
+  await boss.createQueue(QUEUES.adminTask, ADMIN_TASK_QUEUE)
+  await boss.updateQueue(QUEUES.adminTask, ADMIN_TASK_QUEUE)
+  await boss.work<AdminTaskJob>(
+    QUEUES.adminTask,
+    { batchSize: 1, localConcurrency: 1 },
+    async ([job]) => {
+      if (!job) return null
+      log.info({ task: job.data.kind, by: job.data.requestedBy }, 'running an admin task')
+      const message = await runAdminTask(
+        { config, db, boss, storage, staging, packer, log },
+        job.data,
+      )
+      return { message }
+    },
+  )
+
   const loops = [
     repeat(PACK_EVERY_MS, log, 'packing small files', async () => {
       const sealed = await packer.sealDue()

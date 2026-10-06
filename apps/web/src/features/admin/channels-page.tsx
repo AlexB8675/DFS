@@ -5,6 +5,7 @@ import { useActionState, useState } from 'react'
 import { toast } from 'sonner'
 import { ListSkeleton } from '@/components/list-skeleton'
 import { Button } from '@/components/ui/button'
+import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import {
   Dialog,
   DialogClose,
@@ -24,30 +25,55 @@ import { formText } from '@/lib/form-data'
 import { cn } from '@/lib/utils'
 import { channelsQuery, useCreateChannel, useSetChannelEnabled } from './api'
 
-/** `/admin/channels`: the Discord channels blobs are stored in (§4). */
-export function ChannelsPage() {
+/**
+ * Admin → Storage: the Discord channels blobs are stored in (§4). The bot
+ * creates new ones in this environment's category; one made by hand is added
+ * by its ID, and must be in that category too (D25).
+ */
+export function ChannelsSection({
+  discord,
+  onCreate,
+  creating,
+}: {
+  /** Whether blobs go to Discord here: channels only matter then. */
+  discord: boolean
+  onCreate: () => void
+  creating: boolean
+}) {
   const channels = useQuery(channelsQuery)
   const [adding, setAdding] = useState(false)
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex shrink-0 items-center gap-3 px-5 py-3">
-        <p className="flex-1 text-sm text-muted-foreground">
+    <Card size="sm">
+      <CardHeader>
+        <CardTitle>Channels</CardTitle>
+        <p className="text-xs text-muted-foreground">
           New blobs go to the least busy enabled channel. Disabled channels stay readable.
         </p>
-        <Button
-          onClick={() => {
-            setAdding(true)
-          }}
-        >
-          <Plus /> Add channel
-        </Button>
-      </div>
-      {channels.data ? (
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <CardAction className="flex gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setAdding(true)
+            }}
+          >
+            Add by ID
+          </Button>
+          <Button size="sm" disabled={!discord || creating} onClick={onCreate}>
+            {creating ? <Spinner /> : <Plus />} Create channel
+          </Button>
+        </CardAction>
+      </CardHeader>
+      <CardContent className="px-0">
+        {channels.data?.length === 0 ? (
+          <p className="px-(--card-spacing) text-sm text-muted-foreground">
+            No channel is registered yet: check the Discord layout, or create one.
+          </p>
+        ) : channels.data ? (
           <table className="w-full table-fixed text-sm">
-            <thead className="sticky top-0 bg-background text-xs text-muted-foreground">
-              <tr className="border-y text-left">
+            <thead className="text-xs text-muted-foreground">
+              <tr className="border-b text-left">
                 <th className="py-2 pl-5 font-medium">Channel</th>
                 <th className="hidden w-48 py-2 pl-4 font-medium md:table-cell">Discord ID</th>
                 <th className="hidden w-24 py-2 pl-4 text-right font-medium sm:table-cell">
@@ -65,10 +91,10 @@ export function ChannelsPage() {
               ))}
             </tbody>
           </table>
-        </div>
-      ) : (
-        <ListSkeleton />
-      )}
+        ) : (
+          <ListSkeleton />
+        )}
+      </CardContent>
       {adding && (
         <AddChannelDialog
           onClose={() => {
@@ -76,7 +102,7 @@ export function ChannelsPage() {
           }}
         />
       )}
-    </div>
+    </Card>
   )
 }
 
@@ -84,7 +110,7 @@ function ChannelRow({ channel }: { channel: StorageChannel }) {
   const setEnabled = useSetChannelEnabled()
 
   return (
-    <tr className="border-b border-border/50 hover:bg-muted/40">
+    <tr className="border-b border-border/50 last:border-b-0 hover:bg-muted/40">
       <td className="py-2.5 pl-5">
         <span
           className={cn('flex items-center gap-2', !channel.enabled && 'text-muted-foreground')}

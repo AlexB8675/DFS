@@ -1,11 +1,6 @@
 import type { Config } from '@dfs/config'
-import { registerStorageChannels, type Database } from '@dfs/db'
-import {
-  discordProblem,
-  ensureDiscordLayout,
-  type DiscordRest,
-  type DiscordRestClient,
-} from '@dfs/storage'
+import type { Database } from '@dfs/db'
+import { discordProblem, type DiscordRest, type DiscordRestClient } from '@dfs/storage'
 import {
   ApplicationCommandOptionType,
   Client,
@@ -20,6 +15,7 @@ import {
 } from '@discordjs/core'
 import { WebSocketManager } from '@discordjs/ws'
 import type { FastifyBaseLogger } from 'fastify'
+import { capitalized, setUpDiscord } from './discord-setup.ts'
 import { alertLost, markLost } from './lost.ts'
 import { dataChannels } from './storage.ts'
 
@@ -206,17 +202,8 @@ export async function runCommand(
   await api.interactions.defer(interaction.id, interaction.token, { flags: MessageFlags.Ephemeral })
   let content: string
   try {
-    const layout = await ensureDiscordLayout(rest, guildId, categoryName)
-    const registered = await registerStorageChannels(db, layout.channels, '/dfs setup')
-    content = [
-      ...layout.changes.map((change) => `• ${change}`),
-      registered.length > 0 ? `Registered for storage: ${registered.join(', ')}.` : '',
-      layout.changes.length === 0 && registered.length === 0
-        ? `“${categoryName}” and its channels were already set up.`
-        : '',
-    ]
-      .filter(Boolean)
-      .join('\n')
+    const done = await setUpDiscord(db, rest, { guildId, categoryName }, '/dfs setup')
+    content = done.map((line) => `• ${capitalized(line)}.`).join('\n')
   } catch (error) {
     content = `Setup failed: ${discordProblem(error) ?? (error instanceof Error ? error.message : String(error))}`
   }

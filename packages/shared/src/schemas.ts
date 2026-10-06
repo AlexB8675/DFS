@@ -488,6 +488,121 @@ export const systemHealthSchema = z.object({
 })
 export type SystemHealth = z.infer<typeof systemHealthSchema>
 
+// ── Storage control (§9) ─────────────────────────────────────────────────────
+
+/**
+ * What an admin can have the leading bot do now. Those marked in
+ * `DISCORD_TASKS` need Discord storage.
+ */
+export const adminTaskKindSchema = z.enum([
+  'channel.create',
+  'discord.setup',
+  'packs.seal',
+  'orphans.reconcile',
+  'uploads.retry',
+  'deletions.retry',
+  'blob.recover',
+])
+export type AdminTaskKind = z.infer<typeof adminTaskKindSchema>
+
+export const DISCORD_TASKS: readonly AdminTaskKind[] = [
+  'channel.create',
+  'discord.setup',
+  'orphans.reconcile',
+  'blob.recover',
+]
+
+/** What each task is called on the page and in the audit log. */
+export const ADMIN_TASK_LABELS: Record<AdminTaskKind, string> = {
+  'channel.create': 'Create a storage channel',
+  'discord.setup': 'Check the Discord layout',
+  'packs.seal': 'Seal packs now',
+  'orphans.reconcile': 'Clean up orphan messages',
+  'uploads.retry': 'Retry failed uploads',
+  'deletions.retry': 'Retry failing deletions',
+  'blob.recover': 'Recover a lost blob',
+}
+
+/** A blob ID: a bigint identity, sent as a string so it stays exact. */
+const blobId = z.string().regex(/^\d{1,18}$/)
+
+/** `POST /admin/tasks`. */
+export const adminTaskRequestSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('channel.create') }),
+  z.object({ kind: z.literal('discord.setup') }),
+  z.object({ kind: z.literal('packs.seal') }),
+  z.object({ kind: z.literal('orphans.reconcile') }),
+  z.object({ kind: z.literal('uploads.retry') }),
+  z.object({ kind: z.literal('deletions.retry') }),
+  z.object({ kind: z.literal('blob.recover'), blobId }),
+])
+export type AdminTaskRequest = z.infer<typeof adminTaskRequestSchema>
+
+export const adminTaskSchema = z.object({
+  id,
+  kind: adminTaskKindSchema,
+  /** The blob a recovery is about. */
+  blobId: blobId.nullable(),
+  requestedBy: z.string(),
+  state: z.enum(['pending', 'running', 'done', 'failed']),
+  /** What it did, or why it failed, in a sentence. */
+  result: z.string().nullable(),
+  createdAt: timestamp,
+  finishedAt: timestamp.nullable(),
+})
+export type AdminTask = z.infer<typeof adminTaskSchema>
+export const adminTaskListSchema = z.array(adminTaskSchema)
+
+/** `GET /admin/storage`: what is stuck between staging and Discord, and what was lost. */
+export const storageStatusSchema = z.object({
+  blobStore: z.enum(['discord', 'local', 'chaos']),
+  /** Blobs whose upload failed: retrying with backoff, or given up after every try. */
+  uploads: z.array(
+    z.object({
+      jobId: id,
+      blobId,
+      kind: z.enum(['solo', 'pack']).nullable(),
+      sizeBytes: byteCount.nullable(),
+      state: z.enum(['retrying', 'failed']),
+      attempts: count,
+      maxAttempts: count,
+      error: z.string().nullable(),
+      since: timestamp,
+    }),
+  ),
+  /** Released blobs whose message the bot failed to delete; it keeps trying. */
+  deletions: z.array(
+    z.object({
+      blobId,
+      channelName: z.string().nullable(),
+      attempts: count,
+      error: z.string().nullable(),
+    }),
+  ),
+  /** Blobs whose message was deleted in Discord, newest first, with the files they held. */
+  lost: z.array(
+    z.object({
+      blobId,
+      channelName: z.string().nullable(),
+      detectedAt: timestamp.nullable(),
+      fileCount: count,
+      /** The first few, for finding them in the metadata browser. */
+      files: z.array(
+        z.object({
+          nodeId: id,
+          name: z.string(),
+          ownerId: id,
+          ownerName: z.string(),
+          parentId: id.nullable(),
+          /** Whether the lost version is the file's current one, not an older one. */
+          current: z.boolean(),
+        }),
+      ),
+    }),
+  ),
+})
+export type StorageStatus = z.infer<typeof storageStatusSchema>
+
 // ── PostgreSQL (§16) ─────────────────────────────────────────────────────────
 
 /** A connection doing something: running a query, or holding a transaction open. */

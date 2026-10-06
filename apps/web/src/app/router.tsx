@@ -99,11 +99,13 @@ export function createAppRouter() {
             { path: 'users/:userId', lazy: adminUserPage },
             { path: 'users/:userId/folders/:folderId', lazy: adminUserPage },
             {
-              path: 'channels',
+              path: 'storage',
               lazy: async () => ({
-                Component: (await import('@/features/admin/channels-page')).ChannelsPage,
+                Component: (await import('@/features/admin/storage-page')).StoragePage,
               }),
             },
+            // Channels became part of Storage.
+            { path: 'channels', element: <Navigate to="/admin/storage" replace /> },
             {
               path: 'database',
               lazy: async () => ({

@@ -312,6 +312,10 @@ export const blobs = pgTable(
     index('blobs_message_id')
       .on(t.messageId)
       .where(sql`${t.messageId} IS NOT NULL`),
+    // The overview reads lost blobs every few seconds; there are few, if any.
+    index('blobs_lost')
+      .on(t.lostAt)
+      .where(sql`${t.state} = 'lost'`),
   ],
 )
 

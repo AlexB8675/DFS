@@ -1,3 +1,9 @@
+import {
+  ADMIN_TASK_LABELS,
+  type AdminTask,
+  type AdminTaskRequest,
+  type StorageStatus,
+} from '@dfs/shared'
 import type {
   AdminUser,
   AuditEntry,
@@ -332,13 +338,164 @@ export class AdminMockDb extends MockDb {
         problems: lost.length,
       },
       backups: { lastBackupAt: ago(2 * 3_600_000), lastJournalFlushAt: ago(40_000) },
-      lostBlobs: lost.map((node) => ({
-        blobId: node.id,
+      lostBlobs: this.lostFiles().map(({ blobId }) => ({
+        blobId,
         channelName: 'storage-00',
         detectedAt: ago(9 * 24 * 3_600_000),
         affectedFiles: 1,
       })),
     }
+  }
+
+  /** Tasks admins started, newest first; the mock finishes each at once. */
+  private readonly tasks: AdminTask[] = []
+  /** Whether the made-up failing deletion was tried again (and went). */
+  private deletionsRetried = false
+
+  /** What is stuck in storage, made up from the seeded failed and lost files (§9). */
+  storageStatus(): StorageStatus {
+    this.requireAdmin()
+    const files = Object.values(this.state.nodes).filter((node) => node.kind === 'file')
+    const owner = (node: MockNode) =>
+      this.state.users.find((user) => user.id === node.ownerId)?.displayName ?? 'unknown'
+    return {
+      blobStore: 'discord',
+      uploads: files
+        .filter((node) => node.syncState === 'failed')
+        .map((node, index) => ({
+          jobId: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+          blobId: String(7100 + index),
+          kind: node.sizeBytes < CHUNK_SIZE / 2 ? 'pack' : 'solo',
+          sizeBytes: Math.min(node.sizeBytes, CHUNK_SIZE),
+          state: 'failed',
+          attempts: 11,
+          maxAttempts: 11,
+          error: 'Posting blob 7100: Discord answered 500 Internal Server Error.',
+          since: node.updatedAt,
+        })),
+      deletions: this.deletionsRetried
+        ? []
+        : [
+            {
+              blobId: '6880',
+              channelName: 'dfs-legacy',
+              attempts: 4,
+              error: 'Deleting blob 6880: The bot can’t see that server or channel.',
+            },
+          ],
+      lost: this.lostFiles().map(({ blobId, node }) => ({
+        blobId,
+        channelName: 'storage-00',
+        detectedAt: new Date(Date.now() - 9 * DAY).toISOString(),
+        fileCount: 1,
+        files: [
+          {
+            nodeId: node.id,
+            name: node.name,
+            ownerId: node.ownerId,
+            ownerName: owner(node),
+            parentId: node.parentId,
+            current: true,
+          },
+        ],
+      })),
+    }
+  }
+
+  adminTasks(): AdminTask[] {
+    this.requireAdmin()
+    return this.tasks.slice(0, 20)
+  }
+
+  adminTask(id: string): AdminTask {
+    this.requireAdmin()
+    const task = this.tasks.find((candidate) => candidate.id === id)
+    if (!task) throw new MockApiError(404, 'not_found', 'No such task.')
+    return task
+  }
+
+  /** Runs a task at once, as if the leading bot had taken it straight away. */
+  startTask(request: AdminTaskRequest): AdminTask {
+    const admin = this.requireAdmin()
+    let result: string
+    let failed = false
+    switch (request.kind) {
+      case 'channel.create': {
+        const numbers = this.state.channels
+          .map((channel) => /^storage-(\d+)$/.exec(channel.name)?.[1])
+          .filter((digits) => digits !== undefined)
+          .map(Number)
+        const name = `storage-${String(Math.max(-1, ...numbers) + 1).padStart(2, '0')}`
+        this.createChannel({ discordChannelId: String(10n ** 17n + BigInt(Date.now())), name })
+        result = `Created #${name}; it takes new blobs within a minute.`
+        break
+      }
+      case 'discord.setup':
+        result = '“DFS” and its channels were already set up.'
+        break
+      case 'packs.seal':
+        result = 'Nothing was waiting to be packed.'
+        break
+      case 'orphans.reconcile':
+        result = 'Checked 412 messages and deleted 0 orphans.'
+        break
+      case 'uploads.retry': {
+        const failedFiles = Object.values(this.state.nodes).filter(
+          (node) => node.syncState === 'failed',
+        )
+        for (const node of failedFiles) {
+          node.syncState = 'syncing'
+          node.syncCompletesAt = Date.now() + 4000
+        }
+        result =
+          failedFiles.length === 0
+            ? 'No upload had given up.'
+            : `Gave ${String(failedFiles.length)} uploads one more try, now. The failed count catches up within a minute.`
+        break
+      }
+      case 'deletions.retry':
+        result = this.deletionsRetried ? 'No deletion was failing.' : 'Deleted 1 blob.'
+        this.deletionsRetried = true
+        break
+      case 'blob.recover': {
+        const lost = this.lostFiles().find((entry) => entry.blobId === request.blobId)
+        if (lost) {
+          lost.node.syncState = 'stored'
+          result = `Recovered blob ${request.blobId}: 1 version is readable again.`
+        } else {
+          failed = true
+          result = `Blob ${request.blobId} isn’t lost.`
+        }
+        break
+      }
+    }
+    const now = new Date().toISOString()
+    const task: AdminTask = {
+      id: crypto.randomUUID(),
+      kind: request.kind,
+      blobId: 'blobId' in request ? request.blobId : null,
+      requestedBy: admin.displayName,
+      state: failed ? 'failed' : 'done',
+      result,
+      createdAt: now,
+      finishedAt: now,
+    }
+    this.tasks.unshift(task)
+    this.audit(
+      'task.started',
+      ADMIN_TASK_LABELS[request.kind],
+      'blobId' in request ? `blob ${request.blobId}` : undefined,
+    )
+    this.save()
+    return task
+  }
+
+  /** Lost files, each in a blob of its own, with a blob ID like the API's. */
+  private lostFiles(): { blobId: string; node: MockNode }[] {
+    return Object.values(this.state.nodes)
+      .filter((node) => node.kind === 'file' && node.syncState === 'lost')
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map((node, index) => ({ blobId: String(6100 + index), node }))
   }
 
   /** Database connections an admin cancelled or ended, gone from the made-up list. */
