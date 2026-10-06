@@ -11,6 +11,7 @@ import {
 } from '@dfs/db'
 import { eq, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
+import { audit } from '../audit.ts'
 import type { Auth } from '../auth/sessions.ts'
 import { isUniqueViolation } from '../db-errors.ts'
 import { ApiError } from '../errors.ts'
@@ -209,6 +210,15 @@ export async function trashNodes(app: FastifyInstance, auth: Auth, ids: string[]
       tx,
       trashed.flatMap((node) => node.parent_id ?? []),
     )
+    await audit(
+      tx,
+      updated.map((node) => ({
+        actorId: ownerId,
+        action: 'node.trashed',
+        target: node.name,
+        nodeId: node.id,
+      })),
+    )
     await appendJournal(tx, updated.map(nodeRecord))
   })
 }
@@ -277,6 +287,13 @@ export async function restoreNode(
     if (!restored) throw notFound()
     await tx.update(nodes).set({ trashedVia: null }).where(eq(nodes.trashedVia, id))
     await markFoldersDirty(tx, [parentId])
+    await audit(tx, {
+      actorId: ownerId,
+      action: 'node.restored',
+      target: restored.name,
+      details: restored.name === node.name ? null : `renamed from ${node.name}`,
+      nodeId: id,
+    })
     await appendJournal(tx, [nodeRecord(restored)])
   })
   return toDriveNode(await visibleNode(app.db, ownerId, id))

@@ -3,6 +3,7 @@ import { appendJournal, purgeSubtrees, type Executor } from '@dfs/db'
 import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
+import { audit } from '../audit.ts'
 import type { Auth } from '../auth/sessions.ts'
 import { ApiError } from '../errors.ts'
 import { removeStagedVersions } from '../staging.ts'
@@ -64,11 +65,12 @@ export async function listTrash(
 export async function deleteForever(app: FastifyInstance, auth: Auth, id: string): Promise<void> {
   const staged = await app.db.transaction(async (tx) => {
     await lockDrive(tx, auth.user.id)
-    const { rows } = await tx.execute<{ id: string }>(sql`
-      SELECT id FROM nodes
+    const { rows } = await tx.execute<TrashedRow>(sql`
+      SELECT id, name FROM nodes
       WHERE id = ${id} AND owner_id = ${auth.user.id} AND deleted_at IS NOT NULL`)
     if (!rows[0]) throw notFound()
     const purged = await purgeSubtrees(tx, auth.user.id, [id])
+    await audit(tx, purgedEntries(auth, rows, null))
     await appendJournal(tx, purged.records)
     return purged.versionIds
   })
@@ -79,17 +81,34 @@ export async function deleteForever(app: FastifyInstance, auth: Auth, id: string
 export async function emptyTrash(app: FastifyInstance, auth: Auth): Promise<void> {
   const staged = await app.db.transaction(async (tx) => {
     await lockDrive(tx, auth.user.id)
-    const { rows } = await tx.execute<{ id: string }>(sql`
-      SELECT id FROM nodes WHERE owner_id = ${auth.user.id} AND deleted_at IS NOT NULL`)
+    const { rows } = await tx.execute<TrashedRow>(sql`
+      SELECT id, name FROM nodes WHERE owner_id = ${auth.user.id} AND deleted_at IS NOT NULL`)
     const purged = await purgeSubtrees(
       tx,
       auth.user.id,
       rows.map((row) => row.id),
     )
+    await audit(tx, purgedEntries(auth, rows, 'emptied the trash'))
     await appendJournal(tx, purged.records)
     return purged.versionIds
   })
   await removeStagedVersions(app, staged)
+}
+
+interface TrashedRow extends Record<string, unknown> {
+  id: string
+  name: string
+}
+
+/** One audit entry per item deleted for good; what was below it goes unnamed. */
+function purgedEntries(auth: Auth, rows: readonly TrashedRow[], details: string | null) {
+  return rows.map((row) => ({
+    actorId: auth.user.id,
+    action: 'node.purged',
+    target: row.name,
+    details,
+    nodeId: row.id,
+  }))
 }
 
 function decodeTrashCursor(text: string) {

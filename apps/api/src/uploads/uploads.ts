@@ -18,6 +18,7 @@ import {
   type Executor,
 } from '@dfs/db'
 import {
+  formatBytes,
   nameKey,
   type CreateUploadInput,
   type UploadBatchResult,
@@ -27,6 +28,7 @@ import {
 import { eq, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { fromDrizzle, type PgBoss } from 'pg-boss'
+import { audit } from '../audit.ts'
 import type { Auth } from '../auth/sessions.ts'
 import { ApiError } from '../errors.ts'
 import { notFound, VISIBLE } from '../nodes/read.ts'
@@ -641,6 +643,14 @@ async function finishUpload(
       reserved_bytes = greatest(0, reserved_bytes - ${upload.reserved_bytes})
     WHERE id = ${auth.user.id}`)
   if (upload.parent_id) await markFoldersDirty(tx, [upload.parent_id])
+  const size = formatBytes(upload.size_bytes)
+  await audit(tx, {
+    actorId: auth.user.id,
+    action: 'upload.completed',
+    target: node.name,
+    details: upload.version_no > 1 ? `${size}, new version` : size,
+    nodeId: node.id,
+  })
   await appendJournal(tx, [...pruneRecords, nodeRecord(node)])
   return prunedIds
 }

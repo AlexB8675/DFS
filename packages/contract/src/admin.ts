@@ -8,6 +8,7 @@ import {
   METRICS,
   metricSeriesSchema,
   nodePageSchema,
+  nodeSchema,
   storageChannelListSchema,
   storageChannelSchema,
   shareLinkPageSchema,
@@ -108,6 +109,37 @@ export function adminTests({
       expect(created?.target).toBe(user.displayName)
       const times = log.items.map((entry) => Date.parse(entry.at))
       expect(times).toEqual([...times].sort((a, b) => b - a))
+    })
+
+    it('logs uploads, and moving to the trash, restoring and deleting for good (§7.5)', async () => {
+      const { user, username, photo, notes } = await userWithFiles()
+      const client = await signIn(username, chosenPassword(username))
+      await uploadFile(client, user.rootFolderId, 'notes.txt', text('hello again'))
+      await client.send('DELETE', `/nodes/${photo.nodeId}`)
+      // Its name is taken by then, so it comes back renamed.
+      await uploadFile(client, user.rootFolderId, 'beach.jpg', text('new'))
+      await client.call('POST', `/nodes/${photo.nodeId}/restore`, nodeSchema)
+      await client.send('DELETE', `/nodes/${notes.nodeId}`)
+      await client.send('DELETE', `/trash/${notes.nodeId}`)
+      await client.send('POST', '/nodes/trash', { json: { ids: [photo.nodeId] } })
+      await client.send('DELETE', '/trash')
+
+      const log = await (
+        await owner()
+      ).call('GET', `/admin/audit?actorId=${user.id}&actions=upload.,node.`, auditPageSchema)
+      expect(log.items.map((entry) => [entry.action, entry.target, entry.details])).toEqual([
+        ['node.purged', 'beach (1).jpg', 'emptied the trash'],
+        ['node.trashed', 'beach (1).jpg', null],
+        ['node.purged', 'notes.txt', null],
+        ['node.trashed', 'notes.txt', null],
+        ['node.restored', 'beach (1).jpg', 'renamed from beach.jpg'],
+        ['upload.completed', 'beach.jpg', '3 B'],
+        ['node.trashed', 'beach.jpg', null],
+        ['upload.completed', 'notes.txt', '11 B, new version'],
+        ['upload.completed', 'notes.txt', '2 B'],
+        ['upload.completed', 'beach.jpg', '10 B'],
+      ])
+      expect(log.items.every((entry) => entry.actorName === user.displayName)).toBe(true)
     })
 
     it('reports the system’s health', async () => {

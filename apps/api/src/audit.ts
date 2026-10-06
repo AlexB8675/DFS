@@ -11,11 +11,19 @@ export interface AuditEntry {
   nodeId?: string | null
 }
 
-export async function audit(db: Executor, entry: AuditEntry): Promise<void> {
-  await db.insert(auditLog).values({
-    userId: entry.actorId,
-    action: entry.action,
-    nodeId: entry.nodeId ?? null,
-    meta: { target: entry.target, details: entry.details ?? null },
-  })
+/** Writes one entry, or several in one statement. */
+export async function audit(
+  db: Executor,
+  entries: AuditEntry | readonly AuditEntry[],
+): Promise<void> {
+  const list = 'action' in entries ? [entries] : entries
+  if (list.length === 0) return
+  await db.insert(auditLog).values(
+    list.map((entry) => ({
+      userId: entry.actorId,
+      action: entry.action,
+      nodeId: entry.nodeId ?? null,
+      meta: { target: entry.target, details: entry.details ?? null },
+    })),
+  )
 }

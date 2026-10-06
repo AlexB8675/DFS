@@ -1,4 +1,5 @@
 import {
+  formatBytes,
   nameKey,
   normalizeName,
   splitExtension,
@@ -556,6 +557,7 @@ export class MockDb {
         throw new MockApiError(403, 'forbidden', 'The root folder cannot be trashed.')
       node.deletedAt = now
       for (const descendant of this.descendants(node.id)) descendant.trashedVia ??= node.id
+      this.audit('node.trashed', node.name)
     }
     this.changed()
   }
@@ -567,7 +569,13 @@ export class MockDb {
     const { rootFolderId } = this.currentUser()
     // Restore into the original folder if it still exists, otherwise into the root.
     if (!parent || !isVisible(parent)) node.parentId = rootFolderId
+    const trashedName = node.name
     node.name = this.freeName(node.parentId ?? rootFolderId, node.name)
+    this.audit(
+      'node.restored',
+      node.name,
+      node.name === trashedName ? null : `renamed from ${trashedName}`,
+    )
     node.deletedAt = null
     node.moderationReason = null
     for (const descendant of this.descendants(node.id)) {
@@ -580,14 +588,18 @@ export class MockDb {
   deleteForever(id: string): void {
     const node = this.state.nodes[id]
     if (!node?.deletedAt || node.ownerId !== this.state.userId) throw notFound()
+    this.audit('node.purged', node.name)
     this.remove(node)
     this.changed()
   }
 
   emptyTrash(): void {
-    for (const node of Object.values(this.state.nodes)) {
-      const mine = node.ownerId === this.state.userId
-      if (mine && node.deletedAt && this.state.nodes[node.id]) this.remove(node)
+    const trashed = Object.values(this.state.nodes).filter(
+      (node) => node.ownerId === this.state.userId && node.deletedAt,
+    )
+    for (const node of trashed) this.audit('node.purged', node.name, 'emptied the trash')
+    for (const node of trashed) {
+      if (this.state.nodes[node.id]) this.remove(node)
     }
     this.changed()
   }
@@ -753,6 +765,10 @@ export class MockDb {
       this.scheduleSyncCompletion(node)
     }
     upload.state = 'completed'
+    if (node) {
+      const size = formatBytes(upload.sizeBytes)
+      this.audit('upload.completed', node.name, upload.isNewVersion ? `${size}, new version` : size)
+    }
     const parts = this.receivedBytes.get(uploadId)
     this.receivedBytes.delete(uploadId)
     if (parts) {
