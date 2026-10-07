@@ -5,9 +5,11 @@ import {
   compactionGroups,
   type CompactionRule,
   type Database,
+  type Executor,
   type JournalRecord,
   type Metrics,
 } from '@dfs/db'
+import { METRIC_STEPS } from '@dfs/shared'
 import { BlobStoreError, type BlobLocation, type BlobStore } from '@dfs/storage'
 import { sql } from 'drizzle-orm'
 import type { FastifyBaseLogger } from 'fastify'
@@ -31,6 +33,21 @@ export const STALE_BUILDING_MS = 60 * 60_000
  */
 const BUILDING_FRESH_MS = 30 * 60_000
 
+/**
+ * Whether files were downloaded in the last minute or so: the API adds what
+ * it sends to `downloads.bytes` every 5 s, by half minute (§16). Compaction
+ * reads whole packs from Discord, over the link those downloads use too.
+ */
+export async function downloadsUnderWay(db: Executor): Promise<boolean> {
+  const { rows } = await db.execute<{ reading: boolean }>(sql`
+    SELECT EXISTS (
+      SELECT 1 FROM metrics
+      WHERE name = 'downloads.bytes' AND step = ${METRIC_STEPS.halfMinute}
+        AND at >= now() - interval '1 minute' AND sum > 0
+    ) AS reading`)
+  return rows[0]?.reading ?? false
+}
+
 export interface CompactionReport {
   /** New packs stored, one per group merged. */
   groups: number
@@ -46,6 +63,12 @@ export interface CompactorOptions {
   db: Database
   store: BlobStore
   rule: CompactionRule
+  /**
+   * Whether work that comes first is under way (uploads waiting, files
+   * being downloaded): the leader's runs wait for it, and stop before the
+   * next pack read when it starts. Compact packs now doesn't wait.
+   */
+  busy?: () => Promise<boolean>
   log?: Pick<FastifyBaseLogger, 'info' | 'warn'>
   metrics?: Metrics
 }
@@ -105,20 +128,28 @@ export class Compactor {
   }
 
   async #compact(force: boolean): Promise<CompactionReport> {
-    const { db, rule } = this.#options
+    const { db, rule, busy } = this.#options
+    const report: CompactionReport = { groups: 0, packs: 0, freedBytes: 0, failures: 0 }
+    const yields = force || !busy ? () => Promise.resolve(false) : busy
+    if (await yields()) return report
     const candidates = await compactionCandidates(db, force ? { ...rule, minAgeDays: 0 } : rule, [
       ...this.#broken,
     ])
     const groups = compactionGroups(candidates, rule.packTargetBytes).map((group) =>
       group.map((pack) => pack.id),
     )
-    const report: CompactionReport = { groups: 0, packs: 0, freedBytes: 0, failures: 0 }
-    for (const group of force ? groups : groups.slice(0, 1)) await this.#merge(group, report)
+    for (const group of force ? groups : groups.slice(0, 1)) {
+      await this.#merge(group, report, yields)
+    }
     return report
   }
 
   /** Merges one group into a new pack, leaving out packs that fail their check. */
-  async #merge(group: readonly number[], report: CompactionReport): Promise<void> {
+  async #merge(
+    group: readonly number[],
+    report: CompactionReport,
+    yields: () => Promise<boolean>,
+  ): Promise<void> {
     const { db, store, log, metrics } = this.#options
     // As they are now: a pack emptied meanwhile has gone to the garbage collector.
     const { rows: packs } = await db.execute<PackRow>(sql`
@@ -138,6 +169,8 @@ export class Compactor {
     const read = new Map<number, Uint8Array>()
     const merged: PackRow[] = []
     for (const pack of packs) {
+      // Nothing is reserved yet: stopping here leaves nothing behind.
+      if (await yields()) return
       const live = await this.#readLive(pack, framesOf.get(pack.id) ?? [])
       if (!live) {
         report.failures += 1

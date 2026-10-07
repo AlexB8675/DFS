@@ -231,7 +231,7 @@ function Compaction({
   return (
     <Section
       title="Packs that hold little"
-      description={`Packs whose files were mostly deleted. Once ${age(minAgeDays)} old, the bot merges them into fewer, a group a minute while nothing waits to be stored, and the deleted files’ bytes leave Discord with them.`}
+      description={`Packs whose files were mostly deleted. Once ${age(minAgeDays)} old, the bot merges them into fewer, a group a minute while nothing is being uploaded or downloaded, and the deleted files’ bytes leave Discord with them.`}
       action={
         all.packs > 0 && (
           <Button size="sm" variant="outline" disabled={compacting} onClick={onCompact}>

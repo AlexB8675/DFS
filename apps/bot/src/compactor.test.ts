@@ -23,7 +23,7 @@ import { sql } from 'drizzle-orm'
 import type pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest'
 import { collectGarbage } from './collector.ts'
-import { Compactor, dropStalePacks } from './compactor.ts'
+import { Compactor, downloadsUnderWay, dropStalePacks } from './compactor.ts'
 import { reconcileOrphans } from './reconciler.ts'
 import { dataChannels, instanceId } from './storage.ts'
 import { postJournal, settleBlobs, uploadedFiles, waitingForALock } from './testing.ts'
@@ -338,6 +338,42 @@ describe('Compactor (DESIGN.md §6.6)', () => {
         })),
       },
     })
+  })
+
+  it('waits while files are downloaded, and stops before its next read when one starts', async () => {
+    const { packIds } = await sparsePacks(2)
+    const sent = (secondsAgo: number) => sql`
+      INSERT INTO metrics (name, step, at, sum, count, max)
+      VALUES ('downloads.bytes', 30,
+        to_timestamp(floor(extract(epoch FROM now()) / 30) * 30 - ${secondsAgo}), 4096, 1, 4096)`
+    // A download two minutes ago is over; one this half minute isn't.
+    await db.execute(sent(120))
+    expect(await downloadsUnderWay(db)).toBe(false)
+    await db.execute(sent(0))
+    expect(await downloadsUnderWay(db)).toBe(true)
+
+    const busy = () => downloadsUnderWay(db)
+    expect(await new Compactor({ db, store, rule, busy }).compact()).toMatchObject({ groups: 0 })
+    // A download starts once the first pack is read: nothing is reserved yet.
+    let checks = 0
+    const startsLater = () => Promise.resolve((checks += 1) > 2)
+    const { rows: before } = await db.execute<{ blobs: number }>(sql`
+      SELECT count(*)::int AS blobs FROM blobs`)
+    expect(await new Compactor({ db, store, rule, busy: startsLater }).compact()).toMatchObject({
+      groups: 0,
+    })
+    expect(checks).toBe(3)
+    const { rows: after } = await db.execute<{ blobs: number }>(sql`
+      SELECT count(*)::int AS blobs FROM blobs`)
+    expect(after).toEqual(before)
+    for (const id of packIds) expect((await blob(id)).state).toBe('stored')
+
+    // Compact packs now is the admin's call: it doesn't wait.
+    expect(await new Compactor({ db, store, rule, busy }).compact({ force: true })).toMatchObject({
+      groups: 1,
+      packs: 2,
+    })
+    await db.execute(sql`DELETE FROM metrics WHERE name = 'downloads.bytes'`)
   })
 
   it('leaves out a pack that fails its check, and doesn’t try it again', async () => {

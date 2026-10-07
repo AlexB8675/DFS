@@ -23,7 +23,7 @@ import { sql } from 'drizzle-orm'
 import type { FastifyBaseLogger } from 'fastify'
 import { fromDrizzle, type JobResult, type PgBoss } from 'pg-boss'
 import { collectGarbage, uploadsWaiting } from './collector.ts'
-import { Compactor, dropStalePacks } from './compactor.ts'
+import { Compactor, downloadsUnderWay, dropStalePacks } from './compactor.ts'
 import { keepGateway } from './gateway.ts'
 import { JournalUploader } from './journal-uploader.ts'
 import { Packer } from './packer.ts'
@@ -157,6 +157,8 @@ export async function startLeaderWork(options: {
       packTargetBytes: config.sizes.packTargetBytes,
       minAgeDays: config.compactMinAgeDays,
     },
+    // Uploads and downloads come first: a run waits until neither is under way.
+    busy: async () => (await uploadsWaiting(db)) || (await downloadsUnderWay(db)),
     log,
     metrics,
   })
@@ -184,9 +186,8 @@ export async function startLeaderWork(options: {
       const sealed = await packer.sealDue()
       if (sealed > 0) metrics?.record('packs.sealed', sealed)
     }),
-    // Uploads come first: compaction waits for every blob to be stored.
     repeat(COMPACT_EVERY_MS, log, 'merging packs that hold little', async () => {
-      if (!(await uploadsWaiting(db))) await compactor.compact()
+      await compactor.compact()
     }),
     // Uploads come first, but deleting never stops altogether.
     repeat(COLLECT_EVERY_MS, log, 'deleting released blobs', async () => {
