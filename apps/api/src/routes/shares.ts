@@ -27,7 +27,7 @@ import {
   countShareLinks,
   createShare,
   listShares,
-  revokeShare,
+  deleteShare,
   updateShare,
 } from '../shares/shares.ts'
 import { assertOwnOrigin } from './auth.ts'
@@ -73,7 +73,7 @@ export function shareRoutes(app: FastifyInstance, _options: object, done: () => 
     '/shares/:id',
     { schema: { params: byId, response: noContent } },
     async (request, reply) => {
-      await revokeShare(app, requireAuth(request.auth), request.params.id)
+      await deleteShare(app, requireAuth(request.auth), request.params.id)
       return reply.code(204).send(null)
     },
   )

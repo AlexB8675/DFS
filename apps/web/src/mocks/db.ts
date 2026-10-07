@@ -91,7 +91,6 @@ export interface MockShare {
   hasPassword: boolean
   maxDownloads: number | null
   downloadCount: number
-  revokedAt: string | null
   /** A file link's version, which it serves however the file changes (§7.5); `null` for a folder. */
   versionNo: number | null
 }
@@ -172,7 +171,7 @@ export class MockFileExists extends MockApiError {
   }
 }
 
-const STATE_VERSION = 10
+const STATE_VERSION = 11
 const STORAGE_KEY = 'dfs.mock-db'
 /** `CHUNK_SIZE` at the 10 MiB attachment limit (§7.3). */
 export const CHUNK_SIZE = 10 * 1024 * 1024 - 128 * 1024
@@ -904,13 +903,13 @@ export class MockDb {
     return { items, nextCursor: null }
   }
 
-  /** Links not revoked yet to this node or anything below it, which removing it would revoke (§7.2). */
-  protected unrevokedLinksBelow(node: MockNode): MockShare[] {
+  /** Links to this node or anything below it, which removing it would delete (§7.2). */
+  protected linksBelow(node: MockNode): MockShare[] {
     const below = new Set([
       node.id,
       ...this.descendants(node.id).map((descendant) => descendant.id),
     ])
-    return this.state.shares.filter((share) => !share.revokedAt && below.has(share.nodeId))
+    return this.state.shares.filter((share) => below.has(share.nodeId))
   }
 
   /** `POST /shares/count`: outstanding links to these items or below them, or to anything in the trash. */
@@ -956,7 +955,6 @@ export class MockDb {
       hasPassword: input.password !== null,
       maxDownloads: input.maxDownloads,
       downloadCount: 0,
-      revokedAt: null,
       versionNo: node.kind === 'file' ? (node.versionNo ?? 1) : null,
     }
     this.state.shares.push(share)
@@ -966,9 +964,6 @@ export class MockDb {
 
   updateShare(id: string, changes: UpdateShareInput): ShareLink {
     const share = this.ownShare(id)
-    if (share.revokedAt) {
-      throw new MockApiError(409, 'share_revoked', 'A revoked link can’t be changed.')
-    }
     if (this.shareVersion(share) === 'deleted') {
       throw new MockApiError(
         409,
@@ -988,9 +983,10 @@ export class MockDb {
     return this.shareDto(share, null)
   }
 
-  revokeShare(id: string): void {
+  /** `DELETE /shares/:id`: turning a link off deletes it. */
+  deleteShare(id: string): void {
     const share = this.ownShare(id)
-    share.revokedAt ??= new Date().toISOString()
+    this.state.shares = this.state.shares.filter((candidate) => candidate !== share)
     this.save()
   }
 
@@ -1112,7 +1108,7 @@ export class MockDb {
     return { name: `${folder.name}.zip`, body: createZip(this.zipEntries([folder])) }
   }
 
-  /** The share behind a token, if it still works: not revoked, expired or used up. */
+  /** The share behind a token, if it still works: not expired or used up. */
   private liveShare(
     token: string,
     { requireUnlocked = true } = {},
@@ -1121,9 +1117,6 @@ export class MockDb {
     const root = share ? this.state.nodes[share.nodeId] : undefined
     if (!share || !root || !isVisible(root)) {
       throw new MockApiError(404, 'share_not_found', 'This link doesn’t exist.')
-    }
-    if (share.revokedAt) {
-      throw new MockApiError(410, 'share_revoked', 'The owner turned this link off.')
     }
     if (share.expiresAt && new Date(share.expiresAt).getTime() <= Date.now()) {
       throw new MockApiError(410, 'share_expired', 'This link has expired.')
@@ -1420,10 +1413,9 @@ function mockContent(node: MockNode): string {
   return `Mock content of “${node.name}” (${node.sizeBytes} bytes in the real file).\n`
 }
 
-/** A share link that still works: not revoked, expired or used up (§7.5). */
+/** A share link that still works: not expired or used up (§7.5). */
 function isWorking(share: MockShare, now: number): boolean {
   return (
-    !share.revokedAt &&
     !(share.expiresAt && new Date(share.expiresAt).getTime() <= now) &&
     !(share.maxDownloads !== null && share.downloadCount >= share.maxDownloads)
   )

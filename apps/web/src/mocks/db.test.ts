@@ -450,10 +450,9 @@ describe('mock API database', () => {
       })
     })
 
-    it('turns away expired, revoked and unknown links', () => {
+    it('turns away expired and unknown links', () => {
       const error = (token: string) => apiError(() => db.publicShare(token))
       expect(error('demo-expired')).toEqual({ status: 410, code: 'share_expired' })
-      expect(error('demo-revoked')).toEqual({ status: 410, code: 'share_revoked' })
       expect(error('nope')).toEqual({ status: 404, code: 'share_not_found' })
     })
 
@@ -487,7 +486,7 @@ describe('mock API database', () => {
 
     it('locks the link again when its password changes, and never lists tokens', () => {
       db.unlockShare('demo-lisbon', 'lisbon')
-      const link = db.shares().items.find((share) => share.hasPassword && !share.revokedAt)
+      const link = db.shares().items.find((share) => share.hasPassword)
       if (!link) throw new Error('No password-protected link')
       db.updateShare(link.id, { password: 'new-secret' })
 

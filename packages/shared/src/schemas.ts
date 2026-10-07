@@ -349,7 +349,6 @@ export const shareLinkSchema = z.object({
   hasPassword: z.boolean(),
   maxDownloads: z.number().int().positive().nullable(),
   downloadCount: z.number().int().min(0),
-  revokedAt: timestamp.nullable(),
   /**
    * A file link serves the version current when it was made (§7.5): still
    * the file's `current` one, an `earlier` one since the file was replaced,
@@ -498,10 +497,10 @@ export type UserUsage = z.infer<typeof userUsageSchema>
 export const moderationSchema = z.object({ reason: z.string().trim().min(3).max(500) })
 export type ModerationInput = z.infer<typeof moderationSchema>
 /**
- * `DELETE /admin/nodes/:id`: removing an item revokes every share link to it
- * or to what's inside it, for good, so restoring it brings none back (§7.2).
+ * `DELETE /admin/nodes/:id`: removing an item deletes every share link to it
+ * or to what's inside it, so restoring it brings none back (§7.2).
  */
-export const moderationResultSchema = z.object({ revokedLinks: z.number().int().min(0) })
+export const moderationResultSchema = z.object({ deletedLinks: z.number().int().min(0) })
 export type ModerationResult = z.infer<typeof moderationResultSchema>
 
 export const serviceStatusSchema = z.enum(['ok', 'degraded', 'down'])
@@ -608,10 +607,9 @@ export const adminShareSchema = z.object({
   hasPassword: z.boolean(),
   maxDownloads: z.number().int().positive().nullable(),
   downloadCount: count,
-  revokedAt: timestamp.nullable(),
   /** A file link's version, as its owner's list says it (§7.5); `null` for a folder link. */
   version: z.enum(['current', 'earlier', 'deleted']).nullable(),
-  state: z.enum(['active', 'expired', 'used_up', 'revoked', 'version_deleted']),
+  state: z.enum(['active', 'expired', 'used_up', 'version_deleted']),
 })
 export type AdminShare = z.infer<typeof adminShareSchema>
 export const adminSharePageSchema = pageSchema(adminShareSchema)

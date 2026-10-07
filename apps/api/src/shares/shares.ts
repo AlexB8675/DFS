@@ -7,8 +7,15 @@ import type {
   ShareLink,
   UpdateShareInput,
 } from '@dfs/shared'
-import { appendJournal, shareLinks, shareRecords, uuidArray, WORKING_LINK } from '@dfs/db'
-import { and, eq, isNull, sql } from 'drizzle-orm'
+import {
+  appendJournal,
+  shareDeletedRecords,
+  shareLinks,
+  shareRecords,
+  uuidArray,
+  WORKING_LINK,
+} from '@dfs/db'
+import { eq, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { audit } from '../audit.ts'
 import { hashPassword } from '../auth/passwords.ts'
@@ -30,7 +37,6 @@ interface ShareRow extends Record<string, unknown> {
   has_password: boolean
   max_downloads: number | null
   download_count: number
-  revoked_at: string | null
   version_id: string | null
   version: ShareLink['version']
 }
@@ -127,8 +133,6 @@ export async function updateShare(
   changes: UpdateShareInput,
 ): Promise<ShareLink> {
   const current = await ownShare(app, auth, id)
-  if (current.revoked_at)
-    throw new ApiError(409, 'share_revoked', 'A revoked link can’t be changed.')
   if (current.version === 'deleted') throw versionGone()
   const passwordHash =
     changes.password === undefined || changes.password === null
@@ -161,22 +165,22 @@ export async function updateShare(
   return toShareLink(await ownShare(app, auth, id), null)
 }
 
-/** `DELETE /shares/:id`: turns the link off for good. */
-export async function revokeShare(app: FastifyInstance, auth: Auth, id: string): Promise<void> {
+/** `DELETE /shares/:id`: turns the link off, which deletes it; it stops working at once. */
+export async function deleteShare(app: FastifyInstance, auth: Auth, id: string): Promise<void> {
   const share = await ownShare(app, auth, id)
   await app.db.transaction(async (tx) => {
-    const revoked = await tx
-      .update(shareLinks)
-      .set({ revokedAt: new Date() })
-      .where(and(eq(shareLinks.id, id), isNull(shareLinks.revokedAt)))
-      .returning()
+    const deleted = await tx
+      .delete(shareLinks)
+      .where(eq(shareLinks.id, id))
+      .returning({ id: shareLinks.id })
+    if (deleted.length === 0) return
     const audited = await audit(tx, {
       actorId: auth.user.id,
       action: 'share.revoked',
       target: share.node_name,
       nodeId: share.node_id,
     })
-    await appendJournal(tx, [...shareRecords(revoked), ...audited])
+    await appendJournal(tx, [...shareDeletedRecords([id]), ...audited])
   })
 }
 
@@ -184,7 +188,7 @@ const SELECT_SHARE = sql`
   SELECT share.id, share.node_id, node.name AS node_name, node.kind AS node_kind,
     share.created_at::text AS created_at, share.expires_at::text AS expires_at,
     share.password_hash IS NOT NULL AS has_password, share.max_downloads, share.download_count,
-    share.revoked_at::text AS revoked_at, share.version_id,
+    share.version_id,
     CASE
       WHEN node.kind = 'folder' THEN NULL
       WHEN share.version_id IS NULL THEN 'deleted'
@@ -223,7 +227,6 @@ function toShareLink(row: ShareRow, url: string | null): ShareLink {
     hasPassword: row.has_password,
     maxDownloads: row.max_downloads,
     downloadCount: row.download_count,
-    revokedAt: iso(row.revoked_at),
     version: row.version,
   }
 }

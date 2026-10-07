@@ -1,6 +1,12 @@
-import { abandonUploads, appendJournal, shareLinks, shareRecords, WORKING_LINK } from '@dfs/db'
+import {
+  abandonUploads,
+  appendJournal,
+  shareDeletedRecords,
+  shareLinks,
+  WORKING_LINK,
+} from '@dfs/db'
 import type { AdminSession, AdminShare, AdminShareOwner, AdminUpload, Page } from '@dfs/shared'
-import { and, eq, isNull, sql } from 'drizzle-orm'
+import { eq, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { audit, auditAlone } from '../audit.ts'
 import { endSession, endUserSessions, type Auth } from '../auth/sessions.ts'
@@ -134,15 +140,13 @@ interface ShareRow extends Record<string, unknown> {
   has_password: boolean
   max_downloads: number | null
   download_count: number
-  revoked_at: string | null
 }
 
 const SELECT_SHARES = sql`
   SELECT share.id, share.node_id, node.name AS node_name, node.kind AS node_kind,
     node.owner_id, owner.display_name AS owner_name, node.parent_id,
     share.created_at::text AS created_at, share.expires_at::text AS expires_at,
-    share.password_hash IS NOT NULL AS has_password, share.max_downloads, share.download_count,
-    share.revoked_at::text AS revoked_at
+    share.password_hash IS NOT NULL AS has_password, share.max_downloads, share.download_count
   FROM share_links share
   JOIN nodes node ON node.id = share.node_id
   JOIN users owner ON owner.id = node.owner_id`
@@ -180,7 +184,7 @@ function listedShares(q: string | undefined) {
         node.parent_id, chain.path,
         link.created_at::text AS created_at, link.expires_at::text AS expires_at,
         link.password_hash IS NOT NULL AS has_password, link.max_downloads,
-        link.download_count, link.revoked_at::text AS revoked_at,
+        link.download_count,
         CASE
           WHEN node.kind = 'folder' THEN NULL
           WHEN link.version_id IS NULL THEN 'deleted'
@@ -263,8 +267,8 @@ export async function shareOwners(
   }))
 }
 
-/** `DELETE /admin/shares/:id`: turns any user's link off for good. */
-export async function revokeShareAsAdmin(
+/** `DELETE /admin/shares/:id`: turns any user's link off, which deletes it. */
+export async function deleteShareAsAdmin(
   app: FastifyInstance,
   admin: Auth,
   id: string,
@@ -273,13 +277,12 @@ export async function revokeShareAsAdmin(
   const [share] = rows
   if (!share) throw new ApiError(404, 'not_found', 'No such link.')
   await app.db.transaction(async (tx) => {
-    const revoked = await tx
-      .update(shareLinks)
-      .set({ revokedAt: new Date() })
-      .where(and(eq(shareLinks.id, id), isNull(shareLinks.revokedAt)))
-      .returning()
-    // Off already: nothing changed, so nothing to note.
-    if (revoked.length === 0) return
+    const deleted = await tx
+      .delete(shareLinks)
+      .where(eq(shareLinks.id, id))
+      .returning({ id: shareLinks.id })
+    // Gone already: nothing changed, so nothing to note.
+    if (deleted.length === 0) return
     const audited = await audit(tx, {
       actorId: admin.user.id,
       action: 'share.revoked',
@@ -287,7 +290,7 @@ export async function revokeShareAsAdmin(
       nodeId: share.node_id,
       details: `${share.owner_name}’s link`,
     })
-    await appendJournal(tx, [...shareRecords(revoked), ...audited])
+    await appendJournal(tx, [...shareDeletedRecords([id]), ...audited])
   })
 }
 
@@ -364,9 +367,8 @@ export async function cancelUploadAsAdmin(
 
 function toAdminShare(row: ListedRow): AdminShare {
   const now = Date.now()
-  const state = row.revoked_at
-    ? 'revoked'
-    : row.version === 'deleted'
+  const state =
+    row.version === 'deleted'
       ? 'version_deleted'
       : row.expires_at && Date.parse(row.expires_at) <= now
         ? 'expired'
@@ -388,7 +390,6 @@ function toAdminShare(row: ListedRow): AdminShare {
     hasPassword: row.has_password,
     maxDownloads: row.max_downloads,
     downloadCount: row.download_count,
-    revokedAt: row.revoked_at ? iso(row.revoked_at) : null,
     version: row.version,
     state,
   }

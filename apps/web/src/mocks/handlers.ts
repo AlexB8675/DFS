@@ -328,7 +328,7 @@ export const handlers = [
     respond(request, () => db.adminChildren(params.id, readQuery(request, listQuery))),
   ),
   http.get<Id>('/api/admin/nodes/:id/links', ({ request, params }) =>
-    respond(request, () => db.linksToRevoke(params.id)),
+    respond(request, () => db.linksToDelete(params.id)),
   ),
   http.delete<Id>('/api/admin/nodes/:id', ({ request, params }) =>
     respond(request, async () =>
@@ -420,7 +420,7 @@ export const handlers = [
   ),
   http.delete<Id>('/api/admin/shares/:id', ({ request, params }) =>
     respondEmpty(request, () => {
-      db.revokeShareAsAdmin(params.id)
+      db.deleteShareAsAdmin(params.id)
     }),
   ),
   http.get('/api/admin/uploads', ({ request }) => respond(request, () => db.adminUploads())),
@@ -447,7 +447,7 @@ export const handlers = [
   ),
   http.delete<Id>('/api/shares/:id', ({ request, params }) =>
     respondEmpty(request, () => {
-      db.revokeShare(params.id)
+      db.deleteShare(params.id)
     }),
   ),
 

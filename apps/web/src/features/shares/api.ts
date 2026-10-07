@@ -56,17 +56,17 @@ export function expiryFromChoice(choice: string, now = Date.now()): string | nul
   return choice === 'never' ? null : new Date(now + Number(choice) * 86_400_000).toISOString()
 }
 
-export function useRevokeShare() {
+/** Turns a link off, which deletes it. */
+export function useDeleteShare() {
   return useMutation({
     mutationFn: (id: string) => apiSend('DELETE', `/shares/${id}`),
     onSettled: refreshShares,
   })
 }
 
-export type ShareStatus = 'active' | 'expired' | 'revoked' | 'used-up' | 'version-deleted'
+export type ShareStatus = 'active' | 'expired' | 'used-up' | 'version-deleted'
 
 export function shareStatus(share: ShareLink, now: Date = new Date()): ShareStatus {
-  if (share.revokedAt) return 'revoked'
   // The version a file link served was deleted: it works no more (§7.5).
   if (share.version === 'deleted') return 'version-deleted'
   if (share.expiresAt && new Date(share.expiresAt) <= now) return 'expired'

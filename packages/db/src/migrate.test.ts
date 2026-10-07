@@ -33,7 +33,7 @@ describe('migrations', () => {
       })
       // One instance ID, made once (DESIGN §4).
       expect(counts).toEqual({
-        applied: 19,
+        applied: 20,
         tables: 17,
         instance: [expect.stringMatching(/^[0-9a-f]{12}$/)],
       })
@@ -82,6 +82,19 @@ describe('schema rules (DESIGN §5.1)', () => {
         .where(sql`${users.id} = ${user.id}`)
       return { user, root }
     })
+  }
+
+  /**
+   * Runs an older migration's statements again, against the schema as it is
+   * now, with the column they read that a later one dropped (0019).
+   */
+  async function replay(statements: readonly string[]) {
+    await db.execute(sql`ALTER TABLE share_links ADD COLUMN revoked_at timestamptz`)
+    try {
+      for (const statement of statements) await db.execute(sql.raw(statement))
+    } finally {
+      await db.execute(sql`ALTER TABLE share_links DROP COLUMN revoked_at`)
+    }
   }
 
   /** The constraint a failed statement broke, from drizzle's wrapped error. */
@@ -159,9 +172,7 @@ describe('schema rules (DESIGN §5.1)', () => {
       new URL('../migrations/0016_journal_shares_audit.sql', import.meta.url),
       'utf8',
     )
-    for (const statement of backfill.split('--> statement-breakpoint')) {
-      await db.execute(sql.raw(statement))
-    }
+    await replay(backfill.split('--> statement-breakpoint'))
     const { rows } = await db.execute<JournalRecord & Record<string, unknown>>(sql`
       SELECT kind, record FROM journal
       WHERE record->>'id' IN (${share.id}, ${String(entry.id)}) ORDER BY id`)
@@ -180,11 +191,13 @@ describe('schema rules (DESIGN §5.1)', () => {
           ),
         ),
       }))
-    // 0016 came before links had versions (0018).
+    // 0016 came before links had versions (0018), and while they kept revokedAt (0019).
     const [record, ...rest] = [...shareRecords([share]), ...auditRecords([entry])]
     if (!record) throw new Error('no record')
     const { versionId: _versionId, ...linkState } = record.record
-    expect(normal(rows)).toEqual(normal([{ ...record, record: linkState }, ...rest]))
+    expect(normal(rows)).toEqual(
+      normal([{ ...record, record: { ...linkState, revokedAt: null } }, ...rest]),
+    )
     expect(rows[0]?.record).not.toHaveProperty('downloadCount')
   })
 
@@ -229,9 +242,7 @@ describe('schema rules (DESIGN §5.1)', () => {
       new URL('../migrations/0018_share_link_versions.sql', import.meta.url),
       'utf8',
     )
-    for (const statement of backfill.split('--> statement-breakpoint').slice(3)) {
-      await db.execute(sql.raw(statement))
-    }
+    await replay(backfill.split('--> statement-breakpoint').slice(3))
     const pinned = await db.select().from(shareLinks).where(eq(shareLinks.nodeId, file.id))
     expect(pinned.map((link) => link.versionId)).toEqual([version.id])
     const folderLink = await db.select().from(shareLinks).where(eq(shareLinks.nodeId, root.id))

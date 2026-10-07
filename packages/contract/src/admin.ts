@@ -85,7 +85,7 @@ export function adminTests({
       )
     })
 
-    it('revokes the share links to an item it removes, for good, and says how many', async () => {
+    it('deletes the share links to an item it removes, and says how many', async () => {
       const { user, username } = await newUserWithFolder()
       const client = await signIn(username, chosenPassword(username))
       const folder = await client.call('POST', '/folders', nodeSchema, {
@@ -98,8 +98,6 @@ export function adminTests({
         })
       const folderLink = await share(folder.id)
       const fileLink = await share(inside.nodeId)
-      const gone = await share(inside.nodeId)
-      await client.send('DELETE', `/shares/${gone.id}`)
       const admin = await owner()
 
       const counted = await admin.call('GET', `/admin/nodes/${folder.id}/links`, shareCountSchema)
@@ -112,15 +110,15 @@ export function adminTests({
           json: { reason: 'Not allowed here.' },
         },
       )
-      expect(result.revokedLinks).toBe(2)
+      expect(result.deletedLinks).toBe(2)
 
       // Restoring it brings none back.
       const again = await signIn(username, chosenPassword(username))
       await again.send('POST', `/nodes/${folder.id}/restore`)
       const { items } = await again.call('GET', '/shares', shareLinkPageSchema)
-      for (const link of [folderLink, fileLink]) {
-        expect(items.find((item) => item.id === link.id)?.revokedAt).not.toBeNull()
-      }
+      const ids = items.map((item) => item.id)
+      expect(ids).not.toContain(folderLink.id)
+      expect(ids).not.toContain(fileLink.id)
     })
 
     it('adds storage channels, refuses one twice, and keeps one taking blobs', async () => {
@@ -234,14 +232,18 @@ export function adminTests({
       expect(JSON.stringify(found)).not.toContain(link.url?.split('/s/')[1] ?? 'no token')
 
       await admin.send('DELETE', `/admin/shares/${link.id}`)
+      // Turned off, it is gone from its owner's links too.
       const own = await client.call('GET', '/shares', shareLinkPageSchema)
-      expect(own.items.find((share) => share.id === link.id)?.revokedAt).not.toBeNull()
+      expect(own.items.map((share) => share.id)).not.toContain(link.id)
       const active = await admin.call('GET', '/admin/shares?active=true', adminSharePageSchema)
       expect(active.items.map((share) => share.id)).not.toContain(link.id)
       const log = await admin.call('GET', '/admin/audit?actions=share.&limit=1', auditPageSchema)
       expect(log.items[0]).toMatchObject({ action: 'share.revoked', target: 'beach.jpg' })
-      // Turning it off again changes nothing, so the log notes nothing more.
-      await admin.send('DELETE', `/admin/shares/${link.id}`)
+      // It is gone: turning it off again finds nothing, and the log notes nothing more.
+      expect(await admin.error('DELETE', `/admin/shares/${link.id}`)).toEqual({
+        status: 404,
+        code: 'not_found',
+      })
       const again = await admin.call('GET', '/admin/audit?actions=share.&limit=1', auditPageSchema)
       expect(again.items[0]?.id).toBe(log.items[0]?.id)
     })

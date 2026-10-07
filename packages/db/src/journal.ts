@@ -18,6 +18,7 @@ export interface JournalRecord {
     | 'version.purged'
     | 'blob.relocated'
     | 'share.upsert'
+    | 'share.deleted'
     | 'audit.added'
   record: Record<string, unknown>
 }
@@ -78,6 +79,11 @@ export function shareRecords(shares: readonly ShareRow[]): JournalRecord[] {
     kind: 'share.upsert',
     record: { ...state, tokenHash: tokenHash.toString('hex') },
   }))
+}
+
+/** Share links turned off, which are deleted (§7.5): `{id}` each. */
+export function shareDeletedRecords(ids: readonly string[]): JournalRecord[] {
+  return ids.map((id) => ({ kind: 'share.deleted', record: { id } }))
 }
 
 /** Audit entries for recovery, as written (§7.5): the janitor drops them after a year. */

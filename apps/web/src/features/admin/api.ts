@@ -301,7 +301,8 @@ export function useSignOutUser() {
   })
 }
 
-export function useRevokeShareAsAdmin() {
+/** Turns any user's link off, which deletes it. */
+export function useDeleteShareAsAdmin() {
   return useMutation({
     mutationFn: (id: string) => apiSend('DELETE', `/admin/shares/${id}`),
     onSettled: () => afterAccessChange('shares'),
@@ -353,8 +354,8 @@ async function invalidateUsers(): Promise<void> {
   ])
 }
 
-/** The share links removing an item would revoke: to it or what's inside it. */
-export function linksToRevokeQuery(nodeId: string) {
+/** The share links removing an item would delete: to it or what's inside it. */
+export function linksToDeleteQuery(nodeId: string) {
   return queryOptions({
     queryKey: ['admin', 'node-links', nodeId],
     queryFn: ({ signal }) => apiGet(`/admin/nodes/${nodeId}/links`, shareCountSchema, { signal }),

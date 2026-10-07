@@ -251,15 +251,15 @@ export class AdminMockDb extends MockDb {
     )
   }
 
-  /** `GET /admin/nodes/:id/links`: the share links removing this item would revoke. */
-  linksToRevoke(id: string): ShareCount {
+  /** `GET /admin/nodes/:id/links`: the share links removing this item would delete. */
+  linksToDelete(id: string): ShareCount {
     this.requireAdmin()
-    return { links: this.unrevokedLinksBelow(this.anyVisibleNode(id)).length }
+    return { links: this.linksBelow(this.anyVisibleNode(id)).length }
   }
 
   /**
    * Moderation trash: the owner finds the item in their trash, with the
-   * reason. Every share link to it or below it is revoked, for good.
+   * reason. Every share link to it or below it is deleted.
    */
   moderate(id: string, reason: string): ModerationResult {
     this.requireAdmin()
@@ -267,27 +267,27 @@ export class AdminMockDb extends MockDb {
     if (node.parentId === null) {
       throw new MockApiError(403, 'forbidden', 'A root folder cannot be removed.')
     }
-    const revoked = this.unrevokedLinksBelow(node)
+    const deleted = new Set(this.linksBelow(node))
+    this.state.shares = this.state.shares.filter((share) => !deleted.has(share))
     const now = new Date().toISOString()
-    for (const share of revoked) share.revokedAt = now
     node.deletedAt = now
     node.moderationReason = reason
     for (const descendant of this.descendants(node.id)) descendant.trashedVia ??= node.id
     const owner = this.state.users.find((user) => user.id === node.ownerId)
-    const links = revoked.length
+    const links = deleted.size
     this.audit(
       'node.moderated',
       `${node.name} (${owner?.displayName ?? 'unknown'})`,
       links === 0
         ? reason
-        : `${reason} · ${String(links)} share ${links === 1 ? 'link' : 'links'} revoked`,
+        : `${reason} · ${String(links)} share ${links === 1 ? 'link' : 'links'} deleted`,
     )
     this.changed()
     // Removed from under the signed-in user: their open folder updates live.
     if (node.ownerId === this.state.userId) {
       this.emit({ type: 'nodes.changed', parentIds: [node.parentId] })
     }
-    return { revokedLinks: links }
+    return { deletedLinks: links }
   }
 
   // ── System ─────────────────────────────────────────────────────────────────
@@ -463,9 +463,8 @@ export class AdminMockDb extends MockDb {
           )
         if (!matches) return []
         const version = this.shareVersion(share)
-        const state = share.revokedAt
-          ? 'revoked'
-          : version === 'deleted'
+        const state =
+          version === 'deleted'
             ? 'version_deleted'
             : share.expiresAt && Date.parse(share.expiresAt) <= now
               ? 'expired'
@@ -488,7 +487,6 @@ export class AdminMockDb extends MockDb {
             hasPassword: share.password !== null,
             maxDownloads: share.maxDownloads,
             downloadCount: share.downloadCount,
-            revokedAt: share.revokedAt,
             version,
             state,
           },
@@ -541,15 +539,14 @@ export class AdminMockDb extends MockDb {
       )
   }
 
-  revokeShareAsAdmin(id: string): void {
+  /** `DELETE /admin/shares/:id`: turning any user's link off deletes it. */
+  deleteShareAsAdmin(id: string): void {
     this.requireAdmin()
     const share = this.state.shares.find((candidate) => candidate.id === id)
     const node = share && this.state.nodes[share.nodeId]
     if (!share || !node) throw new MockApiError(404, 'not_found', 'No such link.')
-    // Off already: nothing changes, and nothing is noted.
-    if (share.revokedAt) return
     const owner = this.state.users.find((user) => user.id === node.ownerId)
-    share.revokedAt = new Date().toISOString()
+    this.state.shares = this.state.shares.filter((candidate) => candidate !== share)
     this.audit('share.revoked', node.name, `${owner?.displayName ?? 'Someone'}’s link`)
     this.save()
   }

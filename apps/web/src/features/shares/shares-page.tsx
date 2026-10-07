@@ -22,7 +22,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { ListSkeleton } from '@/components/list-skeleton'
 import { errorMessage } from '@/lib/api/client'
 import { formatDate, formatFullDate } from '@/lib/format'
-import { shareStatus, sharesQuery, useRevokeShare, type ShareStatus } from './api'
+import { shareStatus, sharesQuery, useDeleteShare, type ShareStatus } from './api'
 import { EditShareDialog } from './edit-share-dialog'
 
 const STATUS_BADGES: Record<
@@ -32,27 +32,26 @@ const STATUS_BADGES: Record<
   active: { label: 'Active', variant: 'default' },
   expired: { label: 'Expired', variant: 'secondary' },
   'used-up': { label: 'Limit reached', variant: 'secondary' },
-  revoked: { label: 'Revoked', variant: 'outline' },
   'version-deleted': { label: 'Version deleted', variant: 'outline' },
 }
 
 /** `/shared`: the user's public share links (§7.5). */
 export function SharesPage() {
   const shares = useQuery(sharesQuery)
-  const revoke = useRevokeShare()
-  const [revoking, setRevoking] = useState<ShareLink | null>(null)
+  const remove = useDeleteShare()
+  const [deleting, setDeleting] = useState<ShareLink | null>(null)
   const [editing, setEditing] = useState<ShareLink | null>(null)
   const links = shares.data?.items ?? []
 
-  async function confirmRevoke() {
-    if (!revoking) return
+  async function confirmDelete() {
+    if (!deleting) return
     try {
-      await revoke.mutateAsync(revoking.id)
-      toast.success(`Link to “${revoking.nodeName}” revoked`)
+      await remove.mutateAsync(deleting.id)
+      toast.success(`Link to “${deleting.nodeName}” deleted`)
     } catch (error) {
-      toast.error('Could not revoke the link', { description: errorMessage(error) })
+      toast.error('Could not delete the link', { description: errorMessage(error) })
     }
-    setRevoking(null)
+    setDeleting(null)
   }
 
   return (
@@ -142,7 +141,7 @@ export function SharesPage() {
                       {link.maxDownloads !== null && ` / ${link.maxDownloads}`}
                     </td>
                     <td className="py-2.5 pr-5 text-right">
-                      {status !== 'revoked' && status !== 'version-deleted' && (
+                      {status !== 'version-deleted' && (
                         <Tooltip>
                           <TooltipTrigger asChild>
                             <Button
@@ -159,23 +158,21 @@ export function SharesPage() {
                           <TooltipContent>Edit expiry, password and limit</TooltipContent>
                         </Tooltip>
                       )}
-                      {status !== 'revoked' && (
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              variant="ghost"
-                              size="icon-sm"
-                              aria-label={`Revoke link to “${link.nodeName}”`}
-                              onClick={() => {
-                                setRevoking(link)
-                              }}
-                            >
-                              <Unlink />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Revoke link</TooltipContent>
-                        </Tooltip>
-                      )}
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            aria-label={`Delete link to “${link.nodeName}”`}
+                            onClick={() => {
+                              setDeleting(link)
+                            }}
+                          >
+                            <Unlink />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Delete link</TooltipContent>
+                      </Tooltip>
                     </td>
                   </tr>
                 )
@@ -195,22 +192,22 @@ export function SharesPage() {
       )}
 
       <AlertDialog
-        open={revoking !== null}
+        open={deleting !== null}
         onOpenChange={(open) => {
-          if (!open) setRevoking(null)
+          if (!open) setDeleting(null)
         }}
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Revoke this link?</AlertDialogTitle>
+            <AlertDialogTitle>Delete this link?</AlertDialogTitle>
             <AlertDialogDescription>
-              Anyone who has the link to “{revoking?.nodeName}” will lose access right away.
+              Anyone who has the link to “{deleting?.nodeName}” will lose access right away.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction variant="destructive" onClick={() => void confirmRevoke()}>
-              Revoke
+            <AlertDialogAction variant="destructive" onClick={() => void confirmDelete()}>
+              Delete
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

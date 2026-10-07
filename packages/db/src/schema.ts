@@ -384,7 +384,6 @@ export const shareLinks = pgTable(
     passwordVersion: integer('password_version').notNull().default(0),
     maxDownloads: integer('max_downloads'),
     downloadCount: integer('download_count').notNull().default(0),
-    revokedAt: timestamptz('revoked_at'),
   },
   (t) => [
     uniqueIndex('share_links_token_hash').on(t.tokenHash),

@@ -331,7 +331,7 @@ export function createSeed(version: number): MockState {
 
   // ── Share links ───────────────────────────────────────────────────────────
   // Readable tokens, so the demo links can be tried: /s/demo-lisbon (password
-  // "lisbon"), /s/demo-resume, and the expired and revoked ones.
+  // "lisbon"), /s/demo-resume, and the expired one.
   const share = (nodeId: string, token: string, fields: Partial<MockShare>): MockShare => ({
     id: makeUuid(random),
     nodeId,
@@ -342,11 +342,9 @@ export function createSeed(version: number): MockState {
     hasPassword: false,
     maxDownloads: null,
     downloadCount: 0,
-    revokedAt: null,
     versionNo: nodes[nodeId]?.kind === 'file' ? 1 : null,
     ...fields,
   })
-  const budget = Object.values(nodes).find((node) => node.name === 'Budget 2026.xlsx')?.id ?? root
   const shares = [
     share(lisbon, 'demo-lisbon', {
       expiresAt: new Date(now + 7 * DAY).toISOString(),
@@ -355,7 +353,6 @@ export function createSeed(version: number): MockState {
       downloadCount: 3,
     }),
     share(resume, 'demo-resume', { maxDownloads: 10, downloadCount: 4 }),
-    share(budget, 'demo-revoked', { revokedAt: ago(2 * DAY) }),
     share(wedding, 'demo-expired', { expiresAt: ago(DAY), downloadCount: 12 }),
     share(documents, 'demo-documents', {}),
   ]

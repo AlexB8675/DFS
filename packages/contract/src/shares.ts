@@ -60,11 +60,11 @@ export function shareTests({ describe, it, expect, owner, target }: SuiteContext
 
       // A new link shares the file as it is now.
       expect(await share(client, first.nodeId)).toMatchObject({ version: 'current' })
-      // Once the old link stops working, its version goes.
+      // Once the old link is turned off, which deletes it, its version goes.
       await client.send('DELETE', `/shares/${link.id}`)
       await target().settle()
       expect((await usedBytes(client)) - before).toBe(3)
-      expect(await listed(client, link.id)).toMatchObject({ version: 'deleted' })
+      expect(await listed(client, link.id)).toBe(undefined)
     })
 
     it('ends a file link whose version was deleted, for good', async () => {
@@ -90,14 +90,14 @@ export function shareTests({ describe, it, expect, owner, target }: SuiteContext
       const outside = await uploadFile(client, root.id, 'b.txt', text('b'))
       await share(client, folder.id)
       await share(client, inside.nodeId)
-      const revoked = await share(client, outside.nodeId)
-      await client.send('DELETE', `/shares/${revoked.id}`)
+      const deleted = await share(client, outside.nodeId)
+      await client.send('DELETE', `/shares/${deleted.id}`)
       const count = async (body: Record<string, unknown>) =>
         (await client.call('POST', '/shares/count', shareCountSchema, { json: body })).links
 
       expect(await count({ ids: [folder.id] })).toBe(2)
       expect(await count({ ids: [inside.nodeId] })).toBe(1)
-      // Revoked, it is no longer outstanding.
+      // Turned off, it is gone.
       expect(await count({ ids: [outside.nodeId] })).toBe(0)
 
       // In the trash, they would come back with it; deleting it forever deletes them.
@@ -139,7 +139,7 @@ export function shareTests({ describe, it, expect, owner, target }: SuiteContext
 
       const { items } = await client.call('GET', '/shares', shareLinkPageSchema)
       const listed = items.find((item) => item.id === created.id)
-      expect(listed).toMatchObject({ url: null, downloadCount: 0, revokedAt: null })
+      expect(listed).toMatchObject({ url: null, downloadCount: 0 })
     })
 
     it('opens a shared folder without signing in, and never reaches outside it', async () => {
@@ -219,11 +219,11 @@ export function shareTests({ describe, it, expect, owner, target }: SuiteContext
       })
     })
 
-    it('says why a link is dead: revoked, expired, unknown', async () => {
+    it('says why a link is dead: expired, or gone (turned off or unknown)', async () => {
       const client = await owner()
       const root = await workspace(client)
-      const revoked = await share(client, root.id)
-      await client.send('DELETE', `/shares/${revoked.id}`)
+      const turnedOff = await share(client, root.id)
+      await client.send('DELETE', `/shares/${turnedOff.id}`)
       const expired = await share(client, root.id, {
         expiresAt: new Date(Date.now() - 60_000).toISOString(),
       })
@@ -231,7 +231,7 @@ export function shareTests({ describe, it, expect, owner, target }: SuiteContext
         const { token, client: stranger } = visitor(url)
         return stranger.error('GET', `/s/${token}`)
       }
-      expect(await open(revoked.url)).toEqual({ status: 410, code: 'share_revoked' })
+      expect(await open(turnedOff.url)).toEqual({ status: 404, code: 'share_not_found' })
       expect(await open(expired.url)).toEqual({ status: 410, code: 'share_expired' })
       expect(await open(`${target().baseUrl}/s/no-such-link`)).toEqual({
         status: 404,

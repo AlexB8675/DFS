@@ -29,13 +29,12 @@ export interface LiveShare extends Record<string, unknown> {
   expires_at: string | null
   max_downloads: number | null
   download_count: number
-  revoked_at: string | null
   /** A file link's version (§7.5); `null` for a folder link. */
   version_id: string | null
   shared_by: string
 }
 
-/** The share behind a token, if it still works: not revoked, expired or used up. */
+/** The share behind a token, if it still works: not expired or used up. */
 export async function liveShare(
   app: FastifyInstance,
   token: string,
@@ -43,15 +42,15 @@ export async function liveShare(
   const { rows } = await app.db.execute<LiveShare>(sql`
     SELECT share.id, share.node_id, share.password_hash, share.password_version,
       share.expires_at::text AS expires_at, share.max_downloads, share.download_count,
-      share.revoked_at::text AS revoked_at, share.version_id, owner.display_name AS shared_by
+      share.version_id, owner.display_name AS shared_by
     FROM share_links share
     JOIN nodes node ON node.id = share.node_id
     JOIN users owner ON owner.id = node.owner_id
     WHERE share.token_hash = ${tokenHash(token)}
       AND node.deleted_at IS NULL AND node.trashed_via IS NULL AND owner.disabled_at IS NULL`)
   const [share] = rows
+  // A link turned off is deleted: it is gone, like one that never was.
   if (!share) throw new ApiError(404, 'share_not_found', 'This link doesn’t exist.')
-  if (share.revoked_at) throw new ApiError(410, 'share_revoked', 'The owner turned this link off.')
   if (share.expires_at && Date.parse(share.expires_at) <= Date.now()) {
     throw new ApiError(410, 'share_expired', 'This link has expired.')
   }

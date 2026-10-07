@@ -12,11 +12,11 @@ import {
   markFoldersDirty,
   nodeRecords,
   notifyEvent,
+  shareDeletedRecords,
   shareLinks,
-  shareRecords,
   type Executor,
 } from '@dfs/db'
-import { and, isNull, sql } from 'drizzle-orm'
+import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { audit, auditAlone } from '../audit.ts'
 import type { Auth } from '../auth/sessions.ts'
@@ -129,22 +129,21 @@ function subtree(id: string) {
 
 /**
  * `GET /admin/nodes/:id/links`: the share links removing this item would
- * revoke: every one not revoked yet, to it or to what's inside it, also
- * expired or used up, which its owner could otherwise bring back.
+ * delete: every one to it or to what's inside it, also expired or used up,
+ * which its owner could otherwise bring back.
  */
-export async function linksToRevoke(app: FastifyInstance, id: string): Promise<ShareCount> {
+export async function linksToDelete(app: FastifyInstance, id: string): Promise<ShareCount> {
   await anyVisibleNode(app.db, id)
   const { rows } = await app.db.execute<{ links: number }>(sql`
-    SELECT count(*)::int AS links FROM share_links
-    WHERE revoked_at IS NULL AND node_id IN ${subtree(id)}`)
+    SELECT count(*)::int AS links FROM share_links WHERE node_id IN ${subtree(id)}`)
   return { links: rows[0]?.links ?? 0 }
 }
 
 /**
  * `DELETE /admin/nodes/:id`: moves an item to its owner's trash with the
  * reason, which the owner sees there; their open folder updates live. Every
- * share link to it or to what's inside it is revoked, for good: restoring
- * it brings none back.
+ * share link to it or to what's inside it is deleted: restoring it brings
+ * none back.
  */
 export async function moderate(
   app: FastifyInstance,
@@ -162,15 +161,14 @@ export async function moderate(
     if (!node.parent_id) throw new ApiError(403, 'forbidden', 'A root folder cannot be removed.')
     const updated = await markTrashed(tx, [id], reason)
     // After the nodes, as making a link locks its node first (locks.ts).
-    const revoked = await tx
-      .update(shareLinks)
-      .set({ revokedAt: new Date() })
-      .where(and(isNull(shareLinks.revokedAt), sql`${shareLinks.nodeId} IN ${subtree(id)}`))
-      .returning()
+    const deleted = await tx
+      .delete(shareLinks)
+      .where(sql`${shareLinks.nodeId} IN ${subtree(id)}`)
+      .returning({ id: shareLinks.id })
     await markFoldersDirty(tx, [node.parent_id])
     const { rows } = await tx.execute<{ name: string }>(sql`
       SELECT display_name AS name FROM users WHERE id = ${node.owner_id}`)
-    const links = revoked.length
+    const links = deleted.length
     const audited = await audit(tx, {
       actorId: admin.user.id,
       action: 'node.moderated',
@@ -178,7 +176,7 @@ export async function moderate(
       details:
         links === 0
           ? reason
-          : `${reason} · ${String(links)} share ${links === 1 ? 'link' : 'links'} revoked`,
+          : `${reason} · ${String(links)} share ${links === 1 ? 'link' : 'links'} deleted`,
       nodeId: id,
     })
     await notifyEvent(tx, {
@@ -186,7 +184,11 @@ export async function moderate(
       type: 'nodes.changed',
       payload: { parentIds: [node.parent_id] },
     })
-    await appendJournal(tx, [...nodeRecords(updated), ...shareRecords(revoked), ...audited])
-    return { revokedLinks: links }
+    await appendJournal(tx, [
+      ...nodeRecords(updated),
+      ...shareDeletedRecords(deleted.map((link) => link.id)),
+      ...audited,
+    ])
+    return { deletedLinks: links }
   })
 }

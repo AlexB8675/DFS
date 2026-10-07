@@ -51,7 +51,7 @@ const ACTIONS: Record<string, { label: string; icon: LucideIcon; tone?: string }
   'auth.login_failed': { label: 'Failed sign-in', icon: UserLock, tone: 'text-destructive' },
   'auth.password_changed': { label: 'Changed password', icon: KeyRound },
   'share.created': { label: 'Shared a link', icon: Link2 },
-  'share.revoked': { label: 'Turned a link off', icon: Link2Off },
+  'share.revoked': { label: 'Deleted a link', icon: Link2Off },
   'admin.viewed': { label: 'Viewed a drive', icon: Eye },
   'upload.completed': { label: 'Uploaded', icon: Upload },
   'node.trashed': { label: 'Moved to the trash', icon: Trash },

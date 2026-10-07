@@ -81,10 +81,6 @@ const UNAVAILABLE: Record<string, { title: string; description: string }> = {
     title: 'This link has expired',
     description: 'Ask the person who shared it for a new one.',
   },
-  share_revoked: {
-    title: 'This link was turned off',
-    description: 'The owner stopped sharing it. Ask them for a new link if you still need it.',
-  },
   share_used_up: {
     title: 'This link has been used up',
     description: 'It reached its download limit. Ask the person who shared it for a new one.',
@@ -96,7 +92,8 @@ const UNAVAILABLE: Record<string, { title: string; description: string }> = {
   },
   share_not_found: {
     title: 'This link doesn’t exist',
-    description: 'Check that you copied all of it.',
+    description:
+      'Check that you copied all of it. The person who shared it may also have turned it off.',
   },
 }
 

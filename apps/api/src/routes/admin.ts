@@ -39,7 +39,7 @@ import { readMetrics } from '@dfs/db'
 import type { FastifyInstance } from 'fastify'
 import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
-import { adminNode, anyVisibleNode, linksToRevoke, moderate, userUsage } from '../admin/browse.ts'
+import { adminNode, anyVisibleNode, linksToDelete, moderate, userUsage } from '../admin/browse.ts'
 import {
   cancelUploadAsAdmin,
   endSessionAsAdmin,
@@ -47,7 +47,7 @@ import {
   listShares,
   shareOwners,
   listUploads,
-  revokeShareAsAdmin,
+  deleteShareAsAdmin,
   signOutUser,
 } from '../admin/access.ts'
 import { databaseStatus, signalSession, vacuumTable } from '../admin/database.ts'
@@ -158,7 +158,7 @@ export function adminRoutes(app: FastifyInstance, _options: object, done: () => 
   routes.get(
     '/admin/nodes/:id/links',
     { config: admin, schema: { params: byId, response: { 200: shareCountSchema } } },
-    (request) => linksToRevoke(app, request.params.id),
+    (request) => linksToDelete(app, request.params.id),
   )
 
   routes.delete(
@@ -263,7 +263,7 @@ export function adminRoutes(app: FastifyInstance, _options: object, done: () => 
     '/admin/shares/:id',
     { config: admin, schema: { params: byId, response: noContent } },
     async (request, reply) => {
-      await revokeShareAsAdmin(app, requireAuth(request.auth), request.params.id)
+      await deleteShareAsAdmin(app, requireAuth(request.auth), request.params.id)
       return reply.code(204).send(null)
     },
   )

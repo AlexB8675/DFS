@@ -9,7 +9,7 @@ import type { Auth } from '../auth/sessions.ts'
 import { createFolder } from '../nodes/write.ts'
 import { testConfig } from '../testing/config.ts'
 import { seedUser } from '../testing/seed.ts'
-import { createShare, revokeShare, updateShare } from './shares.ts'
+import { createShare, deleteShare, updateShare } from './shares.ts'
 
 let database: TestDatabase
 let app: FastifyInstance
@@ -54,7 +54,7 @@ async function lastJournalId(): Promise<number> {
 }
 
 describe('share links in the journal (§8)', () => {
-  it('records each change of a link with its audit entry, without its download count', async () => {
+  it('records each change of a link with its audit entry, without its download count, and its deletion', async () => {
     if (!auth.user.rootNodeId) throw new Error('Missing root folder.')
     const folder = await createFolder(app, auth, auth.user.rootNodeId, 'Shared')
 
@@ -77,17 +77,16 @@ describe('share links in the journal (§8)', () => {
     since = await lastJournalId()
     await updateShare(app, auth, share.id, { maxDownloads: 9 })
     expect(await journaledSince(since)).toMatchObject([
-      { kind: 'share.upsert', record: { id: share.id, maxDownloads: 9, revokedAt: null } },
+      { kind: 'share.upsert', record: { id: share.id, maxDownloads: 9 } },
     ])
 
     since = await lastJournalId()
-    await revokeShare(app, auth, share.id)
-    const revoked = await journaledSince(since)
-    expect(revoked).toMatchObject([
-      { kind: 'share.upsert', record: { id: share.id } },
-      { kind: 'audit.added', record: { action: 'share.revoked' } },
+    await deleteShare(app, auth, share.id)
+    // Turned off, it is deleted: recovery deletes it too.
+    expect(await journaledSince(since)).toEqual([
+      { kind: 'share.deleted', record: { id: share.id } },
+      expect.objectContaining({ kind: 'audit.added' }),
     ])
-    expect(revoked[0]?.record.revokedAt).toEqual(expect.any(String))
   })
 
   it('journals an audit entry written on its own', async () => {

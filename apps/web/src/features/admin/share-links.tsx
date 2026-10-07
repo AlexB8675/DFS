@@ -14,7 +14,7 @@ import { cn } from '@/lib/utils'
 import {
   adminShareOwnersQuery,
   adminSharesQuery,
-  useRevokeShareAsAdmin,
+  useDeleteShareAsAdmin,
   type ShareFilter,
 } from './api'
 import { AllClear, Section } from './section'
@@ -32,7 +32,6 @@ const SHARE_STATES: Record<AdminShare['state'], string> = {
   active: 'Active',
   expired: 'Expired',
   used_up: 'Used up',
-  revoked: 'Turned off',
   version_deleted: 'Version deleted',
 }
 
@@ -218,7 +217,7 @@ function OwnerLinks({
   onConfirm: (confirmation: Confirmation) => void
 }) {
   const shares = useInfiniteQuery(adminSharesQuery(filter, owner.ownerId))
-  const revoke = useRevokeShareAsAdmin()
+  const remove = useDeleteShareAsAdmin()
   const items = shares.data?.pages.flatMap((page) => page.items) ?? []
   if (!shares.data) return <Skeleton className="mt-1 h-16 rounded-lg" />
 
@@ -305,15 +304,15 @@ function OwnerLinks({
                     <Button
                       variant="ghost"
                       size="icon-sm"
-                      aria-label={`Turn off ${share.ownerName}’s link to ${share.nodeName}`}
-                      title="Turn the link off"
+                      aria-label={`Delete ${share.ownerName}’s link to ${share.nodeName}`}
+                      title="Delete the link"
                       onClick={() => {
                         onConfirm({
-                          title: `Turn off ${share.ownerName}’s link?`,
-                          description: `The link to “${share.nodeName}” stops working for anyone who has it, for good. ${share.ownerName} sees it turned off.`,
-                          action: 'Turn it off',
-                          run: () => revoke.mutateAsync(share.id),
-                          done: `Turned off the link to ${share.nodeName}`,
+                          title: `Delete ${share.ownerName}’s link?`,
+                          description: `The link to “${share.nodeName}” stops working for anyone who has it, and goes from ${share.ownerName}’s links.`,
+                          action: 'Delete it',
+                          run: () => remove.mutateAsync(share.id),
+                          done: `Deleted the link to ${share.nodeName}`,
                         })
                       }}
                     >

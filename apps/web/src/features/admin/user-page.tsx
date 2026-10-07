@@ -36,7 +36,7 @@ import {
   adminChildrenQuery,
   adminPathQuery,
   adminUsersQuery,
-  linksToRevokeQuery,
+  linksToDeleteQuery,
   useModerateNode,
   userUsageQuery,
 } from './api'
@@ -324,18 +324,18 @@ function ModerationDialog({
   onClose: () => void
 }) {
   const moderate = useModerateNode()
-  const links = useQuery(linksToRevokeQuery(node.id))
+  const links = useQuery(linksToDeleteQuery(node.id))
   const [state, submit, pending] = useActionState(
     async (_previous: FormState, formData: FormData): Promise<FormState> => {
       const reason = formText(formData, 'reason').trim()
       if (reason.length < 3) return { error: 'Give a reason; the owner will see it.' }
       try {
-        const { revokedLinks } = await moderate.mutateAsync({ id: node.id, reason })
+        const { deletedLinks } = await moderate.mutateAsync({ id: node.id, reason })
         toast.success(`Removed “${node.name}”`, {
           description:
-            revokedLinks === 0
+            deletedLinks === 0
               ? `${ownerName} sees it in their trash, with your reason.`
-              : `${ownerName} sees it in their trash, with your reason. ${linkCount(revokedLinks)} to it ${revokedLinks === 1 ? 'was' : 'were'} revoked.`,
+              : `${ownerName} sees it in their trash, with your reason. ${linkCount(deletedLinks)} to it ${deletedLinks === 1 ? 'was' : 'were'} deleted.`,
         })
         onClose()
         return { error: null }
@@ -366,7 +366,7 @@ function ModerationDialog({
           {links.data !== undefined && links.data.links > 0 && (
             <LinkWarning>
               {linkCount(links.data.links)} to it
-              {node.kind === 'folder' ? ' or what’s inside it' : ''} will be revoked for good:{' '}
+              {node.kind === 'folder' ? ' or what’s inside it' : ''} will be deleted:{' '}
               {links.data.links === 1 ? 'it stops' : 'they stop'} working now, and restoring it
               won’t bring {links.data.links === 1 ? 'it' : 'them'} back.
             </LinkWarning>
