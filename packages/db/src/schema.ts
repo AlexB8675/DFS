@@ -313,12 +313,18 @@ export const blobs = pgTable(
     createdAt: timestamptz('created_at').notNull().defaultNow(),
     storedAt: timestamptz('stored_at'),
     lastVerifiedAt: timestamptz('last_verified_at'),
+    /**
+     * When it went to `deleting`. Its message is deleted only once every
+     * journal record written by then is on Discord (§6.4).
+     */
+    releasedAt: timestamptz('released_at'),
   },
   (t) => [
     index('blobs_queue')
       .on(t.state)
       .where(sql`${t.state} IN ('staged', 'uploading', 'deleting')`),
     index('blobs_channel_id').on(t.channelId),
+    check('blobs_released', sql`${t.state} <> 'deleting' OR ${t.releasedAt} IS NOT NULL`),
   ],
 )
 

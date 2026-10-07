@@ -14,7 +14,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } fro
 import { Packer } from './packer.ts'
 import { dataChannels } from './storage.ts'
 import { runAdminTask, type TaskDeps } from './tasks.ts'
-import { settleBlobs, uploadedFiles } from './testing.ts'
+import { postJournal, settleBlobs, uploadedFiles } from './testing.ts'
 
 // Admin → Storage's tasks (DESIGN.md §9), run as the leader runs them,
 // against a fake Discord.
@@ -131,10 +131,12 @@ describe('admin tasks (DESIGN.md §9)', () => {
     await uploadedFiles(db, staging, [100, 200])
     await settleBlobs({ db, staging, store, sizes })
     const { rows } = await db.execute<{ id: number }>(sql`
-      UPDATE blobs SET state = 'deleting', attempts = 3, last_error = 'Discord was down'
+      UPDATE blobs SET state = 'deleting', released_at = now(), attempts = 3,
+        last_error = 'Discord was down'
       WHERE state = 'stored' RETURNING id::float8 AS id`)
     const [blob] = rows
     if (!blob) throw new Error('Nothing was stored.')
+    await postJournal(db)
     expect(await runAdminTask(deps(), task('deletions.retry'))).toBe('Deleted 1 blob.')
     expect(await blobState(blob.id)).toBe('deleted')
     expect(await runAdminTask(deps(), task('deletions.retry'))).toBe('No deletion was failing.')

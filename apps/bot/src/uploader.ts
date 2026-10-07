@@ -166,6 +166,7 @@ async function storeBlob(
     }>(sql`
       UPDATE blobs SET stored_at = now(), staged_path = NULL,
         state = CASE WHEN live_bytes <= 0 THEN 'deleting'::blob_state ELSE 'stored' END,
+        released_at = CASE WHEN live_bytes <= 0 THEN now() END,
         channel_id = ${location.channelId}, message_id = ${location.messageId},
         attachment_id = ${location.attachmentId},
         cdn_url = ${url?.url ?? null}, cdn_url_expires_at = ${url?.expiresAt ?? null}

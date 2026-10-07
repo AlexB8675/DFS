@@ -38,8 +38,9 @@ describe('refreshBlobUrls (DESIGN.md §6.2)', () => {
     const ids: number[] = []
     for (const state of ['stored', 'deleting'] as const) {
       const { rows } = await db.execute<{ id: number }>(sql`
-        INSERT INTO blobs (kind, state, size_bytes, live_bytes, frame_count)
-        VALUES ('solo', ${state}, 4, 4, 1) RETURNING id::float8 AS id`)
+        INSERT INTO blobs (kind, state, size_bytes, live_bytes, frame_count, released_at)
+        VALUES ('solo', ${state}, 4, 4, 1, ${state === 'deleting' ? new Date() : null})
+        RETURNING id::float8 AS id`)
       const id = rows[0]?.id ?? 0
       const { location } = await store.put({ id, kind: 'solo', frameCount: 1 }, () =>
         Promise.resolve(new Uint8Array(4)),

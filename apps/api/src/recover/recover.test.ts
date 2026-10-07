@@ -313,11 +313,20 @@ async function settleStack({ app, store, journal }: Stack): Promise<void> {
   for (const versionId of await purgeUnneededVersions(app.db)) {
     await app.staging.removeVersion(versionId)
   }
+  // Small batches, so a record too large for one is cut into pieces. Released
+  // blobs are deleted once the journal saying why is posted, and that is posted too.
+  const postJournal = async () => {
+    await flushJournal(app, { maxBytes: 1500 })
+    await new JournalUploader({ db: app.db, journal }).run()
+  }
+  await postJournal()
   while ((await collectGarbage({ db: app.db, store, staging: app.staging }, 100)) > 0);
+  const { rows } = await app.db.execute<{ waiting: number }>(sql`
+    SELECT count(*)::int AS waiting FROM blobs WHERE state = 'deleting'`)
+  if (rows[0]?.waiting !== 0)
+    throw new Error('Released blobs were left once the journal was posted.')
   await foldAllFolderStats(app.db)
-  // Small batches, so a record too large for one is cut into pieces.
-  await flushJournal(app, { maxBytes: 1500 })
-  await new JournalUploader({ db: app.db, journal }).run()
+  await postJournal()
 }
 
 /** Every version's bytes, as an app on `db` reads them. */

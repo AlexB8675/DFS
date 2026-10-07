@@ -207,7 +207,8 @@ export async function writeRecovered(db: Database, input: WriteInput): Promise<v
           WHERE chunk.blob_id = blobs.id AND chunk.purged_at IS NULL), 0)`)
     // Nothing live left: the garbage collector deletes its message.
     await tx.execute(sql`
-      UPDATE blobs SET state = 'deleting' WHERE state = 'stored' AND live_bytes = 0`)
+      UPDATE blobs SET state = 'deleting', released_at = now()
+      WHERE state = 'stored' AND live_bytes = 0`)
     await tx.execute(sql`
       UPDATE users SET used_bytes = coalesce((
         SELECT sum(version.size_bytes) FROM file_versions version

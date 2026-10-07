@@ -148,6 +148,13 @@
       "when": 1791394795238,
       "tag": "0020_no_outside_deletions",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1791395846551,
+      "tag": "0021_deletions_wait_for_the_journal",
+      "breakpoints": true
     }
   ]
 }

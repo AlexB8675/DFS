@@ -6,7 +6,24 @@ import type { FastifyBaseLogger } from 'fastify'
 // Deleting blobs nothing uses any more (DESIGN.md §6.4): purges move a blob
 // with no live frames left to `deleting`, and the leading bot deletes its
 // message, one at a time and a few per round, so uploads keep most of
-// Discord's rate limits.
+// Discord's rate limits. A message goes only once the journal saying why is
+// on Discord: rebuilt from the journal alone, the database must never point
+// at a message already deleted.
+
+/**
+ * Released blobs whose release #dfs-journal holds: released before the
+ * oldest journal record not yet posted. Batches are posted in order, so the
+ * records not posted are those from the first batch still staged on, or
+ * else those not sealed yet. A record's `created_at` and a release's
+ * `released_at` are both their transaction's start (`now()`), so a release
+ * waits for the records of its own transaction too.
+ */
+const RELEASE_POSTED = sql`released_at < coalesce((
+    SELECT min(created_at) FROM journal
+    WHERE id >= coalesce(
+      (SELECT min(first_id) FROM journal_batches WHERE state = 'staged'),
+      (SELECT min(id) FROM journal WHERE batch_no IS NULL))
+  ), 'infinity')`
 
 export interface CollectorDeps {
   db: Database
@@ -27,7 +44,7 @@ interface ReleasedBlob extends Record<string, unknown> {
 export async function collectGarbage(deps: CollectorDeps, limit: number): Promise<number> {
   const { rows } = await deps.db.execute<ReleasedBlob>(sql`
     SELECT id::float8 AS id, channel_id, message_id, attachment_id, staged_path FROM blobs
-    WHERE state = 'deleting' ORDER BY attempts, id LIMIT ${limit}`)
+    WHERE state = 'deleting' AND ${RELEASE_POSTED} ORDER BY attempts, id LIMIT ${limit}`)
   let deleted = 0
   for (const blob of rows) if ((await deleteBlob(deps, blob)) === null) deleted += 1
   return deleted
@@ -42,7 +59,7 @@ export async function retryFailedDeletions(
 ): Promise<{ deleted: number; failures: string[] }> {
   const { rows } = await deps.db.execute<ReleasedBlob>(sql`
     SELECT id::float8 AS id, channel_id, message_id, attachment_id, staged_path FROM blobs
-    WHERE state = 'deleting' AND attempts > 0 ORDER BY id LIMIT 100`)
+    WHERE state = 'deleting' AND attempts > 0 AND ${RELEASE_POSTED} ORDER BY id LIMIT 100`)
   let deleted = 0
   const failures: string[] = []
   for (const blob of rows) {

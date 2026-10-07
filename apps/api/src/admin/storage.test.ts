@@ -127,7 +127,8 @@ describe('Admin → Storage (§9)', () => {
       sizes: app.config.sizes,
     })
     const { rows } = await app.db.execute<{ id: string }>(sql`
-      UPDATE blobs SET state = 'deleting', attempts = 2, last_error = 'Discord was down'
+      UPDATE blobs SET state = 'deleting', released_at = now(), attempts = 2,
+        last_error = 'Discord was down'
       WHERE state = 'stored' RETURNING id::text AS id`)
 
     const status = await admin.call('GET', '/admin/storage', storageStatusSchema)

@@ -16,6 +16,24 @@ export async function settleBlobs(
   await storeAllStagedBlobs(deps)
 }
 
+/**
+ * Marks every journal record posted to #dfs-journal, as the API's flusher
+ * and the bot's uploader would in a minute or so, without sealing anything:
+ * released blobs can be deleted then (§6.4). Tests only.
+ */
+export async function postJournal(db: Database): Promise<void> {
+  await db.execute(sql`
+    WITH batch AS (
+      INSERT INTO journal_batches
+        (batch_no, first_id, last_id, record_count, state, size_bytes, sha256, stored_at)
+      SELECT coalesce((SELECT max(batch_no) FROM journal_batches), 0) + 1, min(id), max(id),
+        count(*), 'stored', 0, decode('00', 'hex'), now()
+      FROM journal WHERE batch_no IS NULL HAVING count(*) > 0
+      RETURNING batch_no
+    )
+    UPDATE journal SET batch_no = batch.batch_no FROM batch WHERE journal.batch_no IS NULL`)
+}
+
 /** Packs every waiting frame, leaving the packs in staging for the bot to store. Tests only. */
 export async function sealPacks(deps: {
   db: Database

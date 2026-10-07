@@ -45,11 +45,14 @@ export async function purgeVersions(
   await tx.execute(sql`
     UPDATE blobs SET
       live_bytes = blobs.live_bytes - released.bytes,
-      -- Nothing live left: a stored blob goes to the GC.
+      -- Nothing live left: a stored blob goes to the GC, once this is journaled.
       state = CASE
         WHEN blobs.live_bytes - released.bytes > 0 THEN blobs.state
         WHEN blobs.state = 'stored' THEN 'deleting'::blob_state
-        ELSE blobs.state END
+        ELSE blobs.state END,
+      released_at = CASE
+        WHEN blobs.live_bytes - released.bytes <= 0 AND blobs.state = 'stored' THEN now()
+        ELSE blobs.released_at END
     FROM (
       SELECT blob_id, sum(frame_size) AS bytes FROM chunks
       WHERE version_id = ANY(${versions}) AND blob_id IS NOT NULL AND purged_at IS NULL

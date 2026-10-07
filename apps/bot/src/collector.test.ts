@@ -1,13 +1,14 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { createDatabase, createPool, type Database } from '@dfs/db'
+import { appendJournal, createDatabase, createPool, type Database } from '@dfs/db'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
 import { LocalBlobStore, Staging } from '@dfs/storage'
 import { sql } from 'drizzle-orm'
 import type pg from 'pg'
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest'
 import { collectGarbage, uploadsWaiting } from './collector.ts'
+import { postJournal } from './testing.ts'
 import { storeBlobs } from './uploader.ts'
 
 let database: TestDatabase
@@ -69,6 +70,7 @@ describe('collectGarbage (DESIGN.md §6.4)', () => {
     expect(await stateOf(id)).toBe('deleting')
     expect(await uploadsWaiting(db)).toBe(false)
 
+    await postJournal(db)
     expect(await collectGarbage({ db, staging, store }, 10)).toBe(1)
     expect(await stateOf(id)).toBe('deleted')
     await expect(store.read(where(id), 0, 4)).rejects.toThrow()
@@ -80,7 +82,8 @@ describe('collectGarbage (DESIGN.md §6.4)', () => {
   it('keeps a blob it could not delete, to try again', async () => {
     const id = await staged()
     await storeBlobs({ db, staging, store }, [id])
-    await db.execute(sql`UPDATE blobs SET state = 'deleting' WHERE id = ${id}`)
+    await db.execute(sql`UPDATE blobs SET state = 'deleting', released_at = now() WHERE id = ${id}`)
+    await postJournal(db)
     const failing = vi.spyOn(store, 'delete').mockRejectedValueOnce(new Error('rate limited'))
     const log = { warn: vi.fn() }
     try {
@@ -98,7 +101,9 @@ describe('collectGarbage (DESIGN.md §6.4)', () => {
     const stuck = await staged()
     const next = await staged()
     await storeBlobs({ db, staging, store }, [stuck, next])
-    await db.execute(sql`UPDATE blobs SET state = 'deleting' WHERE id IN (${stuck}, ${next})`)
+    await db.execute(sql`
+      UPDATE blobs SET state = 'deleting', released_at = now() WHERE id IN (${stuck}, ${next})`)
+    await postJournal(db)
     const remove = store.delete.bind(store)
     const failing = vi.spyOn(store, 'delete').mockImplementation(async (blob) => {
       if (blob.id === stuck) throw new Error('Missing Permissions')
@@ -115,5 +120,37 @@ describe('collectGarbage (DESIGN.md §6.4)', () => {
     const { rows } = await db.execute<{ attempts: number; last_error: string }>(sql`
       SELECT attempts, last_error FROM blobs WHERE id = ${stuck}`)
     expect(rows[0]).toEqual({ attempts: 1, last_error: 'Missing Permissions' })
+  })
+
+  it('deletes a message only once the journal saying why is on Discord', async () => {
+    const id = await staged()
+    await storeBlobs({ db, staging, store }, [id])
+    await postJournal(db)
+    // Released by a purge, journaled in the same transaction.
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`
+        UPDATE blobs SET state = 'deleting', live_bytes = 0, released_at = now()
+        WHERE id = ${id}`)
+      await appendJournal(tx, [{ kind: 'version.purged', record: { id: crypto.randomUUID() } }])
+    })
+    // Not sealed yet, then sealed but not posted.
+    await collectGarbage({ db, staging, store }, 10)
+    expect(await stateOf(id)).toBe('deleting')
+    await db.execute(sql`
+      WITH batch AS (
+        INSERT INTO journal_batches
+          (batch_no, first_id, last_id, record_count, state, size_bytes, sha256)
+        SELECT (SELECT max(batch_no) FROM journal_batches) + 1, min(id), max(id), count(*),
+          'staged', 0, decode('00', 'hex')
+        FROM journal WHERE batch_no IS NULL
+        RETURNING batch_no
+      )
+      UPDATE journal SET batch_no = batch.batch_no FROM batch WHERE journal.batch_no IS NULL`)
+    await collectGarbage({ db, staging, store }, 10)
+    expect(await stateOf(id)).toBe('deleting')
+
+    await db.execute(sql`UPDATE journal_batches SET state = 'stored' WHERE state = 'staged'`)
+    await collectGarbage({ db, staging, store }, 10)
+    expect(await stateOf(id)).toBe('deleted')
   })
 })
