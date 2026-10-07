@@ -27,7 +27,9 @@ import { httpTransport, type UploadTransport } from './upload-transport'
 // - Progress counts bytes as the browser sends them, so it moves steadily.
 // - A failed request is retried with exponential backoff, honouring
 //   `Retry-After` (503 when the server's staging area is full). A broken or
-//   paused stream starts again after the last part the server has.
+//   paused stream starts again after the last part the server has. An upload
+//   that fails all the same gives up its session at once; Retry starts it
+//   afresh. One paused for 5 hours is canceled (`PAUSE_LIMIT_MS`).
 // - Uploads live in their page, as on any website: closing or reloading it
 //   cancels them, and the server forgets what had arrived (`cancelOnLeave`).
 //   While it holds any, the page says every minute that it is still open;
@@ -64,6 +66,8 @@ export const DEFAULT_LIMITS: UploadLimits = {
 const PUBLISH_MS = 100
 /** How often a page says its uploads are still open; ten quiet minutes give them up (§6.1). */
 const ALIVE_EVERY_MS = 60_000
+/** A paused upload is cancelled after this long, so it doesn't hold the server's space for days. */
+export const PAUSE_LIMIT_MS = 5 * 60 * 60_000
 /** Sessions per `POST /uploads/alive`, the API's limit. */
 const ALIVE_BATCH = 500
 const REFRESH_MS = 1000
@@ -94,8 +98,9 @@ interface Job {
   attempts: number
   retryTimer: ReturnType<typeof setTimeout> | null
   completing: boolean
-  /** A retry must reconcile receipts before it can send more. */
-  checkingSession: boolean
+  /** While paused: when the pause runs out and the upload is cancelled. */
+  pausedUntil: number | null
+  pauseTimer: ReturnType<typeof setTimeout> | null
   /** After the upload: where the file is on its way to Discord. */
   syncState: SyncState | null
   /** Node events can precede completion, but may describe an older version. */
@@ -170,7 +175,8 @@ export class UploadEngine {
         attempts: 0,
         retryTimer: null,
         completing: false,
-        checkingSession: false,
+        pausedUntil: null,
+        pauseTimer: null,
         syncState: null,
         syncNeedsRefresh: false,
         error: null,
@@ -199,30 +205,13 @@ export class UploadEngine {
     this.resumeJobs([...this.jobs.values()])
   }
 
-  /** Tries a failed upload again, sending only the parts the server doesn't have. */
-  async retry(id: string): Promise<void> {
+  /** Starts a failed upload again, from its beginning: failing gave up its session. */
+  retry(id: string): void {
     const job = this.jobs.get(id)
     if (job?.status !== 'failed') return
     job.status = 'queued'
     job.error = null
     job.attempts = 0
-    this.publish(job)
-    const session = job.session
-    if (session) {
-      job.checkingSession = true
-      try {
-        const status = await this.transport.status(session.uploadId)
-        if (this.jobs.get(id) !== job || job.session !== session) return
-        received(job, session, status.receivedParts)
-      } catch (error) {
-        // The session expired: start over with a new one.
-        if (job.session === session && isNotFound(error)) resetSession(job)
-      } finally {
-        job.checkingSession = false
-      }
-    }
-    // Cancelled or cleared while asking the server.
-    if (this.jobs.get(id)?.status !== 'queued') return
     this.requeue(job)
     this.publish(job)
     this.pump()
@@ -239,15 +228,14 @@ export class UploadEngine {
   }
 
   /**
-   * Drops finished, failed and canceled uploads from the list (and failed
-   * sessions from the server). Files still on their way to Discord stay.
+   * Drops finished, failed and canceled uploads from the list. Files still
+   * on their way to Discord stay.
    */
   clearFinished(): void {
     const removed = new Set<string>()
     for (const job of this.jobs.values()) {
       if (isActive(job.status) || job.status === 'paused') continue
       if (job.status === 'done' && !isSettled(job.syncState)) continue
-      if (job.status === 'failed') this.dropSession(job)
       removed.add(job.id)
       this.jobs.delete(job.id)
       this.changes.delete(job.id)
@@ -659,8 +647,15 @@ export class UploadEngine {
     }
   }
 
+  /**
+   * Ends an upload that won't finish: its session goes from the server now,
+   * with its half file, so nothing waits in its folder or holds the server's
+   * space. Retry starts it afresh.
+   */
   private fail(job: Job, message: string): void {
     this.stop(job)
+    this.dropSession(job)
+    resetSession(job)
     job.status = 'failed'
     job.error = message
     this.publish(job)
@@ -762,6 +757,10 @@ export class UploadEngine {
       this.abortRequests(job)
       this.clearRetry(job)
       job.status = 'paused'
+      job.pausedUntil = Date.now() + PAUSE_LIMIT_MS
+      job.pauseTimer = setTimeout(() => {
+        this.pauseRanOut(job)
+      }, PAUSE_LIMIT_MS)
       paused.add(job)
       this.publish(job)
     }
@@ -769,10 +768,26 @@ export class UploadEngine {
     this.pump()
   }
 
+  /** A pause that lasted `PAUSE_LIMIT_MS` cancels its upload, and says why. */
+  private pauseRanOut(job: Job): void {
+    job.pauseTimer = null
+    if (job.status !== 'paused') return
+    this.cancelJobs([job])
+    job.error = 'Canceled after 5 hours paused'
+    this.publish(job)
+  }
+
+  private clearPause(job: Job): void {
+    if (job.pauseTimer !== null) clearTimeout(job.pauseTimer)
+    job.pauseTimer = null
+    job.pausedUntil = null
+  }
+
   private resumeJobs(jobs: (Job | undefined)[]): void {
     // In reverse, so requeuing each at the front keeps their order.
     for (const job of jobs.toReversed()) {
       if (job?.status !== 'paused') continue
+      this.clearPause(job)
       job.status = 'queued'
       job.attempts = 0
       this.requeue(job)
@@ -787,6 +802,7 @@ export class UploadEngine {
       if (job.status === 'done' || job.status === 'canceled') continue
       this.abortRequests(job)
       this.clearRetry(job)
+      this.clearPause(job)
       job.status = 'canceled'
       this.dropSession(job)
       canceled.add(job)
@@ -798,7 +814,7 @@ export class UploadEngine {
 
   /** Puts a job back at the front of the line it belongs in. */
   private requeue(job: Job): void {
-    if (this.preparingSessions.has(job) || job.checkingSession) return
+    if (this.preparingSessions.has(job)) return
     if (job.session) this.waiting.unshift(job)
     else this.needSession.unshift(job)
   }
@@ -914,6 +930,7 @@ function toItem(job: Job): Omit<UploadItem, 'id' | 'file' | 'parentId'> {
     nodeId: job.session?.nodeId ?? null,
     syncState: job.syncState,
     retrying: job.retryTimer !== null,
+    pausedUntil: job.pausedUntil,
     error: job.error,
   }
 }

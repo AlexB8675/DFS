@@ -15,6 +15,7 @@ for (const count of [10_000, 100_000]) {
       nodeId: null,
       syncState: null,
       retrying: false,
+      pausedUntil: null,
       error: null,
     }))
     const store = createUploadStore()

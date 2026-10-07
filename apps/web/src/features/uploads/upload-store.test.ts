@@ -17,6 +17,7 @@ function item(
     nodeId: null,
     syncState,
     retrying: false,
+    pausedUntil: null,
     error: null,
   }
 }

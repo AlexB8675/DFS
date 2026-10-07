@@ -76,15 +76,16 @@ describe.skipIf(!apiBase)('the upload engine against the real API, with faults',
         })),
       )
       await until(() => item('large-1.bin')?.status === 'failed', 'the outage to fail large-1.bin')
-      expect(item('large-1.bin')?.uploadedBytes).toBeGreaterThan(0)
+      // Failing gave its session up, with what had arrived (§6.1).
+      expect(item('large-1.bin')?.uploadedBytes).toBe(0)
       network.outage = 'off'
-      // Resume failed uploads, as the panel's Retry does: from the first missing part.
+      // Retry failed uploads, as the panel's Retry does: afresh, in a new session.
       const resumed = new Set<string>()
       await until(
-        async () => {
+        () => {
           for (const failed of items().filter((upload) => upload.status === 'failed')) {
             resumed.add(failed.file.name)
-            await engine.retry(failed.id)
+            engine.retry(failed.id)
           }
           return items().every((upload) => upload.status === 'done')
         },

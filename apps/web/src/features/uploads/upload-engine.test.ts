@@ -2,7 +2,7 @@ import type { DriveNode, SyncState, UploadSession } from '@dfs/shared'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { queryClient } from '@/app/query-client'
 import { ApiError } from '@/lib/api/client'
-import { DEFAULT_LIMITS, UploadEngine } from './upload-engine'
+import { DEFAULT_LIMITS, PAUSE_LIMIT_MS, UploadEngine } from './upload-engine'
 import { useUploadStore } from './upload-store'
 import type { OnProgress, UploadTransport } from './upload-transport'
 
@@ -456,7 +456,7 @@ describe('UploadEngine', () => {
         expect(item('read-error.bin').status).toBe('failed')
         expect(item('readable.bin').status).toBe('done')
       })
-      await engine.retry(item('read-error.bin').id)
+      engine.retry(item('read-error.bin').id)
       await vi.waitFor(() => {
         expect(item('read-error.bin').status).toBe('done')
       })
@@ -669,7 +669,7 @@ describe('UploadEngine', () => {
     expect(api.streamed.map((sent) => sent.from)).toEqual([0, 0, 0])
   })
 
-  it('gives up after repeated failures, then resumes after the parts the server kept', async () => {
+  it('gives up after repeated failures, cancelling its session at once; Retry starts afresh', async () => {
     const { api, transport } = fakeApi()
     let broken = true
     api.failStream = () => (broken ? busy() : null)
@@ -692,13 +692,19 @@ describe('UploadEngine', () => {
     )
     // The first try, then six retries since the last that stored anything.
     expect(api.streamed.map((sent) => sent.from)).toEqual([0, 2, 2, 2, 2, 2, 2, 2])
+    // Its half file goes from the server now, not when the page closes.
+    const first = api.streamed[0]?.uploadId
+    expect(transport.cancel).toHaveBeenCalledExactlyOnceWith(first)
+    expect(item('stuck.bin')).toMatchObject({ nodeId: null, uploadedBytes: 0 })
 
     broken = false
-    await engine.retry(item('stuck.bin').id)
+    engine.retry(item('stuck.bin').id)
     await vi.waitFor(() => {
       expect(item('stuck.bin').status).toBe('done')
     })
-    expect(api.streamed.at(-1)?.from).toBe(2)
+    // A new session, sent from its start.
+    expect(api.streamed.at(-1)?.from).toBe(0)
+    expect(api.streamed.at(-1)?.uploadId).not.toBe(first)
   })
 
   it('retries a small file whose response was lost; the server accepts it again (§6.1)', async () => {
@@ -802,6 +808,40 @@ describe('UploadEngine', () => {
       engine.cancel(item('long.bin').id)
       await vi.advanceTimersByTimeAsync(120_000)
       expect(transport.alive).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('cancels an upload paused for 5 hours, and says why', async () => {
+    vi.useFakeTimers()
+    try {
+      const { api, transport } = fakeApi()
+      api.autoRelease = false
+      const engine = new UploadEngine(transport)
+      await engine.enqueue('folder', [
+        file('paused.bin', 4 * CHUNK),
+        file('resumed.bin', 4 * CHUNK),
+      ])
+      await vi.waitFor(() => {
+        expect(api.streams).toHaveLength(1)
+      })
+      const [pausedSession] = api.sessions.keys()
+      engine.pause(item('paused.bin').id)
+      engine.pause(item('resumed.bin').id)
+      await vi.advanceTimersByTimeAsync(PAUSE_LIMIT_MS - 60_000)
+      expect(item('paused.bin').pausedUntil).toBeGreaterThan(Date.now())
+      engine.resume(item('resumed.bin').id)
+      // Past the limit, and the panel's next update.
+      await vi.advanceTimersByTimeAsync(61_000)
+
+      expect(item('paused.bin')).toMatchObject({
+        status: 'canceled',
+        error: 'Canceled after 5 hours paused',
+        pausedUntil: null,
+      })
+      expect(item('resumed.bin')).toMatchObject({ status: 'uploading', pausedUntil: null })
+      expect(transport.cancel).toHaveBeenCalledExactlyOnceWith(pausedSession)
     } finally {
       vi.useRealTimers()
     }
@@ -957,45 +997,6 @@ describe('UploadEngine', () => {
       expect(item('second.bin').syncState).toBe('stored')
     })
     expect(transport.nodes).toHaveBeenCalledTimes(2)
-  })
-
-  it('waits for retry receipts when paused and resumed while checking the session', async () => {
-    const { api, transport } = fakeApi()
-    api.failStream = () => new ApiError(400, 'rejected', 'Stream rejected')
-    const receipt = Promise.withResolvers<Awaited<ReturnType<UploadTransport['status']>>>()
-    const status = vi.fn<UploadTransport['status']>(() => receipt.promise)
-    const engine = new UploadEngine({
-      ...transport,
-      streamFile: (uploadId, from, body, signal, onProgress) => {
-        const sending = transport.streamFile(uploadId, from, body, signal, onProgress)
-        if (api.streamed.length === 1) api.streams.at(-1)?.store(1)
-        return sending
-      },
-      status,
-    })
-    await engine.enqueue('folder', [file('retry.bin', 3 * CHUNK)])
-    await vi.waitFor(() => {
-      expect(item('retry.bin').status).toBe('failed')
-    })
-    const upload = item('retry.bin')
-    const uploadId = api.streamed[0]?.uploadId ?? ''
-    const snapshot = await transport.status(uploadId)
-    expect(snapshot.receivedParts).toEqual([0])
-    const before = api.streamed.length
-    api.failStream = () => null
-    const retrying = engine.retry(upload.id)
-    engine.pause(upload.id)
-    engine.resume(upload.id)
-    await new Promise((resolve) => setTimeout(resolve, 20))
-    expect(api.streamed).toHaveLength(before)
-
-    receipt.resolve(snapshot)
-    await retrying
-    await vi.waitFor(() => {
-      expect(item('retry.bin')).toMatchObject({ status: 'done', uploadedBytes: 3 * CHUNK })
-    })
-    expect(api.streamed.slice(before).map((sent) => sent.from)).toEqual([1])
-    expect(transport.complete).toHaveBeenCalledTimes(1)
   })
 
   it('resyncs every uploaded file in one lookup, shared by concurrent refreshes', async () => {

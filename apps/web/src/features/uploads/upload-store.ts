@@ -21,6 +21,9 @@ export interface UploadItem {
   syncState: SyncState | null
   /** Set while a failed request waits out its backoff. */
   retrying: boolean
+  /** While paused: when the upload is cancelled if still paused (epoch ms). */
+  pausedUntil: number | null
+  /** Why it failed, or why it was canceled when the user didn't cancel it. */
   error: string | null
 }
 

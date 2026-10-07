@@ -313,7 +313,9 @@ function UploadRowActions({ item }: { item: UploadItem }) {
           <IconButton
             icon={RotateCcw}
             label={`Retry ${name}`}
-            onClick={() => void uploadEngine.retry(item.id)}
+            onClick={() => {
+              uploadEngine.retry(item.id)
+            }}
           />
           {cancel}
         </div>
@@ -410,7 +412,9 @@ function statusText(item: UploadItem): string {
     case 'uploading':
       return item.retrying ? `Connection trouble, retrying… · ${progress}` : progress
     case 'paused':
-      return `Paused · ${progress}`
+      return item.pausedUntil === null
+        ? `Paused · ${progress}`
+        : `Paused · ${progress} · canceled at ${timeOfDay(item.pausedUntil)} if not resumed`
     case 'done':
       switch (item.syncState) {
         case 'stored':
@@ -424,6 +428,10 @@ function statusText(item: UploadItem): string {
     case 'failed':
       return item.error ?? 'Upload failed'
     case 'canceled':
-      return 'Canceled'
+      return item.error ?? 'Canceled'
   }
+}
+
+function timeOfDay(at: number): string {
+  return new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
