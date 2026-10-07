@@ -10,7 +10,6 @@
     "./storage": "./src/storage.ts",
     "./packer": "./src/packer.ts",
     "./testing": "./src/testing.ts",
-    "./lost": "./src/lost.ts",
     "./collector": "./src/collector.ts"
   },
   "scripts": {

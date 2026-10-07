@@ -1,12 +1,5 @@
 import type { SyncState } from '@dfs/shared'
-import {
-  CloudCheck,
-  CloudOff,
-  CloudUpload,
-  LoaderCircle,
-  TriangleAlert,
-  type LucideIcon,
-} from 'lucide-react'
+import { CloudCheck, CloudOff, CloudUpload, LoaderCircle, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 const SYNC_STATES: Record<SyncState, { icon: LucideIcon; label: string; className: string }> = {
@@ -29,11 +22,6 @@ const SYNC_STATES: Record<SyncState, { icon: LucideIcon; label: string; classNam
     icon: CloudOff,
     label: 'Upload failed. Upload the file again.',
     className: 'text-amber-500',
-  },
-  lost: {
-    icon: TriangleAlert,
-    label: 'Lost: the copy in Discord is missing or damaged.',
-    className: 'text-destructive',
   },
 }
 

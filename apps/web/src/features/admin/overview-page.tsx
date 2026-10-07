@@ -15,10 +15,10 @@ import {
 } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Link } from 'react-router'
-import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Progress } from '@/components/ui/progress'
 import { Skeleton } from '@/components/ui/skeleton'
-import { formatBytes, formatDate, formatDuration, formatFullDate } from '@/lib/format'
+import { formatBytes, formatDate, formatDuration } from '@/lib/format'
 import { usePreferences } from '@/lib/preferences'
 import { cn } from '@/lib/utils'
 import { healthQuery } from './api'
@@ -198,51 +198,6 @@ function HealthView({ health }: { health: SystemHealth }) {
           </Detail>
         </StatCard>
       </div>
-
-      {health.lostBlobs.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <TriangleAlert className="size-4 text-destructive" /> Lost blobs
-            </CardTitle>
-            <CardAction>
-              <Link
-                to="/admin/storage"
-                className="flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
-              >
-                Their files, and recovering them <ArrowRight className="size-3.5" aria-hidden />
-              </Link>
-            </CardAction>
-          </CardHeader>
-          <CardContent>
-            <table className="w-full text-sm">
-              <thead className="text-left text-xs text-muted-foreground">
-                <tr>
-                  <th className="pb-2 font-medium">Blob</th>
-                  <th className="pb-2 font-medium">Channel</th>
-                  <th className="pb-2 font-medium">Detected</th>
-                  <th className="pb-2 text-right font-medium">Files</th>
-                </tr>
-              </thead>
-              <tbody>
-                {health.lostBlobs.map((blob) => (
-                  <tr key={blob.blobId} className="border-t border-border/60">
-                    <td className="py-2 font-mono text-xs">{blob.blobId.slice(0, 8)}</td>
-                    <td className="py-2">#{blob.channelName}</td>
-                    <td
-                      className="py-2 text-muted-foreground"
-                      title={formatFullDate(blob.detectedAt)}
-                    >
-                      {formatDate(blob.detectedAt)}
-                    </td>
-                    <td className="py-2 text-right tabular-nums">{blob.affectedFiles}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </CardContent>
-        </Card>
-      )}
     </>
   )
 }

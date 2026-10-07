@@ -360,7 +360,7 @@ for (const storage of ['local', 'discord'] as const) {
       expect(report.settled).toEqual({
         droppedFiles: [],
         rolledBack: [],
-        lostVersions: [],
+        unreadableVersions: [],
         orphans: [],
       })
       expect(report.batches).toBeGreaterThan(1)

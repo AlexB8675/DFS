@@ -1,10 +1,7 @@
-import { markLost } from '@dfs/bot/lost'
 import { dataChannels } from '@dfs/bot/storage'
 import { settleBlobs } from '@dfs/bot/testing'
 import { ApiClient, createFolder, text, uploadFile, workspace } from '@dfs/contract'
 import { storageChannels } from '@dfs/db'
-import { nodePageSchema, systemHealthSchema } from '@dfs/shared'
-import { sql } from 'drizzle-orm'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
 import { DiscordBlobStore } from '@dfs/storage'
 import { FakeDiscord } from '@dfs/storage/testing'
@@ -110,37 +107,5 @@ describe('reading from Discord', () => {
     } finally {
       await body?.cancel()
     }
-  })
-
-  it('shows a file whose message was deleted by hand as lost, until it is purged', async () => {
-    const folder = await createFolder(client, (await workspace(client)).id, 'Lost')
-    const session = await uploadFile(client, folder.id, 'gone.txt', text('soon gone'))
-    const store = app.blobStore as DiscordBlobStore
-    await settleBlobs({ db: app.db, staging: app.staging, store, sizes: app.config.sizes })
-    const { rows } = await app.db.execute<{ channel: string; message: string; blob: string }>(sql`
-      SELECT channel.discord_channel_id AS channel, blob.message_id AS message, blob.id::text AS blob
-      FROM chunks chunk JOIN blobs blob ON blob.id = chunk.blob_id
-      JOIN storage_channels channel ON channel.id = blob.channel_id
-      WHERE chunk.version_id = ${session.versionId}`)
-    const stored = rows[0]
-    if (!stored) throw new Error('Nothing stored.')
-
-    await markLost(app.db, stored.channel, [stored.message])
-    const listing = await client.call('GET', `/nodes/${folder.id}/children`, nodePageSchema)
-    expect(listing.items.map((item) => item.syncState)).toEqual(['lost'])
-    expect(await client.error('GET', `/files/${session.nodeId}/content`)).toEqual({
-      status: 409,
-      code: 'file_lost',
-    })
-    const lostBlobs = async () =>
-      (await client.call('GET', '/admin/health', systemHealthSchema)).lostBlobs.map((blob) => ({
-        blobId: blob.blobId,
-        affectedFiles: blob.affectedFiles,
-      }))
-    expect(await lostBlobs()).toEqual([{ blobId: stored.blob, affectedFiles: 1 }])
-
-    await client.send('POST', '/nodes/trash', { json: { ids: [session.nodeId] } })
-    await client.send('DELETE', `/trash/${session.nodeId}`)
-    expect(await lostBlobs()).toEqual([])
   })
 })

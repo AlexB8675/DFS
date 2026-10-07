@@ -7,8 +7,7 @@ import { afterTask, isFinished } from './api'
 // that starts them.
 
 export function taskLabel(task: AdminTask): string {
-  const label = ADMIN_TASK_LABELS[task.kind]
-  return task.blobId ? `${label} (${task.blobId})` : label
+  return ADMIN_TASK_LABELS[task.kind]
 }
 
 /** Says how each task seen under way ended, once it does, and refreshes what it may have changed. */

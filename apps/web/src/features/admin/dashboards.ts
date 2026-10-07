@@ -331,13 +331,10 @@ export const MONITORING_SECTIONS: DashboardSection[] = [
         ],
       },
       {
-        title: 'Lost and failed',
-        description: 'Blobs whose messages were deleted in Discord, and uploads that gave up.',
+        title: 'Failed uploads',
+        description: 'Blobs that gave up being stored in Discord after every try.',
         format: 'count',
-        lines: [
-          { label: 'Lost blobs', color: 'critical', series: 'blobs.lost:avg' },
-          { label: 'Failed jobs', color: 'warning', series: 'queue.failed:avg' },
-        ],
+        lines: [{ label: 'Failed jobs', color: 'warning', series: 'queue.failed:avg' }],
       },
       backlog,
     ],

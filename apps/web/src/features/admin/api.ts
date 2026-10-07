@@ -59,7 +59,7 @@ export const healthQuery = queryOptions({
   staleTime: 0,
 })
 
-/** Admin → Storage (§9): what is stuck between staging and Discord, and what was lost. */
+/** Admin → Storage (§9): what is stuck between staging and Discord. */
 export const storageQuery = queryOptions({
   queryKey: ['admin', 'storage'],
   queryFn: ({ signal }) => apiGet('/admin/storage', storageStatusSchema, { signal }),

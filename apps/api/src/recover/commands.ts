@@ -154,9 +154,9 @@ export function printReport(report: RecoveryReport): void {
       `[WARN] “${file.name}” (${file.id}) is back at version ${String(file.versionNo)}: its newest never reached Discord.`,
     )
   }
-  if (settled.lostVersions.length > 0) {
+  if (settled.unreadableVersions.length > 0) {
     console.info(
-      `[WARN] ${String(settled.lostVersions.length)} version(s) lost: a blob they need isn't in the journal.`,
+      `[WARN] ${String(settled.unreadableVersions.length)} version(s) dropped: a blob they need isn't in the journal.`,
     )
   }
   if (settled.orphans.length > 0) {

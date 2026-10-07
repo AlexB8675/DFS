@@ -37,8 +37,8 @@ const TABLES: readonly TableSpec[] = [
   { table: 'file_versions', key: ['id'], exclude: [] },
   // A chunk's row ID is new; it is matched by its version and place.
   { table: 'chunks', key: ['version_id', 'idx'], exclude: ['id'] },
-  // Signed links expire and are signed again; tries, errors, checks and
-  // losses are the bot's at the time; the channel is matched by Discord ID;
+  // Signed links expire and are signed again; tries, errors and checks are
+  // the bot's at the time; the channel is matched by Discord ID;
   // recovery knows when a blob was stored, not when it was staged.
   {
     table: 'blobs',
@@ -51,7 +51,6 @@ const TABLES: readonly TableSpec[] = [
       'last_error',
       'created_at',
       'last_verified_at',
-      'lost_at',
     ],
     extra: CHANNEL,
     // A deleted blob is a tombstone: one released before it was ever stored

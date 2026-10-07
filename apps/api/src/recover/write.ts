@@ -159,9 +159,8 @@ export async function writeRecovered(db: Database, input: WriteInput): Promise<v
           frame_size: chunk.frameSize,
           plain_sha256: hex(chunk.plainSha256),
           frame_sha256: hex(chunk.frameSha256),
-          // A blob the journal never saw: the version can't be read, and is marked lost.
-          blob_id: state.blobs.has(chunk.blobId) ? chunk.blobId : null,
-          blob_offset: state.blobs.has(chunk.blobId) ? chunk.offset : null,
+          blob_id: chunk.blobId,
+          blob_offset: chunk.offset,
         })),
       ),
     )
@@ -210,17 +209,11 @@ export async function writeRecovered(db: Database, input: WriteInput): Promise<v
     await tx.execute(sql`
       UPDATE blobs SET state = 'deleting' WHERE state = 'stored' AND live_bytes = 0`)
     await tx.execute(sql`
-      UPDATE file_versions SET state = 'lost'
-      WHERE id IN (
-        SELECT chunk.version_id FROM chunks chunk
-        LEFT JOIN blobs blob ON blob.id = chunk.blob_id
-        WHERE blob.id IS NULL OR blob.state = 'deleted')`)
-    await tx.execute(sql`
       UPDATE users SET used_bytes = coalesce((
         SELECT sum(version.size_bytes) FROM file_versions version
         JOIN nodes node ON node.id = version.node_id
         WHERE node.owner_id = users.id
-          AND version.state IN ('syncing', 'stored', 'failed', 'lost')), 0)`)
+          AND version.state IN ('syncing', 'stored', 'failed')), 0)`)
     await tx.execute(sql`
       INSERT INTO folder_stats_dirty (node_id) SELECT id FROM nodes WHERE kind = 'folder'`)
   })

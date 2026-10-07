@@ -36,7 +36,7 @@ describe('refreshBlobUrls (DESIGN.md §6.2)', () => {
       fetch: discord.fetch,
     })
     const ids: number[] = []
-    for (const state of ['stored', 'lost'] as const) {
+    for (const state of ['stored', 'deleting'] as const) {
       const { rows } = await db.execute<{ id: number }>(sql`
         INSERT INTO blobs (kind, state, size_bytes, live_bytes, frame_count)
         VALUES ('solo', ${state}, 4, 4, 1) RETURNING id::float8 AS id`)

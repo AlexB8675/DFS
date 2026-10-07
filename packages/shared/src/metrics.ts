@@ -101,7 +101,6 @@ export const METRICS = {
   'storage.packs': byLeader('gauge', 'count', 'Stored packs'),
   'blobs.waiting': byLeader('gauge', 'count', 'Blobs waiting to be stored'),
   'blobs.deleting': byLeader('gauge', 'count', 'Blobs waiting to be deleted'),
-  'blobs.lost': byLeader('gauge', 'count', 'Lost blobs'),
   'queue.pending': byLeader('gauge', 'count', 'Pending jobs'),
   'queue.failed': byLeader('gauge', 'count', 'Failed jobs'),
   'db.bytes': byLeader('gauge', 'bytes', 'Database size'),

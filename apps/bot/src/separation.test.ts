@@ -9,7 +9,6 @@ import { ChannelType } from '@discordjs/core'
 import { sql } from 'drizzle-orm'
 import type pg from 'pg'
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest'
-import { markLost } from './lost.ts'
 import { reconcileOrphans } from './reconciler.ts'
 import { instanceId, placeableChannels } from './storage.ts'
 import { settleBlobs, uploadedFiles } from './testing.ts'
@@ -158,11 +157,5 @@ describe('two environments on one server (D25)', () => {
       expect.arrayContaining([devStored.message, prodStored.message, devInLoose.id, devInProd.id]),
     )
     expect(left).not.toContain(prodOrphan.id)
-
-    // Production's message deleted by hand: only production loses a blob.
-    expect(await markLost(dev.db, prodChannel.id, [prodStored.message])).toBeNull()
-    expect(await markLost(prod.db, prodChannel.id, [prodStored.message])).toMatchObject({
-      blobs: 1,
-    })
   })
 })

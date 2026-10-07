@@ -44,7 +44,7 @@ describe('summarize', () => {
       item('done', 10, 10, 'syncing'),
       item('done', 10, 10, 'stored'),
       // A sync that failed is over too; the panel shows the problem instead.
-      item('done', 10, 10, 'lost'),
+      item('done', 10, 10, 'failed'),
     ])
     expect(summary).toMatchObject({ done: 3, syncing: 1 })
   })
@@ -80,7 +80,7 @@ describe('upload store', () => {
       { status: 'queued' as const, uploadedBytes: 0 },
       { status: 'done' as const, uploadedBytes: 100, syncState: 'syncing' as const },
       { syncState: 'stored' as const },
-      { syncState: 'lost' as const },
+      { syncState: 'failed' as const },
       { status: 'canceled' as const },
     ]) {
       store.getState().apply(new Map([[first.id, change]]), 100)

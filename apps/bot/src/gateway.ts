@@ -16,13 +16,10 @@ import {
 import { WebSocketManager } from '@discordjs/ws'
 import type { FastifyBaseLogger } from 'fastify'
 import { capitalized, setUpDiscord } from './discord-setup.ts'
-import { alertLost, markLost } from './lost.ts'
-import { dataChannels } from './storage.ts'
 
 // The bot's connection to Discord's gateway (DESIGN.md §11), production only
-// (D25): it watches for storage messages deleted by hand (§6.5) and answers
-// `/dfs setup`. Only the leading bot connects. Deletions while it is offline
-// aren't replayed; the scrubber (M4) finds those.
+// (D25): it answers `/dfs setup`. Only the leading bot connects. It doesn't
+// watch for deleted messages: only the bot reaches the channels (D31).
 
 export interface GatewayDeps {
   config: Config
@@ -50,8 +47,6 @@ export const COMMANDS: RESTPutAPIApplicationGuildCommandsJSONBody = [
 
 /** After a failed connection, the next try comes this much later. */
 const RECONNECT_MS = 30_000
-/** How long the registered data channels are trusted before they are read again. */
-const CHANNELS_FRESH_MS = 60_000
 
 /**
  * Connects in the background, and tries again after a failure, so a problem
@@ -91,24 +86,13 @@ export async function startGateway(
 ): Promise<{ stop: () => Promise<void> }> {
   const { config, rest, log } = deps
   const guildId = config.discord.guildId
-  const dataChannels = new DataChannelIds(deps.db)
   const gateway = new WebSocketManager({
     token: config.discord.botToken ?? '',
-    // Message deletions need GuildMessages, but not the content intent (§11).
-    intents: GatewayIntentBits.Guilds | GatewayIntentBits.GuildMessages,
+    // Commands arrive with any intents; Guilds is the least there is.
+    intents: GatewayIntentBits.Guilds,
     rest,
   })
   const client = new Client({ rest, gateway })
-  // Every deletion in the server arrives; only data channels can hold blobs.
-  const onDeleted = async (channelId: string, messageIds: readonly string[]) => {
-    if (await dataChannels.has(channelId)) await deleted(deps, channelId, messageIds)
-  }
-  client.on(GatewayDispatchEvents.MessageDelete, ({ data }) => {
-    if (data.guild_id === guildId) void onDeleted(data.channel_id, [data.id])
-  })
-  client.on(GatewayDispatchEvents.MessageDeleteBulk, ({ data }) => {
-    if (data.guild_id === guildId) void onDeleted(data.channel_id, data.ids)
-  })
   client.once(GatewayDispatchEvents.Ready, ({ data, api }) => {
     if (!guildId) return
     api.applicationCommands.bulkOverwriteGuildCommands(data.application.id, guildId, COMMANDS).then(
@@ -130,50 +114,6 @@ export async function startGateway(
     stop: async () => {
       await gateway.destroy()
     },
-  }
-}
-
-/** The Discord IDs of the registered data channels, read again every minute. */
-class DataChannelIds {
-  readonly #db: Database
-  #ids: Promise<Set<string>> | null = null
-  #readAt = 0
-
-  constructor(db: Database) {
-    this.#db = db
-  }
-
-  async has(discordChannelId: string): Promise<boolean> {
-    if (!this.#ids || Date.now() - this.#readAt > CHANNELS_FRESH_MS) {
-      this.#readAt = Date.now()
-      this.#ids = dataChannels(this.#db).then(
-        (channels) => new Set(channels.map((channel) => channel.discordChannelId)),
-        (error: unknown) => {
-          // Read again on the next event; until then, check every deletion.
-          this.#ids = null
-          throw error
-        },
-      )
-    }
-    try {
-      return (await this.#ids).has(discordChannelId)
-    } catch {
-      return true
-    }
-  }
-}
-
-/** Messages deleted in one of the server's channels: any of this environment's blobs among them are lost. */
-export async function deleted(
-  deps: GatewayDeps,
-  discordChannelId: string,
-  messageIds: readonly string[],
-): Promise<void> {
-  try {
-    const report = await markLost(deps.db, discordChannelId, messageIds)
-    if (report) await alertLost(deps.db, deps.rest, report, deps.log)
-  } catch (error) {
-    deps.log.error({ err: error, discordChannelId }, 'could not record deleted storage messages')
   }
 }
 

@@ -189,7 +189,6 @@ describe('metrics (DESIGN §16)', () => {
     expect(sampled.map((row) => row.name).sort()).toEqual(
       [
         'blobs.deleting',
-        'blobs.lost',
         'blobs.waiting',
         'db.bytes',
         'files.bytes',

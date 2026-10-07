@@ -141,6 +141,13 @@
       "when": 1791378444528,
       "tag": "0019_erase_turned_off_links",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1791394795238,
+      "tag": "0020_no_outside_deletions",
+      "breakpoints": true
     }
   ]
 }

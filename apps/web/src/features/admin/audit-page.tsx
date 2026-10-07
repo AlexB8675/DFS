@@ -18,7 +18,6 @@ import {
   ShieldAlert,
   Trash,
   Trash2,
-  TriangleAlert,
   Upload,
   UserCheck,
   UserCog,
@@ -79,7 +78,6 @@ const ACTIONS: Record<string, { label: string; icon: LucideIcon; tone?: string }
   },
   'backup.completed': { label: 'Backup completed', icon: DatabaseBackup, tone: 'text-emerald-500' },
   'scrub.completed': { label: 'Scrub completed', icon: ScanSearch },
-  'blob.lost': { label: 'Blob lost', icon: TriangleAlert, tone: 'text-destructive' },
 }
 
 /** Kinds of action to narrow the log to, by the prefixes of their names. */

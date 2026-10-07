@@ -41,8 +41,6 @@ export interface SystemFigures extends StorageTotals {
   syncBytes: number
   /** Frames and sealed packs in staging (`stagedBytesSql`). */
   stagedBytes: number
-  /** Blobs whose message was deleted in Discord. */
-  lostBlobs: number
   /** Upload jobs waiting, how long the oldest has, and those that gave up. */
   pendingJobs: number
   oldestPendingSeconds: number
@@ -74,8 +72,6 @@ export async function systemFigures(
         (SELECT coalesce(sum(size_bytes), 0)::float8 FROM file_versions WHERE state = 'syncing')
           AS "syncBytes",
         ${stagedBytesSql()}::float8 AS "stagedBytes",
-        -- Through the index of lost blobs: always as it is now.
-        (SELECT count(*)::float8 FROM blobs WHERE state = 'lost') AS "lostBlobs",
         pg_database_size(current_database())::float8 AS "databaseBytes",
         account.*,
         (SELECT coalesce(sum(stats.file_count), 0)::float8
@@ -150,7 +146,6 @@ export async function sampleSystem(db: Database, metrics: Metrics): Promise<void
   metrics.record('storage.packs', figures.packs)
   metrics.record('blobs.waiting', figures.waitingBlobs)
   metrics.record('blobs.deleting', figures.deletingBlobs)
-  metrics.record('blobs.lost', figures.lostBlobs)
   metrics.record('queue.pending', figures.pendingJobs)
   metrics.record('queue.failed', figures.failedJobs)
   metrics.record('db.bytes', figures.databaseBytes)

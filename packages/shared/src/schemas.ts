@@ -122,9 +122,9 @@ export type NodeKind = z.infer<typeof nodeKindSchema>
 
 /**
  * Where a file's bytes are, as shown in the UI: still uploading, readable from
- * staging while it syncs to Discord, stored, or broken.
+ * staging while it syncs to Discord, stored, or failed to sync.
  */
-export const syncStateSchema = z.enum(['uploading', 'syncing', 'stored', 'failed', 'lost'])
+export const syncStateSchema = z.enum(['uploading', 'syncing', 'stored', 'failed'])
 export type SyncState = z.infer<typeof syncStateSchema>
 
 export const nodeSchema = z.object({
@@ -508,7 +508,7 @@ export type ServiceStatus = z.infer<typeof serviceStatusSchema>
 
 /** Something that needs an admin's attention (§16). */
 export const systemAlertSchema = z.object({
-  /** Stable, for telling alerts apart: `bot_down`, `lost_blobs`, `staging_full`… */
+  /** Stable, for telling alerts apart: `bot_down`, `staging_full`… */
   code: z.string(),
   level: z.enum(['warning', 'critical']),
   title: z.string(),
@@ -548,15 +548,6 @@ export const systemHealthSchema = z.object({
     lastBackupAt: timestamp.nullable(),
     lastJournalFlushAt: timestamp.nullable(),
   }),
-  lostBlobs: z.array(
-    z.object({
-      /** A bigint identity in the database, sent as a string so it stays exact. */
-      blobId: z.string(),
-      channelName: z.string(),
-      detectedAt: timestamp,
-      affectedFiles: count,
-    }),
-  ),
 })
 export type SystemHealth = z.infer<typeof systemHealthSchema>
 
@@ -684,7 +675,6 @@ export const adminTaskKindSchema = z.enum([
   'orphans.reconcile',
   'uploads.retry',
   'deletions.retry',
-  'blob.recover',
 ])
 export type AdminTaskKind = z.infer<typeof adminTaskKindSchema>
 
@@ -692,7 +682,6 @@ export const DISCORD_TASKS: readonly AdminTaskKind[] = [
   'channel.create',
   'discord.setup',
   'orphans.reconcile',
-  'blob.recover',
 ]
 
 /** What each task is called on the page and in the audit log. */
@@ -703,7 +692,6 @@ export const ADMIN_TASK_LABELS: Record<AdminTaskKind, string> = {
   'orphans.reconcile': 'Clean up orphan messages',
   'uploads.retry': 'Retry failed uploads',
   'deletions.retry': 'Retry failing deletions',
-  'blob.recover': 'Recover a lost blob',
 }
 
 /** A blob ID: a bigint identity, sent as a string so it stays exact. */
@@ -717,15 +705,12 @@ export const adminTaskRequestSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('orphans.reconcile') }),
   z.object({ kind: z.literal('uploads.retry') }),
   z.object({ kind: z.literal('deletions.retry') }),
-  z.object({ kind: z.literal('blob.recover'), blobId }),
 ])
 export type AdminTaskRequest = z.infer<typeof adminTaskRequestSchema>
 
 export const adminTaskSchema = z.object({
   id,
   kind: adminTaskKindSchema,
-  /** The blob a recovery is about. */
-  blobId: blobId.nullable(),
   requestedBy: z.string(),
   state: z.enum(['pending', 'running', 'done', 'failed']),
   /** What it did, or why it failed, in a sentence. */
@@ -736,7 +721,7 @@ export const adminTaskSchema = z.object({
 export type AdminTask = z.infer<typeof adminTaskSchema>
 export const adminTaskListSchema = z.array(adminTaskSchema)
 
-/** `GET /admin/storage`: what is stuck between staging and Discord, and what was lost. */
+/** `GET /admin/storage`: what is stuck between staging and Discord. */
 export const storageStatusSchema = z.object({
   blobStore: z.enum(['discord', 'local', 'chaos']),
   /** Blobs whose upload failed: retrying with backoff, or given up after every try. */
@@ -760,27 +745,6 @@ export const storageStatusSchema = z.object({
       channelName: z.string().nullable(),
       attempts: count,
       error: z.string().nullable(),
-    }),
-  ),
-  /** Blobs whose message was deleted in Discord, newest first, with the files they held. */
-  lost: z.array(
-    z.object({
-      blobId,
-      channelName: z.string().nullable(),
-      detectedAt: timestamp.nullable(),
-      fileCount: count,
-      /** The first few, for finding them in the metadata browser. */
-      files: z.array(
-        z.object({
-          nodeId: id,
-          name: z.string(),
-          ownerId: id,
-          ownerName: z.string(),
-          parentId: id.nullable(),
-          /** Whether the file's current version is lost, rather than only older ones. */
-          current: z.boolean(),
-        }),
-      ),
     }),
   ),
 })

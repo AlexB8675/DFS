@@ -297,7 +297,6 @@ export class AdminMockDb extends MockDb {
     const now = Date.now()
     const files = Object.values(this.state.nodes).filter((node) => node.kind === 'file')
     const syncing = files.filter((node) => node.syncState === 'syncing')
-    const lost = files.filter((node) => node.syncState === 'lost')
     const backlogBytes = sum(syncing.map((node) => node.sizeBytes))
     const { blobCount, packCount, storedBytes } = storageStats(files)
     const jitter = (min: number, max: number) => min + Math.random() * (max - min)
@@ -306,14 +305,6 @@ export class AdminMockDb extends MockDb {
     const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? '' : 's'}`
     // The same alerts the API raises for these figures (apps/api/src/admin/alerts.ts).
     const alerts: SystemHealth['alerts'] = []
-    if (lost.length > 0) {
-      alerts.push({
-        code: 'lost_blobs',
-        level: 'critical',
-        title: plural(lost.length, 'lost blob'),
-        detail: `${plural(lost.length, 'file')} can’t be downloaded: their messages were deleted in Discord.`,
-      })
-    }
     if (failed > 0) {
       alerts.push({
         code: 'uploads_failed',
@@ -331,13 +322,7 @@ export class AdminMockDb extends MockDb {
         { name: 'Bot', status: 'ok', detail: `Gateway ${Math.round(jitter(38, 95))} ms` },
         { name: 'Database', status: 'ok', detail: 'PostgreSQL 18 · 2.3 GB' },
         // As the API's checks see them (§16): the median answer of the last minute.
-        {
-          name: 'Discord',
-          status: lost.length > 0 ? 'degraded' : 'ok',
-          detail:
-            (lost.length > 0 ? `${lost.length} lost blob${lost.length === 1 ? '' : 's'} · ` : '') +
-            `${Math.round(jitter(80, 120))} ms`,
-        },
+        { name: 'Discord', status: 'ok', detail: `${Math.round(jitter(80, 120))} ms` },
         { name: 'Internet', status: 'ok', detail: `${Math.round(jitter(10, 20))} ms` },
       ],
       queue: {
@@ -364,15 +349,9 @@ export class AdminMockDb extends MockDb {
         lastRunAt: ago(3 * 3_600_000),
         checkedBlobs: Math.round(blobCount * 0.62),
         totalBlobs: blobCount,
-        problems: lost.length,
+        problems: 0,
       },
       backups: { lastBackupAt: ago(2 * 3_600_000), lastJournalFlushAt: ago(40_000) },
-      lostBlobs: this.lostFiles().map(({ blobId }) => ({
-        blobId,
-        channelName: 'storage-00',
-        detectedAt: ago(9 * 24 * 3_600_000),
-        affectedFiles: 1,
-      })),
     }
   }
 
@@ -590,12 +569,10 @@ export class AdminMockDb extends MockDb {
   /** Whether the made-up failing deletion was tried again (and went). */
   private deletionsRetried = false
 
-  /** What is stuck in storage, made up from the seeded failed and lost files (§9). */
+  /** What is stuck in storage, made up from the seeded failed files (§9). */
   storageStatus(): StorageStatus {
     this.requireAdmin()
     const files = Object.values(this.state.nodes).filter((node) => node.kind === 'file')
-    const owner = (node: MockNode) =>
-      this.state.users.find((user) => user.id === node.ownerId)?.displayName ?? 'unknown'
     return {
       blobStore: 'discord',
       uploads: files
@@ -621,22 +598,6 @@ export class AdminMockDb extends MockDb {
               error: 'Deleting blob 6880: The bot can’t see that server or channel.',
             },
           ],
-      lost: this.lostFiles().map(({ blobId, node }) => ({
-        blobId,
-        channelName: 'storage-00',
-        detectedAt: new Date(Date.now() - 9 * DAY).toISOString(),
-        fileCount: 1,
-        files: [
-          {
-            nodeId: node.id,
-            name: node.name,
-            ownerId: node.ownerId,
-            ownerName: owner(node),
-            parentId: node.parentId,
-            current: true,
-          },
-        ],
-      })),
     }
   }
 
@@ -656,7 +617,6 @@ export class AdminMockDb extends MockDb {
   startTask(request: AdminTaskRequest): AdminTask {
     const admin = this.requireAdmin()
     let result: string
-    let failed = false
     switch (request.kind) {
       case 'channel.create': {
         const numbers = this.state.channels
@@ -695,45 +655,21 @@ export class AdminMockDb extends MockDb {
         result = this.deletionsRetried ? 'No deletion was failing.' : 'Deleted 1 blob.'
         this.deletionsRetried = true
         break
-      case 'blob.recover': {
-        const lost = this.lostFiles().find((entry) => entry.blobId === request.blobId)
-        if (lost) {
-          lost.node.syncState = 'stored'
-          result = `Recovered blob ${request.blobId}: 1 version is readable again.`
-        } else {
-          failed = true
-          result = `Blob ${request.blobId} isn’t lost.`
-        }
-        break
-      }
     }
     const now = new Date().toISOString()
     const task: AdminTask = {
       id: crypto.randomUUID(),
       kind: request.kind,
-      blobId: 'blobId' in request ? request.blobId : null,
       requestedBy: admin.displayName,
-      state: failed ? 'failed' : 'done',
+      state: 'done',
       result,
       createdAt: now,
       finishedAt: now,
     }
     this.tasks.unshift(task)
-    this.audit(
-      'task.started',
-      ADMIN_TASK_LABELS[request.kind],
-      'blobId' in request ? `blob ${request.blobId}` : undefined,
-    )
+    this.audit('task.started', ADMIN_TASK_LABELS[request.kind])
     this.save()
     return task
-  }
-
-  /** Lost files, each in a blob of its own, with a blob ID like the API's. */
-  private lostFiles(): { blobId: string; node: MockNode }[] {
-    return Object.values(this.state.nodes)
-      .filter((node) => node.kind === 'file' && node.syncState === 'lost')
-      .sort((a, b) => a.id.localeCompare(b.id))
-      .map((node, index) => ({ blobId: String(6100 + index), node }))
   }
 
   /** Database connections an admin cancelled or ended, gone from the made-up list. */
@@ -870,7 +806,6 @@ export class AdminMockDb extends MockDb {
       'sync.files': syncing.length,
       'sync.bytes': sum(syncing.map((node) => node.sizeBytes)),
       'staging.bytes': Math.min(sum(syncing.map((node) => node.sizeBytes)), STAGING_MAX_BYTES),
-      'blobs.lost': files.filter((node) => node.syncState === 'lost').length,
       'queue.failed': files.filter((node) => node.syncState === 'failed').length,
     })
   }

@@ -5,17 +5,8 @@ import {
   type StorageStatus,
 } from '@dfs/shared'
 import { useQuery } from '@tanstack/react-query'
-import {
-  CircleCheck,
-  CircleX,
-  LifeBuoy,
-  Package,
-  RotateCcw,
-  ScanSearch,
-  Wrench,
-} from 'lucide-react'
+import { CircleCheck, CircleX, Package, RotateCcw, ScanSearch, Wrench } from 'lucide-react'
 import type { ReactNode } from 'react'
-import { Link } from 'react-router'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -31,7 +22,7 @@ import { taskLabel, useTaskResults } from './task-results'
 
 /**
  * `/admin/storage`: the channels, what is stuck between staging and Discord,
- * lost blobs, and what the leading bot can do about them now (§9).
+ * and what the leading bot can do about them now (§9).
  */
 export function StoragePage() {
   const storage = useQuery(storageQuery)
@@ -39,29 +30,21 @@ export function StoragePage() {
   const start = useStartTask()
   const discord = storage.data?.blobStore === 'discord'
 
-  /** Whether a task of this kind (for this blob) is being asked for, or is under way. */
-  const busy = (kind: AdminTaskKind, blobId?: string) => {
-    const asking = start.isPending ? start.variables : undefined
-    if (
-      asking?.kind === kind &&
-      (blobId === undefined || ('blobId' in asking && asking.blobId === blobId))
-    ) {
-      return true
-    }
-    return (tasks.data ?? []).some(
-      (task) =>
-        task.kind === kind && !isFinished(task) && (blobId === undefined || task.blobId === blobId),
-    )
-  }
-  const run = (kind: AdminTaskKind, blobId?: string) => {
-    const request = kind === 'blob.recover' ? { kind, blobId: blobId ?? '' } : { kind }
-    start.mutate(request, {
-      onError: (error) => {
-        toast.error(`Couldn’t start “${ADMIN_TASK_LABELS[kind]}”`, {
-          description: errorMessage(error),
-        })
+  /** Whether a task of this kind is being asked for, or is under way. */
+  const busy = (kind: AdminTaskKind) =>
+    (start.isPending && start.variables.kind === kind) ||
+    (tasks.data ?? []).some((task) => task.kind === kind && !isFinished(task))
+  const run = (kind: AdminTaskKind) => {
+    start.mutate(
+      { kind },
+      {
+        onError: (error) => {
+          toast.error(`Couldn’t start “${ADMIN_TASK_LABELS[kind]}”`, {
+            description: errorMessage(error),
+          })
+        },
       },
-    })
+    )
   }
 
   useTaskResults(tasks.data)
@@ -134,14 +117,6 @@ export function StoragePage() {
               retrying={busy('deletions.retry')}
               onRetry={() => {
                 run('deletions.retry')
-              }}
-            />
-            <Lost
-              lost={storage.data.lost}
-              discord={discord}
-              recovering={(blobId) => busy('blob.recover', blobId)}
-              onRecover={(blobId) => {
-                run('blob.recover', blobId)
               }}
             />
           </>
@@ -308,80 +283,6 @@ function Deletions({
             ],
           }))}
         />
-      )}
-    </Section>
-  )
-}
-
-function Lost({
-  lost,
-  discord,
-  recovering,
-  onRecover,
-}: {
-  lost: StorageStatus['lost']
-  discord: boolean
-  recovering: (blobId: string) => boolean
-  onRecover: (blobId: string) => void
-}) {
-  return (
-    <Section
-      title="Lost blobs"
-      description="Their messages were deleted in Discord. Recovering reads the blob back from Discord’s CDN, which keeps a deleted attachment only if it was downloaded lately, and only for a while: usually it can’t."
-    >
-      {lost.length === 0 ? (
-        <AllClear>Nothing was lost.</AllClear>
-      ) : (
-        <ul className="grid gap-3">
-          {lost.map((blob) => (
-            <li key={blob.blobId} className="grid gap-2 rounded-lg border p-3">
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
-                <span className="font-mono text-xs">Blob {blob.blobId}</span>
-                <span className="text-muted-foreground">
-                  {blob.channelName ? `#${blob.channelName}` : 'no channel'}
-                  {blob.detectedAt && ` · lost ${formatDate(blob.detectedAt)}`} · {blob.fileCount}{' '}
-                  {blob.fileCount === 1 ? 'file' : 'files'}
-                </span>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="ml-auto"
-                  disabled={!discord || recovering(blob.blobId)}
-                  onClick={() => {
-                    onRecover(blob.blobId)
-                  }}
-                >
-                  {recovering(blob.blobId) ? <Spinner /> : <LifeBuoy />} Try to recover
-                </Button>
-              </div>
-              <ul className="grid gap-1 text-sm">
-                {blob.files.map((file) => (
-                  <li key={file.nodeId} className="flex gap-2">
-                    {file.parentId ? (
-                      <Link
-                        to={`/admin/users/${file.ownerId}/folders/${file.parentId}`}
-                        className="truncate font-medium underline-offset-4 hover:underline"
-                      >
-                        {file.name}
-                      </Link>
-                    ) : (
-                      <span className="truncate font-medium">{file.name}</span>
-                    )}
-                    <span className="shrink-0 text-muted-foreground">
-                      {file.ownerName}
-                      {!file.current && ' · an older version'}
-                    </span>
-                  </li>
-                ))}
-                {blob.fileCount > blob.files.length && (
-                  <li className="text-xs text-muted-foreground">
-                    and {blob.fileCount - blob.files.length} more
-                  </li>
-                )}
-              </ul>
-            </li>
-          ))}
-        </ul>
       )}
     </Section>
   )

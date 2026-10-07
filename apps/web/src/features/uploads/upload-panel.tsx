@@ -247,7 +247,7 @@ function UploadRow({ entry }: { entry: UploadEntry }) {
         <p
           className={cn(
             'truncate text-xs tabular-nums',
-            item.status === 'failed' || item.syncState === 'failed' || item.syncState === 'lost'
+            item.status === 'failed' || item.syncState === 'failed'
               ? 'text-destructive'
               : 'text-muted-foreground',
           )}
@@ -426,7 +426,6 @@ function statusText(item: UploadItem): string {
         case 'stored':
           return `${formatBytes(item.file.size)} · on Discord`
         case 'failed':
-        case 'lost':
           return 'Uploaded, but it couldn’t be stored on Discord'
         default:
           return 'Syncing to Discord…'

@@ -15,7 +15,6 @@ import { retryFailedDeletions } from './collector.ts'
 import { capitalized, setUpDiscord } from './discord-setup.ts'
 import type { Packer } from './packer.ts'
 import { reconcileOrphans } from './reconciler.ts'
-import { recoverBlob } from './recover.ts'
 import { instanceId, type BotStorage } from './storage.ts'
 
 // What an admin can have the leading bot do now (Admin → Storage, DESIGN.md
@@ -101,8 +100,6 @@ export async function runAdminTask(deps: TaskDeps, job: AdminTaskJob): Promise<s
             : ''
         return `Deleted ${String(deleted)} ${deleted === 1 ? 'blob' : 'blobs'}.${still}`
       }
-      case 'blob.recover':
-        return await recoverBlob({ db, store: storage.store }, Number(task.blobId))
     }
   } catch (error) {
     // Discord's refusals in plain words; anything else as it is.

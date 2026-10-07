@@ -29,9 +29,6 @@ const LIMITS = {
 
 export interface AlertFigures {
   bot: { status: ServiceStatus; detail: string }
-  lostBlobs: number
-  /** Files that can't be downloaded: their current version is in a lost blob. */
-  lostFiles: number
   failedJobs: number
   oldestPendingSeconds: number
   stagedBytes: number
@@ -104,17 +101,6 @@ export function healthAlerts(figures: AlertFigures): SystemAlert[] {
       level: 'warning',
       title: 'The bot isn’t storing anything',
       detail: `It answers, but reports ${bot.detail}.`,
-    })
-  }
-  if (figures.lostBlobs > 0) {
-    alerts.push({
-      code: 'lost_blobs',
-      level: 'critical',
-      title: plural(figures.lostBlobs, 'lost blob'),
-      detail:
-        figures.lostFiles > 0
-          ? `${plural(figures.lostFiles, 'file')} can’t be downloaded: their messages were deleted in Discord.`
-          : 'Their messages were deleted in Discord. They held only older versions: every file can still be downloaded.',
     })
   }
   const staging = figures.stagingMaxBytes > 0 ? figures.stagedBytes / figures.stagingMaxBytes : 0

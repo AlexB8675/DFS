@@ -83,8 +83,6 @@ function syncState(versionState: string | null): SyncState {
       return 'syncing'
     case 'stored':
       return 'stored'
-    case 'lost':
-      return 'lost'
     default:
       return 'failed'
   }

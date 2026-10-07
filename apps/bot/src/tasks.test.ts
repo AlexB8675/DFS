@@ -11,7 +11,6 @@ import { sql } from 'drizzle-orm'
 import type pg from 'pg'
 import { PgBoss } from 'pg-boss'
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest'
-import { deleted } from './gateway.ts'
 import { Packer } from './packer.ts'
 import { dataChannels } from './storage.ts'
 import { runAdminTask, type TaskDeps } from './tasks.ts'
@@ -86,56 +85,13 @@ function deps(overrides: Partial<TaskDeps> = {}): TaskDeps {
   }
 }
 
-const task = (kind: string, blobId?: string) => ({ kind, blobId, requestedBy: 'Admin' })
+const task = (kind: string) => ({ kind, requestedBy: 'Admin' })
 
-async function stateOf(table: 'blobs' | 'file_versions', id: number | string): Promise<string> {
+async function blobState(id: number): Promise<string> {
   const { rows } = await db.execute<{ state: string }>(
-    table === 'blobs'
-      ? sql`SELECT state FROM blobs WHERE id = ${id}`
-      : sql`SELECT state FROM file_versions WHERE id = ${id}`,
+    sql`SELECT state FROM blobs WHERE id = ${id}`,
   )
   return rows[0]?.state ?? 'missing'
-}
-
-/**
- * Two small files in one pack in Discord, whose message is then deleted by
- * hand: read through the CDN first (`read`), as a download would, or never.
- */
-async function lostPack({ read }: { read: boolean }) {
-  const uploaded = await uploadedFiles(db, staging, [100, 200])
-  await settleBlobs({ db, staging, store, sizes })
-  const { rows } = await db.execute<{
-    id: number
-    channel_id: string
-    message_id: string
-    attachment_id: string
-    size_bytes: number
-    cdn_url: string
-    expires_ms: number
-  }>(sql`
-    SELECT DISTINCT blob.id::float8 AS id, blob.channel_id, blob.message_id, blob.attachment_id,
-      blob.size_bytes, blob.cdn_url,
-      (extract(epoch FROM blob.cdn_url_expires_at) * 1000)::float8 AS expires_ms
-    FROM blobs blob JOIN chunks chunk ON chunk.blob_id = blob.id
-    WHERE chunk.version_id = ${uploaded.files[0]?.versionId ?? ''}`)
-  const blob = rows[0]
-  if (!blob) throw new Error('Nothing was stored.')
-  if (read) {
-    await store.read(
-      {
-        id: blob.id,
-        channelId: blob.channel_id,
-        messageId: blob.message_id,
-        attachmentId: blob.attachment_id,
-        url: { url: blob.cdn_url, expiresAt: new Date(blob.expires_ms) },
-      },
-      0,
-      blob.size_bytes,
-    )
-  }
-  await discord.delete(`/channels/${storage00.id}/messages/${blob.message_id}`)
-  await deleted({ config, db, rest: discord, log: log as never }, storage00.id, [blob.message_id])
-  return { ...uploaded, blob }
 }
 
 describe('admin tasks (DESIGN.md §9)', () => {
@@ -163,34 +119,6 @@ describe('admin tasks (DESIGN.md §9)', () => {
     )
   })
 
-  it('recovers a lost blob read lately, from the CDN’s copy, and its files with it', async () => {
-    const { files, blob } = await lostPack({ read: true })
-    expect(await stateOf('blobs', blob.id)).toBe('lost')
-    expect(await runAdminTask(deps(), task('blob.recover', String(blob.id)))).toBe(
-      `Recovered blob ${String(blob.id)}: 2 versions are readable again.`,
-    )
-    expect(await stateOf('blobs', blob.id)).toBe('stored')
-    for (const file of files) expect(await stateOf('file_versions', file.versionId)).toBe('stored')
-    const { rows } = await db.execute<{ message_id: string; lost_at: string | null }>(sql`
-      SELECT message_id, lost_at FROM blobs WHERE id = ${blob.id}`)
-    expect(rows[0]?.message_id).not.toBe(blob.message_id)
-    expect(rows[0]?.lost_at).toBeNull()
-    expect(discord.messages.map((message) => message.id)).toContain(rows[0]?.message_id)
-    const { rows: journal } = await db.execute<{ kind: string }>(sql`
-      SELECT kind FROM journal ORDER BY id DESC LIMIT 1`)
-    expect(journal[0]?.kind).toBe('blob.stored')
-  })
-
-  it('leaves a blob lost when no one had read it: Discord serves it no more', async () => {
-    const { blob } = await lostPack({ read: false })
-    const posts = discord.messages.length
-    await expect(runAdminTask(deps(), task('blob.recover', String(blob.id)))).rejects.toThrow(
-      `Discord no longer serves blob ${String(blob.id)}`,
-    )
-    expect(await stateOf('blobs', blob.id)).toBe('lost')
-    expect(discord.messages).toHaveLength(posts)
-  })
-
   it('seals what waits to be packed now', async () => {
     await uploadedFiles(db, staging, [100, 200])
     expect(await runAdminTask(deps(), task('packs.seal'))).toBe(
@@ -200,13 +128,15 @@ describe('admin tasks (DESIGN.md §9)', () => {
   })
 
   it('tries failing deletions again now', async () => {
-    const { blob } = await lostPack({ read: true })
-    await runAdminTask(deps(), task('blob.recover', String(blob.id)))
-    await db.execute(sql`
+    await uploadedFiles(db, staging, [100, 200])
+    await settleBlobs({ db, staging, store, sizes })
+    const { rows } = await db.execute<{ id: number }>(sql`
       UPDATE blobs SET state = 'deleting', attempts = 3, last_error = 'Discord was down'
-      WHERE id = ${blob.id}`)
+      WHERE state = 'stored' RETURNING id::float8 AS id`)
+    const [blob] = rows
+    if (!blob) throw new Error('Nothing was stored.')
     expect(await runAdminTask(deps(), task('deletions.retry'))).toBe('Deleted 1 blob.')
-    expect(await stateOf('blobs', blob.id)).toBe('deleted')
+    expect(await blobState(blob.id)).toBe('deleted')
     expect(await runAdminTask(deps(), task('deletions.retry'))).toBe('No deletion was failing.')
   })
 
@@ -240,6 +170,8 @@ describe('admin tasks (DESIGN.md §9)', () => {
         task('channel.create'),
       ),
     ).rejects.toThrow('This needs Discord storage')
-    await expect(runAdminTask(deps(), task('everything.delete'))).rejects.toThrow()
+    for (const kind of ['everything.delete', 'blob.recover']) {
+      await expect(runAdminTask(deps(), task(kind))).rejects.toThrow()
+    }
   })
 })

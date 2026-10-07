@@ -735,7 +735,7 @@ async function finishUpload(
   const { rows: earlier } = await tx.execute<{ id: string }>(sql`
     SELECT id FROM file_versions
     WHERE node_id = ${upload.node_id} AND id <> ${upload.version_id}
-      AND state IN ('syncing', 'stored', 'failed', 'lost')`)
+      AND state IN ('syncing', 'stored', 'failed')`)
   const prunedIds = await unneededVersions(
     tx,
     earlier.map((row) => row.id),

@@ -15,7 +15,6 @@ export interface BlobUploadJob {
 /** An admin task: what it is, and who asked. */
 export interface AdminTaskJob {
   kind: string
-  blobId?: string
   requestedBy: string
 }
 

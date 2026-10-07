@@ -160,8 +160,11 @@ export interface Settled {
   droppedFiles: { id: string; ownerId: string; name: string }[]
   /** Files that fell back to an earlier version, their current one never having reached Discord. */
   rolledBack: { id: string; name: string; versionNo: number }[]
-  /** Versions with a frame in a blob the journal doesn't have, marked `lost`. */
-  lostVersions: string[]
+  /**
+   * Versions with a frame in a blob the journal doesn't have, or whose
+   * message it says was deleted: dropped, as if never journaled.
+   */
+  unreadableVersions: string[]
   /** Items whose folder is gone, dropped with what is below them. */
   orphans: string[]
 }
@@ -172,15 +175,26 @@ export interface Settled {
  * listed; nothing is made up.
  */
 export function settle(state: FoldedState): Settled {
-  const settled: Settled = { droppedFiles: [], rolledBack: [], lostVersions: [], orphans: [] }
+  const settled: Settled = { droppedFiles: [], rolledBack: [], unreadableVersions: [], orphans: [] }
+  // Only DFS deletes its messages (D31), so this means a journal cut short.
+  // The files fall back below.
+  for (const [versionId, version] of state.versions) {
+    const readable = (version.chunks ?? []).every((chunk) => {
+      const blob = state.blobs.get(chunk.blobId)
+      return blob !== undefined && !blob.deleted
+    })
+    if (readable) continue
+    state.versions.delete(versionId)
+    settled.unreadableVersions.push(versionId)
+  }
   const versionsOf = Map.groupBy(state.versions.values(), (version) => version.nodeId)
 
   for (const node of [...state.nodes.values()]) {
     if (node.kind !== 'file') continue
     const current = node.currentVersionId as string | null
     if (current && state.versions.has(current)) continue
-    // An upload journaled before uploads in progress were left out, or a
-    // version still syncing when the database was lost.
+    // An upload journaled before uploads in progress were left out, a
+    // version still syncing when the database was lost, or one unreadable.
     const kept = (versionsOf.get(node.id as string) ?? []).toSorted(
       (a, b) => b.versionNo - a.versionNo,
     )[0]
@@ -219,15 +233,7 @@ export function settle(state: FoldedState): Settled {
   }
 
   for (const [versionId, version] of state.versions) {
-    if (!state.nodes.has(version.nodeId)) {
-      state.versions.delete(versionId)
-      continue
-    }
-    const readable = (version.chunks ?? []).every((chunk) => {
-      const blob = state.blobs.get(chunk.blobId)
-      return blob !== undefined && !blob.deleted
-    })
-    if (!readable) settled.lostVersions.push(versionId)
+    if (!state.nodes.has(version.nodeId)) state.versions.delete(versionId)
   }
   for (const [shareId, share] of state.shares) {
     if (!state.nodes.has(share.nodeId as string)) state.shares.delete(shareId)

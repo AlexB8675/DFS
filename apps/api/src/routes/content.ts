@@ -79,9 +79,6 @@ export async function downloadableFile(
     WHERE node.id = ${nodeId}`)
   const [file] = rows
   if (file?.kind !== 'file') throw new ApiError(404, 'not_found', 'This item no longer exists.')
-  if (file.state === 'lost') {
-    throw new ApiError(409, 'file_lost', 'This file’s data was deleted from Discord.')
-  }
   if (file.state !== 'syncing' && file.state !== 'stored') {
     throw new ApiError(409, 'not_ready', 'This file hasn’t finished uploading.')
   }

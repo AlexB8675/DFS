@@ -222,7 +222,7 @@ export function isPending(status: UploadStatus): boolean {
 
 /** Whether the second phase is over, one way or the other. */
 export function isSettled(syncState: SyncState | null): boolean {
-  return syncState === 'stored' || syncState === 'failed' || syncState === 'lost'
+  return syncState === 'stored' || syncState === 'failed'
 }
 
 export interface UploadSummary {

@@ -262,7 +262,7 @@ export function createSeed(version: number): MockState {
   const wedding = file(videos, 'Wedding highlights.mp4', 4.2 * GB, { age: 200 * DAY })
   file(videos, 'Family dinner.mp4', 1.1 * GB, { age: 33 * DAY })
   file(videos, 'Drone footage – coast.mkv', 11.8 * GB, { age: 40 * MINUTE, syncState: 'syncing' })
-  file(videos, 'Old camcorder tape 1998.avi', 2.1 * GB, { age: 500 * DAY, syncState: 'lost' })
+  file(videos, 'Old camcorder tape 1998.avi', 2.1 * GB, { age: 500 * DAY })
   file(videos, 'Screen recording 2026-09-28.mov', 640 * MB, { age: 5 * DAY, syncState: 'failed' })
 
   // ── Backups ───────────────────────────────────────────────────────────────
@@ -513,8 +513,7 @@ export function createSeed(version: number): MockState {
   log(DAY, 'Demo User', 'user.created', 'Taylor Brooks', '@taylor · 100 GB · User')
   log(2 * DAY, 'Priya Patel', 'user.updated', 'Sam Rivera', 'Quota 50 GB → 100 GB')
   log(9 * DAY, 'Demo User', 'user.created', 'Morgan Diaz', '@morgan · 50 GB · User')
-  log(3 * DAY, 'System', 'scrub.completed', 'All channels', 'Checked 41,208 blobs, 1 lost')
-  log(9 * DAY, 'System', 'blob.lost', 'storage-00', 'Old camcorder tape 1998.avi')
+  log(3 * DAY, 'System', 'scrub.completed', 'All channels', 'Checked 41,208 blobs, all intact')
   log(45 * DAY, 'Demo User', 'channel.created', 'storage-02', null)
   log(60 * DAY, 'Demo User', 'channel.disabled', 'dfs-legacy', null)
   log(90 * DAY, 'Priya Patel', 'user.disabled', 'Jordan Lee', null)

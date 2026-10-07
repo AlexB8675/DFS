@@ -54,8 +54,8 @@ function recentTotals(app: FastifyInstance, now = Date.now()): Promise<StorageTo
 }
 
 /**
- * `GET /admin/health`: alerts, services, queue, sync backlog, staging, cache,
- * storage and lost blobs.
+ * `GET /admin/health`: alerts, services, queue, sync backlog, staging, cache
+ * and storage.
  */
 export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> {
   const [bot, figures, recent, troubles, database] = await Promise.all([
@@ -91,15 +91,12 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
       WHERE step = ${METRIC_STEPS.minute} AND at >= now() - interval '1 hour'
         AND name IN ('discord.posted', 'cache.hits', 'cache.misses', 'discord.429',
           'http.server_errors', 'cdn.failures', 'discord.post_failures', 'pg.deadlocks')`),
-    // Blobs waiting to be deleted, and those lost, each read through an index:
-    // the newest lost ones with the files they held, and how many files
-    // can't be downloaded: those whose current version is in one.
+    // Blobs that keep failing to delete, through the index of the GC's queue,
+    // and how far the journal is behind.
     app.db.execute<{
       failing_deletions: number
       journal_behind: number
       journal_error: string | null
-      lost_files: number
-      lost: { id: string; channel: string | null; lostAt: string | null; files: number }[]
     }>(sql`
       SELECT
         (SELECT count(*)::int FROM blobs
@@ -111,23 +108,7 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
             WHERE state = 'staged'),
           0)::float8 AS journal_behind,
         (SELECT last_error FROM journal_batches WHERE state = 'staged'
-          ORDER BY batch_no LIMIT 1) AS journal_error,
-        (SELECT count(DISTINCT node.id)::int
-          FROM blobs blob JOIN chunks chunk ON chunk.blob_id = blob.id
-          JOIN file_versions version ON version.id = chunk.version_id
-          JOIN nodes node ON node.id = version.node_id AND node.current_version_id = version.id
-          WHERE blob.state = 'lost') AS lost_files,
-        coalesce((
-          SELECT json_agg(json_build_object(
-            'id', blob.id::text, 'channel', channel.name, 'lostAt', blob.lost_at,
-            'files', (SELECT count(DISTINCT version.node_id)
-              FROM chunks chunk JOIN file_versions version ON version.id = chunk.version_id
-              WHERE chunk.blob_id = blob.id)
-          ) ORDER BY blob.lost_at DESC NULLS LAST)
-          FROM (SELECT * FROM blobs WHERE state = 'lost'
-            ORDER BY lost_at DESC NULLS LAST LIMIT 50) blob
-          LEFT JOIN storage_channels channel ON channel.id = blob.channel_id
-        ), '[]') AS lost`),
+          ORDER BY batch_no LIMIT 1) AS journal_error`),
     // PostgreSQL's connections: how many of the limit, and the stuck ones.
     app.db.execute<{
       connections: number
@@ -152,16 +133,10 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
   const discordCheck = app.checks.reading('discord')
   const internetCheck = app.checks.reading('internet')
   const discord = reach(discordCheck)
-  const lost =
-    figures.lostBlobs > 0
-      ? `${String(figures.lostBlobs)} lost ${figures.lostBlobs === 1 ? 'blob' : 'blobs'}`
-      : null
   return {
     checkedAt: new Date().toISOString(),
     alerts: healthAlerts({
       bot,
-      lostBlobs: figures.lostBlobs,
-      lostFiles: troubles.rows[0]?.lost_files ?? 0,
       failedJobs: figures.failedJobs,
       oldestPendingSeconds: figures.oldestPendingSeconds,
       stagedBytes: figures.stagedBytes,
@@ -198,12 +173,8 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
         detail: `PostgreSQL · ${formatBytes(figures.databaseBytes)}`,
       },
       local
-        ? { name: 'Blob store', status: lost ? 'degraded' : 'ok', detail: lost ?? 'Local files' }
-        : {
-            name: 'Discord',
-            status: lost && discord.status === 'ok' ? 'degraded' : discord.status,
-            detail: lost ? `${lost} · ${discord.detail}` : discord.detail,
-          },
+        ? { name: 'Blob store', status: 'ok', detail: 'Local files' }
+        : { name: 'Discord', ...discord },
       { name: 'Internet', ...reach(internetCheck) },
     ],
     queue: {
@@ -231,12 +202,6 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
     // The scrubber, journal flushes and backups arrive with M4.
     scrubber: { lastRunAt: null, checkedBlobs: 0, totalBlobs: figures.blobs, problems: 0 },
     backups: { lastBackupAt: null, lastJournalFlushAt: null },
-    lostBlobs: (troubles.rows[0]?.lost ?? []).map((blob) => ({
-      blobId: blob.id,
-      channelName: blob.channel ?? 'local',
-      detectedAt: blob.lostAt ? new Date(blob.lostAt).toISOString() : new Date().toISOString(),
-      affectedFiles: blob.files,
-    })),
   }
 }
 

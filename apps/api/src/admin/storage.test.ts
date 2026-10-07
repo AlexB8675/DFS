@@ -8,7 +8,6 @@ import {
   adminTaskSchema,
   auditPageSchema,
   sessionSchema,
-  shareLinkSchema,
   storageStatusSchema,
   systemHealthSchema,
 } from '@dfs/shared'
@@ -21,8 +20,7 @@ import { testConfig } from '../testing/config.ts'
 import { seedUser } from '../testing/seed.ts'
 
 // Admin → Storage (DESIGN.md §9): tasks go to the leading bot through the
-// job queue, only while one leads; lost blobs come with the files they held.
-// A stand-in bot answers the health check.
+// job queue, only while one leads. A stand-in bot answers the health check.
 
 let database: TestDatabase
 let app: FastifyInstance
@@ -119,75 +117,32 @@ describe('Admin → Storage (§9)', () => {
     })
   })
 
-  it('lists a lost blob with the file it held, on this page and the overview', async () => {
+  it('lists a released blob that keeps failing to delete, and the blob store', async () => {
     const me = await admin.call('GET', '/auth/me', sessionSchema)
-    await uploadFile(admin, me.user.rootFolderId, 'gone.txt', text('lost in Discord'))
+    await uploadFile(admin, me.user.rootFolderId, 'stuck.txt', text('stuck in Discord'))
     await settleBlobs({
       db: app.db,
       staging: app.staging,
       store: new LocalBlobStore(app.config.localBlobDir),
       sizes: app.config.sizes,
     })
-    await app.db.execute(
-      sql`UPDATE blobs SET state = 'lost', lost_at = now() WHERE state = 'stored'`,
-    )
-    await app.db.execute(sql`UPDATE file_versions SET state = 'lost' WHERE state = 'stored'`)
+    const { rows } = await app.db.execute<{ id: string }>(sql`
+      UPDATE blobs SET state = 'deleting', attempts = 2, last_error = 'Discord was down'
+      WHERE state = 'stored' RETURNING id::text AS id`)
 
     const status = await admin.call('GET', '/admin/storage', storageStatusSchema)
     expect(status.blobStore).toBe('local')
-    expect(status.lost).toHaveLength(1)
-    expect(status.lost[0]).toMatchObject({
-      fileCount: 1,
-      files: [{ name: 'gone.txt', ownerName: 'owner', current: true }],
-    })
-
+    expect(status.deletions).toEqual([
+      { blobId: rows[0]?.id, channelName: null, attempts: 2, error: 'Discord was down' },
+    ])
     leading = true
     const health = await admin.call('GET', '/admin/health', systemHealthSchema)
-    expect(health.lostBlobs).toHaveLength(1)
-    expect(health.alerts.find((alert) => alert.code === 'lost_blobs')?.detail).toMatch(/^1 file /)
-  })
-
-  it('lists each file of a lost blob once, and counts as lost only files whose current version is', async () => {
-    const me = await admin.call('GET', '/auth/me', sessionSchema)
-    const settle = () =>
-      settleBlobs({
-        db: app.db,
-        staging: app.staging,
-        store: new LocalBlobStore(app.config.localBlobDir),
-        sizes: app.config.sizes,
-      })
-    // Two older versions of a file go to Discord together; its current one later.
-    // A share link keeps the first once the file is replaced (§7.5).
-    const first = await uploadFile(admin, me.user.rootFolderId, 'kept.txt', text('first'))
-    await admin.call('POST', '/shares', shareLinkSchema, {
-      json: { nodeId: first.nodeId, expiresAt: null, password: null, maxDownloads: null },
+    expect(health.services.find((service) => service.name === 'Blob store')).toEqual({
+      name: 'Blob store',
+      status: 'ok',
+      detail: 'Local files',
     })
-    await uploadFile(admin, me.user.rootFolderId, 'kept.txt', text('second'))
-    await settle()
-    await uploadFile(admin, me.user.rootFolderId, 'kept.txt', text('third'))
-    await settle()
-    const { rows } = await app.db.execute<{ blob_id: string }>(sql`
-      SELECT chunk.blob_id::text AS blob_id FROM chunks chunk
-      JOIN file_versions version ON version.id = chunk.version_id
-      JOIN nodes node ON node.id = version.node_id
-      WHERE node.name = 'kept.txt' AND version.version_no = 1`)
-    const blobId = rows[0]?.blob_id ?? ''
-    await app.db.execute(sql`UPDATE blobs SET state = 'lost', lost_at = now() WHERE id = ${blobId}`)
-    await app.db.execute(sql`
-      UPDATE file_versions SET state = 'lost'
-      WHERE id IN (SELECT version_id FROM chunks WHERE blob_id = ${blobId})`)
-
-    const status = await admin.call('GET', '/admin/storage', storageStatusSchema)
-    expect(status.lost.find((blob) => blob.blobId === blobId)).toMatchObject({
-      fileCount: 1,
-      files: [{ name: 'kept.txt', current: false }],
-    })
-    const health = await admin.call('GET', '/admin/health', systemHealthSchema)
-    expect(health.lostBlobs.find((blob) => blob.blobId === blobId)?.affectedFiles).toBe(1)
-    // gone.txt still can't be downloaded; kept.txt can, from its current version.
-    const alert = health.alerts.find((candidate) => candidate.code === 'lost_blobs')
-    expect(alert?.title).toBe('2 lost blobs')
-    expect(alert?.detail).toMatch(/^1 file /)
+    await app.db.execute(sql`UPDATE blobs SET attempts = 0 WHERE id = ${rows[0]?.id ?? ''}`)
   })
 
   it('counts sealed packs waiting for Discord as staging used, as the upload limit does', async () => {

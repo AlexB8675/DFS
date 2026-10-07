@@ -25,8 +25,8 @@ interface TreeRow extends ReadableVersion {
 
 /**
  * The entries of a ZIP holding these items and everything below them, files
- * still uploading, or lost from Discord, left out: they can't be read. Top-level
- * names that clash get ` (1)`, … added.
+ * still uploading or failed left out: they can't be read. Top-level names
+ * that clash get ` (1)`, … added.
  */
 export async function archiveEntries(
   app: FastifyInstance,

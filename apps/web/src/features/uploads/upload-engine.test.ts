@@ -976,13 +976,13 @@ describe('UploadEngine', () => {
     engine.markSyncStates(new Map([[item('a.txt').nodeId ?? '', 'stored']]))
     // After a reconnect, events may have been missed: the rest is asked for.
     vi.mocked(transport.nodes).mockImplementation((nodeIds) =>
-      Promise.resolve(nodeIds.map((nodeId) => driveNode(nodeId, 'lost'))),
+      Promise.resolve(nodeIds.map((nodeId) => driveNode(nodeId, 'failed'))),
     )
     await engine.refreshSyncStates()
 
     await vi.waitFor(() => {
       expect(item('a.txt').syncState).toBe('stored')
-      expect(item('b.txt').syncState).toBe('lost')
+      expect(item('b.txt').syncState).toBe('failed')
     })
     // Only the file still syncing is asked about.
     expect(transport.nodes).toHaveBeenCalledTimes(1)
