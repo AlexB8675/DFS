@@ -16,6 +16,8 @@ export interface VersionState extends Row {
   nodeId: string
   versionNo: number
   chunks: ChunkState[] | null
+  /** When it was journaled as stored: its creation time, for records older than `createdAt`. */
+  journaledAt: string
 }
 
 export interface ChunkState {
@@ -106,7 +108,7 @@ export function foldJournal(entries: readonly JournalEntry[]): FoldedState {
         break
       }
       case 'version.stored':
-        state.versions.set(id, { createdAt: entry.at, ...record } as unknown as VersionState)
+        state.versions.set(id, { ...record, journaledAt: entry.at } as unknown as VersionState)
         break
       case 'version.purged':
         state.versions.delete(id)

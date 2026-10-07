@@ -17,6 +17,8 @@ interface TableSpec {
   extra?: SQL
   /** Rows that aren't compared, on either side. */
   where?: SQL
+  /** The rows to compare, in place of the table's: its `columns` are all it may have. */
+  rows?: { columns: string[]; query: SQL }
 }
 
 const CHANNEL = sql`(SELECT discord_channel_id FROM storage_channels WHERE id = t.channel_id) AS channel`
@@ -73,8 +75,22 @@ const TABLES: readonly TableSpec[] = [
     exclude: ['sealed', 'channel_id', 'attempts', 'last_error', 'created_at', 'stored_at'],
     extra: CHANNEL,
   },
-  // Folded again from the tree.
-  { table: 'folder_stats', key: ['node_id'], exclude: ['updated_at'] },
+  // Folded again from the tree, for every folder. A folder never folded has
+  // no row, which means none of either; so every folder is compared, with
+  // zeros for no row.
+  {
+    table: 'folder_stats',
+    key: ['node_id'],
+    exclude: ['updated_at'],
+    rows: {
+      columns: ['node_id', 'file_count', 'total_bytes', 'updated_at'],
+      query: sql`
+        SELECT node.id AS node_id, coalesce(t.file_count, 0) AS file_count,
+          coalesce(t.total_bytes, 0) AS total_bytes
+        FROM nodes node LEFT JOIN folder_stats t ON t.node_id = node.id
+        WHERE node.kind = 'folder' ORDER BY node.id`,
+    },
+  },
 ]
 
 /** Tables recovery leaves empty: sessions, uploads in progress, tickets, graphs, the outbox. */
@@ -140,7 +156,25 @@ export async function compareDatabases(
         spec.key.map((name) => sql`t.${sql.identifier(name)}`),
         sql`, `,
       )}`
-    const [left, right] = await Promise.all([source.execute(query), recovered.execute(query)])
+    if (spec.rows) {
+      const unknown = columns
+        .map((column) => column.name)
+        .filter((name) => !spec.rows?.columns.includes(name))
+      if (unknown.length > 0) {
+        differences.push({
+          table: spec.table,
+          key: '*',
+          column: unknown.join(', '),
+          source: 'columns the drill doesn’t know',
+          recovered: 'decide whether recovery covers them (apps/api/src/recover/compare.ts)',
+        })
+      }
+    }
+    const rowsQuery = spec.rows?.query ?? query
+    const [left, right] = await Promise.all([
+      source.execute(rowsQuery),
+      recovered.execute(rowsQuery),
+    ])
     const keyOf = (row: Record<string, unknown>) =>
       spec.key.map((name) => String(normalize(row[name]))).join('/')
     const rightByKey = new Map(right.rows.map((row) => [keyOf(row), row]))

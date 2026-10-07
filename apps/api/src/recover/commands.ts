@@ -3,6 +3,7 @@ import type { Config } from '@dfs/config'
 import { MasterKeys } from '@dfs/crypto'
 import { createDatabase, createPool, runMigrations } from '@dfs/db'
 import { createDiscordRest } from '@dfs/storage'
+import { sql } from 'drizzle-orm'
 import pg from 'pg'
 import { compareDatabases } from './compare.ts'
 import {
@@ -98,6 +99,19 @@ export async function drillCommand(config: Config, options: RecoveryOptions): Pr
       onError: () => undefined,
     })
     try {
+      // What the journal on Discord can't have yet shows up as differences too.
+      const { rows } = await createDatabase(live).execute<{
+        unflushed: number
+        staged: number
+      }>(sql`
+        SELECT (SELECT count(*) FROM journal WHERE batch_no IS NULL)::int AS unflushed,
+          (SELECT count(*) FROM journal_batches WHERE state = 'staged')::int AS staged`)
+      const waiting = rows[0]
+      if (waiting && (waiting.unflushed > 0 || waiting.staged > 0)) {
+        console.info(
+          `[WARN] Not on Discord yet: ${String(waiting.unflushed)} journal record(s) not sealed, ${String(waiting.staged)} batch(es) not posted.`,
+        )
+      }
       const differences = await compareDatabases(createDatabase(live), createDatabase(rebuilt))
       for (const difference of differences) {
         console.info(

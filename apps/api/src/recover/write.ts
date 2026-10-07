@@ -1,6 +1,6 @@
 import { foldAllFolderStats, type Database, type Executor } from '@dfs/db'
 import { sql } from 'drizzle-orm'
-import { trashedVia, type FoldedState } from './fold.ts'
+import { trashedVia, type FoldedState, type VersionState } from './fold.ts'
 import type { CategoryChannel } from './journal-source.ts'
 import { RecoveryError, type ReadBatch } from './read-journal.ts'
 
@@ -88,6 +88,7 @@ export async function writeRecovered(db: Database, input: WriteInput): Promise<v
       tx,
       'file_versions',
       [...state.versions.values()].map((version) => ({
+        ...olderVersionFields(state, version),
         id: version.id,
         node_id: version.nodeId,
         version_no: version.versionNo,
@@ -99,8 +100,6 @@ export async function writeRecovered(db: Database, input: WriteInput): Promise<v
         content_hash: hex(version.contentHash),
         wrapped_dek: hex(Buffer.from(version.wrappedDek as string, 'base64').toString('hex')),
         key_id: version.keyId,
-        created_by: version.createdBy ?? null,
-        created_at: version.createdAt,
         modified_at: version.modifiedAt ?? null,
       })),
     )
@@ -121,6 +120,12 @@ export async function writeRecovered(db: Database, input: WriteInput): Promise<v
       )}::jsonb) AS r(id uuid, root_node_id uuid)
       WHERE users.id = r.id`)
 
+    const framesIn = new Map<number, number>()
+    for (const version of state.versions.values()) {
+      for (const chunk of version.chunks ?? []) {
+        framesIn.set(chunk.blobId, (framesIn.get(chunk.blobId) ?? 0) + 1)
+      }
+    }
     await insert(
       tx,
       'blobs',
@@ -129,7 +134,9 @@ export async function writeRecovered(db: Database, input: WriteInput): Promise<v
         kind: blob.kind,
         state: blob.deleted ? 'deleted' : 'stored',
         size_bytes: blob.sizeBytes,
-        frame_count: blob.frameCount ?? 0,
+        // Older records don't say: a solo blob holds one frame, a pack at
+        // least those still pointing at it.
+        frame_count: blob.frameCount ?? (blob.kind === 'solo' ? 1 : (framesIn.get(blob.id) ?? 0)),
         sha256: hex(blob.sha256),
         channel_id: blob.discordChannelId
           ? (channelIds.get(blob.discordChannelId as string) ?? null)
@@ -218,6 +225,22 @@ export async function writeRecovered(db: Database, input: WriteInput): Promise<v
       INSERT INTO folder_stats_dirty (node_id) SELECT id FROM nodes WHERE kind = 'folder'`)
   })
   await foldAllFolderStats(db)
+}
+
+/**
+ * Who made a version and when: in its record since `createdBy` and
+ * `createdAt` were journaled; before, the file's owner, who makes every
+ * version, and for a first version its file's creation, which was in the
+ * same transaction. A later version's creation is known no better than
+ * when it was journaled as stored.
+ */
+function olderVersionFields(state: FoldedState, version: VersionState): Row {
+  const node = state.nodes.get(version.nodeId)
+  return {
+    created_by: version.createdBy ?? node?.ownerId ?? null,
+    created_at:
+      version.createdAt ?? (version.versionNo === 1 && node ? node.createdAt : version.journaledAt),
+  }
 }
 
 /** Inserts rows in statements of `ROWS_PER_STATEMENT`, keeping identity values with `overriding`. */
