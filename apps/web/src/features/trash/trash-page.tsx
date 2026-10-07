@@ -1,5 +1,5 @@
 import type { TrashItem } from '@dfs/shared'
-import { useInfiniteQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { RotateCcw, ShieldAlert, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { toast } from 'sonner'
@@ -23,6 +23,8 @@ import { useRestoreNodes } from '@/features/drive/api'
 import { ListSkeleton } from '@/components/list-skeleton'
 import { errorMessage } from '@/lib/api/client'
 import { formatBytes, formatDate, formatFullDate } from '@/lib/format'
+import { countShareLinks, linkCount } from '@/features/shares/api'
+import { LinkWarning } from '@/features/shares/link-warning'
 import { trashQuery, useDeleteForever, useEmptyTrash } from './api'
 
 type Confirmation = { kind: 'delete'; item: TrashItem } | { kind: 'empty' }
@@ -34,6 +36,16 @@ export function TrashPage() {
   const deleteForever = useDeleteForever()
   const emptyTrash = useEmptyTrash()
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null)
+  // The share links deleting forever would delete with it (§7.5).
+  const links = useQuery({
+    queryKey: ['share-count', confirmation?.kind === 'delete' ? confirmation.item.id : 'trash'],
+    queryFn: () =>
+      countShareLinks(
+        confirmation?.kind === 'delete' ? { ids: [confirmation.item.id] } : { trash: true },
+      ),
+    enabled: confirmation !== null,
+    staleTime: 0,
+  })
   const items = trash.data?.pages.flatMap((page) => page.items) ?? []
   const retentionDays = trash.data?.pages[0]?.retentionDays
 
@@ -212,6 +224,13 @@ export function TrashPage() {
                 : 'Everything in the trash will be deleted immediately and cannot be recovered.'}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {links.data !== undefined && links.data > 0 && (
+            <LinkWarning>
+              {confirmation?.kind === 'delete'
+                ? `${linkCount(links.data)} to ${confirmation.item.kind === 'folder' ? 'it or what’s inside it' : 'it'} will be deleted too, and stop working for good.`
+                : `${linkCount(links.data)} to items in the trash will be deleted too, and stop working for good.`}
+            </LinkWarning>
+          )}
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction variant="destructive" onClick={() => void handleConfirm()}>

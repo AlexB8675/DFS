@@ -26,6 +26,7 @@ import {
   updateNodeSchema,
   updateShareSchema,
   updateUserSchema,
+  shareCountInputSchema,
 } from '@dfs/shared'
 import { delay, http, HttpResponse, sse, type JsonBodyType } from 'msw'
 import { z, ZodError } from 'zod'
@@ -428,6 +429,9 @@ export const handlers = [
 
   // ── Share links ────────────────────────────────────────────────────────────
   http.get('/api/shares', ({ request }) => respond(request, () => db.shares())),
+  http.post('/api/shares/count', ({ request }) =>
+    respond(request, async () => db.shareCount(shareCountInputSchema.parse(await request.json()))),
+  ),
   http.post('/api/shares', ({ request }) =>
     respond(request, async () => db.createShare(createShareSchema.parse(await request.json())), {
       status: 201,

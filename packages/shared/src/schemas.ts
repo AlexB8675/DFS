@@ -360,6 +360,20 @@ export const shareLinkSchema = z.object({
 export type ShareLink = z.infer<typeof shareLinkSchema>
 export const shareLinkPageSchema = pageSchema(shareLinkSchema)
 
+/**
+ * `POST /shares/count`: the user's outstanding links (not revoked, expired or
+ * used up) to these items or anything inside them, or to anything in the
+ * trash: what moving them to the trash would stop, or deleting them forever
+ * would delete (§7.5).
+ */
+export const shareCountInputSchema = z.union([
+  z.object({ ids: z.array(id).min(1).max(1000) }),
+  z.object({ trash: z.literal(true) }),
+])
+export type ShareCountInput = z.infer<typeof shareCountInputSchema>
+export const shareCountSchema = z.object({ links: z.number().int().min(0) })
+export type ShareCount = z.infer<typeof shareCountSchema>
+
 export const createShareSchema = z.object({
   nodeId: id,
   expiresAt: timestamp.nullable(),

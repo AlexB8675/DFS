@@ -6,6 +6,8 @@ export type DriveDialog =
   | { type: 'rename'; node: DriveNode }
   | { type: 'move'; nodes: DriveNode[] }
   | { type: 'share'; node: DriveNode }
+  /** Moving to the trash items share links reach: they would stop working. */
+  | { type: 'trash'; nodes: DriveNode[]; links: number }
 
 interface DialogState {
   dialog: DriveDialog | null

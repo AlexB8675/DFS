@@ -21,6 +21,8 @@ import {
   type Session,
   type SharedFolderPage,
   type SharedNode,
+  type ShareCount,
+  type ShareCountInput,
   type ShareLink,
   type SortField,
   type SortOrder,
@@ -900,6 +902,28 @@ export class MockDb {
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .map((share) => this.shareDto(share, null))
     return { items, nextCursor: null }
+  }
+
+  /** `POST /shares/count`: outstanding links to these items or below them, or to anything in the trash. */
+  shareCount(input: ShareCountInput): ShareCount {
+    const userId = this.state.userId
+    const ids = 'ids' in input ? new Set(input.ids) : null
+    const inScope = (node: MockNode) =>
+      node.ownerId === userId &&
+      (ids
+        ? this.ancestors(node).some((ancestor) => ids.has(ancestor.id))
+        : this.ancestors(node).some((ancestor) => ancestor.deletedAt !== null))
+    const now = Date.now()
+    const links = this.state.shares.filter((share) => {
+      const node = this.state.nodes[share.nodeId]
+      return (
+        node !== undefined &&
+        inScope(node) &&
+        isWorking(share, now) &&
+        this.shareVersion(share) !== 'deleted'
+      )
+    })
+    return { links: links.length }
   }
 
   createShare(input: {

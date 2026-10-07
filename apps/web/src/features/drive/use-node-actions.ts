@@ -1,6 +1,7 @@
 import type { DriveNode } from '@dfs/shared'
 import { toast } from 'sonner'
 import { useCurrentUser } from '@/features/auth/session'
+import { countShareLinks } from '@/features/shares/api'
 import { pickFiles } from '@/features/uploads/picked-files'
 import { enqueueUploads } from '@/features/uploads/upload-engine'
 import { errorMessage } from '@/lib/api/client'
@@ -97,8 +98,25 @@ export function useNodeActions() {
     }
   }
 
-  async function moveToTrash(nodes: DriveNode[]) {
+  /**
+   * Moves items to the trash, with an Undo. When share links reach them,
+   * which would stop working, it asks first (`confirmed` once it has).
+   */
+  async function moveToTrash(nodes: DriveNode[], confirmed: boolean) {
     const ids = nodes.map((node) => node.id)
+    if (!confirmed) {
+      let links: number
+      try {
+        links = await countShareLinks({ ids })
+      } catch (error) {
+        toast.error('Could not move to trash', { description: errorMessage(error) })
+        return
+      }
+      if (links > 0) {
+        openDialog({ type: 'trash', nodes, links })
+        return
+      }
+    }
     await animateOut(ids)
     try {
       await trashNodes.mutateAsync(nodes)
@@ -141,7 +159,8 @@ export function useNodeActions() {
     share: (node: DriveNode) => {
       openDialog({ type: 'share', node })
     },
-    moveToTrash: (nodes: DriveNode[]) => void moveToTrash(nodes),
+    /** `confirmed`: the user was told which share links it stops. */
+    moveToTrash: (nodes: DriveNode[], confirmed = false) => void moveToTrash(nodes, confirmed),
     newFolder: (parentId: string) => {
       openDialog({ type: 'new-folder', parentId })
     },

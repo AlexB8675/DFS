@@ -1,6 +1,8 @@
 import {
   createShareSchema,
   publicShareSchema,
+  shareCountInputSchema,
+  shareCountSchema,
   shareLinkPageSchema,
   shareLinkSchema,
   sharedFolderPageSchema,
@@ -21,7 +23,13 @@ import {
   sharedChildren,
   unlockShare,
 } from '../shares/public.ts'
-import { createShare, listShares, revokeShare, updateShare } from '../shares/shares.ts'
+import {
+  countShareLinks,
+  createShare,
+  listShares,
+  revokeShare,
+  updateShare,
+} from '../shares/shares.ts'
 import { assertOwnOrigin } from './auth.ts'
 import { downloadableFile } from './content.ts'
 
@@ -38,6 +46,12 @@ export function shareRoutes(app: FastifyInstance, _options: object, done: () => 
 
   routes.get('/shares', { schema: { response: { 200: shareLinkPageSchema } } }, (request) =>
     listShares(app, requireAuth(request.auth)),
+  )
+
+  routes.post(
+    '/shares/count',
+    { schema: { body: shareCountInputSchema, response: { 200: shareCountSchema } } },
+    (request) => countShareLinks(app, requireAuth(request.auth), request.body),
   )
 
   routes.post(

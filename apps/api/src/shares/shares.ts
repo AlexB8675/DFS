@@ -1,6 +1,13 @@
 import { createHash, randomBytes } from 'node:crypto'
-import type { CreateShareInput, Page, ShareLink, UpdateShareInput } from '@dfs/shared'
-import { appendJournal, shareLinks, shareRecords } from '@dfs/db'
+import type {
+  CreateShareInput,
+  Page,
+  ShareCount,
+  ShareCountInput,
+  ShareLink,
+  UpdateShareInput,
+} from '@dfs/shared'
+import { appendJournal, shareLinks, shareRecords, uuidArray, WORKING_LINK } from '@dfs/db'
 import { and, eq, isNull, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { audit } from '../audit.ts'
@@ -39,6 +46,35 @@ export async function listShares(app: FastifyInstance, auth: Auth): Promise<Page
     WHERE node.owner_id = ${auth.user.id}
     ORDER BY share.created_at DESC, share.id DESC`)
   return { items: rows.map((row) => toShareLink(row, null)), nextCursor: null }
+}
+
+/**
+ * `POST /shares/count`: the caller's outstanding links to these items or
+ * anything inside them, or to anything in the trash, so deleting them can
+ * warn first. A file link whose version is gone no longer counts.
+ */
+export async function countShareLinks(
+  app: FastifyInstance,
+  auth: Auth,
+  input: ShareCountInput,
+): Promise<ShareCount> {
+  const scope =
+    'ids' in input
+      ? sql`link.node_id IN (
+          WITH RECURSIVE below AS (
+            SELECT id FROM nodes WHERE id = ANY(${uuidArray(input.ids)}) AND owner_id = ${auth.user.id}
+            UNION ALL
+            SELECT child.id FROM nodes child JOIN below ON child.parent_id = below.id
+          )
+          SELECT id FROM below)`
+      : sql`node.owner_id = ${auth.user.id}
+          AND (node.deleted_at IS NOT NULL OR node.trashed_via IS NOT NULL)`
+  const { rows } = await app.db.execute<{ links: number }>(sql`
+    SELECT count(*)::int AS links
+    FROM share_links link JOIN nodes node ON node.id = link.node_id
+    WHERE ${scope} AND ${WORKING_LINK}
+      AND (node.kind = 'folder' OR link.version_id IS NOT NULL)`)
+  return { links: rows[0]?.links ?? 0 }
 }
 
 /** `POST /shares`: the only time the link itself is shown. */

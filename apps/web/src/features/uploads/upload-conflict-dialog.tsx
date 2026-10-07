@@ -13,6 +13,8 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { linkCount } from '@/features/shares/api'
+import { LinkWarning } from '@/features/shares/link-warning'
 import { formatCount } from '@/lib/format'
 import { uploadEngine, type ConflictChoice } from './upload-engine'
 import { useUploadStore, type UploadEntry } from './upload-store'
@@ -27,11 +29,26 @@ export function UploadConflictDialog() {
   const items = useUploadStore((state) => state.items)
   const entry = items.find((candidate) => candidate.id === conflicts[0])
   if (!entry) return null
+  // What "for all" would replace: the links of every file waiting.
+  const waiting = new Set(conflicts)
+  const allLinks = items
+    .filter((candidate) => waiting.has(candidate.id))
+    .reduce((total, candidate) => total + (candidate.store.getState().conflict?.links ?? 0), 0)
   // Keyed, so each upload starts with its own suggested name.
-  return <ConflictQuestion key={entry.id} entry={entry} waiting={conflicts.length} />
+  return (
+    <ConflictQuestion key={entry.id} entry={entry} waiting={conflicts.length} allLinks={allLinks} />
+  )
 }
 
-function ConflictQuestion({ entry, waiting }: { entry: UploadEntry; waiting: number }) {
+function ConflictQuestion({
+  entry,
+  waiting,
+  allLinks,
+}: {
+  entry: UploadEntry
+  waiting: number
+  allLinks: number
+}) {
   const item = useStore(entry.store)
   const [name, setName] = useState(item.conflict?.suggestedName ?? item.name)
   const [forAll, setForAll] = useState(false)
@@ -73,10 +90,16 @@ function ConflictQuestion({ entry, waiting }: { entry: UploadEntry; waiting: num
             <DialogTitle className="truncate">“{item.name}” already exists</DialogTitle>
             <DialogDescription>
               Replace it with the file you’re uploading, keep both, or skip this one.
-              {conflict.links > 0 &&
-                ` Its ${formatCount(conflict.links, 'share link')} will keep sharing the file as it is now.`}
             </DialogDescription>
           </DialogHeader>
+
+          {(forAll ? allLinks : conflict.links) > 0 && (
+            <LinkWarning>
+              {forAll
+                ? `These files have ${linkCount(allLinks)}. Replacing them won’t update the links: they keep sharing the versions you replace, which stay, counting toward your storage, until the links stop working.`
+                : `This file has ${linkCount(conflict.links)}. Replacing the file won’t update ${conflict.links === 1 ? 'the link: it keeps' : 'the links: they keep'} sharing the version you replace, which stays, counting toward your storage, until ${conflict.links === 1 ? 'the link stops' : 'they stop'} working.`}
+            </LinkWarning>
+          )}
 
           <div className="grid gap-2">
             <Label htmlFor="conflict-name">Name for the copy, if you keep both</Label>

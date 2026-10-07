@@ -1,6 +1,7 @@
 import {
   publicShareSchema,
   sessionSchema,
+  shareCountSchema,
   shareLinkPageSchema,
   shareLinkSchema,
   sharedFolderPageSchema,
@@ -79,6 +80,30 @@ export function shareTests({ describe, it, expect, owner, target }: SuiteContext
       expect(
         await client.error('PATCH', `/shares/${link.id}`, { json: { maxDownloads: 5 } }),
       ).toEqual({ status: 409, code: 'share_version_deleted' })
+    })
+
+    it('counts the links deleting would stop: to an item, inside a folder, in the trash', async () => {
+      const client = await owner()
+      const root = await workspace(client)
+      const folder = await createFolder(client, root.id, 'Album')
+      const inside = await uploadFile(client, folder.id, 'a.txt', text('a'))
+      const outside = await uploadFile(client, root.id, 'b.txt', text('b'))
+      await share(client, folder.id)
+      await share(client, inside.nodeId)
+      const revoked = await share(client, outside.nodeId)
+      await client.send('DELETE', `/shares/${revoked.id}`)
+      const count = async (body: Record<string, unknown>) =>
+        (await client.call('POST', '/shares/count', shareCountSchema, { json: body })).links
+
+      expect(await count({ ids: [folder.id] })).toBe(2)
+      expect(await count({ ids: [inside.nodeId] })).toBe(1)
+      // Revoked, it is no longer outstanding.
+      expect(await count({ ids: [outside.nodeId] })).toBe(0)
+
+      // In the trash, they would come back with it; deleting it forever deletes them.
+      const trashed = await count({ trash: true })
+      await client.send('POST', '/nodes/trash', { json: { ids: [folder.id] } })
+      expect((await count({ trash: true })) - trashed).toBe(2)
     })
 
     it('can’t share a file before its upload completes', async () => {

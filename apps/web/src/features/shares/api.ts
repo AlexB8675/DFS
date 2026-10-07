@@ -1,7 +1,9 @@
 import {
+  shareCountSchema,
   shareLinkPageSchema,
   shareLinkSchema,
   type CreateShareInput,
+  type ShareCountInput,
   type ShareLink,
   type UpdateShareInput,
 } from '@dfs/shared'
@@ -13,6 +15,16 @@ export const sharesQuery = queryOptions({
   queryKey: ['shares'],
   queryFn: ({ signal }) => apiGet('/shares', shareLinkPageSchema, { signal }),
 })
+
+/** Outstanding links to these items or what's inside them, or to anything in the trash (§7.5). */
+export async function countShareLinks(input: ShareCountInput): Promise<number> {
+  return (await apiSend('POST', '/shares/count', input, shareCountSchema)).links
+}
+
+/** “1 share link” or “3 share links”. */
+export function linkCount(links: number): string {
+  return `${String(links)} share ${links === 1 ? 'link' : 'links'}`
+}
 
 const refreshShares = () => queryClient.invalidateQueries({ queryKey: sharesQuery.queryKey })
 
