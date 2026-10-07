@@ -8,6 +8,7 @@ import {
   adminTaskSchema,
   auditPageSchema,
   sessionSchema,
+  shareLinkSchema,
   storageStatusSchema,
   systemHealthSchema,
 } from '@dfs/shared'
@@ -156,7 +157,11 @@ describe('Admin → Storage (§9)', () => {
         sizes: app.config.sizes,
       })
     // Two older versions of a file go to Discord together; its current one later.
-    await uploadFile(admin, me.user.rootFolderId, 'kept.txt', text('first'))
+    // A share link keeps the first once the file is replaced (§7.5).
+    const first = await uploadFile(admin, me.user.rootFolderId, 'kept.txt', text('first'))
+    await admin.call('POST', '/shares', shareLinkSchema, {
+      json: { nodeId: first.nodeId, expiresAt: null, password: null, maxDownloads: null },
+    })
     await uploadFile(admin, me.user.rootFolderId, 'kept.txt', text('second'))
     await settle()
     await uploadFile(admin, me.user.rootFolderId, 'kept.txt', text('third'))

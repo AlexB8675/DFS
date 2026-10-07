@@ -693,7 +693,6 @@ export class AdminMockDb extends MockDb {
         setting('Disks', 'api', 'CACHE_DIR', 'D:\\dfs\\.data\\cache'),
         setting('Disks', 'api', 'CACHE_MAX_BYTES', '5 GiB'),
         setting('Accounts', 'api', 'DEFAULT_QUOTA_BYTES', '100 GiB'),
-        setting('Accounts', 'api', 'VERSION_RETENTION', '3'),
         setting('Durability', 'both', 'SCRUB_REQUESTS_PER_HOUR', '600'),
       ],
       botSettings: true,

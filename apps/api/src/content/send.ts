@@ -20,7 +20,7 @@ export function sendFile(
   file: DownloadableFile,
 ): FastifyReply {
   const size = file.size_bytes
-  const range = parseRange(request.headers.range, size)
+  const range = requestedRange(request, file)
   void reply
     .header('accept-ranges', 'bytes')
     .header('etag', `"${file.version_id}"`)
@@ -62,6 +62,21 @@ export function sendZip(
     .header('cache-control', 'private, no-store')
     .header('x-content-type-options', 'nosniff')
     .send(Readable.from(writeZip(entries, { timeZone: zipTimeZone(timeZone) })))
+}
+
+/**
+ * The range a request asks for, or none when it resumes a download of
+ * another version of the file (`If-Range` names the version it began with,
+ * our ETag): that download gets the whole of this version, not the rest of
+ * it after the start of the other.
+ */
+export function requestedRange(
+  request: FastifyRequest,
+  file: Pick<DownloadableFile, 'version_id' | 'size_bytes'>,
+): ReturnType<typeof parseRange> {
+  const ifRange = request.headers['if-range']
+  if (ifRange !== undefined && ifRange !== `"${file.version_id}"`) return null
+  return parseRange(request.headers.range, file.size_bytes)
 }
 
 /**

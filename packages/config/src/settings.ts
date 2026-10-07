@@ -99,7 +99,6 @@ export function describeSettings(
       entry('Disks', 'api', 'CACHE_MAX_BYTES', size(config.cacheMaxBytes)),
       entry('Accounts', 'api', 'DEFAULT_QUOTA_BYTES', size(config.defaultQuotaBytes)),
       entry('Accounts', 'api', 'TEMP_PASSWORD_DAYS', config.tempPasswordDays),
-      entry('Accounts', 'api', 'VERSION_RETENTION', config.versionRetention),
       entry('Accounts', 'both', 'TRASH_RETENTION_DAYS', config.trashRetentionDays),
       // Trashing a large folder in the request, or as a job past it (§7.2).
       entry('Accounts', 'api', 'TRASH_SYNC_LIMIT', config.trashSyncLimit),

@@ -1,13 +1,20 @@
+import { randomBytes } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { auditLog, createDatabase, createPool, type Database } from '@dfs/db'
+import { auditLog, createDatabase, createPool, shareLinks, type Database } from '@dfs/db'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
 import { Staging } from '@dfs/storage'
 import { sql } from 'drizzle-orm'
 import type pg from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, inject, it, vi } from 'vitest'
-import { cleanUp, emptyOldTrash, giveUpIdleUploads, onTheClock } from './leader-work.ts'
+import {
+  cleanUp,
+  dropUnneededVersions,
+  emptyOldTrash,
+  giveUpIdleUploads,
+  onTheClock,
+} from './leader-work.ts'
 import { uploadedFiles } from './testing.ts'
 
 // The leader samples the system once in each half-minute bucket (DESIGN §16):
@@ -133,6 +140,52 @@ describe('cleanUp', () => {
     const { rows: owner } = await db.execute<{ reserved: number }>(sql`
       SELECT reserved_bytes::float8 AS reserved FROM users WHERE id = ${ownerId}`)
     expect(owner[0]?.reserved).toBe(1000)
+  })
+
+  it('deletes an earlier version once the last link serving it stops working', async () => {
+    const staging = new Staging(path.join(directory, 'staging'))
+    const { ownerId, files } = await uploadedFiles(db, staging, [100, 200])
+    const [first, second] = files
+    if (!first || !second) throw new Error('No test files.')
+    // The second upload is the file's second version, its current one.
+    await db.execute(sql`
+      UPDATE file_versions SET node_id = ${first.nodeId}, version_no = 2 WHERE id = ${second.versionId}`)
+    await db.execute(
+      sql`UPDATE nodes SET current_version_id = ${second.versionId} WHERE id = ${first.nodeId}`,
+    )
+    const [link] = await db
+      .insert(shareLinks)
+      .values({
+        nodeId: first.nodeId,
+        versionId: first.versionId,
+        tokenHash: randomBytes(32),
+        expiresAt: new Date(Date.now() + 86_400_000),
+      })
+      .returning()
+    if (!link) throw new Error('No test link.')
+    const used = async () => {
+      const { rows } = await db.execute<{ used: number }>(sql`
+        SELECT used_bytes::float8 AS used FROM users WHERE id = ${ownerId}`)
+      return rows[0]?.used
+    }
+
+    await dropUnneededVersions(db, staging)
+    expect(await used()).toBe(300)
+
+    await db.execute(sql`
+      UPDATE share_links SET expires_at = now() - interval '1 minute' WHERE id = ${link.id}`)
+    await dropUnneededVersions(db, staging)
+    expect(await used()).toBe(200)
+    const { rows } = await db.execute<{ version_id: string | null }>(sql`
+      SELECT version_id FROM share_links WHERE id = ${link.id}`)
+    // The link knows its version is gone, and works no more (§7.5).
+    expect(rows).toEqual([{ version_id: null }])
+    // Its staged frame went with it; the current version's stays.
+    await expect(staging.read(staging.framePath(first.versionId, 0))).rejects.toThrow()
+    await expect(staging.read(staging.framePath(second.versionId, 0))).resolves.toHaveLength(200)
+    const { rows: versions } = await db.execute<{ id: string }>(sql`
+      SELECT id FROM file_versions WHERE node_id = ${first.nodeId}`)
+    expect(versions.map((row) => row.id)).toEqual([second.versionId])
   })
 
   it('keeps the audit log for a year', async () => {

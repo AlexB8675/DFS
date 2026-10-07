@@ -45,7 +45,6 @@ export interface Config {
   journalFlushIntervalMs: number
   backupRetention: number
   trashRetentionDays: number
-  versionRetention: number
   trashSyncLimit: number
   defaultQuotaBytes: number
   tempPasswordDays: number
@@ -157,7 +156,6 @@ const envSchema = z.object({
   JOURNAL_FLUSH_INTERVAL_MS: integer(60_000, 1000),
   BACKUP_RETENTION: integer(7, 1),
   TRASH_RETENTION_DAYS: integer(30, 1),
-  VERSION_RETENTION: integer(3),
   TRASH_SYNC_LIMIT: integer(50_000, 1),
   DEFAULT_QUOTA_BYTES: byteSize(100 * GiB),
   TEMP_PASSWORD_DAYS: integer(7, 1),
@@ -316,7 +314,6 @@ export function loadConfig(env: Record<string, string | undefined>, options: Loa
     journalFlushIntervalMs: raw.JOURNAL_FLUSH_INTERVAL_MS,
     backupRetention: raw.BACKUP_RETENTION,
     trashRetentionDays: raw.TRASH_RETENTION_DAYS,
-    versionRetention: raw.VERSION_RETENTION,
     trashSyncLimit: raw.TRASH_SYNC_LIMIT,
     defaultQuotaBytes: raw.DEFAULT_QUOTA_BYTES,
     tempPasswordDays: raw.TEMP_PASSWORD_DAYS,

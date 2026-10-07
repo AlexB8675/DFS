@@ -220,8 +220,8 @@ describe('mock API database', () => {
 
     await db.receivePart(second.uploadId, 0, text('second take'), null)
     expect(db.node(first.nodeId)).toMatchObject({ name: 'Notes.txt', sizeBytes: 11 })
-    // The previous version still counts (D24).
-    expect(db.session().user.usedBytes - usedBefore).toBe(16)
+    // No share link serves the previous version, so it went, with its quota (D20, D24).
+    expect(db.session().user.usedBytes - usedBefore).toBe(11)
     expect(list(rootId()).filter((node) => node.name === 'Notes.txt')).toHaveLength(1)
   })
 

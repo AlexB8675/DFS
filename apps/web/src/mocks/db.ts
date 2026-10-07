@@ -60,8 +60,18 @@ export interface MockNode {
   /** Set on descendants of a trashed folder: the ID of that folder. */
   trashedVia: string | null
   moderationReason: string | null
-  /** Sizes of the previous versions kept (D20); they count toward the quota (D24). */
-  previousVersionBytes?: number[]
+  /** A file's current version, counting from 1 (D20). */
+  versionNo?: number
+  /** Earlier versions a share link still serves (§7.5); they count toward the quota (D24). */
+  earlierVersions?: MockVersion[]
+}
+
+/** An earlier version of a file, kept for a share link. */
+export interface MockVersion {
+  no: number
+  sizeBytes: number
+  mimeType: string | null
+  updatedAt: string
 }
 
 export interface MockShare {
@@ -79,6 +89,8 @@ export interface MockShare {
   maxDownloads: number | null
   downloadCount: number
   revokedAt: string | null
+  /** A file link's version, which it serves however the file changes (§7.5); `null` for a folder. */
+  versionNo: number | null
 }
 
 interface MockUpload {
@@ -147,15 +159,13 @@ export class MockApiError extends Error {
   }
 }
 
-const STATE_VERSION = 9
+const STATE_VERSION = 10
 const STORAGE_KEY = 'dfs.mock-db'
 /** `CHUNK_SIZE` at the 10 MiB attachment limit (§7.3). */
 export const CHUNK_SIZE = 10 * 1024 * 1024 - 128 * 1024
 const CSRF_TOKEN = 'mock-csrf-token'
 /** Archive links from `POST /archive` work once, for a minute (§9). */
 const ARCHIVE_TICKET_MS = 60_000
-/** `VERSION_RETENTION` (§15): previous versions kept after a new one completes. */
-const VERSION_RETENTION = 3
 
 export interface ListOptions {
   kind?: NodeKind
@@ -183,6 +193,8 @@ export class MockDb {
    */
   private readonly receivedBytes = new Map<string, Map<number, Uint8Array>>()
   private readonly fileBytes = new Map<string, Uint8Array>()
+  /** Earlier versions' bytes, by `${nodeId}#${versionNo}`, kept for share links. */
+  private readonly versionBytes = new Map<string, Uint8Array>()
 
   constructor() {
     this.state = loadState() ?? createSeed(STATE_VERSION)
@@ -332,13 +344,17 @@ export class MockDb {
     this.scheduleSyncCompletions()
   }
 
-  /** Tests only: every file still syncing is stored now, as the real bot would get to. */
+  /**
+   * Tests only: every file still syncing is stored now, and earlier versions
+   * no link serves any more are gone, as the real bot would get to.
+   */
   finishSyncs(): void {
     for (const node of Object.values(this.state.nodes)) {
       if (node.syncState === 'syncing') {
         node.syncState = 'stored'
         node.syncCompletesAt = null
       }
+      this.dropUnneededVersions(node)
     }
     this.save()
   }
@@ -770,12 +786,23 @@ export class MockDb {
     const node = this.state.nodes[upload.nodeId]
     if (node) {
       if (upload.isNewVersion) {
-        node.previousVersionBytes = [node.sizeBytes, ...(node.previousVersionBytes ?? [])].slice(
-          0,
-          VERSION_RETENTION,
-        )
+        // The replaced version stays while a share link serves it (§7.5).
+        const replaced = node.versionNo ?? 1
+        node.earlierVersions = [
+          ...(node.earlierVersions ?? []),
+          {
+            no: replaced,
+            sizeBytes: node.sizeBytes,
+            mimeType: node.mimeType,
+            updatedAt: node.updatedAt,
+          },
+        ]
+        const bytes = this.fileBytes.get(node.id)
+        if (bytes) this.versionBytes.set(`${node.id}#${String(replaced)}`, bytes)
+        node.versionNo = replaced + 1
         node.sizeBytes = upload.sizeBytes
         node.mimeType = upload.mimeType
+        this.dropUnneededVersions(node)
       }
       node.syncState = 'syncing'
       node.syncCompletesAt = Date.now() + 2000 + Math.random() * 4000
@@ -852,7 +879,10 @@ export class MockDb {
     password: string | null
     maxDownloads: number | null
   }): ShareLink {
-    this.visibleNode(input.nodeId)
+    const node = this.visibleNode(input.nodeId)
+    if (node.syncState === 'uploading') {
+      throw new MockApiError(409, 'not_ready', 'This file hasn’t finished uploading.')
+    }
     const share: MockShare = {
       id: crypto.randomUUID(),
       nodeId: input.nodeId,
@@ -865,6 +895,7 @@ export class MockDb {
       maxDownloads: input.maxDownloads,
       downloadCount: 0,
       revokedAt: null,
+      versionNo: node.kind === 'file' ? (node.versionNo ?? 1) : null,
     }
     this.state.shares.push(share)
     this.save()
@@ -875,6 +906,13 @@ export class MockDb {
     const share = this.ownShare(id)
     if (share.revokedAt) {
       throw new MockApiError(409, 'share_revoked', 'A revoked link can’t be changed.')
+    }
+    if (this.shareVersion(share) === 'deleted') {
+      throw new MockApiError(
+        409,
+        'share_version_deleted',
+        'The version this link shared was deleted. Make a new link to share the file as it is now.',
+      )
     }
     if (changes.expiresAt !== undefined) share.expiresAt = changes.expiresAt
     if (changes.maxDownloads !== undefined) share.maxDownloads = changes.maxDownloads
@@ -907,9 +945,14 @@ export class MockDb {
     const { share, root } = this.liveShare(token, { requireUnlocked: false })
     if (share.password !== null && !this.unlockedShares.has(token)) return { locked: true }
     const owner = this.state.users.find((user) => user.id === root.ownerId)
+    const earlier = this.sharedVersion(share, root)
     return {
       locked: false,
-      root: { ...this.sharedNode(root), parentId: null },
+      root: {
+        ...this.sharedNode(root),
+        ...(earlier && { sizeBytes: earlier.sizeBytes, updatedAt: earlier.updatedAt }),
+        parentId: null,
+      },
       sharedBy: owner?.displayName ?? 'Someone',
       expiresAt: share.expiresAt,
       downloadsLeft:
@@ -954,7 +997,52 @@ export class MockDb {
     const node = this.nodeInShare(root, id)
     if (node.kind !== 'file') throw notFound()
     if (fromStart) this.countDownload(share)
-    return this.contentOf(node)
+    // A file link serves its own version, which may be an earlier one.
+    const earlier = node.id === root.id ? this.sharedVersion(share, root) : undefined
+    if (!earlier) return this.contentOf(node)
+    const bytes = this.versionBytes.get(`${node.id}#${String(earlier.no)}`)
+    return {
+      name: node.name,
+      mimeType: earlier.mimeType ?? 'application/octet-stream',
+      body: bytes ?? new TextEncoder().encode(mockContent(node)),
+    }
+  }
+
+  /** A file link's version when it is an earlier one than the file's. */
+  private sharedVersion(share: MockShare, node: MockNode): MockVersion | undefined {
+    if (share.versionNo === null || share.versionNo === (node.versionNo ?? 1)) return undefined
+    return node.earlierVersions?.find((version) => version.no === share.versionNo)
+  }
+
+  /** Which version a link serves, as its owner's list says (§7.5). */
+  private shareVersion(share: MockShare): ShareLink['version'] {
+    const node = this.state.nodes[share.nodeId]
+    if (share.versionNo === null || !node) return null
+    if (share.versionNo === (node.versionNo ?? 1)) return 'current'
+    return node.earlierVersions?.some((version) => version.no === share.versionNo)
+      ? 'earlier'
+      : 'deleted'
+  }
+
+  /** Earlier versions go once no working link serves them (§7.5, D20). */
+  private dropUnneededVersions(node: MockNode): void {
+    if (!node.earlierVersions?.length) return
+    const now = Date.now()
+    const served = new Set(
+      this.state.shares
+        .filter(
+          (share) =>
+            share.nodeId === node.id &&
+            !share.revokedAt &&
+            !(share.expiresAt && new Date(share.expiresAt).getTime() <= now) &&
+            !(share.maxDownloads !== null && share.downloadCount >= share.maxDownloads),
+        )
+        .map((share) => share.versionNo),
+    )
+    for (const version of node.earlierVersions) {
+      if (!served.has(version.no)) this.versionBytes.delete(`${node.id}#${String(version.no)}`)
+    }
+    node.earlierVersions = node.earlierVersions.filter((version) => served.has(version.no))
   }
 
   /** `GET /s/:token/archive?nodeId`: the shared folder, or a folder inside it, as a ZIP. */
@@ -986,6 +1074,13 @@ export class MockDb {
     }
     if (share.maxDownloads !== null && share.downloadCount >= share.maxDownloads) {
       throw new MockApiError(410, 'share_used_up', 'This link has reached its download limit.')
+    }
+    if (this.shareVersion(share) === 'deleted') {
+      throw new MockApiError(
+        410,
+        'share_version_deleted',
+        'The version of this file that was shared is gone.',
+      )
     }
     if (requireUnlocked && share.password !== null && !this.unlockedShares.has(token)) {
       throw new MockApiError(403, 'share_locked', 'Enter the password to open this link.')
@@ -1152,7 +1247,7 @@ export class MockDb {
     for (const node of Object.values(this.state.nodes)) {
       if (node.ownerId !== userId || node.kind !== 'file') continue
       total += node.sizeBytes
-      for (const bytes of node.previousVersionBytes ?? []) total += bytes
+      for (const version of node.earlierVersions ?? []) total += version.sizeBytes
     }
     // A new version reserves its full size while it uploads.
     for (const upload of Object.values(this.state.uploads)) {
@@ -1188,12 +1283,13 @@ export class MockDb {
   private shareDto(share: MockShare, url: string | null): ShareLink {
     const node = this.state.nodes[share.nodeId]
     // The token and password never leave the server.
-    const { token: _token, password: _password, ...fields } = share
+    const { token: _token, password: _password, versionNo: _version, ...fields } = share
     return {
       ...fields,
       nodeName: node?.name ?? 'Deleted item',
       nodeKind: node?.kind ?? 'file',
       url,
+      version: this.shareVersion(share),
     }
   }
 

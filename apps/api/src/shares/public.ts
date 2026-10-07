@@ -30,6 +30,8 @@ export interface LiveShare extends Record<string, unknown> {
   max_downloads: number | null
   download_count: number
   revoked_at: string | null
+  /** A file link's version (§7.5); `null` for a folder link. */
+  version_id: string | null
   shared_by: string
 }
 
@@ -41,7 +43,7 @@ export async function liveShare(
   const { rows } = await app.db.execute<LiveShare>(sql`
     SELECT share.id, share.node_id, share.password_hash, share.password_version,
       share.expires_at::text AS expires_at, share.max_downloads, share.download_count,
-      share.revoked_at::text AS revoked_at, owner.display_name AS shared_by
+      share.revoked_at::text AS revoked_at, share.version_id, owner.display_name AS shared_by
     FROM share_links share
     JOIN nodes node ON node.id = share.node_id
     JOIN users owner ON owner.id = node.owner_id
@@ -60,6 +62,13 @@ export async function liveShare(
     SELECT ${NODE_COLUMNS} FROM nodes n ${NODE_JOINS} WHERE n.id = ${share.node_id}`)
   const [root] = roots
   if (!root) throw new ApiError(404, 'share_not_found', 'This link doesn’t exist.')
+  if (root.kind === 'file' && share.version_id === null) {
+    throw new ApiError(
+      410,
+      'share_version_deleted',
+      'The version of this file that was shared is gone.',
+    )
+  }
   return { share, root }
 }
 
@@ -86,7 +95,7 @@ export async function describeShare(
   if (!(await isUnlocked(app, request, share))) return { locked: true }
   return {
     locked: false,
-    root: { ...toSharedNode(toDriveNode(root)), parentId: null },
+    root: { ...(await sharedRoot(app, share, root)), parentId: null },
     sharedBy: share.shared_by,
     expiresAt: share.expires_at ? new Date(share.expires_at).toISOString() : null,
     downloadsLeft:
@@ -196,6 +205,36 @@ async function isUnlocked(
 /** What the unlock cookie vouches for: this share, this password, until then. */
 function unlockClaim(share: LiveShare, expiresAt: number): string {
   return `share-unlock:${share.id}:${String(share.password_version)}:${String(expiresAt)}`
+}
+
+/**
+ * A link's item as its page shows it: a file link's, with the size and date
+ * of the version it serves, which may be an earlier one than the drive's.
+ */
+async function sharedRoot(
+  app: FastifyInstance,
+  share: LiveShare,
+  root: NodeRow,
+): Promise<SharedNode> {
+  const node = toSharedNode(toDriveNode(root))
+  if (share.version_id === null) return node
+  const { rows } = await app.db.execute<{
+    size_bytes: number
+    modified: string
+    current: boolean
+  }>(sql`
+    SELECT version.size_bytes::float8 AS size_bytes,
+      coalesce(version.modified_at, version.created_at)::text AS modified,
+      node.current_version_id = version.id AS current
+    FROM file_versions version JOIN nodes node ON node.id = version.node_id
+    WHERE version.id = ${share.version_id}`)
+  const [version] = rows
+  if (!version || version.current) return node
+  return {
+    ...node,
+    sizeBytes: version.size_bytes,
+    updatedAt: new Date(version.modified).toISOString(),
+  }
 }
 
 /** What a share page may see of a node: nothing about the owner's drive. */

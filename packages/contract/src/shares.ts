@@ -1,8 +1,10 @@
 import {
   publicShareSchema,
+  sessionSchema,
   shareLinkPageSchema,
   shareLinkSchema,
   sharedFolderPageSchema,
+  uploadBatchResultSchema,
 } from '@dfs/shared'
 import { ApiClient } from './client.ts'
 import type { SuiteContext } from './context.ts'
@@ -24,7 +26,85 @@ export function shareTests({ describe, it, expect, owner, target }: SuiteContext
     return { token, client: new ApiClient(baseUrl, origin) }
   }
 
+  async function usedBytes(client: ApiClient): Promise<number> {
+    return (await client.call('GET', '/auth/me', sessionSchema)).user.usedBytes
+  }
+
+  async function listed(client: ApiClient, id: string) {
+    const { items } = await client.call('GET', '/shares', shareLinkPageSchema)
+    return items.find((item) => item.id === id)
+  }
+
   describe('share links (§7.5)', () => {
+    it('keeps a file link on its version when the file is replaced, and that version while the link works', async () => {
+      const client = await owner()
+      const root = await workspace(client)
+      const before = await usedBytes(client)
+      const first = await uploadFile(client, root.id, 'draft.txt', text('a'))
+      const link = await share(client, first.nodeId)
+      expect(link.version).toBe('current')
+      await uploadFile(client, root.id, 'draft.txt', text('bb'))
+      await uploadFile(client, root.id, 'draft.txt', text('ccc'))
+      // The current 3 bytes and the first byte the link serves: the second went.
+      expect((await usedBytes(client)) - before).toBe(4)
+
+      const { token, client: stranger } = visitor(link.url)
+      const opened = await stranger.call('GET', `/s/${token}`, publicShareSchema)
+      expect(opened).toMatchObject({ locked: false, root: { name: 'draft.txt', sizeBytes: 1 } })
+      const served = await stranger.fetch('GET', `/s/${token}/files/${first.nodeId}/content`)
+      expect(await served.text()).toBe('a')
+      const own = await client.fetch('GET', `/files/${first.nodeId}/content`)
+      expect(await own.text()).toBe('ccc')
+      expect(await listed(client, link.id)).toMatchObject({ version: 'earlier' })
+
+      // A new link shares the file as it is now.
+      expect(await share(client, first.nodeId)).toMatchObject({ version: 'current' })
+      // Once the old link stops working, its version goes.
+      await client.send('DELETE', `/shares/${link.id}`)
+      await target().settle()
+      expect((await usedBytes(client)) - before).toBe(3)
+      expect(await listed(client, link.id)).toMatchObject({ version: 'deleted' })
+    })
+
+    it('ends a file link whose version was deleted, for good', async () => {
+      const client = await owner()
+      const root = await workspace(client)
+      const first = await uploadFile(client, root.id, 'once.txt', text('one'))
+      const link = await share(client, first.nodeId, { maxDownloads: 1 })
+      const { token, client: stranger } = visitor(link.url)
+      await stranger.fetch('GET', `/s/${token}/files/${first.nodeId}/content`)
+      // Used up, the link serves nothing, so replacing the file deletes the version.
+      await uploadFile(client, root.id, 'once.txt', text('two'))
+      expect(await listed(client, link.id)).toMatchObject({ version: 'deleted' })
+      expect(
+        await client.error('PATCH', `/shares/${link.id}`, { json: { maxDownloads: 5 } }),
+      ).toEqual({ status: 409, code: 'share_version_deleted' })
+    })
+
+    it('can’t share a file before its upload completes', async () => {
+      const client = await owner()
+      const root = await workspace(client)
+      const { results } = await client.call('POST', '/uploads/batch', uploadBatchResultSchema, {
+        json: {
+          uploads: [
+            { parentId: root.id, name: 'pending.bin', sizeBytes: 5, mimeType: 'text/plain' },
+          ],
+        },
+      })
+      const [started] = results
+      if (!started?.ok) throw new Error('The upload was refused.')
+      expect(
+        await client.error('POST', '/shares', {
+          json: {
+            nodeId: started.session.nodeId,
+            expiresAt: null,
+            password: null,
+            maxDownloads: null,
+          },
+        }),
+      ).toEqual({ status: 409, code: 'not_ready' })
+    })
+
     it('shows a new link once, and lists it without it', async () => {
       const client = await owner()
       const root = await workspace(client)

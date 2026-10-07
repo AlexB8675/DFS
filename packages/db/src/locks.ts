@@ -3,7 +3,9 @@
 //
 // Transactions that write take their locks in one order, so none can wait on
 // another in a circle: the drive's tree lock, upload sessions, nodes (by id),
-// the user's row, dirty-folder markers (by id), and the journal lock last.
+// a file's earlier versions (by id), the user's row, dirty-folder markers (by
+// id), and the journal lock last. A share link's version is pinned under its
+// file's lock, so a completion that prunes versions waits for it or is seen.
 // Starting uploads takes a shared tree lock, then the user's row, and after it
 // only the key-share locks of foreign keys on nodes, which updates (such as
 // completing an upload) don't block.

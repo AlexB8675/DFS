@@ -12,7 +12,7 @@ import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
 import { requireAuth } from '../auth/access.ts'
 import { archiveEntries } from '../content/archive.ts'
-import { archiveQuery, parseRange, sendFile, sendZip } from '../content/send.ts'
+import { archiveQuery, requestedRange, sendFile, sendZip } from '../content/send.ts'
 import {
   countDownload,
   describeShare,
@@ -109,9 +109,14 @@ export function shareRoutes(app: FastifyInstance, _options: object, done: () => 
     async (request, reply) => {
       const { share, root } = await openShare(app, request, request.params.token)
       const node = await nodeInShare(app, root, request.params.id)
-      const file = await downloadableFile(app.db, node.id)
+      // A file link serves its own version, which may be an earlier one.
+      const file = await downloadableFile(
+        app.db,
+        node.id,
+        node.id === root.id ? share.version_id : null,
+      )
       // Only a request from byte 0 is a download; seeking in a video isn't (§7.5).
-      const range = parseRange(request.headers.range, file.size_bytes)
+      const range = requestedRange(request, file)
       if (
         request.method !== 'HEAD' &&
         (range === null || (range !== 'unsatisfiable' && range.start === 0))

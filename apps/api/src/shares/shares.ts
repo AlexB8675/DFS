@@ -24,6 +24,8 @@ interface ShareRow extends Record<string, unknown> {
   max_downloads: number | null
   download_count: number
   revoked_at: string | null
+  version_id: string | null
+  version: ShareLink['version']
 }
 
 export function tokenHash(token: string): Buffer {
@@ -49,10 +51,19 @@ export async function createShare(
   const token = randomBytes(16).toString('base64url')
   const passwordHash = input.password === null ? null : await hashPassword(input.password)
   const share = await app.db.transaction(async (tx) => {
+    // A file link keeps the version current now. Read under the file's lock,
+    // so a completing upload's pruning sees this link, or comes first.
+    const { rows } = await tx.execute<{ current_version_id: string | null }>(sql`
+      SELECT current_version_id FROM nodes WHERE id = ${node.id} FOR SHARE`)
+    const versionId = rows[0]?.current_version_id ?? null
+    if (node.kind === 'file' && versionId === null) {
+      throw new ApiError(409, 'not_ready', 'This file hasn’t finished uploading.')
+    }
     const [created] = await tx
       .insert(shareLinks)
       .values({
         nodeId: node.id,
+        versionId: node.kind === 'file' ? versionId : null,
         tokenHash: tokenHash(token),
         expiresAt: input.expiresAt ? new Date(input.expiresAt) : null,
         passwordHash,
@@ -82,11 +93,19 @@ export async function updateShare(
   const current = await ownShare(app, auth, id)
   if (current.revoked_at)
     throw new ApiError(409, 'share_revoked', 'A revoked link can’t be changed.')
+  if (current.version === 'deleted') throw versionGone()
   const passwordHash =
     changes.password === undefined || changes.password === null
       ? null
       : await hashPassword(changes.password)
   await app.db.transaction(async (tx) => {
+    // A link brought back to life (a later expiry, more downloads) must
+    // still have its version: hold it, so the janitor can't take it now.
+    if (current.version_id) {
+      const { rows } = await tx.execute(sql`
+        SELECT 1 FROM file_versions WHERE id = ${current.version_id} FOR KEY SHARE`)
+      if (rows.length === 0) throw versionGone()
+    }
     const updated = await tx
       .update(shareLinks)
       .set({
@@ -129,8 +148,23 @@ const SELECT_SHARE = sql`
   SELECT share.id, share.node_id, node.name AS node_name, node.kind AS node_kind,
     share.created_at::text AS created_at, share.expires_at::text AS expires_at,
     share.password_hash IS NOT NULL AS has_password, share.max_downloads, share.download_count,
-    share.revoked_at::text AS revoked_at
+    share.revoked_at::text AS revoked_at, share.version_id,
+    CASE
+      WHEN node.kind = 'folder' THEN NULL
+      WHEN share.version_id IS NULL THEN 'deleted'
+      WHEN share.version_id = node.current_version_id THEN 'current'
+      ELSE 'earlier'
+    END AS version
   FROM share_links share JOIN nodes node ON node.id = share.node_id`
+
+/** A file link whose version was deleted: it serves nothing, and can't be brought back. */
+function versionGone(): ApiError {
+  return new ApiError(
+    409,
+    'share_version_deleted',
+    'The version this link shared was deleted. Make a new link to share the file as it is now.',
+  )
+}
 
 async function ownShare(app: FastifyInstance, auth: Auth, id: string): Promise<ShareRow> {
   const { rows } = await app.db.execute<ShareRow>(sql`
@@ -154,5 +188,6 @@ function toShareLink(row: ShareRow, url: string | null): ShareLink {
     maxDownloads: row.max_downloads,
     downloadCount: row.download_count,
     revokedAt: iso(row.revoked_at),
+    version: row.version,
   }
 }

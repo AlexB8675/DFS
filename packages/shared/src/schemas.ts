@@ -329,6 +329,12 @@ export const shareLinkSchema = z.object({
   maxDownloads: z.number().int().positive().nullable(),
   downloadCount: z.number().int().min(0),
   revokedAt: timestamp.nullable(),
+  /**
+   * A file link serves the version current when it was made (§7.5): still
+   * the file's `current` one, an `earlier` one since the file was replaced,
+   * or `deleted`, and the link no longer works. `null` for a folder link.
+   */
+  version: z.enum(['current', 'earlier', 'deleted']).nullable(),
 })
 export type ShareLink = z.infer<typeof shareLinkSchema>
 export const shareLinkPageSchema = pageSchema(shareLinkSchema)

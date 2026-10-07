@@ -343,6 +343,7 @@ export function createSeed(version: number): MockState {
     maxDownloads: null,
     downloadCount: 0,
     revokedAt: null,
+    versionNo: nodes[nodeId]?.kind === 'file' ? 1 : null,
     ...fields,
   })
   const budget = Object.values(nodes).find((node) => node.name === 'Budget 2026.xlsx')?.id ?? root

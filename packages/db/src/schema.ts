@@ -366,6 +366,14 @@ export const shareLinks = pgTable(
     nodeId: uuid('node_id')
       .notNull()
       .references(() => nodes.id),
+    /**
+     * A file link's version: the one current when the link was made, which
+     * it serves however the file changes since, and which is kept while the
+     * link is active (§7.5, D20). `null` for a folder link, which follows its
+     * files; `null` on a file link once its version was deleted, and the
+     * link no longer works.
+     */
+    versionId: uuid('version_id').references(() => fileVersions.id, { onDelete: 'set null' }),
     /** SHA-256 of the link's token; the token itself is shown once (§7.5). */
     tokenHash: bytea('token_hash').notNull(),
     createdAt: timestamptz('created_at').notNull().defaultNow(),
@@ -381,6 +389,10 @@ export const shareLinks = pgTable(
   (t) => [
     uniqueIndex('share_links_token_hash').on(t.tokenHash),
     index('share_links_node_id').on(t.nodeId),
+    // Whether a version is still needed: a pruning looks it up (§6.4).
+    index('share_links_version_id')
+      .on(t.versionId)
+      .where(sql`${t.versionId} IS NOT NULL`),
   ],
 )
 

@@ -1,7 +1,7 @@
 import { dataChannels, refreshBlobUrls, refreshedUrls } from '@dfs/bot/storage'
 import { settleBlobs } from '@dfs/bot/testing'
 import { defineContractSuite, type ContractTarget } from '@dfs/contract'
-import { foldAllFolderStats, liveBytesDrift, storageChannels } from '@dfs/db'
+import { foldAllFolderStats, liveBytesDrift, purgeUnneededVersions, storageChannels } from '@dfs/db'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
 import { refreshUrlsSchema } from '@dfs/shared'
 import { DiscordBlobStore, LocalBlobStore, type BlobReader, type BlobStore } from '@dfs/storage'
@@ -16,7 +16,8 @@ import { seedUser } from './testing/seed.ts'
 // The contract suite (BACKEND.md §5) against the real API, over real HTTP,
 // once on local storage and once on Discord: a Discord in memory, with the
 // bot's uploader, its URL signing and the API's CDN reader. `settle` does what
-// the bot would: store staged blobs, fold folder sizes.
+// the bot would: delete versions no link serves, store staged blobs, fold
+// folder sizes.
 
 for (const storage of ['local', 'discord'] as const) {
   describe(`with ${storage} storage`, () => {
@@ -73,6 +74,9 @@ for (const storage of ['local', 'discord'] as const) {
         origin: setup.config.publicBaseUrl,
         owner,
         settle: async () => {
+          for (const versionId of await purgeUnneededVersions(app.db)) {
+            await app.staging.removeVersion(versionId)
+          }
           await settleBlobs({ db: app.db, staging: app.staging, store, sizes: app.config.sizes })
           await foldAllFolderStats(app.db)
           // Purges, packs and uploads have kept every blob's live bytes exact.

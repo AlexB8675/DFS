@@ -33,6 +33,7 @@ const STATUS_BADGES: Record<
   expired: { label: 'Expired', variant: 'secondary' },
   'used-up': { label: 'Limit reached', variant: 'secondary' },
   revoked: { label: 'Revoked', variant: 'outline' },
+  'version-deleted': { label: 'Version deleted', variant: 'outline' },
 }
 
 /** `/shared`: the user's public share links (§7.5). */
@@ -108,6 +109,14 @@ export function SharesPage() {
                         <span className="min-w-0 truncate" title={link.nodeName}>
                           {link.nodeName}
                         </span>
+                        {link.version === 'earlier' && (
+                          <span
+                            className="shrink-0 text-xs text-muted-foreground"
+                            title="The file was replaced since this link was made; the link still shares the version it was made for."
+                          >
+                            earlier version
+                          </span>
+                        )}
                         {link.hasPassword && (
                           <Lock
                             className="size-3.5 shrink-0 text-muted-foreground"
@@ -133,7 +142,7 @@ export function SharesPage() {
                       {link.maxDownloads !== null && ` / ${link.maxDownloads}`}
                     </td>
                     <td className="py-2.5 pr-5 text-right">
-                      {status !== 'revoked' && (
+                      {status !== 'revoked' && status !== 'version-deleted' && (
                         <Tooltip>
                           <TooltipTrigger asChild>
                             <Button

@@ -51,10 +51,12 @@ export function useRevokeShare() {
   })
 }
 
-export type ShareStatus = 'active' | 'expired' | 'revoked' | 'used-up'
+export type ShareStatus = 'active' | 'expired' | 'revoked' | 'used-up' | 'version-deleted'
 
 export function shareStatus(share: ShareLink, now: Date = new Date()): ShareStatus {
   if (share.revokedAt) return 'revoked'
+  // The version a file link served was deleted: it works no more (§7.5).
+  if (share.version === 'deleted') return 'version-deleted'
   if (share.expiresAt && new Date(share.expiresAt) <= now) return 'expired'
   if (share.maxDownloads !== null && share.downloadCount >= share.maxDownloads) return 'used-up'
   return 'active'

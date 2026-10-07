@@ -60,13 +60,22 @@ export function contentRoutes(app: FastifyInstance, _options: object, done: () =
   done()
 }
 
-/** A file's current version, if it can be read: uploaded, and not failed. */
-export async function downloadableFile(db: Executor, nodeId: string): Promise<DownloadableFile> {
+/**
+ * A file's current version, or the one given (a file link's, §7.5), if it
+ * can be read: uploaded, and not failed.
+ */
+export async function downloadableFile(
+  db: Executor,
+  nodeId: string,
+  versionId: string | null = null,
+): Promise<DownloadableFile> {
   const { rows } = await db.execute<DownloadableFile & { state: string | null; kind: string }>(sql`
     SELECT node.name, node.mime_type, node.kind, version.state::text AS state,
       version.id AS version_id, version.size_bytes::float8 AS size_bytes, version.chunk_size,
       version.chunk_count, version.wrapped_dek, version.key_id
-    FROM nodes node LEFT JOIN file_versions version ON version.id = node.current_version_id
+    FROM nodes node LEFT JOIN file_versions version
+      ON version.id = coalesce(${versionId}::uuid, node.current_version_id)
+        AND version.node_id = node.id
     WHERE node.id = ${nodeId}`)
   const [file] = rows
   if (file?.kind !== 'file') throw new ApiError(404, 'not_found', 'This item no longer exists.')

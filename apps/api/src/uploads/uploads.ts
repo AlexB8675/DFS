@@ -9,6 +9,7 @@ import {
   nodeRecords,
   nodes,
   purgeVersions,
+  unneededVersions,
   QUEUES,
   textArray,
   uploadSessions,
@@ -535,7 +536,7 @@ function uploadCompleted(): ApiError {
 /**
  * `POST /uploads/:id/complete`. The version becomes the file's current one
  * and its quota reservation turns into used bytes, in one transaction; its
- * frames go to the bot as blobs; versions past `VERSION_RETENTION` are purged.
+ * frames go to the bot as blobs; earlier versions no share link serves are purged.
  * Completing a completed upload changes nothing.
  *
  * With `partSha256`, every part's SHA-256 as the client read it, the parts
@@ -660,14 +661,16 @@ async function finishUpload(
     .set({ state: 'completed' })
     .where(eq(uploadSessions.id, upload.id))
 
-  // Old versions beyond retention go (D20), which frees their quota (D24).
-  const { rows: old } = await tx.execute<{ id: string }>(sql`
+  // Earlier versions go, freeing their quota (D20, D24), but for those an
+  // active share link serves: the janitor takes those when their links end.
+  const { rows: earlier } = await tx.execute<{ id: string }>(sql`
     SELECT id FROM file_versions
     WHERE node_id = ${upload.node_id} AND id <> ${upload.version_id}
-      AND state IN ('syncing', 'stored', 'failed', 'lost')
-    ORDER BY version_no DESC
-    OFFSET ${app.config.versionRetention}`)
-  const prunedIds = old.map((row) => row.id)
+      AND state IN ('syncing', 'stored', 'failed', 'lost')`)
+  const prunedIds = await unneededVersions(
+    tx,
+    earlier.map((row) => row.id),
+  )
   const pruneRecords = await purgeVersions(tx, auth.user.id, prunedIds)
 
   if (blobs.length > 0) {

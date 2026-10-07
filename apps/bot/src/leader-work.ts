@@ -9,6 +9,7 @@ import {
   PostgresSampler,
   pruneJournal,
   pruneMetrics,
+  purgeUnneededVersions,
   QUEUES,
   sampleSystem,
   textArray,
@@ -34,8 +35,9 @@ import { storeBlobs } from './uploader.ts'
 // store staged blobs, delete released ones (§6.4), clean up orphan messages
 // (§6.1), keep folder sizes current (§12.1), post the journal's batches to
 // #dfs-journal (§8), clean up after expired uploads and sessions, empty the
-// trash of what has been there too long (§6.4), and drop old metrics, audit
-// entries and journal records already posted.
+// trash of what has been there too long (§6.4), delete earlier versions once
+// no share link serves them (§7.5), and drop old metrics, audit entries and
+// journal records already posted.
 
 const FOLD_EVERY_MS = 2000
 const JANITOR_EVERY_MS = 10 * 60_000
@@ -185,6 +187,9 @@ export async function startLeaderWork(options: {
     repeat(JANITOR_EVERY_MS, log, 'dropping posted journal records', async () => {
       await pruneJournal(db)
     }),
+    repeat(JANITOR_EVERY_MS, log, 'deleting versions no link serves', async () => {
+      await dropUnneededVersions(db, staging)
+    }),
     repeat(JANITOR_EVERY_MS, log, 'emptying old trash', async () => {
       const items = await emptyOldTrash(db, staging, config.trashRetentionDays)
       if (items > 0) log.info({ items }, 'emptied items kept their days in the trash')
@@ -271,6 +276,14 @@ export async function cleanUp(db: Database, staging: Staging, now = Date.now()):
 export async function giveUpIdleUploads(db: Database, staging: Staging): Promise<void> {
   const versions = await abandonIdleUploads(db, IDLE_UPLOAD_MINUTES)
   for (const versionId of versions) await staging.removeVersion(versionId)
+}
+
+/**
+ * Deletes earlier versions whose share links have all stopped working (§7.5),
+ * and their staged frames.
+ */
+export async function dropUnneededVersions(db: Database, staging: Staging): Promise<void> {
+  for (const versionId of await purgeUnneededVersions(db)) await staging.removeVersion(versionId)
 }
 
 /**

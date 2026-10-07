@@ -185,7 +185,7 @@ export function uploadTests({ describe, it, expect, owner, target }: SuiteContex
       expect(await sha256Hex(content)).toBe(await sha256Hex(bytes))
     })
 
-    it('makes a new version when the name matches a file, and keeps both in the quota (D20, D24)', async () => {
+    it('makes a new version when the name matches a file; the one it replaced goes with its quota (D20, D24)', async () => {
       const client = await owner()
       const root = await workspace(client)
       const before = (await client.call('GET', '/auth/me', sessionSchema)).user.usedBytes
@@ -198,20 +198,9 @@ export function uploadTests({ describe, it, expect, owner, target }: SuiteContex
       expect(file).toMatchObject({ name: 'Notes.txt', sizeBytes: 11 })
       const page = await client.call('GET', `/nodes/${root.id}/children`, nodePageSchema)
       expect(page.items.map((node) => node.name)).toEqual(['Notes.txt'])
+      // No share link serves the first version, so only the second counts.
       const after = (await client.call('GET', '/auth/me', sessionSchema)).user.usedBytes
-      expect(after - before).toBe(16)
-    })
-
-    it('keeps three previous versions; older ones go, with their quota (D20, D24)', async () => {
-      const client = await owner()
-      const root = await workspace(client)
-      const before = (await client.call('GET', '/auth/me', sessionSchema)).user.usedBytes
-      for (const content of ['a', 'bb', 'ccc', 'dddd', 'eeeee']) {
-        await uploadFile(client, root.id, 'draft.txt', text(content))
-      }
-      // The current 5 bytes and the 4, 3 and 2 before them; the first is gone.
-      const after = (await client.call('GET', '/auth/me', sessionSchema)).user.usedBytes
-      expect(after - before).toBe(14)
+      expect(after - before).toBe(11)
     })
 
     it('answers per upload in a batch: a folder’s name, an invalid name, too big', async () => {
