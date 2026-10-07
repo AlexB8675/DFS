@@ -66,13 +66,15 @@ export async function purgeVersions(
   return versionIds.map((id) => ({ kind: 'version.purged', record: { id } }))
 }
 
-/** Whether a share link still serves this version: not revoked, expired or used up (§7.5). */
+/** A share link, aliased `link`, that still works: not revoked, expired or used up (§7.5). */
+export const WORKING_LINK = sql`link.revoked_at IS NULL
+  AND (link.expires_at IS NULL OR link.expires_at > now())
+  AND (link.max_downloads IS NULL OR link.download_count < link.max_downloads)`
+
+/** Whether a working share link serves this version. */
 function servedByLink(versionId: ReturnType<typeof sql>) {
   return sql`EXISTS (
-    SELECT 1 FROM share_links link
-    WHERE link.version_id = ${versionId} AND link.revoked_at IS NULL
-      AND (link.expires_at IS NULL OR link.expires_at > now())
-      AND (link.max_downloads IS NULL OR link.download_count < link.max_downloads))`
+    SELECT 1 FROM share_links link WHERE link.version_id = ${versionId} AND ${WORKING_LINK})`
 }
 
 /**

@@ -1,4 +1,4 @@
-import type { SyncState, UploadSession } from '@dfs/shared'
+import { splitExtension, type ExistingFile, type SyncState, type UploadSession } from '@dfs/shared'
 import { queryClient } from '@/app/query-client'
 import { invalidateListings } from '@/features/drive/cache'
 import { markFresh } from '@/features/drive/list-motion'
@@ -10,6 +10,7 @@ import {
   isActive,
   isSettled,
   useUploadStore,
+  type UploadConflict,
   type UploadItem,
   type UploadStatus,
 } from './upload-store'
@@ -78,10 +79,31 @@ const ENSURE_BATCH = 500
 /** Nodes per `POST /nodes/lookup`, the API's limit. */
 const LOOKUP_BATCH = 500
 
+/** What to do with an upload whose name a file in its folder already has (D20). */
+export type ConflictChoice =
+  | { action: 'replace' }
+  | { action: 'skip' }
+  /** Under `name`, or, left out, under the next numbered name: `name (2).txt`. */
+  | { action: 'keep'; name?: string }
+
+/** One drop of files: a choice made "for all" answers its later conflicts too. */
+interface Drop {
+  choice: ConflictChoice | null
+}
+
 interface Job {
   id: string
   file: File
   parentId: string
+  /** The name it is uploaded under: the file's own, or a copy's (`keep`). */
+  name: string
+  /** Whether a file with its name may become its new version (`replace`), or is asked about first. */
+  ifExists: 'ask' | 'replace'
+  drop: Drop
+  /** While `conflict`: the file its name matched. */
+  conflict: UploadConflict | null
+  /** The number in the name of a copy named automatically, so a taken one counts on. */
+  copyNumber: number | null
   status: UploadStatus
   session: UploadSession | null
   /** Parts the server has, as far as the engine knows. */
@@ -159,11 +181,17 @@ export class UploadEngine {
     if (files.length === 0) return
     const folderIds = await this.ensureFolders(parentId, files)
     const items: UploadItem[] = []
+    const drop: Drop = { choice: null }
     for (const { file, relativeDir } of files) {
       const job: Job = {
         id: crypto.randomUUID(),
         file,
         parentId: folderIds.get(relativeDir) ?? parentId,
+        name: file.name,
+        ifExists: 'ask',
+        drop,
+        conflict: null,
+        copyNumber: null,
         status: 'queued',
         session: null,
         doneParts: new Set(),
@@ -223,6 +251,28 @@ export class UploadEngine {
     this.cancelJobs([job])
   }
 
+  /**
+   * Answers an upload whose name a file in its folder has: replace that file
+   * with it (a new version), keep both, or skip it. `forAll` answers the
+   * others waiting too, and those of the same drops still to come; kept
+   * that way, they are named by number.
+   */
+  resolveConflict(id: string, choice: ConflictChoice, forAll = false): void {
+    const job = this.jobs.get(id)
+    if (job?.status !== 'conflict') return
+    const others = forAll
+      ? [...this.jobs.values()].filter((other) => other !== job && other.status === 'conflict')
+      : []
+    this.decide(job, choice)
+    if (forAll) {
+      const automatic: ConflictChoice = choice.action === 'keep' ? { action: 'keep' } : choice
+      for (const other of others) other.drop.choice = automatic
+      job.drop.choice = automatic
+      for (const other of others) this.decide(other, automatic)
+    }
+    this.pump()
+  }
+
   cancelAll(): void {
     this.cancelJobs([...this.jobs.values()])
   }
@@ -234,7 +284,7 @@ export class UploadEngine {
   clearFinished(): void {
     const removed = new Set<string>()
     for (const job of this.jobs.values()) {
-      if (isActive(job.status) || job.status === 'paused') continue
+      if (isActive(job.status) || job.status === 'paused' || job.status === 'conflict') continue
       if (job.status === 'done' && !isSettled(job.syncState)) continue
       removed.add(job.id)
       this.jobs.delete(job.id)
@@ -680,9 +730,10 @@ export class UploadEngine {
         this.transport.createSessions(
           batch.map((job) => ({
             parentId: job.parentId,
-            name: job.file.name,
+            name: job.name,
             sizeBytes: job.file.size,
             mimeType: job.file.type || 'application/octet-stream',
+            ifExists: job.ifExists,
             ...ownModifiedAt(job.file),
           })),
         ),
@@ -690,7 +741,9 @@ export class UploadEngine {
       batch.forEach((job, index) => {
         const result = results[index]
         if (!result?.ok) {
-          if (job.status === 'queued') this.fail(job, result?.error.message ?? 'Could not start.')
+          if (job.status !== 'queued') return
+          if (result?.existing) this.nameTaken(job, result.existing)
+          else this.fail(job, result?.error.message ?? 'Could not start.')
           return
         }
         job.session = result.session
@@ -739,6 +792,51 @@ export class UploadEngine {
       for (const id of [parentId, ...folderIds.values()]) this.refreshFolder(id)
     }
     return folderIds
+  }
+
+  /** Its name is a file's: answered by its drop's choice for all, or it waits for one. */
+  private nameTaken(job: Job, existing: ExistingFile): void {
+    // Its batch is answered: it may go back in line before the batch is done.
+    this.preparingSessions.delete(job)
+    if (job.drop.choice) {
+      this.decide(job, job.drop.choice, existing)
+      return
+    }
+    const { base, extension } = splitExtension(job.file.name)
+    job.status = 'conflict'
+    job.conflict = {
+      versions: existing.versions,
+      links: existing.links,
+      suggestedName: `${base} (${String(Math.max(1, existing.versions))})${extension}`,
+    }
+    this.publish(job)
+  }
+
+  /** Acts on a choice: back in line to replace or under a copy's name, or skipped. */
+  private decide(job: Job, choice: ConflictChoice, existing?: ExistingFile): void {
+    const versions = existing?.versions ?? job.conflict?.versions ?? 0
+    job.conflict = null
+    if (choice.action === 'skip') {
+      this.cancelJobs([job])
+      job.error = `Skipped: “${job.name}” already exists`
+      this.publish(job)
+      return
+    }
+    if (choice.action === 'replace') {
+      job.ifExists = 'replace'
+    } else if (choice.name !== undefined) {
+      job.name = choice.name
+      job.copyNumber = null
+    } else {
+      // Numbered from the file's versions, or on from a copy's name also taken.
+      const number = job.copyNumber === null ? Math.max(1, versions) : job.copyNumber + 1
+      const { base, extension } = splitExtension(job.file.name)
+      job.copyNumber = number
+      job.name = `${base} (${String(number)})${extension}`
+    }
+    job.status = 'queued'
+    this.requeue(job)
+    this.publish(job)
   }
 
   /** Deletes the server side of an upload that won't finish, so no stuck file is left behind. */
@@ -926,7 +1024,9 @@ export class UploadEngine {
 
 function toItem(job: Job): Omit<UploadItem, 'id' | 'file' | 'parentId'> {
   return {
+    name: job.name,
     status: job.status,
+    conflict: job.conflict,
     uploadedBytes: job.uploadedBytes,
     nodeId: job.session?.nodeId ?? null,
     syncState: job.syncState,

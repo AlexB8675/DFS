@@ -231,6 +231,49 @@ export function uploadTests({ describe, it, expect, owner, target }: SuiteContex
       ])
     })
 
+    it('asks before replacing: a name a file has answers file_exists, with that file (D20)', async () => {
+      const client = await owner()
+      const root = await workspace(client)
+      const first = await uploadFile(client, root.id, 'Report.txt', text('one'))
+      const ask = (name: string) => ({
+        parentId: root.id,
+        name,
+        sizeBytes: 3,
+        mimeType: 'text/plain',
+        ifExists: 'ask' as const,
+      })
+      const batch = async (names: string[]) =>
+        (
+          await client.call('POST', '/uploads/batch', uploadBatchResultSchema, {
+            json: { uploads: names.map(ask) },
+          })
+        ).results
+
+      const [taken, fresh, again] = await batch(['report.TXT', 'new.txt', 'NEW.txt'])
+      expect(taken).toMatchObject({
+        ok: false,
+        error: { code: 'file_exists' },
+        existing: { nodeId: first.nodeId, versions: 1, links: 0 },
+      })
+      expect(fresh).toMatchObject({ ok: true, session: { isNewVersion: false } })
+      // Taken earlier in the same batch: by a file still uploading, no version yet.
+      expect(again).toMatchObject({
+        ok: false,
+        error: { code: 'file_exists' },
+        existing: { nodeId: fresh?.ok ? fresh.session.nodeId : '', versions: 0 },
+      })
+      // Nothing became a version of it.
+      const own = await client.fetch('GET', `/files/${first.nodeId}/content`)
+      expect(await own.text()).toBe('one')
+
+      // Its working links are counted: they keep the file as it is now (§7.5).
+      await client.send('POST', '/shares', {
+        json: { nodeId: first.nodeId, expiresAt: null, password: null, maxDownloads: null },
+      })
+      const [linked] = await batch(['Report.txt'])
+      expect(linked).toMatchObject({ existing: { links: 1 } })
+    })
+
     it('makes one file of a name given twice in a batch, a version each', async () => {
       const client = await owner()
       const root = await workspace(client)

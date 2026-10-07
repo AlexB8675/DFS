@@ -10,6 +10,7 @@ import {
   nodes,
   purgeVersions,
   unneededVersions,
+  WORKING_LINK,
   QUEUES,
   textArray,
   uploadSessions,
@@ -22,6 +23,7 @@ import {
   formatBytes,
   nameKey,
   type CreateUploadInput,
+  type ExistingFile,
   type UploadBatchResult,
   type UploadSession,
   type UploadSessionStatus,
@@ -81,9 +83,23 @@ export async function createUploads(
   const outcomes = await app.db.transaction((tx) => startUploads(app, tx, auth, inputs))
   return outcomes.map((outcome) =>
     outcome instanceof ApiError
-      ? { ok: false, error: { code: outcome.code, message: outcome.message } }
+      ? {
+          ok: false,
+          error: { code: outcome.code, message: outcome.message },
+          ...(outcome instanceof FileExists && { existing: outcome.existing }),
+        }
       : { ok: true, session: outcome },
   )
+}
+
+/** An upload that asked first (`ifExists: 'ask'`) found its name taken by a file. */
+class FileExists extends ApiError {
+  readonly existing: ExistingFile
+
+  constructor(name: string, existing: ExistingFile) {
+    super(409, 'file_exists', `“${name}” already exists here.`)
+    this.existing = existing
+  }
 }
 
 /** `POST /uploads`. */
@@ -164,9 +180,16 @@ async function startUploads(
   let free = quota[0]?.free ?? 0
   const existing = await namesInFolders(tx, plans)
   const accepted: Plan[] = []
+  // Uploads that asked first and found their name taken, by a file here or
+  // earlier in this batch: they get that file back, not a version of it.
+  const asked: { plan: Plan; fileId: string | null }[] = []
+  const taken = new Set<string>()
   for (const plan of plans) {
-    if (existing.get(plan.key)?.kind === 'folder') {
+    const found = existing.get(plan.key)
+    if (found?.kind === 'folder') {
       fail(plan.index, nameConflict(plan.name))
+    } else if (plan.input.ifExists === 'ask' && (found || taken.has(plan.key))) {
+      asked.push({ plan, fileId: found?.id ?? null })
     } else if (plan.input.sizeBytes > free) {
       fail(
         plan.index,
@@ -175,6 +198,7 @@ async function startUploads(
     } else {
       free -= plan.input.sizeBytes
       accepted.push(plan)
+      taken.add(plan.key)
     }
   }
 
@@ -216,6 +240,15 @@ async function startUploads(
       if (found.kind === 'file') fileOf.set(key, found.id)
     }
   }
+  // One that asked first doesn't become a version of a file named so meanwhile.
+  for (const plan of raced) {
+    const fileId = fileOf.get(plan.key)
+    if (plan.input.ifExists === 'ask' && fileId) {
+      asked.push({ plan, fileId })
+      accepted.splice(accepted.indexOf(plan), 1)
+    }
+  }
+  await answerAsked(tx, asked, fileOf, fail)
   const newFileIds = new Set(created.map((node) => node.id))
 
   // Versions, numbered per file in turn: only starting an upload makes them.
@@ -290,6 +323,41 @@ async function startUploads(
     created.flatMap((node) => node.parentId ?? []),
   )
   return outcomes
+}
+
+/**
+ * Answers each upload that asked first with the file its name matched: how
+ * many versions it has had, and how many working links serve its current one.
+ */
+async function answerAsked(
+  tx: Executor,
+  asked: { plan: Plan; fileId: string | null }[],
+  fileOf: ReadonlyMap<string, string>,
+  fail: (index: number, error: unknown) => void,
+): Promise<void> {
+  if (asked.length === 0) return
+  const fileIdOf = ({ plan, fileId }: (typeof asked)[number]) => fileId ?? fileOf.get(plan.key)
+  const ids = [...new Set(asked.flatMap((upload) => fileIdOf(upload) ?? []))]
+  const { rows } = await tx.execute<{ id: string; versions: number; links: number }>(sql`
+    SELECT node.id,
+      coalesce((SELECT max(version_no) FROM file_versions WHERE node_id = node.id), 0) AS versions,
+      (SELECT count(*) FROM share_links link
+        WHERE link.version_id = node.current_version_id AND ${WORKING_LINK})::int AS links
+    FROM nodes node WHERE node.id = ANY(${uuidArray(ids)})`)
+  const files = new Map(rows.map((row) => [row.id, row]))
+  for (const upload of asked) {
+    const file = files.get(fileIdOf(upload) ?? '')
+    fail(
+      upload.plan.index,
+      file
+        ? new FileExists(upload.plan.name, {
+            nodeId: file.id,
+            versions: file.versions,
+            links: file.links,
+          })
+        : nameConflict(upload.plan.name),
+    )
+  }
 }
 
 /** What these uploads' names already are in their folders: a file, or a folder in the way. */

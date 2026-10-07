@@ -218,7 +218,23 @@ export const createUploadSchema = z.object({
    * its "Modified" once the upload completes; left out when unknown.
    */
   modifiedAt: timestamp.optional(),
+  /**
+   * When the name matches a file in the folder: make a new version of it
+   * (`replace`, the default, D20), or don't, and answer `file_exists` with
+   * that file (`ask`), so the client can ask its user first.
+   */
+  ifExists: z.enum(['ask', 'replace']).optional(),
 })
+
+/** The file an upload's name matched, when it asked first (`ifExists: 'ask'`). */
+export const existingFileSchema = z.object({
+  nodeId: id,
+  /** How many versions it has had: a copy is named from it, `name (3).txt`. */
+  versions: z.number().int().min(0),
+  /** Working share links to its current version, which keep serving it if it is replaced (§7.5). */
+  links: z.number().int().min(0),
+})
+export type ExistingFile = z.infer<typeof existingFileSchema>
 export type CreateUploadInput = z.infer<typeof createUploadSchema>
 
 export const uploadSessionSchema = z.object({
@@ -246,7 +262,12 @@ export const uploadBatchResultSchema = z.object({
   results: z.array(
     z.discriminatedUnion('ok', [
       z.object({ ok: z.literal(true), session: uploadSessionSchema }),
-      z.object({ ok: z.literal(false), error: apiErrorSchema.shape.error }),
+      z.object({
+        ok: z.literal(false),
+        error: apiErrorSchema.shape.error,
+        /** With `file_exists`: the file the name matched. */
+        existing: existingFileSchema.optional(),
+      }),
     ]),
   ),
 })

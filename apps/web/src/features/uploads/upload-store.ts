@@ -2,7 +2,24 @@ import type { SyncState } from '@dfs/shared'
 import { create } from 'zustand'
 import { createStore, type StoreApi } from 'zustand/vanilla'
 
-export type UploadStatus = 'queued' | 'uploading' | 'paused' | 'done' | 'failed' | 'canceled'
+export type UploadStatus =
+  | 'queued'
+  | 'uploading'
+  | 'paused'
+  | 'done'
+  | 'failed'
+  | 'canceled'
+  /** Its name is a file's in its folder: it waits for its user to choose (D20). */
+  | 'conflict'
+
+/** The file an upload's name matched, and what the dialog offers as the copy's name. */
+export interface UploadConflict {
+  /** How many versions the file has had. */
+  versions: number
+  /** Working share links to its current version, which keep serving it if it is replaced. */
+  links: number
+  suggestedName: string
+}
 
 /** One file in the upload panel. The upload engine owns the real state and publishes it here. */
 export interface UploadItem {
@@ -10,7 +27,11 @@ export interface UploadItem {
   file: File
   /** Folder the file is uploaded into. */
   parentId: string
+  /** The name it is uploaded under: the file's own, or the one chosen for a copy. */
+  name: string
   status: UploadStatus
+  /** While `conflict`: the file its name matched. */
+  conflict: UploadConflict | null
   uploadedBytes: number
   /** The file's node, once the server created its upload session. */
   nodeId: string | null
@@ -36,6 +57,8 @@ interface UploadState {
   /** Stable across progress updates; each row subscribes to its own store. */
   items: UploadEntry[]
   summary: UploadSummary
+  /** Uploads waiting for their user to choose, in the order they came. */
+  conflicts: string[]
   /** Recent upload speed, for the time-left estimate. */
   bytesPerSecond: number
   /** Whether the panel shows; closed, the header's button brings it back. */
@@ -52,11 +75,13 @@ interface UploadState {
 /** Progress costs O(changed uploads), independent of the size of the queue. */
 export function createUploadStore() {
   const entries = new Map<string, UploadEntry>()
+  const conflicts = new Set<string>()
   const totals: UploadTotals = {
     totalBytes: 0,
     uploadedBytes: 0,
     active: 0,
     paused: 0,
+    conflicts: 0,
     done: 0,
     syncing: 0,
     failed: 0,
@@ -66,12 +91,13 @@ export function createUploadStore() {
     total: entries.size,
     active: totals.active,
     paused: totals.paused,
+    conflicts: totals.conflicts,
     done: totals.done,
     syncing: totals.syncing,
     failed: totals.failed,
     progress:
       totals.totalBytes === 0
-        ? totals.active + totals.paused === 0
+        ? totals.active + totals.paused + totals.conflicts === 0
           ? 1
           : 0
         : totals.uploadedBytes / totals.totalBytes,
@@ -80,6 +106,7 @@ export function createUploadStore() {
   return create<UploadState>()((set) => ({
     items: [],
     summary: summary(),
+    conflicts: [],
     bytesPerSecond: 0,
     open: false,
     collapsed: false,
@@ -115,10 +142,17 @@ export function createUploadStore() {
           continue
         adjust(totals, previous, -1)
         entry.store.setState(change)
-        adjust(totals, entry.store.getState(), 1)
+        const next = entry.store.getState()
+        adjust(totals, next, 1)
+        if (next.status === 'conflict') conflicts.add(id)
+        else conflicts.delete(id)
         changed = true
       }
-      set((state) => ({ bytesPerSecond, summary: changed ? summary() : state.summary }))
+      set((state) => ({
+        bytesPerSecond,
+        summary: changed ? summary() : state.summary,
+        conflicts: changed ? [...conflicts] : state.conflicts,
+      }))
     },
     remove: (ids) => {
       let removed = false
@@ -127,12 +161,14 @@ export function createUploadStore() {
         if (!entry) continue
         adjust(totals, entry.store.getState(), -1)
         entries.delete(id)
+        conflicts.delete(id)
         removed = true
       }
       if (removed)
         set((state) => ({
           items: state.items.filter((item) => !ids.has(item.id)),
           summary: summary(),
+          conflicts: [...conflicts],
         }))
     },
     setOpen: (open) => {
@@ -151,6 +187,7 @@ interface UploadTotals {
   uploadedBytes: number
   active: number
   paused: number
+  conflicts: number
   done: number
   syncing: number
   failed: number
@@ -163,6 +200,7 @@ function adjust(totals: UploadTotals, item: UploadItem, direction: 1 | -1): void
   totals.uploadedBytes += direction * item.uploadedBytes
   if (isActive(item.status)) totals.active += direction
   if (item.status === 'paused') totals.paused += direction
+  if (item.status === 'conflict') totals.conflicts += direction
   if (item.status === 'done') {
     totals.done += direction
     if (!isSettled(item.syncState)) totals.syncing += direction
@@ -177,9 +215,9 @@ export function isActive(status: UploadStatus): boolean {
   return status === 'queued' || status === 'uploading'
 }
 
-/** Not finished yet, including paused uploads. */
+/** Not finished yet, including paused uploads and those waiting for a choice. */
 export function isPending(status: UploadStatus): boolean {
-  return isActive(status) || status === 'paused'
+  return isActive(status) || status === 'paused' || status === 'conflict'
 }
 
 /** Whether the second phase is over, one way or the other. */
@@ -191,6 +229,8 @@ export interface UploadSummary {
   total: number
   active: number
   paused: number
+  /** Waiting for their user to choose: their names are files' in their folders. */
+  conflicts: number
   done: number
   /** Uploaded, still on their way to Discord. */
   syncing: number
@@ -206,6 +246,7 @@ export function summarize(items: readonly UploadItem[]): UploadSummary {
   let uploadedBytes = 0
   let active = 0
   let paused = 0
+  let conflicts = 0
   let done = 0
   let syncing = 0
   let failed = 0
@@ -216,6 +257,7 @@ export function summarize(items: readonly UploadItem[]): UploadSummary {
     uploadedBytes += item.uploadedBytes
     if (isActive(item.status)) active += 1
     if (item.status === 'paused') paused += 1
+    if (item.status === 'conflict') conflicts += 1
     if (item.status === 'done') {
       done += 1
       if (!isSettled(item.syncState)) syncing += 1
@@ -223,12 +265,13 @@ export function summarize(items: readonly UploadItem[]): UploadSummary {
     if (item.status === 'failed') failed += 1
     if (isPending(item.status)) remainingBytes += item.file.size - item.uploadedBytes
   }
-  const pending = active + paused
+  const pending = active + paused + conflicts
   const progress = totalBytes === 0 ? (pending === 0 ? 1 : 0) : uploadedBytes / totalBytes
   return {
     total: items.length,
     active,
     paused,
+    conflicts,
     done,
     syncing,
     failed,

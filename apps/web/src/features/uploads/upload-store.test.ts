@@ -12,12 +12,14 @@ function item(
     id: crypto.randomUUID(),
     file: new File([new Uint8Array(size)], 'file.bin'),
     parentId: 'folder',
+    name: 'file.bin',
     status,
     uploadedBytes,
     nodeId: null,
     syncState,
     retrying: false,
     pausedUntil: null,
+    conflict: null,
     error: null,
   }
 }

@@ -53,6 +53,8 @@ function fakeApi() {
     sent,
     streamed,
     attempts: new Map<string, number>(),
+    /** Names files in the folder already have, with their versions: an upload asking first is told. */
+    existing: new Map<string, number>(),
   }
 
   const held = <T extends { release: () => void }>(
@@ -92,6 +94,14 @@ function fakeApi() {
     createSessions: vi.fn<UploadTransport['createSessions']>((uploads) =>
       Promise.resolve(
         uploads.map((upload) => {
+          const versions = api.existing.get(upload.name.toLowerCase())
+          if (versions !== undefined && upload.ifExists === 'ask') {
+            return {
+              ok: false as const,
+              error: { code: 'file_exists', message: `“${upload.name}” already exists here.` },
+              existing: { nodeId: crypto.randomUUID(), versions, links: 1 },
+            }
+          }
           const session = {
             uploadId: crypto.randomUUID(),
             nodeId: crypto.randomUUID(),
@@ -830,6 +840,75 @@ describe('UploadEngine', () => {
       '2024-03-05T06:07:08.000Z',
       undefined,
     ])
+  })
+
+  describe('a name a file already has (D20)', () => {
+    const asked = (transport: UploadTransport) =>
+      vi.mocked(transport.createSessions).mock.calls.flatMap(([uploads]) => uploads)
+
+    it('asks first, and replaces the file only when told to', async () => {
+      const { api, transport } = fakeApi()
+      api.existing.set('report.pdf', 2)
+      const engine = new UploadEngine(transport)
+      await engine.enqueue('folder', [file('report.pdf', 10)])
+      await vi.waitFor(() => {
+        expect(item('report.pdf')).toMatchObject({
+          status: 'conflict',
+          conflict: { versions: 2, links: 1, suggestedName: 'report (2).pdf' },
+        })
+      })
+      expect(useUploadStore.getState().conflicts).toEqual([item('report.pdf').id])
+
+      engine.resolveConflict(item('report.pdf').id, { action: 'replace' })
+      await vi.waitFor(() => {
+        expect(item('report.pdf').status).toBe('done')
+      })
+      expect(asked(transport).map((upload) => upload.ifExists)).toEqual(['ask', 'replace'])
+      expect(useUploadStore.getState().conflicts).toEqual([])
+    })
+
+    it('keeps both under the name chosen, or skips the file', async () => {
+      const { api, transport } = fakeApi()
+      api.existing.set('notes.txt', 1)
+      api.existing.set('photo.jpg', 1)
+      const engine = new UploadEngine(transport)
+      await engine.enqueue('folder', [file('notes.txt', 5), file('photo.jpg', 5)])
+      await vi.waitFor(() => {
+        expect(useUploadStore.getState().conflicts).toHaveLength(2)
+      })
+
+      engine.resolveConflict(item('notes.txt').id, { action: 'keep', name: 'notes (draft).txt' })
+      engine.resolveConflict(item('photo.jpg').id, { action: 'skip' })
+      await vi.waitFor(() => {
+        expect(item('notes.txt')).toMatchObject({ status: 'done', name: 'notes (draft).txt' })
+      })
+      expect(item('photo.jpg')).toMatchObject({
+        status: 'canceled',
+        error: 'Skipped: “photo.jpg” already exists',
+      })
+      expect(asked(transport).at(-1)).toMatchObject({ name: 'notes (draft).txt', ifExists: 'ask' })
+    })
+
+    it('answers the others of a drop with a choice made for all, numbering copies on', async () => {
+      const { api, transport } = fakeApi()
+      api.existing.set('a.txt', 3)
+      api.existing.set('b.txt', 1)
+      api.existing.set('b (1).txt', 1)
+      const engine = new UploadEngine(transport)
+      await engine.enqueue('folder', [file('a.txt', 1), file('b.txt', 1)])
+      await vi.waitFor(() => {
+        expect(useUploadStore.getState().conflicts).toHaveLength(2)
+      })
+
+      engine.resolveConflict(item('a.txt').id, { action: 'keep' }, true)
+      await vi.waitFor(() => {
+        expect(items().map((upload) => [upload.name, upload.status])).toEqual([
+          ['a (3).txt', 'done'],
+          // b (1).txt is taken too: the next number.
+          ['b (2).txt', 'done'],
+        ])
+      })
+    })
   })
 
   it('cancels an upload paused for 5 hours, and says why', async () => {

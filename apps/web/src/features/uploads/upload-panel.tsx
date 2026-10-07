@@ -42,7 +42,7 @@ export function UploadPanel() {
   const setOpen = useUploadStore((state) => state.setOpen)
   const collapsed = useUploadStore((state) => state.collapsed)
   const setCollapsed = useUploadStore((state) => state.setCollapsed)
-  const pending = summary.active + summary.paused > 0
+  const pending = summary.active + summary.paused + summary.conflicts > 0
   useLeaveWarning(pending)
 
   if (!open || items.length === 0) return null
@@ -175,6 +175,9 @@ export function UploadsButton() {
 
 function title(summary: UploadSummary): string {
   if (summary.active > 0) return `Uploading ${formatCount(summary.active, 'file')}`
+  if (summary.conflicts > 0) {
+    return `${formatCount(summary.conflicts, 'file')} already ${summary.conflicts === 1 ? 'exists' : 'exist'}`
+  }
   if (summary.paused > 0) return `${formatCount(summary.paused, 'upload')} paused`
   if (summary.failed > 0) return `${summary.done} uploaded, ${summary.failed} failed`
   if (summary.syncing > 0) return `Syncing ${formatCount(summary.syncing, 'file')} to Discord`
@@ -190,6 +193,7 @@ function subtitle(summary: UploadSummary, bytesPerSecond: number): string {
     const left = formatDuration(summary.remainingBytes / bytesPerSecond)
     return `${percent} · ${formatBytes(bytesPerSecond)}/s · ${left} left`
   }
+  if (summary.conflicts > 0) return `${percent} · waiting for your choice`
   if (summary.paused > 0) return `${percent} · paused`
   if (summary.syncing > 0) return 'Uploaded. They reach Discord even if you close this page.'
   return 'Everything is stored on Discord.'
@@ -233,12 +237,12 @@ function UploadRow({ entry }: { entry: UploadEntry }) {
   return (
     <div role="listitem" className="group/row flex h-full items-center gap-3 pr-2 pl-4">
       <NodeIcon
-        node={{ kind: 'file', name: item.file.name, mimeType: item.file.type || null }}
+        node={{ kind: 'file', name: item.name, mimeType: item.file.type || null }}
         className="size-5 shrink-0"
       />
       <div className="min-w-0 flex-1">
-        <p className="truncate text-sm" title={item.file.name}>
-          {item.file.name}
+        <p className="truncate text-sm" title={item.name}>
+          {item.name}
         </p>
         <p
           className={cn(
@@ -257,7 +261,7 @@ function UploadRow({ entry }: { entry: UploadEntry }) {
 }
 
 function UploadRowActions({ item }: { item: UploadItem }) {
-  const name = item.file.name
+  const name = item.name
   const pause = (
     <IconButton
       icon={Pause}
@@ -343,6 +347,8 @@ function UploadRowActions({ item }: { item: UploadItem }) {
           aria-label="Syncing to Discord"
         />
       )
+    case 'conflict':
+      return <div className="flex">{cancel}</div>
     case 'canceled':
       return null
   }
@@ -427,6 +433,8 @@ function statusText(item: UploadItem): string {
       }
     case 'failed':
       return item.error ?? 'Upload failed'
+    case 'conflict':
+      return 'Already exists here · replace, keep both or skip?'
     case 'canceled':
       return item.error ?? 'Canceled'
   }

@@ -4,6 +4,7 @@ import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/
 import { DragLayer } from '@/features/drag/drag-layer'
 import { DriveDialogs } from '@/features/drive/dialogs/drive-dialogs'
 import { useLiveEvents } from '@/features/live-events/use-live-events'
+import { UploadConflictDialog } from '@/features/uploads/upload-conflict-dialog'
 import { UploadPanel } from '@/features/uploads/upload-panel'
 import { usePreferences } from '@/lib/preferences'
 import { Header } from './header'
@@ -48,6 +49,7 @@ export function AppShell() {
         </main>
       </div>
       <UploadPanel />
+      <UploadConflictDialog />
       <DriveDialogs />
       <DragLayer />
     </div>

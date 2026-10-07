@@ -237,6 +237,7 @@ export const handlers = [
           input.sizeBytes,
           input.mimeType,
           input.modifiedAt,
+          input.ifExists,
         )
       },
       { status: 201 },

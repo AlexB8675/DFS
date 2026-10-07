@@ -10,12 +10,14 @@ for (const count of [10_000, 100_000]) {
       id: String(index),
       file,
       parentId: 'folder',
+      name: 'file.bin',
       status: 'uploading',
       uploadedBytes: 0,
       nodeId: null,
       syncState: null,
       retrying: false,
       pausedUntil: null,
+      conflict: null,
       error: null,
     }))
     const store = createUploadStore()

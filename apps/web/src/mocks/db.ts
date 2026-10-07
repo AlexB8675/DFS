@@ -10,6 +10,7 @@ import {
   type ChangePasswordInput,
   type CreateUploadInput,
   type DriveNode,
+  type ExistingFile,
   type LoginInput,
   type NodeKind,
   type NodePath,
@@ -156,6 +157,16 @@ export class MockApiError extends Error {
     super(message)
     this.status = status
     this.code = code
+  }
+}
+
+/** An upload that asked first (`ifExists: 'ask'`) found its name taken by a file. */
+export class MockFileExists extends MockApiError {
+  readonly existing: ExistingFile
+
+  constructor(name: string, existing: ExistingFile) {
+    super(409, 'file_exists', `“${name}” already exists here.`)
+    this.existing = existing
   }
 }
 
@@ -639,11 +650,16 @@ export class MockDb {
           input.sizeBytes,
           input.mimeType,
           input.modifiedAt,
+          input.ifExists,
         )
         return { ok: true as const, session }
       } catch (error) {
         if (!(error instanceof MockApiError)) throw error
-        return { ok: false as const, error: { code: error.code, message: error.message } }
+        return {
+          ok: false as const,
+          error: { code: error.code, message: error.message },
+          ...(error instanceof MockFileExists && { existing: error.existing }),
+        }
       }
     })
   }
@@ -659,11 +675,24 @@ export class MockDb {
     sizeBytes: number,
     mimeType: string,
     modifiedAt?: string,
+    ifExists: 'ask' | 'replace' = 'replace',
   ): UploadSession {
     this.requireFolder(parentId)
     const name = checkedName(rawName)
     const existing = this.childrenOf(parentId).find((node) => nameKey(node.name) === nameKey(name))
     if (existing?.kind === 'folder') throw nameConflict(name)
+    if (existing && ifExists === 'ask') {
+      // A file still on its first upload has had no version yet.
+      const versions = existing.syncState === 'uploading' ? 0 : (existing.versionNo ?? 1)
+      const links = this.state.shares.filter(
+        (share) => share.versionNo === (existing.versionNo ?? 1) && share.nodeId === existing.id,
+      )
+      throw new MockFileExists(name, {
+        nodeId: existing.id,
+        versions,
+        links: links.filter((share) => isWorking(share, Date.now())).length,
+      })
+    }
     const user = this.currentUser()
     if (this.usedBytes(user.id) + sizeBytes > user.quotaBytes) {
       throw new MockApiError(507, 'quota_exceeded', `Not enough storage left for “${rawName}”.`)
@@ -1030,13 +1059,7 @@ export class MockDb {
     const now = Date.now()
     const served = new Set(
       this.state.shares
-        .filter(
-          (share) =>
-            share.nodeId === node.id &&
-            !share.revokedAt &&
-            !(share.expiresAt && new Date(share.expiresAt).getTime() <= now) &&
-            !(share.maxDownloads !== null && share.downloadCount >= share.maxDownloads),
-        )
+        .filter((share) => share.nodeId === node.id && isWorking(share, now))
         .map((share) => share.versionNo),
     )
     for (const version of node.earlierVersions) {
@@ -1362,6 +1385,15 @@ export class MockDb {
 /** What a mock file contains: a line of text, since the mock stores no bytes. */
 function mockContent(node: MockNode): string {
   return `Mock content of “${node.name}” (${node.sizeBytes} bytes in the real file).\n`
+}
+
+/** A share link that still works: not revoked, expired or used up (§7.5). */
+function isWorking(share: MockShare, now: number): boolean {
+  return (
+    !share.revokedAt &&
+    !(share.expiresAt && new Date(share.expiresAt).getTime() <= now) &&
+    !(share.maxDownloads !== null && share.downloadCount >= share.maxDownloads)
+  )
 }
 
 export function isVisible(node: MockNode): boolean {
