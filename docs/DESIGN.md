@@ -80,6 +80,8 @@ flowchart LR
             PG[("PostgreSQL 18<br/>metadata + pg-boss queue")]
             STAGE[["Staging volume<br/>encrypted frames/blobs only"]]
             CACHE[["Frame cache<br/>LRU, encrypted"]]
+            MEDIA["Media ×1<br/>ffmpeg, no secrets<br/>probe, remux, transcode"]
+            MCACHE[["Media cache<br/>encrypted, key in memory"]]
         end
     end
 
@@ -98,6 +100,8 @@ flowchart LR
     BOT -- "outbound REST + Gateway" --> GUILD
     API -- "outbound GET (Range)" --> CDN
     API <--> CACHE
+    API <-->|"plaintext of one file, segments"| MEDIA
+    MEDIA <--> MCACHE
 ```
 
 ### 3.1 Services
@@ -108,8 +112,9 @@ flowchart LR
 | **api** | Internal | 1…N (stateless) | HTTP API, authentication, sessions, the file-system metadata (tree operations), upload sessions, **encryption/decryption**, download streaming, share links, live events (SSE fed by Postgres `LISTEN/NOTIFY`). Enqueues jobs, and runs the background jobs that need keys: `journal.flush`, `backup.snapshot`, and DEK re-wrapping. | `MASTER_KEY` |
 | **bot** | Internal | 1 active (+ optional standby) | The only process with the Discord token. **Packs** small-file frames into blobs, uploads and deletes blobs, compacts packs, refreshes CDN URLs, and offers admin slash commands. **Outbound-only** network access to Discord. It never sees keys or plaintext. | `DISCORD_BOT_TOKEN` |
 | **postgres** | Internal | 1 | Metadata, sessions, audit log, journal outbox, and the job queue (**pg-boss**, so no Redis is needed). | — |
+| **media** | Internal | 1 | Examines audio and video files, and remuxes or transcodes them to HLS while they play; extracts subtitles and cover art (ffmpeg, §6.7). Reaches nothing but the API, its only client. | — (a token per file, from the API) |
 
-**Why the bot and API are split:** the two most sensitive secrets live in different processes. The bot never sees plaintext or keys; it only moves and concatenates ciphertext. The API never talks to Discord's API directly, so all rate-limit state lives in one place. Both import shared packages that define the frame format and the job contracts.
+**Why the bot and API are split:** the two most sensitive secrets live in different processes. The bot never sees plaintext or keys; it only moves and concatenates ciphertext. The API never talks to Discord's API directly, so all rate-limit state lives in one place. Both import shared packages that define the frame format and the job contracts. The media service is split off for the same reason: ffmpeg parses files anyone with an account uploads, so it runs where a flaw in it reaches no secret (§6.7).
 
 ### 3.2 Network topology & exposure
 
@@ -122,16 +127,18 @@ flowchart LR
         A["api :3000"]
         B["bot :3001 (internal RPC)"]
         P["postgres :5432"]
+        M["media :3002"]
     end
     E -->|dfs_internal| A
     A --- B
     A --- P
     B --- P
+    A --- M
     B -.->|"egress network, outbound 443"| D["discord.com / gateway / CDN"]
     A -.->|"egress network, outbound 443"| D
 ```
 
-- Three Docker networks: `internal` (`internal: true`, no internet, the fixed subnet `10.73.0.0/24`) for service-to-service traffic, `egress` for outbound Discord access (and the API's check of the internet, §16), and `edge` for Caddy, which publishes ports there and reaches Let's Encrypt (a container on an internal network alone can publish no port). Only `api` and `bot` join `egress`, and only `caddy` publishes ports. Postgres has no route to the internet at all.
+- Three Docker networks: `internal` (`internal: true`, no internet, the fixed subnet `10.73.0.0/24`) for service-to-service traffic, `egress` for outbound Discord access (and the API's check of the internet, §16), and `edge` for Caddy, which publishes ports there and reaches Let's Encrypt (a container on an internal network alone can publish no port). Only `api` and `bot` join `egress`, and only `caddy` publishes ports. `media` joins `internal` alone. Postgres has no route to the internet at all.
 - **Route allowlist at the edge:** only `/api/*` is proxied to the API. Every other path is answered from the static SPA build, and unknown paths fall back to `index.html` so client-side routes such as `/s/:token` (public share pages) work. `/internal/*` and metrics paths get an explicit `404`. Nothing else reaches a backend service.
 - **Streaming:** request and response buffering is disabled for uploads (`/api/uploads/*/content`, a whole file in one request, and `/api/uploads/*/parts/*`), the content and archive routes (`/api/files/*/content`, `/api/s/*/files/*/content`, `*/archive`), and `/api/events` (SSE). The body size limit is **12 MiB** (one part plus headroom), except for a file streamed whole, whose length the API checks against its upload. Download and SSE routes have long timeouts; an upload may stall for a minute (Caddy's `read_body_idle`) before Caddy cuts it.
 - **Client IP:** the API trusts `X-Forwarded-For` **only** from the Caddy container's address, fixed at `10.73.0.10` on the internal network (`TRUSTED_PROXY_CIDRS=10.73.0.10/32`), for rate limiting and audit logs.
@@ -329,7 +336,7 @@ erDiagram
 
 **Modified.** `nodes.updated_at` is what the drive shows and sorts as "Modified". A file's is its own modification date, as the browser that uploaded it read it (`File.lastModified`, kept per version in `file_versions.modified_at`), or the time of the upload when the browser didn't know; renaming or moving a file leaves it, as a file system does. A folder's is when it was made, renamed or moved. ZIP downloads carry the same dates (§6.2). A single downloaded file can't: browsers date it to the download. Creation dates, permissions and attributes are out of any website's reach; an archive uploaded as a file keeps them.
 
-Supporting tables not drawn above: `journal` (outbox of metadata changes, §8), `journal_batches` (the sealed batches, staged until the bot posts them, §8), `backups` (snapshots and their manifests, §8, added with M4), `folder_stats_dirty` (§12.1), `archive_tickets` (single-use ZIP links, §9), `metrics` (the admin's graphs, §16), and pg-boss's own schema. The Drizzle schema in `packages/db` is the exact definition; this diagram shows its shape. A received upload part is its chunk row, so upload sessions don't list parts separately. Storage channels have their own ID, so a Discord channel ID appears once, in `storage_channels`.
+Supporting tables not drawn above: `journal` (outbox of metadata changes, §8), `journal_batches` (the sealed batches, staged until the bot posts them, §8), `backups` (snapshots and their manifests, §8, added with M4), `folder_stats_dirty` (§12.1), `archive_tickets` (single-use ZIP links, §9), `metrics` (the admin's graphs, §16), `media_info` (what an audio or video version holds, derived, §6.7), `playback_positions` (where each user stopped, §10.4), and pg-boss's own schema. The Drizzle schema in `packages/db` is the exact definition; this diagram shows its shape. A received upload part is its chunk row, so upload sessions don't list parts separately. Storage channels have their own ID, so a Discord channel ID appears once, in `storage_channels`.
 
 ### 5.1 Key rules and indexes
 
@@ -547,6 +554,35 @@ flowchart LR
   - *Reads* that looked a frame up before it moved read it from its new pack once the old one fails (§6.2); the frame cache, keyed by frames' hashes, needs nothing.
 - **Trade-off:** a deleted small file keeps taking up space in Discord until its pack is compacted, which may be never while the pack stays mostly live. Its quota is released immediately, though, and Discord space is free, so the only real cost is message count. Its bytes stay readable to whoever holds the master key; making them leave Discord within some days was considered and left for later (2026-10-07).
 
+### 6.7 Audio and video streaming
+
+```mermaid
+flowchart LR
+    B["Browser<br/>players (§10.4)"] -- "direct play:<br/>content (Range)" --> A["API"]
+    B -- "remux or transcode:<br/>HLS playlist + segments" --> A
+    A -- "probe, segments,<br/>subtitles, covers" --> M["media<br/>ffmpeg"]
+    M -- "plaintext of one version<br/>(Range, a token for it)" --> A
+    A -- "frames (Range)" --> CDN["Discord CDN"]
+    M <--> MC[["Media cache<br/>encrypted, key in memory"]]
+```
+
+Audio and video play in the browser as they are whenever it can decode them, and otherwise through the media service, which remuxes or transcodes them while they play (D34). The players are §10.4; both come after previews of images, PDFs and text (§10.3).
+
+- **Media info.** Each audio and video version is examined once with ffprobe: right after its upload completes, at the API's request and best effort, or else when first played. `media_info` keeps, per version: its kind, duration and container; each stream's codec with its RFC 6381 string (`avc1.640028`, `hvc1.2.4.L153.B0`, `mp4a.40.2`, `opus`, `ec-3`), profile, resolution, frame rate, HDR transfer and rotation, channels and sample rate, language, title, and default and forced flags; chapters; tags (title, artist, album, album artist, track and disc numbers, year, genre); whether it has a cover; and the times of its video keyframes, read from the file's index (an MP4's sample tables, an MKV's cues) without reading the video itself. It is derived, so it is not journaled: after a recovery, files are examined again as they are played.
+- **Three ways to play.** The player chooses from what the browser says it decodes, given the exact codecs (`MediaSource.isTypeSupported`, `canPlayType`), never from a list of formats, since that differs by browser, system and hardware:
+  1. **Direct play:** the original, from the content route with Range (§6.2), as a download. Nothing runs on the server. Most phone videos and music play this way: MP4 and MOV with H.264, or HEVC where the device decodes it; WebM; MKV in Chrome and Firefox; MP3, AAC, FLAC, Opus, WAV.
+  2. **Remux:** when only the container is the problem (an MKV in Safari, an AVI with H.264), or only the sound (AC-3, E-AC-3 and DTS, which few browsers decode): HLS of fragmented-MP4 segments, the video copied as it is, and the sound copied or converted to AAC, up to 5.1 channels. Segments are cut at keyframes from the index, a few seconds each, so the playlist is known before any segment is made. A file without an index is transcoded instead.
+  3. **Transcode:** when the video codec can't be decoded (HEVC without a decoder, AV1 on older devices, MPEG-2, MPEG-4 Part 2, VC-1, WMV), or a lower quality is chosen: H.264 (x264, `veryfast`) at 1080p, 720p or 480p, never larger than the original, with AAC sound, in 6-second HLS segments, a keyframe forced at each one's start so the playlist is known from the duration alone.
+- **Sessions.** A playlist names its version (`…/media/<versionId>/<mode>/…`), so a segment's bytes never change and are cached as such. The first segment asked for starts ffmpeg at its time, which then makes the next ones, staying at most a minute ahead of the last one asked for, paused beyond that. A segment more than a minute from what is being made starts ffmpeg again there; seeking back finds made segments in the cache. A session nobody asks anything of for a minute ends. At most `MEDIA_TRANSCODES` (2) transcodes and `MEDIA_REMUXES` (4) remuxes run at once, across all viewers; past that, `503 media_busy`, and the player says the server is busy and offers the original.
+- **Quality.** Original is direct play, or a remux when it must be; 1080p, 720p and 480p are transcodes, as far as the original allows. Auto starts with the original and steps down when the connection can't keep up (direct play's buffering, or the segments' download times). One quality is made at a time per viewer: several at once, for switching between them as streaming services do, would mean several transcodes per viewer, more than 6 cores can give. A change of quality starts again at the current time.
+- **Tracks.** A remux or transcode carries the audio track chosen in the player (the default one, else the first); direct play plays the default (Safari offers the others). Text subtitles inside the file (SRT, ASS and SSA, mov_text, WebVTT) are extracted once to WebVTT, as are subtitle files beside a video with its name (`Film.srt`, `Film.it.srt`, `Film.en.forced.vtt`, `.ass`, `.ssa`); ASS styling is lost. Picture subtitles (PGS, VobSub) would have to be burned into the video: not yet.
+- **Cover art:** the picture in an audio file's tags, extracted once; else an image named `cover`, `folder` or `front` (JPEG, PNG or WebP) in the same folder.
+- **The media service** (`apps/media`, Node 24 with Debian's ffmpeg, its own image) runs ffmpeg and ffprobe, and the API is its only client. ffmpeg parses files anyone with an account uploads, so the service holds no secret: no master key, no database, no Discord token, and no internet (the internal network only, §3.2). It runs without root, on a read-only root filesystem with its cache volume, within Compose limits (4 CPUs, 3 GiB), and ffmpeg at a low priority. It reads a version's plaintext from the API (`GET /internal/media/:versionId`, with Range, on the API's port but outside `/api`, so the edge never forwards it) with a token the API signs for that version alone, valid a few hours (HMAC with a key derived from the master key, as share cookies are, §7.5). A flaw in ffmpeg reaches only the files it is asked to play.
+- **The media cache** (`MEDIA_CACHE_DIR`, `MEDIA_CACHE_MAX_BYTES`, 10 GiB on the VPS) holds segments, subtitles and covers, the least recently used going first. They are plaintext media, so each is encrypted (AES-GCM) with a key the service makes when it starts and keeps only in memory: a stolen disk holds ciphertext alone (§7.4), and a restart empties the cache.
+- **Reads from Discord.** ffmpeg reads through the API's reader, so it shares the frame cache and its read-ahead (§6.2). A seek costs the frame holding that point, about 10 MiB, fetched and decrypted.
+- **Shared links** play the same three ways, within the same limits (the user's decision, 2026-10-08), and playing never counts toward a link's download limit (§7.5).
+- **Planned, not yet built:** seek thumbnails (frames above the seek bar, made in one pass over a video's keyframes and kept), and HDR to SDR when transcoding HDR video (tone mapping, CPU-heavy). The user counts both important (2026-10-08).
+
 ---
 
 ## 7. Security
@@ -611,6 +647,7 @@ flowchart TD
 | Stolen staging/cache disk | ✅ Ciphertext only |
 | Malicious or compromised DFS server operator | ❌ The server holds the keys. Fixing this needs E2EE (future: per-user keys derived in the browser, client-side encryption, and more complex sharing). |
 | DFS admin curious about other users | ⚠️ By design (D4), admins **can see file names, the folder tree, and sizes**, but cannot open or download content through the app. Every admin view is audit-logged. |
+| A crafted audio or video file exploiting ffmpeg | ⚠️ Contained: the media service holds no key, database access or token, and reaches only the API, through which it reads the files it is asked to play (§6.7). |
 | Compromised Caddy container | ⚠️ No keys, DB, or Discord token in it, but it sees traffic passing through (including session cookies). |
 | Root on the VPS | ❌ It's a single host, so root can read everything. Harden the VPS (§13.2). |
 | Discord deletes data or bans the bot | ❌ Detected, not prevented. See §2. |
@@ -679,6 +716,7 @@ All routes are under `/api`, use JSON unless noted, and are validated with Zod s
 | `DELETE /nodes/:id` · `POST /nodes/trash` `{ids[]}` · `POST /nodes/:id/restore` · `GET /trash` · `DELETE /trash/:id` · `DELETE /trash` | Trash: move, restore, list, delete one item forever, empty |
 | `POST /uploads` · `POST /uploads/batch` (per-upload results) · `POST /uploads/alive` `{ids[]}` (the page holding them is still open, §6.1) · `GET /uploads/:id` (`receivedParts`; also `state` and `versionId`, until the session expires) · `PUT /uploads/:id/parts/:idx` (binary) · `PUT /uploads/:id/content?from=` (the file from part `from` to its end, streamed) · `POST /uploads/:id/complete` (`partSha256` for a streamed file) · `DELETE /uploads/:id` | Uploads (§6.1) |
 | `GET /files/:id/content` (Range) | Content: the current version, `304` to a browser that has it (§6.2). Earlier versions are internal, kept only for share links (§1.2), and have no routes |
+| `GET /files/:id/media` · `PUT /files/:id/position` `{versionId, positionMs}` · `GET /files/:id/media/:versionId/:mode/index.m3u8` · `…/:mode/init.mp4` · `…/:mode/:n.m4s` · `GET /files/:id/media/:versionId/subtitles/:track.vtt` · `GET /files/:id/media/:versionId/cover` | Audio and video (§6.7, §10.4): the media info of the current version (examined on the first ask if need be), with where this user stopped and the subtitle files beside it; saving where they stopped; HLS for a remux or a transcode (`mode`: `remux`, `1080p`, `720p` or `480p`; `?audio=<track>`); subtitles (a track inside the file, or a subtitle file beside it, by its ID) and the cover. The version must be the file's current one; a segment never changes, so it is cached for a year. `503 media_busy` past the limits, `503 media_unavailable` without the media service. The share page uses the same under `/s/:token/files/:id/…`, without positions |
 | `GET /folders/:id/archive` · `POST /archive` `{ids[]}` → `{url, fileName, expiresAt}` · `GET /archive/:ticket` | ZIP download. Several items get a short-lived, single-use link (D17), which the browser then downloads with a plain navigation |
 | `GET /search?q=&type=&cursor` | Name search (`pg_trgm`) |
 | `POST /shares` · `GET /shares` · `PATCH /shares/:id` (expiry, password, cap) · `DELETE /shares/:id` | Share links (owner) |
@@ -728,7 +766,8 @@ Internal (bot), only reachable on `dfs_internal` and returning `404` at the edge
 | **Choose a password** | Right after a sign-in with a temporary password, before anything else: a new password, typed twice. Welcomes a first sign-in; after a reset, says an admin reset it |
 | **Drive** (main) | Breadcrumbs, virtualized list/grid (file-type icons; thumbnails come later, §1.2), sort, multi-select (shift/ctrl, select-all across pages), right-click context menu, drag-drop upload (files *and* folders, onto the folder or straight onto a subfolder), drag-to-move, inline rename, keyboard shortcuts (F2, Del, Ctrl+A), sync status icon per file (syncing / stored / failed), download (one file as itself, folders and multiple items as a ZIP) |
 | **Upload panel** | Docked queue showing aggregate progress (files and bytes), speed and time left, per-file two-phase progress (upload → Discord sync), pause/resume/cancel per file and for all, retry failed. Closing it keeps files still syncing, and a button in the header brings it back. While uploads are under way it says closing the page cancels them, and the browser asks before leaving |
-| **Preview** | Full screen over the drive (§10.3): images, PDFs, text and code first, with Download, Share and Details; audio and video after, with a player of their own |
+| **Preview** | Full screen over the drive (§10.3): images, PDFs, text and code first, with Download, Share and Details; then video, in its player (§10.4) |
+| **Audio player** | A bar docked at the bottom, playing on while the user browses, with the folder as its queue (§10.4) |
 | **Trash** | Restore, delete forever, empty trash |
 | **Shared links** | List, delete, and edit expiry, password and download limit. A new link is shown (copy, open) only when it is created |
 | **Public share page** | Minimal, unauthenticated SPA route `/s/:token` (data from `/api/s/*`), loaded without the signed-in app: a password prompt if needed (a wrong password shakes the card), then the file with a download button, or a folder to browse (breadcrumbs inside the share, per-file download, ZIP of any folder). Shows who shared it, the expiry and the downloads left, and a clear message for expired and used-up links, and for those gone or never there. Previews come with the Preview screen |
@@ -750,7 +789,7 @@ Internal (bot), only reachable on `dfs_internal` and returning `404` at the edge
 
 ### 10.3 Previews
 
-What a file holds, seen without downloading it (D33). First images, PDFs, text and code; audio and video come after, as their own part, with a dedicated player, streaming and what a player needs. There is no version history (§1.2), and office documents have no preview (§1.2): they download, as does every file the viewer can't show.
+What a file holds, seen without downloading it (D33). First images, PDFs, text and code; audio and video come after, with players of their own (§10.4) and streaming (§6.7). There is no version history (§1.2), and office documents have no preview (§1.2): they download, as does every file the viewer can't show.
 
 - **The viewer:** full screen over the drive, opened by double-click, Enter or the context menu's Preview, for a file it can show. Its place is in the address (`?preview=<id>` on the folder's or the search's URL), so Back closes it and a reload keeps it open. The arrows, ← and → move through the previewable files of the list it was opened from (at a large folder's end, its next page loads), Esc closes it, and on a phone it fills the screen and swipes. Its header has the name, Download, Share and Details (size, type, modified, sync state), and the next image is loaded ahead. Trashed items have none, and neither have admins' views of other users' files (D4).
 - **Which viewer** comes from `fileCategory` (MIME type, then extension), as icons do. A file that turns out unreadable (an image the browser can't decode, text that is binary) says there's no preview, with Download.
@@ -761,6 +800,28 @@ What a file holds, seen without downloading it (D33). First images, PDFs, text a
 - **Caching:** the content route answers `304` to a browser that has the version (§6.2), so going back and forth between files moves no bytes again.
 - **Share page:** a file link shows its preview on the page, above Download; a folder link opens its files in the same viewer. Previews ask with `?preview=1`, which never counts toward the download limit (§7.5); only Download does.
 - **Mock:** the demo's images, PDFs and text files have sample content, so previews work in it too.
+
+### 10.4 Audio and video players
+
+The players of D35, over the streaming of §6.7.
+
+- **Video** plays in the viewer (§10.3), with its own controls rather than the browser's:
+  - play and pause, a seek bar showing what is loaded and the time (and chapter) under the pointer, time, volume and mute, speed (0.5–2×), subtitles, audio track, quality (Original, Auto, 1080p, 720p, 480p, as far as the original allows), picture-in-picture and full screen;
+  - keys: Space or K plays and pauses, J and L skip 10 s, ← and → 5 s, ↑ and ↓ change the volume, M mutes, F goes full screen, C turns subtitles on and off, `<` and `>` change the speed, 0–9 jump to tenths, Home and End to the ends;
+  - on a phone, a tap shows the controls, a double-tap on either side skips 10 s, and full screen follows the device's rotation;
+  - chapters mark the seek bar and have a menu; at the end, the folder's next video plays after 5 s unless cancelled;
+  - Details shows the formats (e.g. HEVC 4K HDR, E-AC-3 5.1) and how it plays: direct, remuxed or transcoded.
+- **Audio** plays in a player bar docked at the bottom of the app, which keeps playing while the user browses (it lives outside the routes):
+  - opening an audio file plays it, with the folder's other audio files queued in order: disc and track number from the tags, else the name in natural order; Play and Add to queue on files and folders;
+  - previous and next, shuffle, repeat (all or one), seek, volume, speed (0.5–3×, for audiobooks and podcasts), and a queue to open, reorder and clear;
+  - title, artist, album and cover from the tags (§6.7), else the file's name;
+  - Media Session: the lock screen, notifications and media keys show and control it, so a phone plays on in the background;
+  - opening a video pauses it; after a reload, the queue and the position come back, paused (stored in the browser).
+- **Resuming.** Where a user stopped a video, or an audio file over 20 minutes, is kept per user and file on the server (`playback_positions`, saved every 10 s while playing and on pause), so it follows them to another device. Playback picks up there, with Start over. Finishing (the last 5%) clears it, as does a new version of the file. It is not journaled.
+- **Fallbacks.** A direct play that fails to decode (a browser can say yes to codecs it then can't play) goes on as a remux or a transcode at the same time. Without the media service, files play only directly, and the others say why, with Download.
+- **Shared links:** the share page plays a video in the viewer and audio in the bar; positions are kept in the browser.
+- **HLS** plays through hls.js on Media Source Extensions (Managed Media Source on iOS 17.1 and later), loaded with the first remux or transcode; older iOS plays HLS by itself. MSE's source is a `blob:` URL, so the CSP gets `media-src 'self' blob:`.
+- **Not planned now:** a music library across the drive (artists and albums), and gapless playback between an album's tracks, which needs a different playback engine (the user's decision, 2026-10-08).
 
 ---
 
@@ -841,11 +902,11 @@ Expected profile (D7): **few users (≤ ~20), many files.** The design targets *
 - **SELinux** (enforcing by default on Fedora): data lives in **named volumes**, and configs (Caddyfile, built SPA) are **baked into images**, so no SELinux relabeling (`:Z`) is needed. Any bind mount that is added later must use `:Z`.
 - **firewalld:** allow only `ssh`, `http`, `https` (plus `443/udp` for HTTP/3). Docker writes its own iptables/nftables rules for published ports. That is fine here because only Caddy publishes ports.
 - **Secrets:** one file each in `/etc/dfs/secrets` (`postgres_password`, `database_url`, `internal_rpc_secret`, `discord_bot_token`, `master_key`), mounted read-only as Compose `secrets:` in `/run/secrets`, and read through `DATABASE_URL_FILE`, `INTERNAL_RPC_SECRET_FILE` and `DISCORD_BOT_TOKEN_FILE` (§15) and `MASTER_KEY_FILE`. Each service gets only the ones it uses. Outside Swarm, Compose mounts the files as they are on the host, so each is mode `0400` and owned by the user of the container reading it: uid 1000 for the API and the bot, 70 for Postgres; on SELinux, the directory carries the `container_file_t` label. The master key is made by `dfs master-key` and kept off the server too. Nothing sensitive goes into images (`.dockerignore` leaves out `.env` files and `.data`) or into files committed to git; the settings that aren't secret are in `docker/.env`, from `docker/.env.example`.
-- **Images:** `docker/server.Dockerfile` (the API, the bot and the migration: one image, three commands, keeping the workspace's layout, since Node runs the TypeScript sources and won't strip types under `node_modules`) and `docker/caddy.Dockerfile` (Caddy with the Caddyfile and the built web app). Both run without root; logs rotate at 10 MB, five files each.
+- **Images:** `docker/server.Dockerfile` (the API, the bot and the migration: one image, three commands, keeping the workspace's layout, since Node runs the TypeScript sources and won't strip types under `node_modules`) `docker/caddy.Dockerfile` (Caddy with the Caddyfile and the built web app), and `docker/media.Dockerfile` (the media service with Debian's ffmpeg, §6.7). Both run without root; logs rotate at 10 MB, five files each.
 - **Lifecycle:** `restart: unless-stopped` and Docker enabled via systemd (`systemctl enable --now docker`). Updates: `docker/deploy.sh` on the development PC, which sends the committed code over SSH to `/opt/dfs`, replacing it whole, and runs `docker compose up -d --build` there. Migrations run automatically in a one-shot `migrate` service before `api`/`bot` start. The runbook is [DEPLOY.md](DEPLOY.md).
 - **Code (D26):** a private GitHub repository. The VPS has no access to it: it gets the code from the development PC (the owner's choice at the first deployment, over a deploy key). There is no CI: `pnpm check` (format, typecheck, lint, tests) runs locally before committing and deploying.
 - **Host hardening:** `dnf-automatic` security updates, SSH key-only login, fail2ban (optional), and a non-root deploy user in the `docker` group. The first VPS goes without it, by the owner's choice: it serves other uses too.
-- **Disk:** staging (`STAGING_MAX_BYTES`) and cache (`CACHE_MAX_BYTES`) must fit on the VPS disk alongside Postgres. Size the VPS disk from those plus the DB estimate (§12.2).
+- **Disk:** staging (`STAGING_MAX_BYTES`), the frame cache (`CACHE_MAX_BYTES`) and the media cache (`MEDIA_CACHE_MAX_BYTES`) must fit on the VPS disk alongside Postgres. Size the VPS disk from those plus the DB estimate (§12.2).
 
 ---
 
@@ -858,7 +919,8 @@ dfs/
 ├─ apps/
 │  ├─ web/            React SPA (Vite), with an MSW mock API in src/mocks
 │  ├─ api/            Fastify HTTP API
-│  └─ bot/            discord.js worker + packer + internal RPC
+│  ├─ bot/            discord.js worker + packer + internal RPC
+│  └─ media/          ffmpeg: media info, remux and transcode to HLS (§6.7)
 ├─ packages/
 │  ├─ shared/         Zod schemas, DTO types, constants
 │  ├─ config/         env parsing (Zod) shared by api/bot
@@ -869,7 +931,7 @@ dfs/
 │  └─ cli/            `dfs` admin CLI (setup, recover, rotate-key, verify)
 ├─ docker/
 │  ├─ docker-compose.dev.yml    local dev: Postgres only
-│  ├─ docker-compose.yml        production: caddy, api, bot, postgres, migrate
+│  ├─ docker-compose.yml        production: caddy, api, bot, media, postgres, migrate
 │  ├─ Caddyfile                 TLS, SPA, route allowlist, streaming settings
 │  └─ *.Dockerfile              multi-stage builds per app
 └─ docs/
@@ -922,6 +984,10 @@ The **`BlobStore` interface** (`put(blob) → ref`, `get(ref, range?) → stream
 | `MASTER_KEY_FILE` | `/run/secrets/dfs_master_key` | api only. Holds the current key and every retired key, each with its `key_id` (§7.3). `dfs master-key <file>` makes a new one, never over an existing file |
 | `STAGING_DIR` / `STAGING_MAX_BYTES` | `/data/staging` / `20 GiB` | shared volume |
 | `CACHE_DIR` / `CACHE_MAX_BYTES` | `/data/cache` / `5 GiB` | per api instance |
+| `MEDIA_INTERNAL_URL` | `http://media:3002` | api only: the media service (§6.7); unset, audio and video play only as they are |
+| `MEDIA_TRANSCODES` / `MEDIA_REMUXES` | `2` / `4` | media only: transcodes and remuxes running at once, across all viewers |
+| `MEDIA_MAX_HEIGHT` | `1080` | media only: the largest transcode |
+| `MEDIA_CACHE_DIR` / `MEDIA_CACHE_MAX_BYTES` | `/data/media` / `10 GiB` | media only: segments, subtitles and covers, encrypted with a key kept in memory |
 | `UPLOAD_CHANNEL_CONCURRENCY` | `2` | in-flight uploads per channel |
 | `SCRUB_REQUESTS_PER_HOUR` | `600` | scrubber budget |
 | `JOURNAL_FLUSH_INTERVAL_MS` | `60000` | |
@@ -953,6 +1019,7 @@ At startup, config parsing rejects size settings that can't work: it requires `P
 - **What is recorded** (the catalog is `METRICS` in `packages/shared`):
   - *API:* requests, 4xx and 5xx; response times (as percentiles, from fixed buckets, so they add up across processes and time; the buckets are fine below 10 ms, where most answers are, so a percentile there is read to within a millisecond or two), leaving out downloads, uploaded parts and event streams, whose time depends on their size, and taking in health checks, which aren't counted as requests: the API's own check gives every half minute a response time; bytes sent to and received from browsers; frame cache hits, misses and size; CDN reads and failures; open event streams; sign-ins and failed sign-ins.
   - *Bot:* every Discord request, 429 and 5xx, and every wait the REST client chose to stay inside a rate limit, all seen in one place, its shared client; blobs posted with their bytes, failed posts, deleted messages, signed URLs, packs sealed, packs compacted with the bytes that freed in Discord and the packs that failed to, orphans deleted.
+  - *Media,* recorded by the API, which every request to the media service goes through (the service has no database): plays by way (direct, remux, transcode), segments served and the time each took, refusals for being busy, and from its health answer the transcodes and remuxes running and the cache's size. An alert says when it doesn't answer: audio and video then play only as they are.
   - *Both:* memory, heap, CPU and event loop delay, every 5 s. The delay is how much later the slowest ticks of a 20 ms timer came than its quickest, not than 20 ms: Windows keeps such a timer at about 31 ms, which would read as a constant 12 ms of delay.
   - *The system,* sampled by the leading bot every half minute, 2 s into it on the clock so each half-minute bucket gets exactly one sample, and counted once: sync backlog, staging, stored and live bytes, blobs by state, queue depth and failures, database size, users, files and sessions. These are the overview's figures too (`systemFigures`): each reads an index or a small table, except one pass over `blobs`.
 - **The API's checks** (`apps/api/src/checks.ts`), so response times are measured all the time, not only while people use DFS: every 10 s, once it listens, each API instance asks Discord (`https://discord.com/api/v10/gateway`, which needs no token), the internet (Google's connectivity check, `https://www.gstatic.com/generate_204`) and itself (`/api/health`, over loopback). Each check is one request on a new connection, so it is the same every time: the name lookup, the connection, TLS and the answer, to its last byte. An answer within 5 s, of any status below 500, is timed (`check.discord.ms`, `check.internet.ms`); anything else is a failed check (`check.discord.failures`, `check.internet.failures`). The API times its own answer as it times any request (`http.ms`). Nothing is smoothed over: while the API runs, these graphs have a figure in every half minute, so a gap means it didn't run. The last minute's checks also make the overview's Discord and Internet services: the median answer, degraded after a failed check, down after three in a row, and "Checking…" until the first has ended (tests build the API without starting them).
@@ -970,6 +1037,7 @@ At startup, config parsing rejects size settings that can't work: it requires `P
 |---|---|
 | Unit | Crypto round-trips and tamper detection (including flipped header bytes and frames moved between object types or versions), frame parsing, pack assembly/offsets (property test: a pack never exceeds `BLOB_MAX_BYTES`), chunk math (range → chunks), name normalization, tree cycle detection |
 | Integration | API + Postgres (Testcontainers) + `LocalBlobStore`: full upload/download/trash/purge flows, packing and compaction, quota accounting, concurrent renames, SSE events across two API instances, and a **recovery drill**: rebuild an empty DB from the blob store alone (snapshot + journal) and diff it against the source DB |
+| Media | The media service against files ffmpeg makes in the test (MP4 with H.264 and AAC, MKV with HEVC and AC-3, AVI with MPEG-4, MP3 with tags and a cover, FLAC): media info and keyframes, remux and transcode segments that ffprobe reads back, a far seek restarting a session, the limits; the media routes in the contract suite, on the mock and the API (with a stand-in media service). Needs ffmpeg where it runs |
 | Scale | Seed 1M nodes and check that listing, search, and move latencies stay within budget (p95 < 100 ms for list and search) |
 | Discord contract | `DiscordBlobStore` against `#storage-03` in the `DFS Dev` category (opt-in, real token; D25; `pnpm --filter @dfs/storage check:discord`): upload, Range read on the CDN, URL refresh, delete, and a repeated `nonce` answered with the first message |
 | Fault injection | A `ChaosBlobStore` wrapper: random 429s, 5xx, timeouts, dropped responses after a successful post (to test idempotency and the reconciler). `BLOB_STORE=chaos` (in the root `.env` or the environment of `pnpm dev`) runs the bot on it, and `check:engine` (in `apps/web`) drives the real upload engine against that stack while failing requests, losing answers and cutting the connection mid-file |
@@ -1009,11 +1077,11 @@ The numbers are the original milestones; the arrows are the order of work (D19):
 
 **Done (2026-10-08):** M4, durability, but for the scrubber and nightly snapshots, both left for later by the user: the GC, the journal on Discord, `dfs recover` and its drill (passed against production's Discord), and compaction.
 
-**Next: previews** (§10.3, D33): images, PDFs, text and code first, then audio and video. [BACKEND.md](BACKEND.md) is the build plan: packages, conventions, the tasks of each milestone and how each is checked.
+**Next: previews** (§10.3, D33): images, PDFs, text and code first, then audio and video (§6.7, §10.4, D34, D35). [BACKEND.md](BACKEND.md) is the build plan: packages, conventions, the tasks of each milestone and how each is checked.
 
 **Web UI, still to do:**
 
-- **Preview** (§10.3): images, PDFs, text and code, in the drive and on the public share page; then audio and video, with a player of their own and streaming.
+- **Preview** (§10.3): images, PDFs, text and code, in the drive and on the public share page; then audio and video: their players (§10.4) and streaming (§6.7), and later seek thumbnails and HDR to SDR.
 - **Upload resume after a reload:** upload IDs in IndexedDB (§10.2).
 - **Inline rename** in lists (a dialog today), and **select-all across pages** of a large folder (today Ctrl+A selects the loaded rows; needs a server-side "whole folder except" selection for bulk actions).
 - **Admin search** across users (`GET /admin/search`).
@@ -1062,5 +1130,7 @@ The numbers are the original milestones; the arrows are the order of work (D19):
 | D31 | Messages deleted outside DFS | **They don't happen** (the user's decision, 2026-10-07): only the bot reaches DFS's channels, so no one else can delete a storage message. There is no watch for deletions, no `lost` state for blobs or versions, no tamper alert and no recovery of a lost blob from the CDN's cache. Discord itself losing data is left to the scrubber, if built. | §2, §5.2, §6.5, §8, §11 |
 | D32 | Which packs compaction merges | **Those that hold little:** live bytes under `COMPACT_THRESHOLD` of a full pack, whatever their own size, a week old, two or more into one (the user's decision, 2026-10-07). A live/size ratio would leave the small packs a lone upload seals, each a whole message, and rewriting one pack alone saves none. Deleted files' bytes leave Discord only when their pack is merged. | §6.6 |
 | D33 | Previews | **Images, PDFs, text and code first**; audio and video after, as their own part, with a dedicated player and streaming (the user's decision, 2026-10-08). PDFs through pdf.js, the same on every browser, Android's included, without loosening the rules against framing; text through a read-only CodeMirror, Markdown formatted and JSON pretty-printed. Viewing a shared file never counts toward its download limit; only Download does. No version history: earlier versions are internal, kept only while a share link serves them. Office documents stay out. | §1.2, §6.2, §7.5, §9, §10.3 |
+| D34 | Audio and video streaming | **Direct play when the browser decodes the file; otherwise a remux (the container or the sound) or a transcode (the video codec, or a lower quality), made while it plays as HLS segments** (the user's decision, 2026-10-08), by ffmpeg in a media service that holds no secret and reads only the files it is asked to play. One quality at a time per viewer, at most 2 transcodes and 4 remuxes at once, and shared links play the same way. Media info is examined once per version and not journaled; cached segments are encrypted with a key kept in memory. Seek thumbnails and HDR to SDR come later, as important. | §3.1, §6.7, §7.4, §9, §15 |
+| D35 | Audio and video players | **A video player in the viewer, and an audio player bar** that plays on while the user browses, with the folder as its queue (the user's decision, 2026-10-08): own controls and keys, Media Session, subtitles inside or beside the file, chapters, the next video, and where each user stopped kept on the server. A music library and gapless playback are not planned now. | §10.4 |
 
 No open questions at this time.
