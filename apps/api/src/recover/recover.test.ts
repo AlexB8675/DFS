@@ -1,4 +1,5 @@
 import { collectGarbage } from '@dfs/bot/collector'
+import { Compactor } from '@dfs/bot/compactor'
 import { JournalUploader } from '@dfs/bot/journal-uploader'
 import { dataChannels } from '@dfs/bot/storage'
 import { settleBlobs } from '@dfs/bot/testing'
@@ -250,6 +251,8 @@ async function useTheDrive(stack: Stack): Promise<void> {
   await upload(stack, owner, docs.id, 'empty.txt', Buffer.alloc(0))
   await upload(stack, owner, docs.id, 'thesis.pdf', bytes(150_000, 3), '2023-05-05T05:05:05.000Z')
   await upload(stack, owner, archive.id, 'old-backup.zip', bytes(140_000, 4))
+  // Stored now: the first of two packs compaction merges below.
+  await settle(stack)
 
   // Renamed, moved; a folder moved with what is in it.
   const notes = await upload(stack, owner, docs.id, 'notes.txt', bytes(2_000, 5))
@@ -293,6 +296,23 @@ async function useTheDrive(stack: Stack): Promise<void> {
   await trashNodes(app, owner, [archive.id])
   await deleteForever(app, owner, archive.id)
 
+  // Compaction (§6.6): both packs hold little, so they become one, the old
+  // ones going once the journal says so. The first report.txt moves with
+  // them, and goes later with the janitor, its link turned off.
+  await settle(stack)
+  const merged = await new Compactor({
+    db: app.db,
+    store: stack.store,
+    rule: {
+      threshold: app.config.compactThreshold,
+      packTargetBytes: app.config.sizes.packTargetBytes,
+      minAgeDays: app.config.compactMinAgeDays,
+    },
+  }).compact({ force: true })
+  if (merged.groups !== 1 || merged.packs !== 2) {
+    throw new Error(`Compaction merged ${JSON.stringify(merged)}, not two packs into one.`)
+  }
+
   // Another user: files, a link, an item removed by the admin with its link.
   const music = await createFolder(app, sam, root(sam), 'Music')
   const song = await upload(stack, sam, music.id, 'song.mp3', bytes(70_000, 12))
@@ -307,9 +327,15 @@ async function useTheDrive(stack: Stack): Promise<void> {
   await updateUserAsAdmin(app, owner, sam.user.id, { quotaBytes: 5 * 1024 ** 3 })
 }
 
-/** What the leading bot does over time: store blobs, drop what no link needs, delete released blobs, post the journal. */
-async function settleStack({ app, store, journal }: Stack): Promise<void> {
+/** Packs what waits, and stores every blob, as the leading bot does within seconds. */
+async function settle({ app, store }: Stack): Promise<void> {
   await settleBlobs({ db: app.db, staging: app.staging, store, sizes: app.config.sizes })
+}
+
+/** What the leading bot does over time: store blobs, drop what no link needs, delete released blobs, post the journal. */
+async function settleStack(stack: Stack): Promise<void> {
+  const { app, store, journal } = stack
+  await settle(stack)
   for (const versionId of await purgeUnneededVersions(app.db)) {
     await app.staging.removeVersion(versionId)
   }
@@ -395,6 +421,24 @@ for (const storage of ['local', 'discord'] as const) {
         await reader.close()
         await setup.cleanup()
       }
+    })
+
+    it('replays the drive’s compaction, and a purge of a frame it moved', async () => {
+      const { entries } = await readJournal(stack.app.keys, (await stack.recovery()).source)
+      const at = entries.findIndex((entry) => entry.kind === 'blob.relocated')
+      const relocated = entries[at]
+      expect(entries[at - 1]).toMatchObject({
+        kind: 'blob.stored',
+        record: { id: relocated?.record.id },
+      })
+      const moved = new Set(
+        (relocated?.record.chunks as { versionId: string }[]).map((chunk) => chunk.versionId),
+      )
+      expect(moved.size).toBeGreaterThan(5)
+      const purgedAfter = entries
+        .slice(at + 1)
+        .filter((entry) => entry.kind === 'version.purged' && moved.has(entry.record.id as string))
+      expect(purgedAfter).toHaveLength(1)
     })
 
     if (storage === 'discord') return

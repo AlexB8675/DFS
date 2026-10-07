@@ -7,7 +7,7 @@ import {
   type JournalRecord,
   type Metrics,
 } from '@dfs/db'
-import type { BlobStore, Staging } from '@dfs/storage'
+import type { BlobLocation, BlobStore, Staging } from '@dfs/storage'
 import { sql } from 'drizzle-orm'
 import type { FastifyBaseLogger } from 'fastify'
 
@@ -106,6 +106,35 @@ export async function storeAllStagedBlobs(deps: UploaderDeps): Promise<void> {
   if (first !== undefined) throw first
 }
 
+/** `blob.stored` (§8), for a blob just stored: what it is and where. */
+export function blobStoredRecord(
+  blob: {
+    id: number
+    kind: 'solo' | 'pack'
+    size_bytes: number
+    frame_count: number
+    sha256: Buffer | null
+  },
+  discordChannelId: string | null,
+  location: BlobLocation,
+): JournalRecord {
+  return {
+    kind: 'blob.stored',
+    record: {
+      id: blob.id,
+      kind: blob.kind,
+      sizeBytes: blob.size_bytes,
+      frameCount: blob.frame_count,
+      sha256: blob.sha256?.toString('hex') ?? null,
+      // Where it is for good, by Discord's IDs, which mean something
+      // without this database (§8). The signed URL expires, so it stays out.
+      discordChannelId,
+      messageId: location.messageId,
+      attachmentId: location.attachmentId,
+    },
+  }
+}
+
 /** Stores one blob; returns the files whose last frame it was. */
 async function storeBlob(
   deps: UploaderDeps,
@@ -193,23 +222,7 @@ async function storeBlob(
         version.chunks_stored = version.chunk_count AND version.state = 'syncing' AS done`)
     const doneIds = versions.filter((version) => version.done).map((version) => version.id)
 
-    const records: JournalRecord[] = [
-      {
-        kind: 'blob.stored',
-        record: {
-          id: blobId,
-          kind: blob.kind,
-          sizeBytes: blob.size_bytes,
-          frameCount: blob.frame_count,
-          sha256: blob.sha256?.toString('hex') ?? null,
-          // Where it is for good, by Discord's IDs, which mean something
-          // without this database (§8). The signed URL expires, so it stays out.
-          discordChannelId: record.discord_channel_id,
-          messageId: location.messageId,
-          attachmentId: location.attachmentId,
-        },
-      },
-    ]
+    const records = [blobStoredRecord(blob, record.discord_channel_id, location)]
     let files: { userId: string; id: string; parentId: string }[] = []
     storedVersions.push(...doneIds)
     if (doneIds.length > 0) {

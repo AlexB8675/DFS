@@ -114,3 +114,23 @@ export async function uploadedFiles(
   }
   return { ownerId: owner.id, files }
 }
+
+/**
+ * Resolves once a transaction on this database waits for a lock; fails if
+ * `work` ends first. Tests only.
+ */
+export async function waitingForALock(db: Database, work: Promise<unknown>): Promise<void> {
+  const done = { ended: false }
+  void work.finally(() => {
+    done.ended = true
+  })
+  for (let tries = 0; tries < 200; tries += 1) {
+    if (done.ended) throw new Error('It finished without waiting for a lock.')
+    const { rows } = await db.execute<{ waiting: number }>(sql`
+      SELECT count(*)::int AS waiting FROM pg_stat_activity
+      WHERE datname = current_database() AND wait_event_type = 'Lock'`)
+    if ((rows[0]?.waiting ?? 0) > 0) return
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  throw new Error('Nothing waited for a lock.')
+}

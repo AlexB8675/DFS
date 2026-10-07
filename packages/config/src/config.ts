@@ -35,6 +35,7 @@ export interface Config {
   }
   packMaxWaitMs: number
   compactThreshold: number
+  compactMinAgeDays: number
   masterKeyFile: string
   stagingDir: string
   stagingMaxBytes: number
@@ -157,6 +158,7 @@ const envSchema = z.object({
   PACK_TARGET_BYTES: optionalByteSize,
   PACK_MAX_WAIT_MS: integer(30_000),
   COMPACT_THRESHOLD: setting(z.coerce.number().min(0).max(1).default(0.3)),
+  COMPACT_MIN_AGE_DAYS: integer(7),
   MASTER_KEY_FILE: setting(z.string().optional()),
   STAGING_DIR: setting(z.string().optional()),
   STAGING_MAX_BYTES: byteSize(20 * GiB),
@@ -317,6 +319,7 @@ export function loadConfig(env: Record<string, string | undefined>, options: Loa
     },
     packMaxWaitMs: raw.PACK_MAX_WAIT_MS,
     compactThreshold: raw.COMPACT_THRESHOLD,
+    compactMinAgeDays: raw.COMPACT_MIN_AGE_DAYS,
     masterKeyFile: directory(raw.MASTER_KEY_FILE ?? defaults.MASTER_KEY_FILE),
     stagingDir: directory(raw.STAGING_DIR ?? defaults.STAGING_DIR),
     stagingMaxBytes: raw.STAGING_MAX_BYTES,

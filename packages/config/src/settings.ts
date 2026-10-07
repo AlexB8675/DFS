@@ -92,6 +92,7 @@ export function describeSettings(
       entry('Storage', 'bot', 'PACK_MAX_WAIT_MS', config.packMaxWaitMs),
       // The bot compacts packs (§6.6).
       entry('Storage', 'bot', 'COMPACT_THRESHOLD', config.compactThreshold),
+      entry('Storage', 'bot', 'COMPACT_MIN_AGE_DAYS', config.compactMinAgeDays),
       entry('Storage', 'both', 'LOCAL_BLOB_DIR', config.localBlobDir),
       entry('Disks', 'both', 'STAGING_DIR', config.stagingDir),
       entry('Disks', 'api', 'STAGING_MAX_BYTES', size(config.stagingMaxBytes)),

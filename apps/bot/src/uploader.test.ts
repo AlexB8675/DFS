@@ -23,7 +23,7 @@ import { eq, sql } from 'drizzle-orm'
 import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest'
 import { dataChannels } from './storage.ts'
-import { sealPacks, uploadedFiles } from './testing.ts'
+import { sealPacks, uploadedFiles, waitingForALock } from './testing.ts'
 import { storeBlobs } from './uploader.ts'
 
 let database: TestDatabase
@@ -360,7 +360,7 @@ describe('lock order (packages/db/src/locks.ts)', () => {
     await db.transaction(async (tx) => {
       expect(await unneededVersions(tx, [replaced])).toEqual([replaced])
       storing = storeBlobs({ db, staging, store }, [packId])
-      await waitingForALock(storing)
+      await waitingForALock(db, storing)
       await appendJournal(tx, await purgeVersions(tx, ownerId, [replaced]))
     })
     expect(await storing).toEqual(new Map())
@@ -370,23 +370,6 @@ describe('lock order (packages/db/src/locks.ts)', () => {
     expect((await liveBytesDrift(db)).filter((blob) => blob.id === packId)).toEqual([])
   })
 })
-
-/** Resolves once another transaction waits for a lock; fails if `work` ends first. */
-async function waitingForALock(work: Promise<unknown>): Promise<void> {
-  const done = { ended: false }
-  void work.finally(() => {
-    done.ended = true
-  })
-  for (let tries = 0; tries < 200; tries += 1) {
-    if (done.ended) throw new Error('It finished without waiting for a lock.')
-    const { rows } = await db.execute<{ waiting: number }>(sql`
-      SELECT count(*)::int AS waiting FROM pg_stat_activity
-      WHERE datname = current_database() AND wait_event_type = 'Lock'`)
-    if ((rows[0]?.waiting ?? 0) > 0) return
-    await new Promise((resolve) => setTimeout(resolve, 25))
-  }
-  throw new Error('Nothing waited for a lock.')
-}
 
 describe('staged blob integrity', () => {
   it('keeps a same-size corrupt blob staged until the original bytes can be stored', async () => {

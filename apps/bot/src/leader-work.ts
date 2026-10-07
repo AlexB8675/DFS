@@ -23,6 +23,7 @@ import { sql } from 'drizzle-orm'
 import type { FastifyBaseLogger } from 'fastify'
 import { fromDrizzle, type JobResult, type PgBoss } from 'pg-boss'
 import { collectGarbage, uploadsWaiting } from './collector.ts'
+import { Compactor, dropStalePacks } from './compactor.ts'
 import { keepGateway } from './gateway.ts'
 import { JournalUploader } from './journal-uploader.ts'
 import { Packer } from './packer.ts'
@@ -31,8 +32,9 @@ import { instanceId, type BotStorage } from './storage.ts'
 import { runAdminTask } from './tasks.ts'
 import { storeBlobs } from './uploader.ts'
 
-// What only the leading bot does (DESIGN.md §11): pack small frames (§6.6),
-// store staged blobs, delete released ones (§6.4), clean up orphan messages
+// What only the leading bot does (DESIGN.md §11): pack small frames and
+// merge packs that hold little (§6.6), store staged blobs, delete released
+// ones (§6.4), clean up orphan messages
 // (§6.1), keep folder sizes current (§12.1), post the journal's batches to
 // #dfs-journal (§8), clean up after expired uploads and sessions, empty the
 // trash of what has been there too long (§6.4), delete earlier versions once
@@ -49,6 +51,8 @@ const JANITOR_EVERY_MS = 10 * 60_000
 const IDLE_UPLOAD_MINUTES = 10
 const IDLE_UPLOADS_EVERY_MS = 60_000
 const PACK_EVERY_MS = 1000
+/** One group of packs merged per run (§6.6): a minute after the last run ends. */
+const COMPACT_EVERY_MS = 60_000
 const COLLECT_EVERY_MS = 2000
 /** Deletes per round while blobs wait to be stored, and while none do (§6.4). */
 const COLLECT_WHILE_UPLOADING = 1
@@ -145,6 +149,18 @@ export async function startLeaderWork(options: {
     log,
   })
 
+  const compactor = new Compactor({
+    db,
+    store,
+    rule: {
+      threshold: config.compactThreshold,
+      packTargetBytes: config.sizes.packTargetBytes,
+      minAgeDays: config.compactMinAgeDays,
+    },
+    log,
+    metrics,
+  })
+
   // Admin → Storage: one task at a time, each once (ADMIN_TASK_QUEUE).
   await boss.createQueue(QUEUES.adminTask, ADMIN_TASK_QUEUE)
   await boss.updateQueue(QUEUES.adminTask, ADMIN_TASK_QUEUE)
@@ -168,6 +184,10 @@ export async function startLeaderWork(options: {
       const sealed = await packer.sealDue()
       if (sealed > 0) metrics?.record('packs.sealed', sealed)
     }),
+    // Uploads come first: compaction waits for every blob to be stored.
+    repeat(COMPACT_EVERY_MS, log, 'merging packs that hold little', async () => {
+      if (!(await uploadsWaiting(db))) await compactor.compact()
+    }),
     // Uploads come first, but deleting never stops altogether.
     repeat(COLLECT_EVERY_MS, log, 'deleting released blobs', async () => {
       const limit = (await uploadsWaiting(db)) ? COLLECT_WHILE_UPLOADING : COLLECT_WHILE_IDLE
@@ -179,6 +199,9 @@ export async function startLeaderWork(options: {
       await journalUploader.run()
     }),
     repeat(JANITOR_EVERY_MS, log, 'cleaning up', () => cleanUp(db, staging)),
+    repeat(JANITOR_EVERY_MS, log, 'dropping packs a crash left half made', async () => {
+      await dropStalePacks(db, store)
+    }),
     repeat(IDLE_UPLOADS_EVERY_MS, log, 'giving up uploads whose page is gone', async () => {
       await giveUpIdleUploads(db, staging)
     }),
