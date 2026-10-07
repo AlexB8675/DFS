@@ -8,11 +8,17 @@ import {
   type StorageChannel,
   type SystemHealth,
 } from '@dfs/shared'
-import { storageChannels, storageTotals, systemFigures, type StorageTotals } from '@dfs/db'
+import {
+  appendJournal,
+  storageChannels,
+  storageTotals,
+  systemFigures,
+  type StorageTotals,
+} from '@dfs/db'
 import { eq, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import { audit } from '../audit.ts'
+import { audit, auditAlone } from '../audit.ts'
 import type { Auth } from '../auth/sessions.ts'
 import { reach } from '../checks.ts'
 import { isUniqueViolation } from '../db-errors.ts'
@@ -338,7 +344,11 @@ export async function createChannel(
     }
     throw error
   }
-  await audit(app.db, { actorId: admin.user.id, action: 'channel.created', target: input.name })
+  await auditAlone(app.db, {
+    actorId: admin.user.id,
+    action: 'channel.created',
+    target: input.name,
+  })
   return channelById(app, input.discordChannelId, 'discord')
 }
 
@@ -364,11 +374,14 @@ export async function setChannelEnabled(
       }
     }
     await tx.update(storageChannels).set({ enabled }).where(eq(storageChannels.id, id))
-    await audit(tx, {
-      actorId: admin.user.id,
-      action: enabled ? 'channel.enabled' : 'channel.disabled',
-      target: channel.name,
-    })
+    await appendJournal(
+      tx,
+      await audit(tx, {
+        actorId: admin.user.id,
+        action: enabled ? 'channel.enabled' : 'channel.disabled',
+        target: channel.name,
+      }),
+    )
   })
   return channelById(app, id, 'id')
 }

@@ -210,7 +210,7 @@ export async function trashNodes(app: FastifyInstance, auth: Auth, ids: string[]
       tx,
       trashed.flatMap((node) => node.parent_id ?? []),
     )
-    await audit(
+    const audited = await audit(
       tx,
       updated.map((node) => ({
         actorId: ownerId,
@@ -219,7 +219,7 @@ export async function trashNodes(app: FastifyInstance, auth: Auth, ids: string[]
         nodeId: node.id,
       })),
     )
-    await appendJournal(tx, nodeRecords(updated))
+    await appendJournal(tx, [...nodeRecords(updated), ...audited])
   })
 }
 
@@ -287,14 +287,14 @@ export async function restoreNode(
     if (!restored) throw notFound()
     await tx.update(nodes).set({ trashedVia: null }).where(eq(nodes.trashedVia, id))
     await markFoldersDirty(tx, [parentId])
-    await audit(tx, {
+    const audited = await audit(tx, {
       actorId: ownerId,
       action: 'node.restored',
       target: restored.name,
       details: restored.name === node.name ? null : `renamed from ${node.name}`,
       nodeId: id,
     })
-    await appendJournal(tx, nodeRecords([restored]))
+    await appendJournal(tx, [...nodeRecords([restored]), ...audited])
   })
   return toDriveNode(await visibleNode(app.db, ownerId, id))
 }

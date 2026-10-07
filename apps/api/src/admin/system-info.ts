@@ -4,7 +4,7 @@ import { formatBytes, type SystemInfo } from '@dfs/shared'
 import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import { audit } from '../audit.ts'
+import { auditAlone } from '../audit.ts'
 import type { Auth } from '../auth/sessions.ts'
 import { ApiError } from '../errors.ts'
 import { apiStartedAt } from './system.ts'
@@ -154,7 +154,7 @@ export async function clearFrameCache(app: FastifyInstance, admin: Auth): Promis
     throw new ApiError(409, 'no_cache', 'With local storage there is no frame cache to clear.')
   }
   const freed = await app.frameCache.clear()
-  await audit(app.db, {
+  await auditAlone(app.db, {
     actorId: admin.user.id,
     action: 'system.cache_cleared',
     target: 'Frame cache',

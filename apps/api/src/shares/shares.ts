@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto'
 import type { CreateShareInput, Page, ShareLink, UpdateShareInput } from '@dfs/shared'
-import { shareLinks } from '@dfs/db'
+import { appendJournal, shareLinks, shareRecords } from '@dfs/db'
 import { and, eq, isNull, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { audit } from '../audit.ts'
@@ -47,22 +47,27 @@ export async function createShare(
 ): Promise<ShareLink> {
   const node = await visibleNode(app.db, auth.user.id, input.nodeId)
   const token = randomBytes(16).toString('base64url')
-  const [share] = await app.db
-    .insert(shareLinks)
-    .values({
+  const passwordHash = input.password === null ? null : await hashPassword(input.password)
+  const share = await app.db.transaction(async (tx) => {
+    const [created] = await tx
+      .insert(shareLinks)
+      .values({
+        nodeId: node.id,
+        tokenHash: tokenHash(token),
+        expiresAt: input.expiresAt ? new Date(input.expiresAt) : null,
+        passwordHash,
+        maxDownloads: input.maxDownloads,
+      })
+      .returning()
+    if (!created) throw new Error('Inserting a share returned nothing.')
+    const audited = await audit(tx, {
+      actorId: auth.user.id,
+      action: 'share.created',
+      target: node.name,
       nodeId: node.id,
-      tokenHash: tokenHash(token),
-      expiresAt: input.expiresAt ? new Date(input.expiresAt) : null,
-      passwordHash: input.password === null ? null : await hashPassword(input.password),
-      maxDownloads: input.maxDownloads,
     })
-    .returning({ id: shareLinks.id })
-  if (!share) throw new Error('Inserting a share returned nothing.')
-  await audit(app.db, {
-    actorId: auth.user.id,
-    action: 'share.created',
-    target: node.name,
-    nodeId: node.id,
+    await appendJournal(tx, [...shareRecords([created]), ...audited])
+    return created
   })
   return toShareLink(await ownShare(app, auth, share.id), `${app.config.publicBaseUrl}/s/${token}`)
 }
@@ -77,34 +82,46 @@ export async function updateShare(
   const current = await ownShare(app, auth, id)
   if (current.revoked_at)
     throw new ApiError(409, 'share_revoked', 'A revoked link can’t be changed.')
-  await app.db
-    .update(shareLinks)
-    .set({
-      ...(changes.expiresAt !== undefined && {
-        expiresAt: changes.expiresAt === null ? null : new Date(changes.expiresAt),
-      }),
-      ...(changes.maxDownloads !== undefined && { maxDownloads: changes.maxDownloads }),
-      ...(changes.password !== undefined && {
-        passwordHash: changes.password === null ? null : await hashPassword(changes.password),
-        passwordVersion: sql`${shareLinks.passwordVersion} + 1`,
-      }),
-    })
-    .where(eq(shareLinks.id, id))
+  const passwordHash =
+    changes.password === undefined || changes.password === null
+      ? null
+      : await hashPassword(changes.password)
+  await app.db.transaction(async (tx) => {
+    const updated = await tx
+      .update(shareLinks)
+      .set({
+        ...(changes.expiresAt !== undefined && {
+          expiresAt: changes.expiresAt === null ? null : new Date(changes.expiresAt),
+        }),
+        ...(changes.maxDownloads !== undefined && { maxDownloads: changes.maxDownloads }),
+        ...(changes.password !== undefined && {
+          passwordHash,
+          passwordVersion: sql`${shareLinks.passwordVersion} + 1`,
+        }),
+      })
+      .where(eq(shareLinks.id, id))
+      .returning()
+    await appendJournal(tx, shareRecords(updated))
+  })
   return toShareLink(await ownShare(app, auth, id), null)
 }
 
 /** `DELETE /shares/:id`: turns the link off for good. */
 export async function revokeShare(app: FastifyInstance, auth: Auth, id: string): Promise<void> {
   const share = await ownShare(app, auth, id)
-  await app.db
-    .update(shareLinks)
-    .set({ revokedAt: new Date() })
-    .where(and(eq(shareLinks.id, id), isNull(shareLinks.revokedAt)))
-  await audit(app.db, {
-    actorId: auth.user.id,
-    action: 'share.revoked',
-    target: share.node_name,
-    nodeId: share.node_id,
+  await app.db.transaction(async (tx) => {
+    const revoked = await tx
+      .update(shareLinks)
+      .set({ revokedAt: new Date() })
+      .where(and(eq(shareLinks.id, id), isNull(shareLinks.revokedAt)))
+      .returning()
+    const audited = await audit(tx, {
+      actorId: auth.user.id,
+      action: 'share.revoked',
+      target: share.node_name,
+      nodeId: share.node_id,
+    })
+    await appendJournal(tx, [...shareRecords(revoked), ...audited])
   })
 }
 

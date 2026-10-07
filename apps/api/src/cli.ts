@@ -132,13 +132,13 @@ async function owner(
         .returning()
       if (!updated) throw new Error('The owner account disappeared.')
       await endUserSessions(tx, existing.id)
-      await audit(tx, {
+      const audited = await audit(tx, {
         actorId: null,
         action: 'user.password_reset',
         target: existing.displayName,
         details: 'dfs owner',
       })
-      await appendJournal(tx, [userRecord(updated)])
+      await appendJournal(tx, [userRecord(updated), ...audited])
     })
     console.info(
       `[INFO] Gave the owner, ${username}, a new temporary password and signed them out everywhere.`,

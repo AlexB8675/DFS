@@ -1,8 +1,8 @@
-import { abandonUploads, shareLinks } from '@dfs/db'
+import { abandonUploads, appendJournal, shareLinks, shareRecords } from '@dfs/db'
 import type { AdminSession, AdminShare, AdminUpload, Page } from '@dfs/shared'
 import { and, eq, isNull, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
-import { audit } from '../audit.ts'
+import { audit, auditAlone } from '../audit.ts'
 import { endSession, endUserSessions, type Auth } from '../auth/sessions.ts'
 import { ApiError } from '../errors.ts'
 import { removeStagedVersions } from '../staging.ts'
@@ -84,7 +84,7 @@ export async function endSessionAsAdmin(
     throw new ApiError(409, 'owner_protected', 'Only the owner can sign the owner out.')
   }
   await endSession(app.db, session.id)
-  await audit(app.db, {
+  await auditAlone(app.db, {
     actorId: admin.user.id,
     action: 'session.ended',
     target: session.user_name,
@@ -112,7 +112,7 @@ export async function signOutUser(
     SELECT count(*)::int AS count FROM sessions
     WHERE user_id = ${userId} AND expires_at > now() AND id <> ${admin.sessionId}`)
   await endUserSessions(app.db, userId, userId === admin.user.id ? admin.sessionId : undefined)
-  await audit(app.db, {
+  await auditAlone(app.db, {
     actorId: admin.user.id,
     action: 'user.signed_out',
     target: user.display_name,
@@ -180,19 +180,22 @@ export async function revokeShareAsAdmin(
   const { rows } = await app.db.execute<ShareRow>(sql`${SELECT_SHARES} WHERE share.id = ${id}`)
   const [share] = rows
   if (!share) throw new ApiError(404, 'not_found', 'No such link.')
-  const revoked = await app.db
-    .update(shareLinks)
-    .set({ revokedAt: new Date() })
-    .where(and(eq(shareLinks.id, id), isNull(shareLinks.revokedAt)))
-    .returning({ id: shareLinks.id })
-  // Off already: nothing changed, so nothing to note.
-  if (revoked.length === 0) return
-  await audit(app.db, {
-    actorId: admin.user.id,
-    action: 'share.revoked',
-    target: share.node_name,
-    nodeId: share.node_id,
-    details: `${share.owner_name}’s link`,
+  await app.db.transaction(async (tx) => {
+    const revoked = await tx
+      .update(shareLinks)
+      .set({ revokedAt: new Date() })
+      .where(and(eq(shareLinks.id, id), isNull(shareLinks.revokedAt)))
+      .returning()
+    // Off already: nothing changed, so nothing to note.
+    if (revoked.length === 0) return
+    const audited = await audit(tx, {
+      actorId: admin.user.id,
+      action: 'share.revoked',
+      target: share.node_name,
+      nodeId: share.node_id,
+      details: `${share.owner_name}’s link`,
+    })
+    await appendJournal(tx, [...shareRecords(revoked), ...audited])
   })
 }
 
@@ -259,7 +262,7 @@ export async function cancelUploadAsAdmin(
   })
   if (!found) throw new ApiError(404, 'not_found', 'No such upload under way.')
   await removeStagedVersions(app, staged)
-  await audit(app.db, {
+  await auditAlone(app.db, {
     actorId: admin.user.id,
     action: 'upload.cancelled',
     target: found.file_name,

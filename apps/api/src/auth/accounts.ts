@@ -2,7 +2,7 @@ import type { ChangePasswordInput, LoginInput } from '@dfs/shared'
 import { appendJournal, userRecord, users } from '@dfs/db'
 import { and, eq, isNull, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
-import { audit } from '../audit.ts'
+import { audit, auditAlone } from '../audit.ts'
 import { ApiError } from '../errors.ts'
 import { dummyHash, hashPassword, passwordProblem, verifyPassword } from './passwords.ts'
 import {
@@ -47,7 +47,7 @@ export async function signIn(
     app.limits.signIn.hit(ip)
     app.metrics.record('auth.failed_sign_ins')
     if (user) await recordFailure(app, user)
-    await audit(app.db, {
+    await auditAlone(app.db, {
       actorId: null,
       action: 'auth.login_failed',
       target: `@${input.username}`,
@@ -87,12 +87,15 @@ export async function signIn(
       .returning()
     if (!current) throw new ApiError(401, 'invalid_credentials', 'Wrong username or password.')
     const session = await openSession(tx, current, client)
-    await audit(tx, {
-      actorId: current.id,
-      action: 'auth.login',
-      target: current.displayName,
-      details: ip,
-    })
+    await appendJournal(
+      tx,
+      await audit(tx, {
+        actorId: current.id,
+        action: 'auth.login',
+        target: current.displayName,
+        details: ip,
+      }),
+    )
     return { user: current, session }
   })
   app.metrics.record('auth.sign_ins')
@@ -141,12 +144,12 @@ export async function changePassword(
     if (!updated) throw new ApiError(401, 'unauthenticated', 'Sign in to continue.')
     await endUserSessions(tx, user.id)
     const session = await openSession(tx, updated, client)
-    await audit(tx, {
+    const audited = await audit(tx, {
       actorId: user.id,
       action: 'auth.password_changed',
       target: updated.displayName,
     })
-    await appendJournal(tx, [userRecord(updated)])
+    await appendJournal(tx, [userRecord(updated), ...audited])
     return { user: updated, session }
   })
 }

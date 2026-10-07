@@ -183,7 +183,8 @@ export const handlers = [
   http.get('/api/trash', ({ request }) =>
     respond(request, () => {
       const query = readQuery(request, pageQuery)
-      return db.trashItems(query.cursor ?? null, query.limit)
+      // The server's default TRASH_RETENTION_DAYS.
+      return { ...db.trashItems(query.cursor ?? null, query.limit), retentionDays: 30 }
     }),
   ),
   http.delete('/api/trash', ({ request }) =>

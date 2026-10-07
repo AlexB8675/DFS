@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm'
 import type { Database } from './client.ts'
 import { uuidArray } from './folder-stats.ts'
-import { appendJournal, type Executor, type JournalRecord } from './journal.ts'
+import { appendJournal, auditRecords, type Executor, type JournalRecord } from './journal.ts'
 import { TREE_LOCK_NAMESPACE } from './locks.ts'
 import { auditLog } from './schema.ts'
 
@@ -153,18 +153,21 @@ export async function expireTrash(
         ownerId,
         still.map((row) => row.id),
       )
-      await tx.insert(auditLog).values(
-        still.map((row) => ({
-          userId: null,
-          action: 'node.purged',
-          nodeId: row.id,
-          meta: {
-            target: `${row.name} (${row.owner})`,
-            details: `after ${String(retentionDays)} days in the trash`,
-          },
-        })),
-      )
-      await appendJournal(tx, records)
+      const entries = await tx
+        .insert(auditLog)
+        .values(
+          still.map((row) => ({
+            userId: null,
+            action: 'node.purged',
+            nodeId: row.id,
+            meta: {
+              target: `${row.name} (${row.owner})`,
+              details: `after ${String(retentionDays)} days in the trash`,
+            },
+          })),
+        )
+        .returning()
+      await appendJournal(tx, [...records, ...auditRecords(entries)])
       return { count: still.length, versions }
     })
     // Counted once committed: staged frames of a purge rolled back must stay.

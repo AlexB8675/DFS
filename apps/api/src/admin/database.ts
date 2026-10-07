@@ -2,7 +2,7 @@ import { hasErrorCode } from '@dfs/db'
 import type { DatabaseStatus } from '@dfs/shared'
 import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
-import { audit } from '../audit.ts'
+import { auditAlone } from '../audit.ts'
 import type { Auth } from '../auth/sessions.ts'
 import { ApiError } from '../errors.ts'
 
@@ -261,7 +261,7 @@ export async function vacuumTable(app: FastifyInstance, admin: Auth, name: strin
   await app.db.execute(
     sql`VACUUM (ANALYZE) ${sql.identifier(found.schema)}.${sql.identifier(found.table)}`,
   )
-  await audit(app.db, { actorId: admin.user.id, action: 'database.vacuumed', target: name })
+  await auditAlone(app.db, { actorId: admin.user.id, action: 'database.vacuumed', target: name })
 }
 
 /**
@@ -295,7 +295,7 @@ export async function signalSession(
   const { rows: signalled } = await app.db.execute<{ done: boolean }>(sql`SELECT ${signal} AS done`)
   // It ended between the two looks.
   if (!signalled[0]?.done) throw new ApiError(404, 'not_found', 'No such database connection.')
-  await audit(app.db, {
+  await auditAlone(app.db, {
     actorId: admin.user.id,
     action: how === 'cancel' ? 'database.query_cancelled' : 'database.session_ended',
     target: `${target.application} (${String(pid)})`,

@@ -200,7 +200,11 @@ export const trashItemSchema = nodeSchema.extend({
   moderationReason: z.string().nullable(),
 })
 export type TrashItem = z.infer<typeof trashItemSchema>
-export const trashPageSchema = pageSchema(trashItemSchema)
+export const trashPageSchema = pageSchema(trashItemSchema).extend({
+  /** Days an item stays in the trash before it is deleted forever (§6.4). */
+  retentionDays: z.number().int().positive(),
+})
+export type TrashPage = z.infer<typeof trashPageSchema>
 
 // ── Uploads ──────────────────────────────────────────────────────────────────
 

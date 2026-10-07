@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import { sql } from 'drizzle-orm'
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest'
 import { createDatabase, createPool, type Database } from './client.ts'
+import { auditRecords, shareRecords, type JournalRecord } from './journal.ts'
 import { runMigrations } from './migrate.ts'
-import { nodes, users } from './schema.ts'
+import { auditLog, nodes, shareLinks, users } from './schema.ts'
 import { createTestDatabase, databaseUrl, withAdmin, type TestDatabase } from './testing/index.ts'
 
 describe('migrations', () => {
@@ -31,7 +33,7 @@ describe('migrations', () => {
       })
       // One instance ID, made once (DESIGN §4).
       expect(counts).toEqual({
-        applied: 16,
+        applied: 17,
         tables: 17,
         instance: [expect.stringMatching(/^[0-9a-f]{12}$/)],
       })
@@ -132,6 +134,54 @@ describe('schema rules (DESIGN §5.1)', () => {
       db.insert(nodes).values({ ownerId: user.id, kind, name: 'Another', nameKey: 'another' })
     expect(await violated(root('folder'))).toBe('nodes_one_root_per_owner')
     expect(await violated(root('file'))).toBe('nodes_root_is_folder')
+  })
+
+  it('backfills share links and audit entries as the API journals them (0016)', async () => {
+    const { user, root } = await createUser('backfill')
+    const [share] = await db
+      .insert(shareLinks)
+      .values({
+        nodeId: root.id,
+        tokenHash: Buffer.alloc(32, 7),
+        passwordHash: 'argon',
+        maxDownloads: 3,
+        downloadCount: 2,
+        expiresAt: new Date('2027-01-01T00:00:00Z'),
+      })
+      .returning()
+    const [entry] = await db
+      .insert(auditLog)
+      .values({ userId: user.id, action: 'share.created', nodeId: root.id, meta: { target: 'x' } })
+      .returning()
+    if (!share || !entry) throw new Error('no rows')
+
+    const backfill = await readFile(
+      new URL('../migrations/0016_journal_shares_audit.sql', import.meta.url),
+      'utf8',
+    )
+    for (const statement of backfill.split('--> statement-breakpoint')) {
+      await db.execute(sql.raw(statement))
+    }
+    const { rows } = await db.execute<JournalRecord & Record<string, unknown>>(sql`
+      SELECT kind, record FROM journal
+      WHERE record->>'id' IN (${share.id}, ${String(entry.id)}) ORDER BY id`)
+    // As JSON, the way recovery reads either: dates compare as instants.
+    const normal = (records: JournalRecord[]) =>
+      records.map(({ kind, record }) => ({
+        kind,
+        record: Object.fromEntries(
+          Object.entries(JSON.parse(JSON.stringify(record)) as Record<string, unknown>).map(
+            ([key, value]) => [
+              key,
+              typeof value === 'string' && /^\d{4}-\d\d-\d\dT/.test(value)
+                ? Date.parse(value)
+                : value,
+            ],
+          ),
+        ),
+      }))
+    expect(normal(rows)).toEqual(normal([...shareRecords([share]), ...auditRecords([entry])]))
+    expect(rows[0]?.record).not.toHaveProperty('downloadCount')
   })
 
   it('searches names by trigram similarity', async () => {

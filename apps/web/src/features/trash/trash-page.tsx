@@ -35,6 +35,7 @@ export function TrashPage() {
   const emptyTrash = useEmptyTrash()
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null)
   const items = trash.data?.pages.flatMap((page) => page.items) ?? []
+  const retentionDays = trash.data?.pages[0]?.retentionDays
 
   async function handleRestore(item: TrashItem) {
     try {
@@ -68,7 +69,11 @@ export function TrashPage() {
       <title>Trash – DFS</title>
       <PageHeader
         title="Trash"
-        description="Items in the trash still count toward your storage and are deleted forever after 30 days."
+        description={
+          retentionDays === undefined
+            ? 'Items in the trash still count toward your storage.'
+            : `Items in the trash still count toward your storage and are deleted forever after ${String(retentionDays)} ${retentionDays === 1 ? 'day' : 'days'}.`
+        }
         actions={
           <Button
             variant="outline"

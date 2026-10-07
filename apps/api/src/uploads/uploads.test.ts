@@ -420,6 +420,31 @@ describe('uploads living in their page (§6.1)', () => {
     expect(await quietFor(receiving.uploadId)).toBeLessThan(60)
   })
 
+  it('pushes the expiry back while the upload lives, and leaves an expired one expired', async () => {
+    const expiresIn = async (uploadId: string) => {
+      const { rows } = await app.db.execute<{ hours: number }>(sql`
+        SELECT extract(epoch FROM expires_at - now())::float8 / 3600 AS hours
+        FROM upload_sessions WHERE id = ${uploadId}`)
+      return rows[0]?.hours ?? Number.NaN
+    }
+    const soon = async (uploadId: string, interval: string) => {
+      await app.db.execute(sql`
+        UPDATE upload_sessions SET expires_at = now() + ${interval}::interval WHERE id = ${uploadId}`)
+    }
+    const held = await start(app.config.sizes.chunkSize + 10)
+    const receiving = await start(app.config.sizes.chunkSize + 10)
+    const expired = await start(app.config.sizes.chunkSize + 10)
+    await soon(held.uploadId, '1 hour')
+    await soon(receiving.uploadId, '1 hour')
+    await soon(expired.uploadId, '-1 minute')
+
+    await keepUploadsAlive(app, auth, [held.uploadId, expired.uploadId])
+    await receivePart(app, auth, receiving.uploadId, 1, Buffer.from('0123456789'), undefined)
+    expect(await expiresIn(held.uploadId)).toBeGreaterThan(23.9)
+    expect(await expiresIn(receiving.uploadId)).toBeGreaterThan(23.9)
+    expect(await expiresIn(expired.uploadId)).toBeLessThan(0)
+  })
+
   it('keeps only the caller’s uploads', async () => {
     const mine = await start(app.config.sizes.chunkSize + 10)
     await idle(mine.uploadId)

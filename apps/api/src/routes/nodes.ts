@@ -154,7 +154,13 @@ export function nodeRoutes(app: FastifyInstance, _options: object, done: () => v
     '/trash',
     { schema: { querystring: pageQuery, response: { 200: trashPageSchema } } },
     (request) =>
-      listTrash(app.db, requireAuth(request.auth), request.query.cursor, request.query.limit),
+      listTrash(
+        app.db,
+        requireAuth(request.auth),
+        request.query.cursor,
+        request.query.limit,
+        app.config.trashRetentionDays,
+      ),
   )
 
   routes.delete(

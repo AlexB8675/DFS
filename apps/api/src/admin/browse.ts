@@ -8,7 +8,7 @@ import {
 import { appendJournal, markFoldersDirty, nodeRecords, notifyEvent, type Executor } from '@dfs/db'
 import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
-import { audit } from '../audit.ts'
+import { audit, auditAlone } from '../audit.ts'
 import type { Auth } from '../auth/sessions.ts'
 import { ApiError } from '../errors.ts'
 import {
@@ -80,7 +80,7 @@ export async function userUsage(
       coalesce(sum(size_bytes) FILTER (WHERE kind = 'file'
         AND (deleted_at IS NOT NULL OR trashed_via IS NOT NULL)), 0)::float8 AS trash
     FROM nodes WHERE owner_id = ${userId}`)
-  await audit(app.db, { actorId: admin.user.id, action: 'admin.viewed', target: user.name })
+  await auditAlone(app.db, { actorId: admin.user.id, action: 'admin.viewed', target: user.name })
   return {
     usedBytes: user.used,
     quotaBytes: user.quota,
@@ -128,7 +128,7 @@ export async function moderate(
     await markFoldersDirty(tx, [node.parent_id])
     const { rows } = await tx.execute<{ name: string }>(sql`
       SELECT display_name AS name FROM users WHERE id = ${node.owner_id}`)
-    await audit(tx, {
+    const audited = await audit(tx, {
       actorId: admin.user.id,
       action: 'node.moderated',
       target: `${node.name} (${rows[0]?.name ?? 'unknown'})`,
@@ -140,6 +140,6 @@ export async function moderate(
       type: 'nodes.changed',
       payload: { parentIds: [node.parent_id] },
     })
-    await appendJournal(tx, nodeRecords(updated))
+    await appendJournal(tx, [...nodeRecords(updated), ...audited])
   })
 }

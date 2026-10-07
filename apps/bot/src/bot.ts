@@ -120,7 +120,9 @@ export function createBot({
     done()
   })
 
-  server.get('/internal/health', () => ({
+  // Asked every 15 s by the container, and by the API for Admin → System:
+  // only trouble is logged, as for the API's own health.
+  server.get('/internal/health', { logLevel: 'warn' }, () => ({
     role: election.state,
     queue: boss ? 'running' : 'stopped',
   }))

@@ -42,7 +42,14 @@ import { stageFrame } from './stage-frame.ts'
 // and hands its frames to the bot. An upload onto a file's name makes a new
 // version of it (D20).
 
+/**
+ * A session lasts this long past its last sign of life: its creation, a part
+ * stored, or its page saying it is open (§6.1). An upload under way never
+ * expires, however long the file takes.
+ */
 const SESSION_LIFETIME_MS = 24 * 60 * 60_000
+/** `expires_at` pushed to a lifetime from now. */
+const extendedExpiry = sql`now() + ${SESSION_LIFETIME_MS} * interval '1 millisecond'`
 /** Staging backpressure: clients wait this long before sending again. */
 const STAGING_RETRY_AFTER_SECONDS = 5
 
@@ -322,8 +329,9 @@ export async function uploadStatus(
 }
 
 /**
- * `POST /uploads/alive`: the caller's page still holds these uploads (§6.1).
- * Sessions being completed or purged right now are skipped, not waited for.
+ * `POST /uploads/alive`: the caller's page still holds these uploads (§6.1),
+ * which keeps them from being given up or expiring. Sessions being completed
+ * or purged right now are skipped, not waited for.
  */
 export async function keepUploadsAlive(
   app: FastifyInstance,
@@ -331,10 +339,11 @@ export async function keepUploadsAlive(
   ids: readonly string[],
 ): Promise<void> {
   await app.db.execute(sql`
-    UPDATE upload_sessions SET alive_at = now()
+    UPDATE upload_sessions SET alive_at = now(), expires_at = ${extendedExpiry}
     WHERE id IN (
       SELECT id FROM upload_sessions
       WHERE id = ANY(${uuidArray(ids)}) AND user_id = ${auth.user.id} AND state = 'receiving'
+        AND expires_at > now()
       ORDER BY id FOR UPDATE SKIP LOCKED)`)
 }
 
@@ -478,7 +487,9 @@ async function storePart(
         attempt.published = inserted.rows.length > 0
         // A part arriving is as good as its page saying it is open.
         if (attempt.published) {
-          await tx.execute(sql`UPDATE upload_sessions SET alive_at = now() WHERE id = ${uploadId}`)
+          await tx.execute(sql`
+            UPDATE upload_sessions SET alive_at = now(), expires_at = ${extendedExpiry}
+            WHERE id = ${uploadId}`)
         }
       }
       if (!attempt.published) {
@@ -665,14 +676,14 @@ async function finishUpload(
     WHERE id = ${auth.user.id}`)
   if (upload.parent_id) await markFoldersDirty(tx, [upload.parent_id])
   const size = formatBytes(upload.size_bytes)
-  await audit(tx, {
+  const audited = await audit(tx, {
     actorId: auth.user.id,
     action: 'upload.completed',
     target: node.name,
     details: upload.version_no > 1 ? `${size}, new version` : size,
     nodeId: node.id,
   })
-  await appendJournal(tx, [...pruneRecords, ...nodeRecords([node])])
+  await appendJournal(tx, [...pruneRecords, ...nodeRecords([node]), ...audited])
   return prunedIds
 }
 

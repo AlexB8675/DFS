@@ -1,5 +1,6 @@
 import { auditLog, storageChannels } from './schema.ts'
 import type { Database } from './client.ts'
+import { appendJournal, auditRecords } from './journal.ts'
 
 // Registering the Discord channels an environment stores in (DESIGN.md §4),
 // for `dfs setup` in the CLI and `/dfs setup` in the bot alike.
@@ -30,13 +31,17 @@ export async function registerStorageChannels(
       .onConflictDoNothing({ target: storageChannels.discordChannelId })
       .returning({ name: storageChannels.name })
     if (rows.length > 0) {
-      await tx.insert(auditLog).values(
-        rows.map(({ name }) => ({
-          userId: null,
-          action: 'channel.created',
-          meta: { target: name, details },
-        })),
-      )
+      const entries = await tx
+        .insert(auditLog)
+        .values(
+          rows.map(({ name }) => ({
+            userId: null,
+            action: 'channel.created',
+            meta: { target: name, details },
+          })),
+        )
+        .returning()
+      await appendJournal(tx, auditRecords(entries))
     }
     return rows.map(({ name }) => name)
   })

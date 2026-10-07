@@ -3,7 +3,7 @@ import { formatBytes } from '@dfs/shared'
 import { appendJournal, folderStats, userRecord, users } from '@dfs/db'
 import { eq, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
-import { audit } from '../audit.ts'
+import { audit, type AuditEntry } from '../audit.ts'
 import { hashPassword, passwordProblem } from '../auth/passwords.ts'
 import { endUserSessions, type Auth, type UserRow } from '../auth/sessions.ts'
 import { ApiError } from '../errors.ts'
@@ -40,12 +40,15 @@ export async function createUserAsAdmin(
       role: input.role ?? 'user',
       quotaBytes: input.quotaBytes ?? app.config.defaultQuotaBytes,
     })
-    await audit(tx, {
-      actorId: admin.user.id,
-      action: 'user.created',
-      target: created.displayName,
-      details: `@${created.username} · ${formatBytes(created.quotaBytes)} · ${created.role === 'admin' ? 'Admin' : 'User'}`,
-    })
+    await appendJournal(
+      tx,
+      await audit(tx, {
+        actorId: admin.user.id,
+        action: 'user.created',
+        target: created.displayName,
+        details: `@${created.username} · ${formatBytes(created.quotaBytes)} · ${created.role === 'admin' ? 'Admin' : 'User'}`,
+      }),
+    )
     return created
   })
   return toAdminUser(user, 0)
@@ -96,8 +99,9 @@ export async function updateUserAsAdmin(
     if (!updated) throw notFound()
 
     const actor = admin.user.id
+    const entries: AuditEntry[] = []
     if (details.length > 0) {
-      await audit(tx, {
+      entries.push({
         actorId: actor,
         action: 'user.updated',
         target: updated.displayName,
@@ -106,11 +110,13 @@ export async function updateUserAsAdmin(
     }
     if (disabling) {
       await endUserSessions(tx, id)
-      await audit(tx, { actorId: actor, action: 'user.disabled', target: updated.displayName })
+      entries.push({ actorId: actor, action: 'user.disabled', target: updated.displayName })
     }
-    if (enabling)
-      await audit(tx, { actorId: actor, action: 'user.enabled', target: updated.displayName })
-    await appendJournal(tx, [userRecord(updated)])
+    if (enabling) {
+      entries.push({ actorId: actor, action: 'user.enabled', target: updated.displayName })
+    }
+    const audited = await audit(tx, entries)
+    await appendJournal(tx, [userRecord(updated), ...audited])
     return toAdminUser(updated, await fileCount(app, updated))
   })
 }
@@ -155,12 +161,12 @@ export async function resetPassword(
       .returning()
     if (!row) throw notFound()
     await endUserSessions(tx, id)
-    await audit(tx, {
+    const audited = await audit(tx, {
       actorId: admin.user.id,
       action: 'user.password_reset',
       target: row.displayName,
     })
-    await appendJournal(tx, [userRecord(row)])
+    await appendJournal(tx, [userRecord(row), ...audited])
     return row
   })
   return toAdminUser(updated, await fileCount(app, updated))

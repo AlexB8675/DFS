@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm'
 import type { Database } from './client.ts'
 import { LOCK_NAMESPACE, LOCKS } from './locks.ts'
-import { journal, type nodes, type users } from './schema.ts'
+import { journal, type auditLog, type nodes, type shareLinks, type users } from './schema.ts'
 
 /** A transaction, or the database outside one. */
 export type Executor = Database | Parameters<Parameters<Database['transaction']>[0]>[0]
@@ -17,6 +17,8 @@ export interface JournalRecord {
     | 'version.stored'
     | 'version.purged'
     | 'blob.relocated'
+    | 'share.upsert'
+    | 'audit.added'
   record: Record<string, unknown>
 }
 
@@ -33,6 +35,8 @@ export async function appendJournal(tx: Executor, records: JournalRecord[]): Pro
 
 type UserRow = typeof users.$inferSelect
 type NodeRow = typeof nodes.$inferSelect
+type ShareRow = typeof shareLinks.$inferSelect
+type AuditRow = typeof auditLog.$inferSelect
 
 /**
  * A user's state for recovery. Usage, reservations and sign-in counters are
@@ -62,6 +66,23 @@ export function nodeRecords(nodes: readonly NodeRow[]): JournalRecord[] {
       ? []
       : [{ kind: 'node.upsert', record: state }],
   )
+}
+
+/**
+ * Share links' states for recovery, the token's hash in hex. The download
+ * count is a usage counter, like a user's used bytes, so it is left out: a
+ * rebuilt link counts afresh. A link goes with its item's `node.purge`.
+ */
+export function shareRecords(shares: readonly ShareRow[]): JournalRecord[] {
+  return shares.map(({ downloadCount: _count, tokenHash, ...state }) => ({
+    kind: 'share.upsert',
+    record: { ...state, tokenHash: tokenHash.toString('hex') },
+  }))
+}
+
+/** Audit entries for recovery, as written (§7.5): the janitor drops them after a year. */
+export function auditRecords(entries: readonly AuditRow[]): JournalRecord[] {
+  return entries.map((entry) => ({ kind: 'audit.added', record: entry }))
 }
 
 /**

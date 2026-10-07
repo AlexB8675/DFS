@@ -1,4 +1,4 @@
-import type { Page, TrashItem } from '@dfs/shared'
+import type { TrashPage } from '@dfs/shared'
 import { appendJournal, purgeSubtrees, type Executor } from '@dfs/db'
 import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
@@ -23,13 +23,17 @@ import { lockDrive } from './write.ts'
 
 const cursorSchema = z.object({ v: z.string(), id: z.uuid() })
 
-/** `GET /trash`: items the user trashed, newest first, with where they would go back to. */
+/**
+ * `GET /trash`: items the user trashed, newest first, with where they would
+ * go back to, and how long the trash keeps them.
+ */
 export async function listTrash(
   db: Executor,
   auth: Auth,
   cursor: string | undefined,
   limit: number,
-): Promise<Page<TrashItem>> {
+  retentionDays: number,
+): Promise<TrashPage> {
   const after = cursor ? decodeTrashCursor(cursor) : null
   const resume = after
     ? sql`AND (n.deleted_at, n.id) < (${after.v}::timestamptz, ${after.id}::uuid)`
@@ -58,6 +62,7 @@ export async function listTrash(
       rows.length > limit && last
         ? Buffer.from(JSON.stringify({ v: last.deleted_value, id: last.id })).toString('base64url')
         : null,
+    retentionDays,
   }
 }
 
@@ -70,8 +75,8 @@ export async function deleteForever(app: FastifyInstance, auth: Auth, id: string
       WHERE id = ${id} AND owner_id = ${auth.user.id} AND deleted_at IS NOT NULL`)
     if (!rows[0]) throw notFound()
     const purged = await purgeSubtrees(tx, auth.user.id, [id])
-    await audit(tx, purgedEntries(auth, rows, null))
-    await appendJournal(tx, purged.records)
+    const audited = await audit(tx, purgedEntries(auth, rows, null))
+    await appendJournal(tx, [...purged.records, ...audited])
     return purged.versionIds
   })
   await removeStagedVersions(app, staged)
@@ -88,8 +93,8 @@ export async function emptyTrash(app: FastifyInstance, auth: Auth): Promise<void
       auth.user.id,
       rows.map((row) => row.id),
     )
-    await audit(tx, purgedEntries(auth, rows, 'emptied the trash'))
-    await appendJournal(tx, purged.records)
+    const audited = await audit(tx, purgedEntries(auth, rows, 'emptied the trash'))
+    await appendJournal(tx, [...purged.records, ...audited])
     return purged.versionIds
   })
   await removeStagedVersions(app, staged)

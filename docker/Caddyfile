@@ -17,8 +17,15 @@
 			max_size 12MiB
 		}
 		# Bodies stream both ways, unbuffered: uploaded files, downloads,
-		# archives and live events. No compression here: it would drop the
-		# length downloads show their progress by, for bytes that don't shrink.
+		# archives and live events. Only the API's JSON answers are
+		# compressed (listings, the admin's figures): a download keeps the
+		# length its progress is shown by, and its bytes rarely shrink.
+		@answers not path_regexp ^/api/(files/[^/]+/content|archive/[^/]+|s/[^/]+/(files/[^/]+/content|archive))$
+		encode @answers zstd gzip {
+			match {
+				header Content-Type application/json*
+			}
+		}
 		reverse_proxy api:3000 {
 			flush_interval -1
 		}
@@ -40,6 +47,11 @@
 
 	header {
 		Strict-Transport-Security "max-age=31536000"
+		# Scripts and styles from DFS itself, and the inline theme script of
+		# apps/web/index.html by its hash (a test checks it). Libraries add
+		# <style> tags as they run, hence inline styles. No eval: Zod tries it
+		# once per page, is refused, and validates without it.
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'sha256-l55eKp0ym+pjMOspknSgoZBSliGiNPiJae4CTpa2RN4='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 		X-Content-Type-Options nosniff
 		X-Frame-Options DENY
 		Referrer-Policy strict-origin-when-cross-origin

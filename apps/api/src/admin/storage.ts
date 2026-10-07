@@ -1,4 +1,11 @@
-import { isMissingTable, LOCK_NAMESPACE, LOCKS, QUEUES, type AdminTaskJob } from '@dfs/db'
+import {
+  appendJournal,
+  isMissingTable,
+  LOCK_NAMESPACE,
+  LOCKS,
+  QUEUES,
+  type AdminTaskJob,
+} from '@dfs/db'
 import {
   ADMIN_TASK_LABELS,
   adminTaskKindSchema,
@@ -221,12 +228,15 @@ export async function startTask(
     }
     const queued = await boss.send(QUEUES.adminTask, data, { db: fromDrizzle(tx, sql) })
     if (!queued) throw new Error('The job queue didn’t take the task.')
-    await audit(tx, {
-      actorId: admin.user.id,
-      action: 'task.started',
-      target: ADMIN_TASK_LABELS[request.kind],
-      details: blobId === undefined ? undefined : `blob ${blobId}`,
-    })
+    await appendJournal(
+      tx,
+      await audit(tx, {
+        actorId: admin.user.id,
+        action: 'task.started',
+        target: ADMIN_TASK_LABELS[request.kind],
+        details: blobId === undefined ? undefined : `blob ${blobId}`,
+      }),
+    )
     return queued
   })
   return getTask(app, id)

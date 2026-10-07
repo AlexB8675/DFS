@@ -302,8 +302,8 @@ export class UploadEngine {
   /**
    * The page is going: its uploads go with it. Each session not completed is
    * cancelled on the server, in requests that outlive the page, so no half
-   * file is left in its folder. A page that crashes leaves them to the
-   * server's janitor, a day later.
+   * file is left in its folder. A page that crashes says nothing more, and
+   * the server gives its uploads up ten minutes later (`keepAlive`).
    */
   cancelOnLeave(): void {
     for (const uploadId of this.heldSessions()) {
