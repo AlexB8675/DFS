@@ -27,6 +27,7 @@ import {
   updateShareSchema,
   updateUserSchema,
   shareCountInputSchema,
+  adminShareQuerySchema,
 } from '@dfs/shared'
 import { delay, http, HttpResponse, sse, type JsonBodyType } from 'msw'
 import { z, ZodError } from 'zod'
@@ -405,17 +406,16 @@ export const handlers = [
   http.post<Id>('/api/admin/users/:id/sign-out', ({ request, params }) =>
     respond(request, () => db.signOutUser(params.id)),
   ),
+  http.get('/api/admin/shares/owners', ({ request }) =>
+    respond(request, () => {
+      const query = readQuery(request, adminShareQuerySchema.pick({ active: true, q: true }))
+      return db.adminShareOwners({ active: query.active === 'true', q: query.q })
+    }),
+  ),
   http.get('/api/admin/shares', ({ request }) =>
     respond(request, () => {
-      const query = readQuery(
-        request,
-        z.object({
-          cursor: z.uuid().optional(),
-          limit: z.coerce.number().int().min(1).max(500).default(100),
-          active: z.enum(['true', 'false']).default('false'),
-        }),
-      )
-      return db.adminShares(query.cursor ?? null, query.limit, query.active === 'true')
+      const query = readQuery(request, adminShareQuerySchema)
+      return db.adminShares({ ...query, active: query.active === 'true' })
     }),
   ),
   http.delete<Id>('/api/admin/shares/:id', ({ request, params }) =>

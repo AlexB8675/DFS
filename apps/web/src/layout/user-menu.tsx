@@ -16,6 +16,7 @@ import {
 import { signOut, useCurrentUser } from '@/features/auth/session'
 import { apiSend, errorMessage } from '@/lib/api/client'
 import { mocksEnabled } from '@/lib/env'
+import { initials } from '@/lib/format'
 import { transitionLinkProps } from '@/lib/navigation'
 
 export function UserMenu() {
@@ -70,14 +71,6 @@ export function UserAvatar({ user, className }: { user: User; className?: string
       </AvatarFallback>
     </Avatar>
   )
-}
-
-function initials(name: string): string {
-  const parts = name.trim().split(/\s+/)
-  return parts
-    .slice(0, 2)
-    .map((part) => part.charAt(0).toUpperCase())
-    .join('')
 }
 
 /** Mock mode only: restores the seeded demo drive. */

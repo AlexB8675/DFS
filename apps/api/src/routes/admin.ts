@@ -1,6 +1,8 @@
 import {
   adminSessionListSchema,
+  adminShareOwnerListSchema,
   adminSharePageSchema,
+  adminShareQuerySchema,
   adminUploadListSchema,
   auditQuerySchema,
   adminTaskListSchema,
@@ -43,6 +45,7 @@ import {
   endSessionAsAdmin,
   listSessions,
   listShares,
+  shareOwners,
   listUploads,
   revokeShareAsAdmin,
   signOutUser,
@@ -228,20 +231,31 @@ export function adminRoutes(app: FastifyInstance, _options: object, done: () => 
     '/admin/shares',
     {
       config: admin,
-      schema: {
-        querystring: z.object({
-          cursor: z.uuid().optional(),
-          limit: z.coerce.number().int().min(1).max(500).default(100),
-          active: z.enum(['true', 'false']).default('false'),
-        }),
-        response: { 200: adminSharePageSchema },
-      },
+      schema: { querystring: adminShareQuerySchema, response: { 200: adminSharePageSchema } },
     },
     (request) =>
       listShares(app, {
         cursor: request.query.cursor,
         limit: request.query.limit,
         active: request.query.active === 'true',
+        ownerId: request.query.ownerId,
+        q: request.query.q,
+      }),
+  )
+
+  routes.get(
+    '/admin/shares/owners',
+    {
+      config: admin,
+      schema: {
+        querystring: adminShareQuerySchema.pick({ active: true, q: true }),
+        response: { 200: adminShareOwnerListSchema },
+      },
+    },
+    (request) =>
+      shareOwners(app, {
+        active: request.query.active === 'true',
+        q: request.query.q,
       }),
   )
 

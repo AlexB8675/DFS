@@ -1,6 +1,6 @@
-import type { AdminSession, AdminShare, AdminUpload } from '@dfs/shared'
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
-import { KeyRound, LogOut, Link2Off, XCircle } from 'lucide-react'
+import type { AdminSession, AdminUpload } from '@dfs/shared'
+import { useQuery } from '@tanstack/react-query'
+import { KeyRound, LogOut, XCircle } from 'lucide-react'
 import { useState } from 'react'
 import { Link } from 'react-router'
 import { toast } from 'sonner'
@@ -18,28 +18,12 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 import { Skeleton } from '@/components/ui/skeleton'
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { errorMessage } from '@/lib/api/client'
 import { formatBytes, formatDate, formatFullDate } from '@/lib/format'
 import { describeUserAgent } from '@/lib/user-agent'
-import {
-  adminSessionsQuery,
-  adminSharesQuery,
-  adminUploadsQuery,
-  useCancelUploadAsAdmin,
-  useEndSession,
-  useRevokeShareAsAdmin,
-} from './api'
+import { adminSessionsQuery, adminUploadsQuery, useCancelUploadAsAdmin, useEndSession } from './api'
 import { AllClear, Section } from './section'
-
-/** An action that can't be undone, waiting for the admin to confirm it. */
-interface Confirmation {
-  title: string
-  description: string
-  action: string
-  run: () => Promise<unknown>
-  done: string
-}
+import { ShareLinks, type Confirmation } from './share-links'
 
 /**
  * `/admin/access`: who is signed in, every share link and the uploads under
@@ -64,7 +48,7 @@ export function AccessPage() {
     <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto grid max-w-6xl gap-6 p-4 sm:p-6">
         <Sessions />
-        <Shares onConfirm={setConfirming} />
+        <ShareLinks onConfirm={setConfirming} />
         <Uploads onConfirm={setConfirming} />
       </div>
       <AlertDialog
@@ -183,148 +167,6 @@ export function SessionList({
         </li>
       ))}
     </ul>
-  )
-}
-
-const SHARE_STATES: Record<AdminShare['state'], string> = {
-  active: 'Active',
-  expired: 'Expired',
-  used_up: 'Used up',
-  revoked: 'Turned off',
-}
-
-function Shares({ onConfirm }: { onConfirm: (confirmation: Confirmation) => void }) {
-  const [active, setActive] = useState(true)
-  const shares = useInfiniteQuery(adminSharesQuery(active))
-  const revoke = useRevokeShareAsAdmin()
-  const items = shares.data?.pages.flatMap((page) => page.items) ?? []
-
-  return (
-    <Section
-      title="Share links"
-      description="Everyone’s links, newest first. Their addresses aren’t shown: only their owners ever saw them."
-      action={
-        <ToggleGroup
-          type="single"
-          variant="outline"
-          size="sm"
-          spacing={0}
-          value={active ? 'active' : 'all'}
-          aria-label="Which links"
-          onValueChange={(value) => {
-            if (value) setActive(value === 'active')
-          }}
-        >
-          <ToggleGroupItem value="active" className="px-2.5">
-            Working
-          </ToggleGroupItem>
-          <ToggleGroupItem value="all" className="px-2.5">
-            All
-          </ToggleGroupItem>
-        </ToggleGroup>
-      }
-    >
-      {!shares.data ? (
-        <Skeleton className="h-24 rounded-lg" />
-      ) : items.length === 0 ? (
-        <AllClear>{active ? 'No link is working.' : 'No one has shared anything.'}</AllClear>
-      ) : (
-        <div className="grid gap-3">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="text-left text-xs text-muted-foreground">
-                <tr>
-                  <th className="pb-2 font-medium">Shared</th>
-                  <th className="pb-2 pl-4 font-medium">Owner</th>
-                  <th className="pb-2 pl-4 font-medium">State</th>
-                  <th className="pb-2 pl-4 text-right font-medium">Downloads</th>
-                  <th className="pb-2 pl-4 font-medium">Created</th>
-                  <th className="w-10 pb-2" aria-label="Actions" />
-                </tr>
-              </thead>
-              <tbody>
-                {items.map((share) => (
-                  <tr key={share.id} className="border-t border-border/60">
-                    <td className="max-w-64 py-1.5">
-                      <span className="flex items-center gap-1.5">
-                        {share.parentId ? (
-                          <Link
-                            to={`/admin/users/${share.ownerId}/folders/${share.parentId}`}
-                            className="truncate font-medium underline-offset-4 hover:underline"
-                          >
-                            {share.nodeName}
-                          </Link>
-                        ) : (
-                          <span className="truncate font-medium">{share.nodeName}</span>
-                        )}
-                        {share.hasPassword && (
-                          <KeyRound
-                            className="size-3.5 shrink-0 text-muted-foreground"
-                            aria-label="Needs a password"
-                          />
-                        )}
-                      </span>
-                    </td>
-                    <td className="py-1.5 pl-4 whitespace-nowrap">{share.ownerName}</td>
-                    <td className="py-1.5 pl-4 whitespace-nowrap text-muted-foreground">
-                      {SHARE_STATES[share.state]}
-                      {share.state === 'active' && share.expiresAt && (
-                        <span title={formatFullDate(share.expiresAt)}>
-                          {' '}
-                          · until {formatDate(share.expiresAt)}
-                        </span>
-                      )}
-                    </td>
-                    <td className="py-1.5 pl-4 text-right whitespace-nowrap tabular-nums">
-                      {share.downloadCount}
-                      {share.maxDownloads !== null && ` of ${String(share.maxDownloads)}`}
-                    </td>
-                    <td
-                      className="py-1.5 pl-4 whitespace-nowrap text-muted-foreground"
-                      title={formatFullDate(share.createdAt)}
-                    >
-                      {formatDate(share.createdAt)}
-                    </td>
-                    <td className="py-1 pl-2 text-right">
-                      {share.state === 'active' && (
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          aria-label={`Turn off ${share.ownerName}’s link to ${share.nodeName}`}
-                          title="Turn the link off"
-                          onClick={() => {
-                            onConfirm({
-                              title: `Turn off ${share.ownerName}’s link?`,
-                              description: `The link to “${share.nodeName}” stops working for anyone who has it, for good. ${share.ownerName} sees it turned off.`,
-                              action: 'Turn it off',
-                              run: () => revoke.mutateAsync(share.id),
-                              done: `Turned off the link to ${share.nodeName}`,
-                            })
-                          }}
-                        >
-                          <Link2Off />
-                        </Button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {shares.hasNextPage && (
-            <Button
-              variant="outline"
-              size="sm"
-              className="justify-self-center"
-              disabled={shares.isFetchingNextPage}
-              onClick={() => void shares.fetchNextPage()}
-            >
-              Load more
-            </Button>
-          )}
-        </div>
-      )}
-    </Section>
   )
 }
 

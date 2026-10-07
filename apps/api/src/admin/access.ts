@@ -1,10 +1,11 @@
-import { abandonUploads, appendJournal, shareLinks, shareRecords } from '@dfs/db'
-import type { AdminSession, AdminShare, AdminUpload, Page } from '@dfs/shared'
+import { abandonUploads, appendJournal, shareLinks, shareRecords, WORKING_LINK } from '@dfs/db'
+import type { AdminSession, AdminShare, AdminShareOwner, AdminUpload, Page } from '@dfs/shared'
 import { and, eq, isNull, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { audit, auditAlone } from '../audit.ts'
 import { endSession, endUserSessions, type Auth } from '../auth/sessions.ts'
 import { ApiError } from '../errors.ts'
+import { escapeLike } from '../nodes/write.ts'
 import { removeStagedVersions } from '../staging.ts'
 
 // Admin → Access (DESIGN.md §9): who is signed in, every share link, and the
@@ -146,29 +147,120 @@ const SELECT_SHARES = sql`
   JOIN nodes node ON node.id = share.node_id
   JOIN users owner ON owner.id = node.owner_id`
 
-/** `GET /admin/shares`: every user's links, newest first; only those still working with `active`. */
-export async function listShares(
-  app: FastifyInstance,
-  options: { cursor: string | undefined; limit: number; active: boolean },
-): Promise<Page<AdminShare>> {
-  const { cursor, limit, active } = options
-  const { rows } = await app.db.execute<ShareRow>(sql`
-    ${SELECT_SHARES}
-    WHERE true
-      ${cursor ? sql`AND share.id < ${cursor}` : sql``}
+interface ListedRow extends ShareRow {
+  owner_username: string
+  path: string
+  version: AdminShare['version']
+  working: boolean
+}
+
+/**
+ * Every link as the admin pages list it, `listed`: with its owner, the
+ * folders its item is in, the version it serves, and whether it works. With
+ * `q`, only links whose item, folder path or owner contains it.
+ */
+function listedShares(q: string | undefined) {
+  const words = q ? `%${escapeLike(q)}%` : null
+  return sql`
+    WITH RECURSIVE chain AS (
+      SELECT link.id AS share_id, node.parent_id AS next, ''::text AS path
+      FROM share_links link JOIN nodes node ON node.id = link.node_id
+      UNION ALL
+      -- Up to the top, leaving out the root, which every path starts in.
+      SELECT chain.share_id, parent.parent_id,
+        CASE
+          WHEN parent.parent_id IS NULL THEN chain.path
+          WHEN chain.path = '' THEN parent.name
+          ELSE parent.name || ' / ' || chain.path
+        END
+      FROM chain JOIN nodes parent ON parent.id = chain.next
+    ), listed AS (
+      SELECT link.id, link.node_id, node.name AS node_name, node.kind AS node_kind,
+        node.owner_id, owner.display_name AS owner_name, owner.username AS owner_username,
+        node.parent_id, chain.path,
+        link.created_at::text AS created_at, link.expires_at::text AS expires_at,
+        link.password_hash IS NOT NULL AS has_password, link.max_downloads,
+        link.download_count, link.revoked_at::text AS revoked_at,
+        CASE
+          WHEN node.kind = 'folder' THEN NULL
+          WHEN link.version_id IS NULL THEN 'deleted'
+          WHEN link.version_id = node.current_version_id THEN 'current'
+          ELSE 'earlier'
+        END AS version,
+        (${WORKING_LINK} AND (node.kind = 'folder' OR link.version_id IS NOT NULL)) AS working
+      FROM share_links link
+      JOIN nodes node ON node.id = link.node_id
+      JOIN users owner ON owner.id = node.owner_id
+      JOIN chain ON chain.share_id = link.id AND chain.next IS NULL
       ${
-        active
-          ? sql`AND share.revoked_at IS NULL
-              AND (share.expires_at IS NULL OR share.expires_at > now())
-              AND (share.max_downloads IS NULL OR share.download_count < share.max_downloads)`
+        words
+          ? sql`WHERE node.name ILIKE ${words} OR chain.path ILIKE ${words}
+              OR owner.display_name ILIKE ${words} OR owner.username ILIKE ${words}`
           : sql``
       }
-    ORDER BY share.id DESC LIMIT ${limit + 1}`)
+    )`
+}
+
+/**
+ * `GET /admin/shares`: links, newest first: only those that work with
+ * `active`, one user's with `ownerId`, those matching `q`.
+ */
+export async function listShares(
+  app: FastifyInstance,
+  options: {
+    cursor: string | undefined
+    limit: number
+    active: boolean
+    ownerId: string | undefined
+    q: string | undefined
+  },
+): Promise<Page<AdminShare>> {
+  const { cursor, limit, active, ownerId, q } = options
+  const { rows } = await app.db.execute<ListedRow>(sql`
+    ${listedShares(q)}
+    SELECT * FROM listed
+    WHERE true
+      ${cursor ? sql`AND id < ${cursor}` : sql``}
+      ${ownerId ? sql`AND owner_id = ${ownerId}` : sql``}
+      ${active ? sql`AND working` : sql``}
+    ORDER BY id DESC LIMIT ${limit + 1}`)
   const page = rows.slice(0, limit)
   return {
     items: page.map(toAdminShare),
     nextCursor: rows.length > limit ? (page.at(-1)?.id ?? null) : null,
   }
+}
+
+/**
+ * `GET /admin/shares/owners`: the users with links, by name, with how many
+ * match (`q`) and how many of those work; only those with one working with
+ * `active`.
+ */
+export async function shareOwners(
+  app: FastifyInstance,
+  options: { active: boolean; q: string | undefined },
+): Promise<AdminShareOwner[]> {
+  const { rows } = await app.db.execute<{
+    owner_id: string
+    owner_name: string
+    owner_username: string
+    links: number
+    working: number
+  }>(sql`
+    ${listedShares(options.q)}
+    SELECT owner_id, owner_name, owner_username, count(*)::int AS links,
+      (count(*) FILTER (WHERE working))::int AS working
+    FROM listed
+    GROUP BY owner_id, owner_name, owner_username
+    ${options.active ? sql`HAVING count(*) FILTER (WHERE working) > 0` : sql``}
+    ORDER BY lower(owner_name), owner_id`)
+  return rows.map((row) => ({
+    ownerId: row.owner_id,
+    ownerName: row.owner_name,
+    ownerUsername: row.owner_username,
+    links: row.links,
+    working: row.working,
+  }))
 }
 
 /** `DELETE /admin/shares/:id`: turns any user's link off for good. */
@@ -270,15 +362,17 @@ export async function cancelUploadAsAdmin(
   })
 }
 
-function toAdminShare(row: ShareRow): AdminShare {
+function toAdminShare(row: ListedRow): AdminShare {
   const now = Date.now()
   const state = row.revoked_at
     ? 'revoked'
-    : row.expires_at && Date.parse(row.expires_at) <= now
-      ? 'expired'
-      : row.max_downloads !== null && row.download_count >= row.max_downloads
-        ? 'used_up'
-        : 'active'
+    : row.version === 'deleted'
+      ? 'version_deleted'
+      : row.expires_at && Date.parse(row.expires_at) <= now
+        ? 'expired'
+        : row.max_downloads !== null && row.download_count >= row.max_downloads
+          ? 'used_up'
+          : 'active'
   return {
     id: row.id,
     nodeId: row.node_id,
@@ -286,13 +380,16 @@ function toAdminShare(row: ShareRow): AdminShare {
     nodeKind: row.node_kind,
     ownerId: row.owner_id,
     ownerName: row.owner_name,
+    ownerUsername: row.owner_username,
     parentId: row.parent_id,
+    path: row.path,
     createdAt: iso(row.created_at),
     expiresAt: row.expires_at ? iso(row.expires_at) : null,
     hasPassword: row.has_password,
     maxDownloads: row.max_downloads,
     downloadCount: row.download_count,
     revokedAt: row.revoked_at ? iso(row.revoked_at) : null,
+    version: row.version,
     state,
   }
 }

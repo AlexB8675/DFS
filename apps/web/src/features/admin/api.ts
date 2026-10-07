@@ -1,5 +1,6 @@
 import {
   adminSessionListSchema,
+  adminShareOwnerListSchema,
   adminSharePageSchema,
   adminUploadListSchema,
   adminTaskListSchema,
@@ -232,16 +233,42 @@ export function adminSessionsQuery(userId?: string) {
   })
 }
 
-export function adminSharesQuery(active: boolean) {
+/** Which links the admin's list shows: working ones only, and those matching words. */
+export interface ShareFilter {
+  active: boolean
+  q: string
+}
+
+/** One user's links, newest first. */
+export function adminSharesQuery({ active, q }: ShareFilter, ownerId: string) {
   return infiniteQueryOptions({
-    queryKey: ['admin', 'shares', active],
+    queryKey: ['admin', 'shares', ownerId, active, q],
     queryFn: ({ pageParam, signal }) =>
       apiGet('/admin/shares', adminSharePageSchema, {
-        query: { cursor: pageParam, limit: 100, active: String(active) },
+        query: {
+          cursor: pageParam,
+          limit: 50,
+          active: String(active),
+          ownerId,
+          q: q === '' ? undefined : q,
+        },
         signal,
       }),
     initialPageParam: null as string | null,
     getNextPageParam: (page) => page.nextCursor,
+  })
+}
+
+/** The users with links, by name, with how many match and work. */
+export function adminShareOwnersQuery({ active, q }: ShareFilter) {
+  return queryOptions({
+    queryKey: ['admin', 'shares', 'owners', active, q],
+    queryFn: ({ signal }) =>
+      apiGet('/admin/shares/owners', adminShareOwnerListSchema, {
+        query: { active: String(active), q: q === '' ? undefined : q },
+        signal,
+      }),
+    placeholderData: (previous) => previous,
   })
 }
 

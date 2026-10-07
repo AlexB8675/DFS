@@ -1077,7 +1077,7 @@ export class MockDb {
   }
 
   /** Which version a link serves, as its owner's list says (§7.5). */
-  private shareVersion(share: MockShare): ShareLink['version'] {
+  protected shareVersion(share: MockShare): ShareLink['version'] {
     const node = this.state.nodes[share.nodeId]
     if (share.versionNo === null || !node) return null
     if (share.versionNo === (node.versionNo ?? 1)) return 'current'

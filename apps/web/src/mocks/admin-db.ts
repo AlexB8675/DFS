@@ -10,6 +10,7 @@ import {
   type SystemInfo,
   type ModerationResult,
   type ShareCount,
+  type AdminShareOwner,
 } from '@dfs/shared'
 import type {
   AdminUser,
@@ -440,22 +441,37 @@ export class AdminMockDb extends MockDb {
     return { ended: sessions.length }
   }
 
-  adminShares(cursor: string | null, limit: number, active: boolean): Page<AdminShare> {
-    this.requireAdmin()
+  /** Every link as the admin pages list it, newest first: with its owner, path and state. */
+  private listedShares(q: string | undefined): AdminShare[] {
     const now = Date.now()
-    const all = [...this.state.shares]
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    const words = q?.trim().toLowerCase() ?? ''
+    return [...this.state.shares]
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))
       .flatMap((share): AdminShare[] => {
         const node = this.state.nodes[share.nodeId]
         const owner = node && this.state.users.find((user) => user.id === node.ownerId)
         if (!node || !owner) return []
+        // The folders it is in, leaving out the root every path starts in.
+        const path = this.ancestors(node)
+          .slice(1, -1)
+          .map((ancestor) => ancestor.name)
+          .join(' / ')
+        const matches =
+          words === '' ||
+          [node.name, path, owner.displayName, owner.username].some((text) =>
+            text.toLowerCase().includes(words),
+          )
+        if (!matches) return []
+        const version = this.shareVersion(share)
         const state = share.revokedAt
           ? 'revoked'
-          : share.expiresAt && Date.parse(share.expiresAt) <= now
-            ? 'expired'
-            : share.maxDownloads !== null && share.downloadCount >= share.maxDownloads
-              ? 'used_up'
-              : 'active'
+          : version === 'deleted'
+            ? 'version_deleted'
+            : share.expiresAt && Date.parse(share.expiresAt) <= now
+              ? 'expired'
+              : share.maxDownloads !== null && share.downloadCount >= share.maxDownloads
+                ? 'used_up'
+                : 'active'
         return [
           {
             id: share.id,
@@ -464,22 +480,65 @@ export class AdminMockDb extends MockDb {
             nodeKind: node.kind,
             ownerId: owner.id,
             ownerName: owner.displayName,
+            ownerUsername: owner.username,
             parentId: node.parentId,
+            path,
             createdAt: share.createdAt,
             expiresAt: share.expiresAt,
             hasPassword: share.password !== null,
             maxDownloads: share.maxDownloads,
             downloadCount: share.downloadCount,
             revokedAt: share.revokedAt,
+            version,
             state,
           },
         ]
       })
-      .filter((share) => !active || share.state === 'active')
-    const start = cursor ? all.findIndex((share) => share.id === cursor) + 1 : 0
-    const items = all.slice(start, start + limit)
+  }
+
+  /** `GET /admin/shares`: newest first, filtered by state, owner and words. */
+  adminShares(query: {
+    cursor?: string
+    limit: number
+    active: boolean
+    ownerId?: string
+    q?: string
+  }): Page<AdminShare> {
+    this.requireAdmin()
+    const all = this.listedShares(query.q).filter(
+      (share) =>
+        (!query.active || share.state === 'active') &&
+        (!query.ownerId || share.ownerId === query.ownerId),
+    )
+    const start = query.cursor ? all.findIndex((share) => share.id === query.cursor) + 1 : 0
+    const items = all.slice(start, start + query.limit)
     const last = items.at(-1)
-    return { items, nextCursor: start + limit < all.length && last ? last.id : null }
+    return { items, nextCursor: start + query.limit < all.length && last ? last.id : null }
+  }
+
+  /** `GET /admin/shares/owners`: who has links, by name, with how many match and work. */
+  adminShareOwners(query: { active: boolean; q?: string }): AdminShareOwner[] {
+    this.requireAdmin()
+    const owners = new Map<string, AdminShareOwner>()
+    for (const share of this.listedShares(query.q)) {
+      const owner = owners.get(share.ownerId) ?? {
+        ownerId: share.ownerId,
+        ownerName: share.ownerName,
+        ownerUsername: share.ownerUsername,
+        links: 0,
+        working: 0,
+      }
+      owner.links += 1
+      if (share.state === 'active') owner.working += 1
+      owners.set(share.ownerId, owner)
+    }
+    return [...owners.values()]
+      .filter((owner) => !query.active || owner.working > 0)
+      .sort(
+        (a, b) =>
+          a.ownerName.toLowerCase().localeCompare(b.ownerName.toLowerCase()) ||
+          a.ownerId.localeCompare(b.ownerId),
+      )
   }
 
   revokeShareAsAdmin(id: string): void {

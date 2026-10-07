@@ -598,18 +598,47 @@ export const adminShareSchema = z.object({
   nodeKind: nodeKindSchema,
   ownerId: id,
   ownerName: z.string(),
+  ownerUsername: z.string(),
   /** The folder it is in, for the metadata browser; `null` for a root. */
   parentId: id.nullable(),
+  /** The folders it is in, from the top of its owner's drive: `Photos / 2024`; empty in the root. */
+  path: z.string(),
   createdAt: timestamp,
   expiresAt: timestamp.nullable(),
   hasPassword: z.boolean(),
   maxDownloads: z.number().int().positive().nullable(),
   downloadCount: count,
   revokedAt: timestamp.nullable(),
-  state: z.enum(['active', 'expired', 'used_up', 'revoked']),
+  /** A file link's version, as its owner's list says it (§7.5); `null` for a folder link. */
+  version: z.enum(['current', 'earlier', 'deleted']).nullable(),
+  state: z.enum(['active', 'expired', 'used_up', 'revoked', 'version_deleted']),
 })
 export type AdminShare = z.infer<typeof adminShareSchema>
 export const adminSharePageSchema = pageSchema(adminShareSchema)
+
+/**
+ * `GET /admin/shares`: links, newest first. `active` keeps those that work,
+ * `ownerId` one user's, and `q` those whose item, folder path or owner
+ * contains these words.
+ */
+export const adminShareQuerySchema = z.object({
+  cursor: z.uuid().optional(),
+  limit: z.coerce.number().int().min(1).max(500).default(100),
+  active: z.enum(['true', 'false']).default('false'),
+  ownerId: z.uuid().optional(),
+  q: z.string().trim().max(200).optional(),
+})
+
+/** `GET /admin/shares/owners`: who has links, by name, with how many (and how many work) match. */
+export const adminShareOwnerSchema = z.object({
+  ownerId: id,
+  ownerName: z.string(),
+  ownerUsername: z.string(),
+  links: count,
+  working: count,
+})
+export type AdminShareOwner = z.infer<typeof adminShareOwnerSchema>
+export const adminShareOwnerListSchema = z.array(adminShareOwnerSchema)
 
 /** An upload still receiving its parts. */
 export const adminUploadSchema = z.object({

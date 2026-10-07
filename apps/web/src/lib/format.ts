@@ -54,3 +54,12 @@ function isSameDay(a: Date, b: Date): boolean {
     a.getDate() === b.getDate()
   )
 }
+
+/** A person's initials, for an avatar: “Sam Rivera” → “SR”. */
+export function initials(name: string): string {
+  const parts = name.trim().split(/\s+/)
+  return parts
+    .slice(0, 2)
+    .map((part) => part.charAt(0).toUpperCase())
+    .join('')
+}

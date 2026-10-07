@@ -1,5 +1,6 @@
 import {
   adminSessionListSchema,
+  adminShareOwnerListSchema,
   adminSharePageSchema,
   adminUploadListSchema,
   adminTaskListSchema,
@@ -243,6 +244,48 @@ export function adminTests({
       await admin.send('DELETE', `/admin/shares/${link.id}`)
       const again = await admin.call('GET', '/admin/audit?actions=share.&limit=1', auditPageSchema)
       expect(again.items[0]?.id).toBe(log.items[0]?.id)
+    })
+
+    it('lists links by owner, with their folders, and finds them by file, folder or person', async () => {
+      const { user, username } = await newUserWithFolder()
+      const client = await signIn(username, chosenPassword(username))
+      const folder = (parentId: string, name: string) =>
+        client.call('POST', '/folders', nodeSchema, { json: { parentId, name } })
+      const trips = await folder(user.rootFolderId, 'Trips')
+      const lisbon = await folder(trips.id, 'Lisbon 2024')
+      const photo = await uploadFile(client, lisbon.id, 'tram.jpg', text('jpeg'))
+      const link = await client.call('POST', '/shares', shareLinkSchema, {
+        json: { nodeId: photo.nodeId, expiresAt: null, password: null, maxDownloads: null },
+      })
+      const admin = await owner()
+      const query = (params: string) =>
+        admin.call('GET', `/admin/shares?${params}`, adminSharePageSchema)
+      const owners = (params: string) =>
+        admin.call('GET', `/admin/shares/owners?${params}`, adminShareOwnerListSchema)
+
+      const mine = await query(`ownerId=${user.id}`)
+      expect(mine.items).toHaveLength(1)
+      expect(mine.items[0]).toMatchObject({
+        id: link.id,
+        path: 'Trips / Lisbon 2024',
+        ownerUsername: username,
+        version: 'current',
+        state: 'active',
+      })
+      expect((await owners('active=true')).find((entry) => entry.ownerId === user.id)).toEqual({
+        ownerId: user.id,
+        ownerName: user.displayName,
+        ownerUsername: username,
+        links: 1,
+        working: 1,
+      })
+      // By a folder it is in, its own name, or its owner; never by anything else.
+      for (const words of ['lisbon', 'TRAM', username]) {
+        const found = await query(`q=${encodeURIComponent(words)}`)
+        expect(found.items.map((share) => share.id)).toContain(link.id)
+      }
+      const none = await owners(`q=${encodeURIComponent('no such thing 9f1c')}`)
+      expect(none).toEqual([])
     })
 
     it('lists uploads under way, and gives one up (§9)', async () => {
