@@ -2,11 +2,21 @@ import {
   fileCategory,
   type DriveNode,
   type FileCategory,
+  type ModerationResult,
+  type ShareCount,
   type UsageCategory,
   type UserUsage,
 } from '@dfs/shared'
-import { appendJournal, markFoldersDirty, nodeRecords, notifyEvent, type Executor } from '@dfs/db'
-import { sql } from 'drizzle-orm'
+import {
+  appendJournal,
+  markFoldersDirty,
+  nodeRecords,
+  notifyEvent,
+  shareLinks,
+  shareRecords,
+  type Executor,
+} from '@dfs/db'
+import { and, isNull, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { audit, auditAlone } from '../audit.ts'
 import type { Auth } from '../auth/sessions.ts'
@@ -106,17 +116,43 @@ export async function adminNode(app: FastifyInstance, id: string): Promise<Drive
   return toDriveNode(await anyVisibleNode(app.db, id))
 }
 
+/** The node and everything below it, as a subquery of IDs. */
+function subtree(id: string) {
+  return sql`(
+    WITH RECURSIVE below AS (
+      SELECT id FROM nodes WHERE id = ${id}
+      UNION ALL
+      SELECT child.id FROM nodes child JOIN below ON child.parent_id = below.id
+    )
+    SELECT id FROM below)`
+}
+
+/**
+ * `GET /admin/nodes/:id/links`: the share links removing this item would
+ * revoke: every one not revoked yet, to it or to what's inside it, also
+ * expired or used up, which its owner could otherwise bring back.
+ */
+export async function linksToRevoke(app: FastifyInstance, id: string): Promise<ShareCount> {
+  await anyVisibleNode(app.db, id)
+  const { rows } = await app.db.execute<{ links: number }>(sql`
+    SELECT count(*)::int AS links FROM share_links
+    WHERE revoked_at IS NULL AND node_id IN ${subtree(id)}`)
+  return { links: rows[0]?.links ?? 0 }
+}
+
 /**
  * `DELETE /admin/nodes/:id`: moves an item to its owner's trash with the
- * reason, which the owner sees there; their open folder updates live.
+ * reason, which the owner sees there; their open folder updates live. Every
+ * share link to it or to what's inside it is revoked, for good: restoring
+ * it brings none back.
  */
 export async function moderate(
   app: FastifyInstance,
   admin: Auth,
   id: string,
   reason: string,
-): Promise<void> {
-  await app.db.transaction(async (tx) => {
+): Promise<ModerationResult> {
+  return app.db.transaction(async (tx) => {
     const { rows: owners } = await tx.execute<{ owner_id: string }>(sql`
       SELECT owner_id FROM nodes WHERE id = ${id}`)
     const [owner] = owners
@@ -125,14 +161,24 @@ export async function moderate(
     const node = await anyVisibleNode(tx, id)
     if (!node.parent_id) throw new ApiError(403, 'forbidden', 'A root folder cannot be removed.')
     const updated = await markTrashed(tx, [id], reason)
+    // After the nodes, as making a link locks its node first (locks.ts).
+    const revoked = await tx
+      .update(shareLinks)
+      .set({ revokedAt: new Date() })
+      .where(and(isNull(shareLinks.revokedAt), sql`${shareLinks.nodeId} IN ${subtree(id)}`))
+      .returning()
     await markFoldersDirty(tx, [node.parent_id])
     const { rows } = await tx.execute<{ name: string }>(sql`
       SELECT display_name AS name FROM users WHERE id = ${node.owner_id}`)
+    const links = revoked.length
     const audited = await audit(tx, {
       actorId: admin.user.id,
       action: 'node.moderated',
       target: `${node.name} (${rows[0]?.name ?? 'unknown'})`,
-      details: reason,
+      details:
+        links === 0
+          ? reason
+          : `${reason} · ${String(links)} share ${links === 1 ? 'link' : 'links'} revoked`,
       nodeId: id,
     })
     await notifyEvent(tx, {
@@ -140,6 +186,7 @@ export async function moderate(
       type: 'nodes.changed',
       payload: { parentIds: [node.parent_id] },
     })
-    await appendJournal(tx, [...nodeRecords(updated), ...audited])
+    await appendJournal(tx, [...nodeRecords(updated), ...shareRecords(revoked), ...audited])
+    return { revokedLinks: links }
   })
 }

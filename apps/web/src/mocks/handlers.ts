@@ -326,10 +326,13 @@ export const handlers = [
   http.get<Id>('/api/admin/nodes/:id/children', ({ request, params }) =>
     respond(request, () => db.adminChildren(params.id, readQuery(request, listQuery))),
   ),
+  http.get<Id>('/api/admin/nodes/:id/links', ({ request, params }) =>
+    respond(request, () => db.linksToRevoke(params.id)),
+  ),
   http.delete<Id>('/api/admin/nodes/:id', ({ request, params }) =>
-    respondEmpty(request, async () => {
-      db.moderate(params.id, moderationSchema.parse(await request.json()).reason)
-    }),
+    respond(request, async () =>
+      db.moderate(params.id, moderationSchema.parse(await request.json()).reason),
+    ),
   ),
   http.get('/api/admin/health', ({ request }) => respond(request, () => db.health())),
   http.get('/api/admin/storage', ({ request }) => respond(request, () => db.storageStatus())),

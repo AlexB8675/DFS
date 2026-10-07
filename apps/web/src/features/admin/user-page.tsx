@@ -24,6 +24,8 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '@/components/ui/spinner'
 import { VirtualList } from '@/components/virtual-list'
 import { sessionQuery } from '@/features/auth/session'
+import { linkCount } from '@/features/shares/api'
+import { LinkWarning } from '@/features/shares/link-warning'
 import { UserAvatar } from '@/layout/user-menu'
 import { errorMessage } from '@/lib/api/client'
 import { formatBytes, formatDate, formatFullDate } from '@/lib/format'
@@ -34,6 +36,7 @@ import {
   adminChildrenQuery,
   adminPathQuery,
   adminUsersQuery,
+  linksToRevokeQuery,
   useModerateNode,
   userUsageQuery,
 } from './api'
@@ -321,14 +324,18 @@ function ModerationDialog({
   onClose: () => void
 }) {
   const moderate = useModerateNode()
+  const links = useQuery(linksToRevokeQuery(node.id))
   const [state, submit, pending] = useActionState(
     async (_previous: FormState, formData: FormData): Promise<FormState> => {
       const reason = formText(formData, 'reason').trim()
       if (reason.length < 3) return { error: 'Give a reason; the owner will see it.' }
       try {
-        await moderate.mutateAsync({ id: node.id, reason })
+        const { revokedLinks } = await moderate.mutateAsync({ id: node.id, reason })
         toast.success(`Removed “${node.name}”`, {
-          description: `${ownerName} sees it in their trash, with your reason.`,
+          description:
+            revokedLinks === 0
+              ? `${ownerName} sees it in their trash, with your reason.`
+              : `${ownerName} sees it in their trash, with your reason. ${linkCount(revokedLinks)} to it ${revokedLinks === 1 ? 'was' : 'were'} revoked.`,
         })
         onClose()
         return { error: null }
@@ -356,6 +363,14 @@ function ModerationDialog({
               logged in the audit log.
             </DialogDescription>
           </DialogHeader>
+          {links.data !== undefined && links.data.links > 0 && (
+            <LinkWarning>
+              {linkCount(links.data.links)} to it
+              {node.kind === 'folder' ? ' or what’s inside it' : ''} will be revoked for good:{' '}
+              {links.data.links === 1 ? 'it stops' : 'they stop'} working now, and restoring it
+              won’t bring {links.data.links === 1 ? 'it' : 'them'} back.
+            </LinkWarning>
+          )}
           <div className="grid gap-2">
             <Label htmlFor="reason">Reason</Label>
             <textarea

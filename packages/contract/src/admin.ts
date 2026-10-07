@@ -7,8 +7,10 @@ import {
   databaseStatusSchema,
   METRICS,
   metricSeriesSchema,
+  moderationResultSchema,
   nodePageSchema,
   nodeSchema,
+  shareCountSchema,
   storageChannelListSchema,
   storageChannelSchema,
   shareLinkPageSchema,
@@ -32,6 +34,13 @@ export function adminTests({
   activated,
   signIn,
 }: SuiteContext): void {
+  /** A user who chose their password, with nothing in their drive yet. */
+  async function newUserWithFolder() {
+    const { user, username, temporaryPassword } = await newUser(await owner())
+    await activated(username, temporaryPassword)
+    return { user, username }
+  }
+
   /** A user with a photo and a text file in their root. */
   async function userWithFiles() {
     const { user, username, temporaryPassword } = await newUser(await owner())
@@ -73,6 +82,44 @@ export function adminTests({
       expect(trash.items.find((item) => item.id === photo.nodeId)?.moderationReason).toBe(
         'Not allowed here.',
       )
+    })
+
+    it('revokes the share links to an item it removes, for good, and says how many', async () => {
+      const { user, username } = await newUserWithFolder()
+      const client = await signIn(username, chosenPassword(username))
+      const folder = await client.call('POST', '/folders', nodeSchema, {
+        json: { parentId: user.rootFolderId, name: 'Shared stuff' },
+      })
+      const inside = await uploadFile(client, folder.id, 'flyer.pdf', text('pdf'))
+      const share = (nodeId: string) =>
+        client.call('POST', '/shares', shareLinkSchema, {
+          json: { nodeId, expiresAt: null, password: null, maxDownloads: null },
+        })
+      const folderLink = await share(folder.id)
+      const fileLink = await share(inside.nodeId)
+      const gone = await share(inside.nodeId)
+      await client.send('DELETE', `/shares/${gone.id}`)
+      const admin = await owner()
+
+      const counted = await admin.call('GET', `/admin/nodes/${folder.id}/links`, shareCountSchema)
+      expect(counted.links).toBe(2)
+      const result = await admin.call(
+        'DELETE',
+        `/admin/nodes/${folder.id}`,
+        moderationResultSchema,
+        {
+          json: { reason: 'Not allowed here.' },
+        },
+      )
+      expect(result.revokedLinks).toBe(2)
+
+      // Restoring it brings none back.
+      const again = await signIn(username, chosenPassword(username))
+      await again.send('POST', `/nodes/${folder.id}/restore`)
+      const { items } = await again.call('GET', '/shares', shareLinkPageSchema)
+      for (const link of [folderLink, fileLink]) {
+        expect(items.find((item) => item.id === link.id)?.revokedAt).not.toBeNull()
+      }
     })
 
     it('adds storage channels, refuses one twice, and keeps one taking blobs', async () => {

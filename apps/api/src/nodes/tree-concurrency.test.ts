@@ -173,7 +173,7 @@ describe('concurrent changes to a subtree', () => {
         () =>
           removal === 'trash'
             ? trashNodes(app, auth, [ancestor.id])
-            : moderate(app, auth, ancestor.id, 'Test moderation'),
+            : moderate(app, auth, ancestor.id, 'Test moderation').then(() => undefined),
       )
       // A single-node response may itself observe the now-trashed node.
       if (result.status === 'rejected') expect(result.reason).toMatchObject({ status: 404 })

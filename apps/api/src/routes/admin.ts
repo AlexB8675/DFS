@@ -14,6 +14,7 @@ import {
   databaseStatusSchema,
   metricSeriesSchema,
   metricsQuerySchema,
+  moderationResultSchema,
   moderationSchema,
   nodeKindSchema,
   nodePageSchema,
@@ -30,12 +31,13 @@ import {
   updateChannelSchema,
   updateUserSchema,
   userUsageSchema,
+  shareCountSchema,
 } from '@dfs/shared'
 import { readMetrics } from '@dfs/db'
 import type { FastifyInstance } from 'fastify'
 import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
-import { adminNode, anyVisibleNode, moderate, userUsage } from '../admin/browse.ts'
+import { adminNode, anyVisibleNode, linksToRevoke, moderate, userUsage } from '../admin/browse.ts'
 import {
   cancelUploadAsAdmin,
   endSessionAsAdmin,
@@ -150,13 +152,19 @@ export function adminRoutes(app: FastifyInstance, _options: object, done: () => 
     },
   )
 
+  routes.get(
+    '/admin/nodes/:id/links',
+    { config: admin, schema: { params: byId, response: { 200: shareCountSchema } } },
+    (request) => linksToRevoke(app, request.params.id),
+  )
+
   routes.delete(
     '/admin/nodes/:id',
-    { config: admin, schema: { params: byId, body: moderationSchema, response: noContent } },
-    async (request, reply) => {
-      await moderate(app, requireAuth(request.auth), request.params.id, request.body.reason)
-      return reply.code(204).send(null)
+    {
+      config: admin,
+      schema: { params: byId, body: moderationSchema, response: { 200: moderationResultSchema } },
     },
+    (request) => moderate(app, requireAuth(request.auth), request.params.id, request.body.reason),
   )
 
   // ── The system ─────────────────────────────────────────────────────────────

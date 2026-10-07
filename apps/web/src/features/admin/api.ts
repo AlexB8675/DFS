@@ -8,8 +8,10 @@ import {
   adminUserSchema,
   auditPageSchema,
   databaseStatusSchema,
+  moderationResultSchema,
   nodePageSchema,
   nodePathSchema,
+  shareCountSchema,
   storageChannelListSchema,
   storageChannelSchema,
   storageStatusSchema,
@@ -324,10 +326,19 @@ async function invalidateUsers(): Promise<void> {
   ])
 }
 
+/** The share links removing an item would revoke: to it or what's inside it. */
+export function linksToRevokeQuery(nodeId: string) {
+  return queryOptions({
+    queryKey: ['admin', 'node-links', nodeId],
+    queryFn: ({ signal }) => apiGet(`/admin/nodes/${nodeId}/links`, shareCountSchema, { signal }),
+    staleTime: 0,
+  })
+}
+
 export function useModerateNode() {
   return useMutation({
     mutationFn: ({ id, reason }: { id: string; reason: string }) =>
-      apiSend('DELETE', `/admin/nodes/${id}`, { reason }),
+      apiSend('DELETE', `/admin/nodes/${id}`, { reason }, moderationResultSchema),
     onSettled: () =>
       Promise.all([
         queryClient.invalidateQueries({ queryKey: ['admin'] }),

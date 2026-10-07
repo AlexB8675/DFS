@@ -904,6 +904,15 @@ export class MockDb {
     return { items, nextCursor: null }
   }
 
+  /** Links not revoked yet to this node or anything below it, which removing it would revoke (§7.2). */
+  protected unrevokedLinksBelow(node: MockNode): MockShare[] {
+    const below = new Set([
+      node.id,
+      ...this.descendants(node.id).map((descendant) => descendant.id),
+    ])
+    return this.state.shares.filter((share) => !share.revokedAt && below.has(share.nodeId))
+  }
+
   /** `POST /shares/count`: outstanding links to these items or below them, or to anything in the trash. */
   shareCount(input: ShareCountInput): ShareCount {
     const userId = this.state.userId

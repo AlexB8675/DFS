@@ -497,6 +497,12 @@ export type UserUsage = z.infer<typeof userUsageSchema>
 /** `DELETE /admin/nodes/:id`: moderation trash. The owner sees the reason in their trash. */
 export const moderationSchema = z.object({ reason: z.string().trim().min(3).max(500) })
 export type ModerationInput = z.infer<typeof moderationSchema>
+/**
+ * `DELETE /admin/nodes/:id`: removing an item revokes every share link to it
+ * or to what's inside it, for good, so restoring it brings none back (§7.2).
+ */
+export const moderationResultSchema = z.object({ revokedLinks: z.number().int().min(0) })
+export type ModerationResult = z.infer<typeof moderationResultSchema>
 
 export const serviceStatusSchema = z.enum(['ok', 'degraded', 'down'])
 export type ServiceStatus = z.infer<typeof serviceStatusSchema>

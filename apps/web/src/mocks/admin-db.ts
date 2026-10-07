@@ -8,6 +8,8 @@ import {
   type AdminTaskRequest,
   type StorageStatus,
   type SystemInfo,
+  type ModerationResult,
+  type ShareCount,
 } from '@dfs/shared'
 import type {
   AdminUser,
@@ -248,23 +250,43 @@ export class AdminMockDb extends MockDb {
     )
   }
 
-  /** Moderation trash: the owner finds the item in their trash, with the reason. */
-  moderate(id: string, reason: string): void {
+  /** `GET /admin/nodes/:id/links`: the share links removing this item would revoke. */
+  linksToRevoke(id: string): ShareCount {
+    this.requireAdmin()
+    return { links: this.unrevokedLinksBelow(this.anyVisibleNode(id)).length }
+  }
+
+  /**
+   * Moderation trash: the owner finds the item in their trash, with the
+   * reason. Every share link to it or below it is revoked, for good.
+   */
+  moderate(id: string, reason: string): ModerationResult {
     this.requireAdmin()
     const node = this.anyVisibleNode(id)
     if (node.parentId === null) {
       throw new MockApiError(403, 'forbidden', 'A root folder cannot be removed.')
     }
-    node.deletedAt = new Date().toISOString()
+    const revoked = this.unrevokedLinksBelow(node)
+    const now = new Date().toISOString()
+    for (const share of revoked) share.revokedAt = now
+    node.deletedAt = now
     node.moderationReason = reason
     for (const descendant of this.descendants(node.id)) descendant.trashedVia ??= node.id
     const owner = this.state.users.find((user) => user.id === node.ownerId)
-    this.audit('node.moderated', `${node.name} (${owner?.displayName ?? 'unknown'})`, reason)
+    const links = revoked.length
+    this.audit(
+      'node.moderated',
+      `${node.name} (${owner?.displayName ?? 'unknown'})`,
+      links === 0
+        ? reason
+        : `${reason} · ${String(links)} share ${links === 1 ? 'link' : 'links'} revoked`,
+    )
     this.changed()
     // Removed from under the signed-in user: their open folder updates live.
     if (node.ownerId === this.state.userId) {
       this.emit({ type: 'nodes.changed', parentIds: [node.parentId] })
     }
+    return { revokedLinks: links }
   }
 
   // ── System ─────────────────────────────────────────────────────────────────
