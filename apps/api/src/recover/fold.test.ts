@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { foldJournal, settle } from './fold.ts'
-import type { JournalEntry } from './read-journal.ts'
+import { RecoveryError, type JournalEntry } from './read-journal.ts'
 
 // Settling a journal cut short (DESIGN.md §8 step 4): what recovery can't
 // read is dropped and listed, and nothing is made up.
@@ -63,5 +63,118 @@ describe('settling the journal (§8)', () => {
     })
     expect(state.nodes.get('kept')).toMatchObject({ currentVersionId: 'kept-1', sizeBytes: 1 })
     expect([...state.versions.keys()]).toEqual(['kept-1'])
+  })
+})
+
+describe('compaction in the journal (§6.6)', () => {
+  const owner: [string, Record<string, unknown>][] = [
+    ['user.upsert', { id: 'owner', rootNodeId: 'root' }],
+    ['node.upsert', { id: 'root', kind: 'folder', parentId: null, ownerId: 'owner' }],
+    ['node.upsert', file('a', 'a-1')],
+  ]
+  const twoChunks = {
+    ...version('a-1', 'a', 1, 1),
+    chunks: [
+      { ...chunk(1), idx: 0 },
+      { ...chunk(2), idx: 1, offset: 300 },
+    ],
+  }
+  const relocated = (id: number, chunks: { versionId: string; idx: number; offset: number }[]) =>
+    ['blob.relocated', { id, chunks }] as [string, Record<string, unknown>]
+  const where = (state: ReturnType<typeof foldJournal>) =>
+    state.versions.get('a-1')?.chunks?.map(({ idx, blobId, offset }) => ({ idx, blobId, offset }))
+
+  it('reads a frame where it was moved to, the old pack deleted', () => {
+    const state = foldJournal(
+      entries([
+        ...owner,
+        ['blob.stored', { id: 1, kind: 'solo' }],
+        ['blob.stored', { id: 2, kind: 'pack' }],
+        ['version.stored', twoChunks],
+        ['blob.stored', { id: 5, kind: 'pack' }],
+        relocated(5, [{ versionId: 'a-1', idx: 1, offset: 77 }]),
+        ['blob.deleted', { id: 2 }],
+      ]),
+    )
+    expect(settle(state)).toMatchObject({ unreadableVersions: [], droppedFiles: [] })
+    // Only the chunk listed moved; the solo blob's stayed.
+    expect(where(state)).toEqual([
+      { idx: 0, blobId: 1, offset: 0 },
+      { idx: 1, blobId: 5, offset: 77 },
+    ])
+  })
+
+  it('follows a pack merged twice, the last move winning', () => {
+    const state = foldJournal(
+      entries([
+        ...owner,
+        ['blob.stored', { id: 1, kind: 'solo' }],
+        ['blob.stored', { id: 2, kind: 'pack' }],
+        ['version.stored', twoChunks],
+        ['blob.stored', { id: 5, kind: 'pack' }],
+        relocated(5, [{ versionId: 'a-1', idx: 1, offset: 77 }]),
+        ['blob.deleted', { id: 2 }],
+        ['blob.stored', { id: 9, kind: 'pack' }],
+        relocated(9, [{ versionId: 'a-1', idx: 1, offset: 4 }]),
+        ['blob.deleted', { id: 5 }],
+      ]),
+    )
+    expect(settle(state).unreadableVersions).toEqual([])
+    expect(where(state)?.[1]).toEqual({ idx: 1, blobId: 9, offset: 4 })
+  })
+
+  it('leaves a version journaled after the move as its record says', () => {
+    // Its pack was compacted while its other frames were still being posted:
+    // the move names it first, and its record, written later, where it is now.
+    const state = foldJournal(
+      entries([
+        ...owner,
+        ['blob.stored', { id: 1, kind: 'solo' }],
+        ['blob.stored', { id: 2, kind: 'pack' }],
+        ['blob.stored', { id: 5, kind: 'pack' }],
+        relocated(5, [{ versionId: 'a-1', idx: 1, offset: 77 }]),
+        ['blob.deleted', { id: 2 }],
+        [
+          'version.stored',
+          { ...twoChunks, chunks: [twoChunks.chunks[0], { ...chunk(5), idx: 1, offset: 77 }] },
+        ],
+      ]),
+    )
+    expect(settle(state).unreadableVersions).toEqual([])
+    expect(where(state)?.[1]).toEqual({ idx: 1, blobId: 5, offset: 77 })
+  })
+
+  it('doesn’t bring back a version purged before its frame moved', () => {
+    const state = foldJournal(
+      entries([
+        ...owner,
+        ['node.upsert', file('b', 'b-1')],
+        ['blob.stored', { id: 2, kind: 'pack' }],
+        ['version.stored', version('a-1', 'a', 1, 2)],
+        ['version.stored', version('b-1', 'b', 1, 2)],
+        ['version.purged', { id: 'b-1' }],
+        ['node.purge', { id: 'b' }],
+        ['blob.stored', { id: 5, kind: 'pack' }],
+        relocated(5, [{ versionId: 'a-1', idx: 0, offset: 0 }]),
+        ['blob.deleted', { id: 2 }],
+      ]),
+    )
+    expect(settle(state).unreadableVersions).toEqual([])
+    expect([...state.versions.keys()]).toEqual(['a-1'])
+    expect(where(state)).toEqual([{ idx: 0, blobId: 5, offset: 0 }])
+  })
+
+  it('refuses a move of a chunk the version doesn’t have', () => {
+    expect(() =>
+      foldJournal(
+        entries([
+          ...owner,
+          ['blob.stored', { id: 2, kind: 'pack' }],
+          ['version.stored', version('a-1', 'a', 1, 2)],
+          ['blob.stored', { id: 5, kind: 'pack' }],
+          relocated(5, [{ versionId: 'a-1', idx: 3, offset: 0 }]),
+        ]),
+      ),
+    ).toThrow(RecoveryError)
   })
 })

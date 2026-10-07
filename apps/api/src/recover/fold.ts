@@ -2,10 +2,11 @@ import { RecoveryError, type JournalEntry } from './read-journal.ts'
 
 // Replaying the journal (DESIGN.md §8) into the state it describes, in
 // memory: each record carries its entity's full state after the change, so
-// applying them in order leaves what the database held. A few things the
-// database did on its own were never journaled, and are done here too:
-// purging a folder takes everything below it, purging a version unpins the
-// links that served it, and a link turned off before links were deleted
+// applying them in order leaves what the database held. `blob.relocated`
+// alone carries a change, where compaction moved some chunks (§6.6). A few
+// things the database did on its own were never journaled, and are done here
+// too: purging a folder takes everything below it, purging a version unpins
+// the links that served it, and a link turned off before links were deleted
 // (0019) was journaled with its `revokedAt`.
 
 type Row = Record<string, unknown>
@@ -130,6 +131,9 @@ export function foldJournal(entries: readonly JournalEntry[]): FoldedState {
         if (blob) blob.deleted = true
         break
       }
+      case 'blob.relocated':
+        relocate(state, entry)
+        break
       case 'share.upsert':
         // Before 0019, turning a link off kept it, revoked.
         if (record.revokedAt) state.shares.delete(id)
@@ -152,6 +156,33 @@ export function foldJournal(entries: readonly JournalEntry[]): FoldedState {
     state.lastRecordId = Math.max(state.lastRecordId, entry.id)
   }
   return state
+}
+
+/**
+ * Compaction moved frames into a new pack (§6.6): each listed chunk of a
+ * version the state has now points there. A version not journaled yet names
+ * its chunks where they are by the time it is, and one purged stays purged.
+ */
+function relocate(state: FoldedState, entry: JournalEntry): void {
+  const blobId = entry.record.id as number
+  const moved = entry.record.chunks as { versionId: string; idx: number; offset: number }[]
+  for (const [versionId, chunks] of Map.groupBy(moved, (chunk) => chunk.versionId)) {
+    const version = state.versions.get(versionId)
+    if (!version?.chunks) continue
+    const offsets = new Map(chunks.map((chunk) => [chunk.idx, chunk.offset]))
+    const known = new Set(version.chunks.map((chunk) => chunk.idx))
+    const unknown = [...offsets.keys()].find((idx) => !known.has(idx))
+    if (unknown !== undefined) {
+      throw new RecoveryError(
+        `Journal record ${String(entry.id)} moves chunk ${String(unknown)} of version ${versionId}, which has no such chunk.`,
+      )
+    }
+    // A new array: the record's own is the batch's, as read.
+    version.chunks = version.chunks.map((chunk) => {
+      const offset = offsets.get(chunk.idx)
+      return offset === undefined ? chunk : { ...chunk, blobId, offset }
+    })
+  }
 }
 
 /** What recovery couldn't bring back, or brought back differently, and why. */
