@@ -3,9 +3,12 @@
 //
 // Transactions that write take their locks in one order, so none can wait on
 // another in a circle: the drive's tree lock, upload sessions, nodes (by id),
-// a file's earlier versions (by id), the user's row, dirty-folder markers (by
-// id), and the journal lock last. A share link's version is pinned under its
-// file's lock, so a completion that prunes versions waits for it or is seen.
+// file versions (by id: a file's earlier ones, or those with frames in a
+// blob), frames waiting for a pack, blobs (by id), the frames in them, the
+// user's row, dirty-folder markers (by id), and the journal lock last. The
+// packer and the garbage collector touch no version, so they start at the
+// frames and the blobs. A share link's version is pinned under its file's
+// lock, so a completion that prunes versions waits for it or is seen.
 // Starting uploads takes a shared tree lock, then the user's row, and after it
 // only the key-share locks of foreign keys on nodes, which updates (such as
 // completing an upload) don't block.

@@ -24,9 +24,11 @@ export async function purgeVersions(
 ): Promise<JournalRecord[]> {
   if (versionIds.length === 0) return []
   const versions = uuidArray(versionIds)
+  // The versions before their blobs, the order of locks.ts: storing a pack
+  // waits here for a purge of one of its versions, or is seen by it.
   const { rows } = await tx.execute<{ bytes: number | null }>(sql`
-    SELECT sum(size_bytes)::float8 AS bytes FROM file_versions
-    WHERE id = ANY(${versions}) AND state IN ('syncing', 'stored', 'failed')`)
+    SELECT sum(size_bytes) FILTER (WHERE state IN ('syncing', 'stored', 'failed'))::float8 AS bytes
+    FROM (SELECT * FROM file_versions WHERE id = ANY(${versions}) ORDER BY id FOR UPDATE) locked`)
   const usedBytes = rows[0]?.bytes ?? 0
 
   // Waits for a pack being sealed with any of their frames (§6.6), so the
@@ -34,6 +36,11 @@ export async function purgeVersions(
   // not packed yet stay locked, so the packer leaves them alone.
   await tx.execute(sql`
     SELECT id FROM chunks WHERE version_id = ANY(${versions}) AND blob_id IS NULL
+    ORDER BY id FOR UPDATE`)
+  // Blobs in ID order too, so two purges of frames in the same packs queue.
+  await tx.execute(sql`
+    SELECT id FROM blobs
+    WHERE id IN (SELECT blob_id FROM chunks WHERE version_id = ANY(${versions}))
     ORDER BY id FOR UPDATE`)
   await tx.execute(sql`
     UPDATE blobs SET

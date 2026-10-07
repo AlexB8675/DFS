@@ -151,6 +151,13 @@ async function storeBlob(
   /** Versions this blob finished: nothing of theirs is left in staging. */
   const storedVersions: string[] = []
   const finished = await db.transaction(async (tx) => {
+    // Its versions before the blob, in ID order, as locks.ts orders them: a
+    // purge locks a version, then its blobs. Those read here can only be
+    // fewer by the time they are locked, as purges take their frames.
+    await tx.execute(sql`
+      SELECT id FROM file_versions
+      WHERE id IN (SELECT version_id FROM chunks WHERE blob_id = ${blobId})
+      ORDER BY id FOR NO KEY UPDATE`)
     // Everything in it may have been purged while it was being posted: then
     // it goes straight to the GC, which deletes the message.
     const { rows: stored } = await tx.execute<{
@@ -169,12 +176,6 @@ async function storeBlob(
     if (!record) return []
 
     await tx.execute(sql`UPDATE chunks SET staged_path = NULL WHERE blob_id = ${blobId}`)
-    // Versions in id order: once packs hold frames of several files (M1), two
-    // blobs stored at once must not lock their versions in opposite orders.
-    await tx.execute(sql`
-      SELECT id FROM file_versions
-      WHERE id IN (SELECT version_id FROM chunks WHERE blob_id = ${blobId})
-      ORDER BY id FOR NO KEY UPDATE`)
     // Each version this blob holds frames of gets closer to stored.
     const { rows: versions } = await tx.execute<{
       id: string

@@ -3,12 +3,16 @@ import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
+  appendJournal,
   chunks,
   createDatabase,
   createPool,
   fileVersions,
+  liveBytesDrift,
   nodes,
+  purgeVersions,
   storageChannels,
+  unneededVersions,
   users,
   type Database,
 } from '@dfs/db'
@@ -19,6 +23,7 @@ import { eq, sql } from 'drizzle-orm'
 import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest'
 import { dataChannels } from './storage.ts'
+import { sealPacks, uploadedFiles } from './testing.ts'
 import { storeBlobs } from './uploader.ts'
 
 let database: TestDatabase
@@ -339,6 +344,49 @@ describe('blob pipeline', () => {
     expect(await storeBlobs({ db, staging, store }, [], 2)).toEqual(new Map())
   })
 })
+
+describe('lock order (packages/db/src/locks.ts)', () => {
+  it('stores a pack while an upload completing purges a version in it, neither waiting on the other in a circle', async () => {
+    const { ownerId, files } = await uploadedFiles(db, staging, [100, 200])
+    await sealPacks({ db, staging, sizes: { blobMaxBytes: 4096, packTargetBytes: 4000 } })
+    const replaced = files[0]?.versionId ?? ''
+    const { rows } = await db.execute<{ id: number }>(sql`
+      SELECT blob_id::float8 AS id FROM chunks WHERE version_id = ${replaced}`)
+    const packId = rows[0]?.id ?? 0
+
+    // A file replaced while its version's pack is posted: completing the new
+    // upload locks the earlier version, then purges it, which takes the pack.
+    let storing = Promise.resolve(new Map<number, Error>())
+    await db.transaction(async (tx) => {
+      expect(await unneededVersions(tx, [replaced])).toEqual([replaced])
+      storing = storeBlobs({ db, staging, store }, [packId])
+      await waitingForALock(storing)
+      await appendJournal(tx, await purgeVersions(tx, ownerId, [replaced]))
+    })
+    expect(await storing).toEqual(new Map())
+    const { rows: pack } = await db.execute<{ state: string; live_bytes: number }>(sql`
+      SELECT state, live_bytes FROM blobs WHERE id = ${packId}`)
+    expect(pack).toEqual([{ state: 'stored', live_bytes: 200 }])
+    expect((await liveBytesDrift(db)).filter((blob) => blob.id === packId)).toEqual([])
+  })
+})
+
+/** Resolves once another transaction waits for a lock; fails if `work` ends first. */
+async function waitingForALock(work: Promise<unknown>): Promise<void> {
+  const done = { ended: false }
+  void work.finally(() => {
+    done.ended = true
+  })
+  for (let tries = 0; tries < 200; tries += 1) {
+    if (done.ended) throw new Error('It finished without waiting for a lock.')
+    const { rows } = await db.execute<{ waiting: number }>(sql`
+      SELECT count(*)::int AS waiting FROM pg_stat_activity
+      WHERE datname = current_database() AND wait_event_type = 'Lock'`)
+    if ((rows[0]?.waiting ?? 0) > 0) return
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  throw new Error('Nothing waited for a lock.')
+}
 
 describe('staged blob integrity', () => {
   it('keeps a same-size corrupt blob staged until the original bytes can be stored', async () => {
