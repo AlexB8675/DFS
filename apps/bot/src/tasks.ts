@@ -70,7 +70,9 @@ export async function runAdminTask(deps: TaskDeps, job: AdminTaskJob): Promise<s
             ? ` ${String(failures)} ${failures === 1 ? 'pack was' : 'packs were'} left out, damaged; the bot’s log says which.`
             : ''
         if (groups === 0) return `No packs held little enough to merge.${damaged}`
-        return `Merged ${String(packs)} packs into ${String(groups)}, freeing ${formatBytes(freedBytes)}; the old messages go within a minute or two.${damaged}`
+        // Packs that were all live free nothing but their messages.
+        const freeing = freedBytes > 0 ? `, freeing ${formatBytes(freedBytes)}` : ''
+        return `Merged ${String(packs)} packs into ${String(groups)}${freeing}; the old messages go within a minute or two.${damaged}`
       }
       case 'orphans.reconcile': {
         if (!discord) break

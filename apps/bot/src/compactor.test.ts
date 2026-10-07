@@ -396,6 +396,36 @@ describe('Compactor (DESIGN.md §6.6)', () => {
     for (const id of packIds) expect((await blob(id)).state).toBe('stored')
   })
 
+  it('gives up a move whose reservation is over half an hour old, and deletes what it posted', async () => {
+    const { packIds, kept } = await sparsePacks(2)
+    const before = await placement(kept)
+    const put = store.put.bind(store)
+    const posted = { id: 0 }
+    // A post that took its time: the janitor's hour draws near.
+    const spy = vi.spyOn(store, 'put').mockImplementation(async (blob, read) => {
+      posted.id = blob.id
+      const result = await put(blob, read)
+      await db.execute(sql`
+        UPDATE blobs SET created_at = now() - interval '31 minutes' WHERE id = ${blob.id}`)
+      return result
+    })
+    try {
+      expect(await new Compactor({ db, store, rule }).compact()).toMatchObject({
+        groups: 0,
+        packs: 0,
+      })
+    } finally {
+      spy.mockRestore()
+    }
+    const newId = posted.id
+    expect(newId).toBeGreaterThan(Math.max(...packIds))
+    expect((await blob(newId)).state).toBe('deleted')
+    await expect(store.read(where(newId), 0, 1)).rejects.toThrow()
+    expect(await placement(kept)).toEqual(before)
+    for (const id of packIds) expect((await blob(id)).state).toBe('stored')
+    expect(await liveBytesDrift(db)).toEqual([])
+  })
+
   it('leaves what a crash after posting left to the janitor and the reconciler', async () => {
     const discord = new FakeDiscord()
     const channel = discord.addTextChannel('storage-00')
