@@ -1,10 +1,14 @@
 import { randomUUID } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import { eq, sql } from 'drizzle-orm'
+import { migrate } from 'drizzle-orm/node-postgres/migrator'
+import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest'
 import { createDatabase, createPool, type Database } from './client.ts'
 import { auditRecords, shareRecords, type JournalRecord } from './journal.ts'
-import { runMigrations } from './migrate.ts'
+import { MIGRATIONS_DIR, runMigrations } from './migrate.ts'
 import { auditLog, fileVersions, nodes, shareLinks, users } from './schema.ts'
 import { createTestDatabase, databaseUrl, withAdmin, type TestDatabase } from './testing/index.ts'
 
@@ -38,6 +42,110 @@ describe('migrations', () => {
         instance: [expect.stringMatching(/^[0-9a-f]{12}$/)],
       })
     } finally {
+      await withAdmin(adminUrl, (admin) => admin.query(`DROP DATABASE ${name} WITH (FORCE)`))
+    }
+  })
+})
+
+describe('migrations over existing rows', () => {
+  it('make the state types again without `lost`, and date the blobs already released (0020, 0021)', async () => {
+    const { adminUrl } = inject('testPostgres')
+    const name = `dfs_states_${randomUUID().replaceAll('-', '').slice(0, 12)}`
+    await withAdmin(adminUrl, (admin) => admin.query(`CREATE DATABASE ${name}`))
+    const url = databaseUrl(adminUrl, name)
+    // The migrations up to 0019, as a database last migrated before these.
+    const before = await mkdtemp(path.join(tmpdir(), 'dfs-migrations-'))
+    try {
+      const journal = JSON.parse(
+        await readFile(path.join(MIGRATIONS_DIR, 'meta', '_journal.json'), 'utf8'),
+      ) as { entries: { idx: number; tag: string }[] }
+      journal.entries = journal.entries.filter((entry) => entry.idx <= 19)
+      await mkdir(path.join(before, 'meta'))
+      await writeFile(path.join(before, 'meta', '_journal.json'), JSON.stringify(journal))
+      for (const entry of journal.entries) {
+        await copyFile(
+          path.join(MIGRATIONS_DIR, `${entry.tag}.sql`),
+          path.join(before, `${entry.tag}.sql`),
+        )
+      }
+      const client = new pg.Client({ connectionString: url })
+      await client.connect()
+      try {
+        await migrate(createDatabase(client), { migrationsFolder: before })
+        await client.query(`
+          WITH owner AS (
+            INSERT INTO users (username, display_name, password_hash, quota_bytes)
+            VALUES ('states', 'States', 'x', 1) RETURNING id
+          ), file AS (
+            INSERT INTO nodes (owner_id, kind, name, name_key)
+            SELECT id, 'folder', 'My Drive', 'my drive' FROM owner RETURNING id
+          )
+          INSERT INTO file_versions
+            (node_id, version_no, state, size_bytes, chunk_size, chunk_count, wrapped_dek, key_id)
+          SELECT file.id, number, state::version_state, 1, 1, 1, decode('00', 'hex'), 'k'
+          FROM file, unnest(ARRAY['uploading', 'syncing', 'stored', 'failed'])
+            WITH ORDINALITY AS states(state, number)`)
+        await client.query(`
+          INSERT INTO blobs (kind, state, size_bytes)
+          SELECT 'pack', state::blob_state, 1
+          FROM unnest(ARRAY['staged', 'stored', 'deleting', 'deleted']) AS states(state)`)
+      } finally {
+        await client.end()
+      }
+
+      await runMigrations(url)
+      const after = await withAdmin(url, async (admin) => ({
+        versions: (
+          await admin.query<{ state: string }>(
+            'SELECT state FROM file_versions ORDER BY version_no',
+          )
+        ).rows.map((row) => row.state),
+        blobs: (
+          await admin.query<{ state: string; released: boolean }>(
+            'SELECT state, released_at IS NOT NULL AS released FROM blobs ORDER BY id',
+          )
+        ).rows,
+        types: (
+          await admin.query<{ type: string; labels: string[] }>(`
+            SELECT typname AS type, array_agg(enumlabel::text ORDER BY enumsortorder) AS labels
+            FROM pg_enum JOIN pg_type ON pg_type.oid = enumtypid
+            WHERE typname IN ('blob_state', 'version_state') GROUP BY typname ORDER BY typname`)
+        ).rows,
+        indexes: (
+          await admin.query<{ name: string }>(`
+            SELECT indexname AS name FROM pg_indexes
+            WHERE indexname IN ('blobs_queue', 'file_versions_in_flight', 'blobs_lost')
+            ORDER BY indexname`)
+        ).rows.map((row) => row.name),
+        defaultState: (
+          await admin.query<{ state: string }>(`
+            SELECT column_default AS state FROM information_schema.columns
+            WHERE table_name = 'file_versions' AND column_name = 'state'`)
+        ).rows[0]?.state,
+      }))
+      expect(after).toEqual({
+        versions: ['uploading', 'syncing', 'stored', 'failed'],
+        blobs: [
+          { state: 'staged', released: false },
+          { state: 'stored', released: false },
+          { state: 'deleting', released: true },
+          { state: 'deleted', released: false },
+        ],
+        types: [
+          {
+            type: 'blob_state',
+            labels: ['building', 'staged', 'uploading', 'stored', 'deleting', 'deleted'],
+          },
+          {
+            type: 'version_state',
+            labels: ['uploading', 'syncing', 'stored', 'failed', 'purging', 'purged'],
+          },
+        ],
+        indexes: ['blobs_queue', 'file_versions_in_flight'],
+        defaultState: "'uploading'::version_state",
+      })
+    } finally {
+      await rm(before, { recursive: true, force: true })
       await withAdmin(adminUrl, (admin) => admin.query(`DROP DATABASE ${name} WITH (FORCE)`))
     }
   })
