@@ -64,7 +64,7 @@ export function ShareDialog({ node, onClose }: ShareDialogProps) {
     >
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle className="truncate">Share “{node.name}”</DialogTitle>
+          <DialogTitle>Share “{node.name}”</DialogTitle>
           <DialogDescription>
             Anyone with the link can{' '}
             {node.kind === 'folder' ? 'browse and download this folder' : 'download this file'}.

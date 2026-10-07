@@ -259,7 +259,7 @@ The admin pages grow from a status page into the place to watch and run DFS, bef
 - [x] Journal the version of an empty file. Done 2026-10-07: completion journals `version.stored` for a version with no chunks (`versionRecords`, moved from the bot to `@dfs/db`; `chunks` is `[]`, never `null`).
 - [ ] Nightly snapshots with manifests and backup pointers (DESIGN §8).
 - [x] `dfs recover` and `dfs drill` (DESIGN §8 step 5), with no snapshot: the whole journal replayed into an empty database. Built 2026-10-07; the drill test (`apps/api/src/recover/recover.test.ts`) rebuilds a drive used every way the journal records and matches it column for column and byte for byte, and covers a batch posted twice, a missing or changed batch, the journal on Discord among another database's, and a file whose version never reached Discord. Records now carry what recovery needs: `blob.stored` its `frameCount`, `version.stored` its `createdBy` and `createdAt`.
-- [ ] Run `dfs drill` against production's Discord, read only, into a scratch database on the VPS (the user's go first). The API container has the master key but not the bot token, and the bot the token but not the key, so it runs in a one-off container given both.
+- [x] `dfs drill` against production's Discord, read only, into a scratch database on the VPS (the user's go, 2026-10-07): 32 batches, 1,461 records, rebuilt and matching the database in use with no difference; the scratch database was dropped. It runs in a one-off API container given the bot token too (docs/DEPLOY.md).
 
 **Done when**
 

@@ -45,7 +45,7 @@ export function TrashDialog({ nodes, links, onClose }: TrashDialogProps) {
     >
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle className="truncate">Move {subject} to the trash?</AlertDialogTitle>
+          <AlertDialogTitle>Move {subject} to the trash?</AlertDialogTitle>
           <AlertDialogDescription>
             You can restore {one ? 'it' : 'them'} from the trash until it’s emptied.
           </AlertDialogDescription>

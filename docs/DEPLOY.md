@@ -141,3 +141,24 @@ says otherwise.
   then: `docker compose exec postgres pg_dump -U dfs -Fc dfs > dfs.dump`.
 - **Stopping:** `docker compose down` keeps every volume; `down -v` would
   delete the database and staging.
+
+## Recovery drill and recovery
+
+`dfs drill` rebuilds the database from `#dfs-journal` and the master key
+alone, into a scratch database it drops afterwards, and says how it differs
+from the one in use (DESIGN §8). It only reads Discord. It needs both the
+master key, which only the API has, and the bot token, which only the bot
+has, so it runs in a one-off API container given the token too:
+
+```bash
+docker compose run --rm --no-deps -T \
+  -v /etc/dfs/secrets/discord_bot_token:/run/secrets/dfs_discord_bot_token:ro \
+  -e DISCORD_BOT_TOKEN_FILE=/run/secrets/dfs_discord_bot_token \
+  api node apps/api/src/cli.ts drill --from discord
+```
+
+After losing the VPS: set it up again as above (the same `DISCORD_GUILD_ID`,
+category and master key file), stop the API and the bot, recover into the
+new, empty database with `recover --into <database-url>` in the same kind of
+container, check the report, then start them. `--key-file` takes a file with
+every master key, current and retired.

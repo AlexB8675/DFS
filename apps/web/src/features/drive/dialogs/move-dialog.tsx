@@ -52,7 +52,7 @@ export function MoveDialog({ nodes, onClose }: MoveDialogProps) {
     >
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle className="truncate">Move {subject}</DialogTitle>
+          <DialogTitle>Move {subject}</DialogTitle>
           <DialogDescription>
             Open the folder you want to move to, then choose Move here.
           </DialogDescription>

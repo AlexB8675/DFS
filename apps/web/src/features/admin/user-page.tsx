@@ -356,7 +356,7 @@ function ModerationDialog({
       <DialogContent className="sm:max-w-md">
         <form action={submit} className="grid gap-4">
           <DialogHeader>
-            <DialogTitle className="truncate">Remove “{node.name}”?</DialogTitle>
+            <DialogTitle>Remove “{node.name}”?</DialogTitle>
             <DialogDescription>
               It moves to {ownerName}’s trash
               {node.kind === 'folder' ? ' with everything in it' : ''}. They can see why, and it is

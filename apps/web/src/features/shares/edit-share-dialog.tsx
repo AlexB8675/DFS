@@ -75,7 +75,7 @@ export function EditShareDialog({ link, onClose }: { link: ShareLink; onClose: (
       <DialogContent className="sm:max-w-md">
         <form action={submit} className="grid gap-5">
           <DialogHeader>
-            <DialogTitle className="truncate">Edit link to “{link.nodeName}”</DialogTitle>
+            <DialogTitle>Edit link to “{link.nodeName}”</DialogTitle>
             <DialogDescription>
               The link itself stays the same; people who have it keep using it.
             </DialogDescription>

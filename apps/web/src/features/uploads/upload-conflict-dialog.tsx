@@ -87,7 +87,7 @@ function ConflictQuestion({
           }}
         >
           <DialogHeader>
-            <DialogTitle className="truncate">“{item.name}” already exists</DialogTitle>
+            <DialogTitle>“{item.name}” already exists</DialogTitle>
             <DialogDescription>
               Replace it with the file you’re uploading, keep both, or skip this one.
             </DialogDescription>
