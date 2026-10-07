@@ -153,6 +153,12 @@ export const nodes = pgTable(
     /** Set when an admin trashed the node for moderation (§7.2). */
     moderationReason: text('moderation_reason'),
     createdAt: timestamptz('created_at').notNull().defaultNow(),
+    /**
+     * "Modified", as the drive shows and sorts it (§5). A file's is its
+     * current version's own modification date, as the uploading browser read
+     * it, or when it was uploaded; renaming or moving it leaves it. A
+     * folder's is when it was made, renamed or moved.
+     */
     updatedAt: timestamptz('updated_at').notNull().defaultNow(),
   },
   (t) => [
@@ -204,6 +210,11 @@ export const fileVersions = pgTable(
     keyId: text('key_id').notNull(),
     createdBy: uuid('created_by').references(() => users.id),
     createdAt: timestamptz('created_at').notNull().defaultNow(),
+    /**
+     * The file's own modification date, as the uploading browser read it
+     * (`File.lastModified`); `null` when it didn't say, as before 0017.
+     */
+    modifiedAt: timestamptz('modified_at'),
   },
   (t) => [
     uniqueIndex('file_versions_number').on(t.nodeId, t.versionNo),

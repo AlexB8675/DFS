@@ -1,7 +1,8 @@
 import { Readable } from 'node:stream'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
+import { z } from 'zod'
 import { readVersion, type ReadableVersion } from './reader.ts'
-import { writeZip, zipLength, type ZipEntry } from './zip.ts'
+import { writeZip, zipLength, zipTimeZone, type ZipEntry } from './zip.ts'
 
 // Sending files and archives (DESIGN.md §6.2, §7.5): streamed, Range-aware,
 // always as attachments with `nosniff`, so nothing uploaded runs in the page.
@@ -41,15 +42,26 @@ export function sendFile(
   return reply.send(Readable.from(readVersion(app, file, start, end)))
 }
 
-/** Sends a ZIP that streams as it is built, with its exact length known up front. */
-export function sendZip(reply: FastifyReply, fileName: string, entries: ZipEntry[]): FastifyReply {
+/** An archive's query: the downloader's time zone (IANA), for its times. */
+export const archiveQuery = z.object({ tz: z.string().max(64).optional() })
+
+/**
+ * Sends a ZIP that streams as it is built, with its exact length known up
+ * front. Its times are in `timeZone` (`?tz=`, the downloader's), or UTC.
+ */
+export function sendZip(
+  reply: FastifyReply,
+  fileName: string,
+  entries: ZipEntry[],
+  timeZone?: string,
+): FastifyReply {
   return reply
     .header('content-type', 'application/zip')
     .header('content-disposition', attachment(fileName))
     .header('content-length', String(zipLength(entries)))
     .header('cache-control', 'private, no-store')
     .header('x-content-type-options', 'nosniff')
-    .send(Readable.from(writeZip(entries)))
+    .send(Readable.from(writeZip(entries, { timeZone: zipTimeZone(timeZone) })))
 }
 
 /**

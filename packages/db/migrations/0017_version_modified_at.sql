@@ -1,0 +1,1 @@
+ALTER TABLE "file_versions" ADD COLUMN "modified_at" timestamp with time zone;

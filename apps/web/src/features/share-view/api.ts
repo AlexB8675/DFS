@@ -2,7 +2,7 @@ import { publicShareSchema, sharedFolderPageSchema, type SharedNode } from '@dfs
 import { infiniteQueryOptions, queryOptions, useMutation } from '@tanstack/react-query'
 import { queryClient } from '@/app/query-client'
 import { ApiError, apiGet, apiSend } from '@/lib/api/client'
-import { downloadFromApi } from '@/lib/download'
+import { downloadFromApi, withTimeZone } from '@/lib/download'
 
 // Public share access (`/api/s/:token/*`, §7.5). No session is involved: an
 // unlocked password-protected link is remembered by a cookie for that share.
@@ -63,7 +63,7 @@ export async function downloadSharedFolder(
   isRoot: boolean,
 ): Promise<void> {
   const query = isRoot ? '' : `?nodeId=${folder.id}`
-  await downloadFromApi(`/s/${token}/archive${query}`, `${folder.name}.zip`)
+  await downloadFromApi(withTimeZone(`/s/${token}/archive${query}`), `${folder.name}.zip`)
   await refreshDownloadsLeft(token)
 }
 

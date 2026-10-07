@@ -683,6 +683,7 @@ export class UploadEngine {
             name: job.file.name,
             sizeBytes: job.file.size,
             mimeType: job.file.type || 'application/octet-stream',
+            ...ownModifiedAt(job.file),
           })),
         ),
       )
@@ -956,6 +957,16 @@ function received(job: Job, session: UploadSession, parts: readonly number[]): v
   job.doneParts = new Set(parts)
   job.recheck = false
   job.uploadedBytes = parts.reduce((total, index) => total + partSize(job, session, index), 0)
+}
+
+/**
+ * A file's own modification date, which the drive shows as its "Modified"
+ * (§6.1). Left out when the browser doesn't know it: some pickers say 0.
+ */
+function ownModifiedAt(file: File): { modifiedAt?: string } {
+  const date = new Date(file.lastModified)
+  const known = file.lastModified > 0 && date.getUTCFullYear() <= 9999
+  return known ? { modifiedAt: date.toISOString() } : {}
 }
 
 function resetSession(job: Job): void {

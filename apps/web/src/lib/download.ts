@@ -21,6 +21,17 @@ export async function downloadFromApi(path: string, fileName: string): Promise<v
   }, 10_000)
 }
 
+/**
+ * An archive's path with the downloader's time zone (`?tz=`): a ZIP's times
+ * have none of their own, so the server writes them in this one (§6.2).
+ */
+export function withTimeZone(path: string): string {
+  const [base = '', search = ''] = path.split('?', 2)
+  const query = new URLSearchParams(search)
+  query.set('tz', Intl.DateTimeFormat().resolvedOptions().timeZone)
+  return `${base}?${query.toString()}`
+}
+
 function saveAs(href: string, fileName: string): void {
   const link = document.createElement('a')
   link.href = href

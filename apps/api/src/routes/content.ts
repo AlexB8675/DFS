@@ -6,7 +6,7 @@ import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
 import { requireAuth } from '../auth/access.ts'
 import { archiveEntries, createArchiveTicket, redeemArchiveTicket } from '../content/archive.ts'
-import { sendFile, sendZip, type DownloadableFile } from '../content/send.ts'
+import { archiveQuery, sendFile, sendZip, type DownloadableFile } from '../content/send.ts'
 import { ApiError } from '../errors.ts'
 import { visibleFolder, visibleNode } from '../nodes/read.ts'
 
@@ -22,10 +22,16 @@ export function contentRoutes(app: FastifyInstance, _options: object, done: () =
     return sendFile(app, request, reply, await downloadableFile(app.db, request.params.id))
   })
 
-  routes.get('/folders/:id/archive', { schema: { params: byId } }, async (request, reply) => {
-    const folder = await visibleFolder(app.db, requireAuth(request.auth).user.id, request.params.id)
-    return sendZip(reply, `${folder.name}.zip`, await archiveEntries(app, [folder]))
-  })
+  routes.get(
+    '/folders/:id/archive',
+    { schema: { params: byId, querystring: archiveQuery } },
+    async (request, reply) => {
+      const auth = requireAuth(request.auth)
+      const folder = await visibleFolder(app.db, auth.user.id, request.params.id)
+      const entries = await archiveEntries(app, [folder])
+      return sendZip(reply, `${folder.name}.zip`, entries, request.query.tz)
+    },
+  )
 
   routes.post(
     '/archive',
@@ -38,14 +44,16 @@ export function contentRoutes(app: FastifyInstance, _options: object, done: () =
 
   routes.get(
     '/archive/:token',
-    { schema: { params: z.object({ token: z.string().max(100) }) } },
+    {
+      schema: { params: z.object({ token: z.string().max(100) }), querystring: archiveQuery },
+    },
     async (request, reply) => {
       const { fileName, nodes } = await redeemArchiveTicket(
         app,
         requireAuth(request.auth),
         request.params.token,
       )
-      return sendZip(reply, fileName, await archiveEntries(app, nodes))
+      return sendZip(reply, fileName, await archiveEntries(app, nodes), request.query.tz)
     },
   )
 

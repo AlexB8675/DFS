@@ -12,7 +12,7 @@ import {
 import { infiniteQueryOptions, queryOptions, useMutation } from '@tanstack/react-query'
 import { queryClient } from '@/app/query-client'
 import { apiGet, apiSend } from '@/lib/api/client'
-import { downloadFromApi } from '@/lib/download'
+import { downloadFromApi, withTimeZone } from '@/lib/download'
 import { usePreferences } from '@/lib/preferences'
 import {
   invalidateListings,
@@ -207,7 +207,7 @@ export async function downloadNodes(nodes: DriveNode[]): Promise<void> {
   if (nodes.length === 1 && first.kind === 'file') {
     await downloadFromApi(`/files/${first.id}/content`, first.name)
   } else if (nodes.length === 1) {
-    await downloadFromApi(`/folders/${first.id}/archive`, `${first.name}.zip`)
+    await downloadFromApi(withTimeZone(`/folders/${first.id}/archive`), `${first.name}.zip`)
   } else {
     const ticket = await apiSend(
       'POST',
@@ -215,7 +215,7 @@ export async function downloadNodes(nodes: DriveNode[]): Promise<void> {
       { ids: nodes.map((node) => node.id) },
       archiveTicketSchema,
     )
-    await downloadFromApi(ticket.url.slice('/api'.length), ticket.fileName)
+    await downloadFromApi(withTimeZone(ticket.url.slice('/api'.length)), ticket.fileName)
   }
 }
 

@@ -5,6 +5,11 @@ import { crc32 } from 'node:zlib'
 // streams with constant memory. Sizes are known up front, but the CRC only
 // after the data, so each file is followed by a data descriptor. ZIP64
 // fields appear only where a size or an offset needs them.
+//
+// Each entry's modification time is written twice: as an MS-DOS time, which
+// has no time zone and is read as local time, so it is written in the
+// downloader's; and as Info-ZIP's extended timestamp, in UTC, which 7-Zip,
+// macOS and unzip prefer where it is present.
 
 export interface ZipEntry {
   /** The path inside the archive; folders end with `/`. */
@@ -18,6 +23,14 @@ export interface ZipEntry {
 const UTF8_NAMES = 0x0800
 const DATA_DESCRIPTOR = 0x0008
 const ZIP64_LIMIT = 0xffffffff
+const EXTENDED_TIMESTAMP = 0x5455
+
+export interface ZipOptions {
+  /** ZIP64 from this size or offset on: lower only to test ZIP64 with small files. */
+  limit?: number
+  /** The downloader's time zone, as `zipTimeZone` checked it: DOS times are written in it. */
+  timeZone?: string
+}
 
 interface Written {
   name: Buffer
@@ -28,11 +41,12 @@ interface Written {
   offset: number
 }
 
-/** The archive as a stream of buffers. `limit` exists to test ZIP64 with small files. */
+/** The archive as a stream of buffers. */
 export async function* writeZip(
   entries: AsyncIterable<ZipEntry> | Iterable<ZipEntry>,
-  { limit = ZIP64_LIMIT } = {},
+  { limit = ZIP64_LIMIT, timeZone = 'UTC' }: ZipOptions = {},
 ): AsyncGenerator<Buffer> {
+  const clock = dosClock(timeZone)
   const written: Written[] = []
   let offset = 0
 
@@ -41,7 +55,7 @@ export async function* writeZip(
     const isFolder = entry.path.endsWith('/')
     const size = isFolder ? 0 : (entry.size ?? 0)
     const zip64 = size >= limit || offset >= limit
-    const header = localHeader(name, entry.modifiedAt, isFolder, zip64)
+    const header = localHeader(name, entry.modifiedAt, isFolder, zip64, clock)
     const record: Written = { name, modifiedAt: entry.modifiedAt, isFolder, crc: 0, size, offset }
     yield header
     offset += header.length
@@ -67,21 +81,30 @@ export async function* writeZip(
 
   const directoryOffset = offset
   for (const record of written) {
-    const header = centralHeader(record, limit)
+    const header = centralHeader(record, limit, clock)
     yield header
     offset += header.length
   }
   yield* endRecords(written.length, directoryOffset, offset - directoryOffset, offset, limit)
 }
 
-function localHeader(name: Buffer, modifiedAt: Date, isFolder: boolean, zip64: boolean): Buffer {
-  const extra = zip64 ? zip64Extra([0, 0]) : Buffer.alloc(0)
+function localHeader(
+  name: Buffer,
+  modifiedAt: Date,
+  isFolder: boolean,
+  zip64: boolean,
+  clock: DosClock,
+): Buffer {
+  const extra = Buffer.concat([
+    zip64 ? zip64Extra([0, 0]) : Buffer.alloc(0),
+    extendedTimestamp(modifiedAt),
+  ])
   const header = Buffer.alloc(30)
   header.writeUInt32LE(0x04034b50, 0)
   header.writeUInt16LE(zip64 ? 45 : 20, 4)
   header.writeUInt16LE(UTF8_NAMES | (isFolder ? 0 : DATA_DESCRIPTOR), 6)
   header.writeUInt16LE(0, 8) // stored
-  writeDosTime(header, 10, modifiedAt)
+  writeDosTime(header, 10, clock(modifiedAt))
   // CRC and sizes follow in the data descriptor; ZIP64 marks the sizes as "in the extra field".
   header.writeUInt32LE(0, 14)
   header.writeUInt32LE(zip64 ? ZIP64_LIMIT : 0, 18)
@@ -105,7 +128,7 @@ function dataDescriptor(crc: number, size: number, zip64: boolean): Buffer {
   return descriptor
 }
 
-function centralHeader(record: Written, limit: number): Buffer {
+function centralHeader(record: Written, limit: number, clock: DosClock): Buffer {
   const bigSize = record.size >= limit
   const bigOffset = record.offset >= limit
   // ZIP64 extra values, in order: uncompressed size, compressed size, offset.
@@ -113,15 +136,18 @@ function centralHeader(record: Written, limit: number): Buffer {
     ...(bigSize ? [record.size, record.size] : []),
     ...(bigOffset ? [record.offset] : []),
   ]
-  const extra = values.length > 0 ? zip64Extra(values) : Buffer.alloc(0)
   const zip64 = values.length > 0
+  const extra = Buffer.concat([
+    zip64 ? zip64Extra(values) : Buffer.alloc(0),
+    extendedTimestamp(record.modifiedAt),
+  ])
   const header = Buffer.alloc(46)
   header.writeUInt32LE(0x02014b50, 0)
   header.writeUInt16LE(45, 4)
   header.writeUInt16LE(zip64 ? 45 : 20, 6)
   header.writeUInt16LE(UTF8_NAMES | (record.isFolder ? 0 : DATA_DESCRIPTOR), 8)
   header.writeUInt16LE(0, 10)
-  writeDosTime(header, 12, record.modifiedAt)
+  writeDosTime(header, 12, clock(record.modifiedAt))
   header.writeUInt32LE(record.crc, 16)
   header.writeUInt32LE(bigSize ? ZIP64_LIMIT : record.size, 20)
   header.writeUInt32LE(bigSize ? ZIP64_LIMIT : record.size, 24)
@@ -180,21 +206,76 @@ function zip64Extra(values: number[]): Buffer {
   return extra
 }
 
-/** MS-DOS time and date, in local time, two-second precision, from 1980. */
-function writeDosTime(buffer: Buffer, at: number, date: Date): void {
-  const year = Math.max(1980, date.getFullYear())
-  buffer.writeUInt16LE(
-    (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2),
-    at,
-  )
-  buffer.writeUInt16LE(((year - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate(), at + 2)
+/**
+ * Info-ZIP's extended timestamp: the modification time in UTC seconds, a
+ * signed 32-bit number, so only for 1901 to 2038; none outside. The same 9
+ * bytes in a local header and in the central directory.
+ */
+function extendedTimestamp(date: Date): Buffer {
+  const seconds = Math.floor(date.getTime() / 1000)
+  if (!(seconds >= -0x80000000 && seconds <= 0x7fffffff)) return Buffer.alloc(0)
+  const extra = Buffer.alloc(9)
+  extra.writeUInt16LE(EXTENDED_TIMESTAMP, 0)
+  extra.writeUInt16LE(5, 2)
+  extra.writeUInt8(0x01, 4) // the modification time, alone
+  extra.writeInt32LE(seconds, 5)
+  return extra
+}
+
+/** An MS-DOS time and date, as written: `[time, date]`. */
+type DosClock = (date: Date) => [number, number]
+
+/**
+ * MS-DOS times in `timeZone`: two-second precision, from 1980 to 2107, a
+ * date outside written as the nearest end. One formatter per archive.
+ */
+function dosClock(timeZone: string): DosClock {
+  const format = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: 'numeric',
+    second: 'numeric',
+  })
+  return (date) => {
+    if (Number.isNaN(date.getTime())) return [0, (1 << 5) | 1]
+    const part = Object.fromEntries(
+      format.formatToParts(date).map(({ type, value }) => [type, Number(value)]),
+    )
+    const year = part.year ?? 1980
+    if (year < 1980) return [0, (1 << 5) | 1]
+    if (year > 2107) return [(23 << 11) | (59 << 5) | 29, (127 << 9) | (12 << 5) | 31]
+    const time = ((part.hour ?? 0) << 11) | ((part.minute ?? 0) << 5) | ((part.second ?? 0) >> 1)
+    return [time, ((year - 1980) << 9) | ((part.month ?? 1) << 5) | (part.day ?? 1)]
+  }
+}
+
+function writeDosTime(buffer: Buffer, at: number, [time, date]: [number, number]): void {
+  buffer.writeUInt16LE(time, at)
+  buffer.writeUInt16LE(date, at + 2)
+}
+
+/** A time zone a client asked for (`?tz=`), if this server knows it; UTC otherwise. */
+export function zipTimeZone(asked: string | undefined): string {
+  if (!asked) return 'UTC'
+  try {
+    return new Intl.DateTimeFormat('en-US', { timeZone: asked }).resolvedOptions().timeZone
+  } catch {
+    return 'UTC'
+  }
 }
 
 /**
  * The exact size `writeZip` will produce for these entries, worked out the
  * same way, so the response can say its length and browsers show progress.
  */
-export function zipLength(entries: readonly ZipEntry[], { limit = ZIP64_LIMIT } = {}): number {
+export function zipLength(
+  entries: readonly ZipEntry[],
+  { limit = ZIP64_LIMIT }: Pick<ZipOptions, 'limit'> = {},
+): number {
   let offset = 0
   let directory = 0
   for (const entry of entries) {
@@ -202,11 +283,12 @@ export function zipLength(entries: readonly ZipEntry[], { limit = ZIP64_LIMIT } 
     const isFolder = entry.path.endsWith('/')
     const size = isFolder ? 0 : (entry.size ?? 0)
     const zip64 = size >= limit || offset >= limit
+    const timestamp = extendedTimestamp(entry.modifiedAt).length
     const entryOffset = offset
-    offset += 30 + nameLength + (zip64 ? 20 : 0)
+    offset += 30 + nameLength + (zip64 ? 20 : 0) + timestamp
     if (!isFolder) offset += size + (zip64 ? 24 : 16)
     const values = (size >= limit ? 2 : 0) + (entryOffset >= limit ? 1 : 0)
-    directory += 46 + nameLength + (values > 0 ? 4 + values * 8 : 0)
+    directory += 46 + nameLength + (values > 0 ? 4 + values * 8 : 0) + timestamp
   }
   const zip64End = entries.length >= 0xffff || offset >= limit || directory >= limit
   return offset + directory + (zip64End ? 56 + 20 : 0) + 22

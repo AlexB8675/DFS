@@ -213,6 +213,11 @@ export const createUploadSchema = z.object({
   name: z.string(),
   sizeBytes: byteCount,
   mimeType: z.string(),
+  /**
+   * The file's own modification date (`File.lastModified`), which becomes
+   * its "Modified" once the upload completes; left out when unknown.
+   */
+  modifiedAt: timestamp.optional(),
 })
 export type CreateUploadInput = z.infer<typeof createUploadSchema>
 

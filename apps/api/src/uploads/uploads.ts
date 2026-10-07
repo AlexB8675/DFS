@@ -66,6 +66,8 @@ interface UploadRow extends Record<string, unknown> {
   chunk_count: number
   wrapped_dek: Buffer
   key_id: string
+  /** The file's own modification date, if its browser said. */
+  modified_at: string | null
   received_hash: Buffer | null
 }
 
@@ -194,6 +196,8 @@ async function startUploads(
               nameKey: nameKey(name),
               mimeType: input.mimeType || null,
               sizeBytes: input.sizeBytes,
+              // Its "Modified" from the start, while it uploads.
+              ...(input.modifiedAt && { updatedAt: new Date(input.modifiedAt) }),
             })),
           )
           .onConflictDoNothing({
@@ -245,6 +249,7 @@ async function startUploads(
         nodeId,
         versionNo,
         sizeBytes: plan.input.sizeBytes,
+        modifiedAt: plan.input.modifiedAt ? new Date(plan.input.modifiedAt) : null,
         chunkSize,
         chunkCount: Math.ceil(plan.input.sizeBytes / chunkSize),
         wrappedDek: Buffer.from(wrapped[i] ?? new Uint8Array()),
@@ -643,7 +648,9 @@ async function finishUpload(
     .set({
       currentVersionId: upload.version_id,
       sizeBytes: upload.size_bytes,
-      updatedAt: new Date(),
+      // "Modified" is the file's own date, so a version uploaded today of a
+      // file last changed last year says last year.
+      updatedAt: upload.modified_at ? new Date(upload.modified_at) : new Date(),
     })
     .where(eq(nodes.id, upload.node_id))
     .returning()
@@ -711,7 +718,7 @@ async function findUpload(
     SELECT session.id, session.node_id, node.parent_id, session.version_id, version.version_no,
       session.state, session.reserved_bytes::float8 AS reserved_bytes,
       version.size_bytes::float8 AS size_bytes, version.chunk_size, version.chunk_count,
-      version.wrapped_dek, version.key_id,
+      version.wrapped_dek, version.key_id, version.modified_at,
       ${
         partIndex === undefined
           ? sql`NULL::bytea`

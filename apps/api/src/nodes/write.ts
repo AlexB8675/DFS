@@ -144,7 +144,8 @@ export async function updateNode(
         .set({
           ...(changes.name !== undefined && { name, nameKey: nameKey(name) }),
           ...(changes.parentId !== undefined && { parentId }),
-          updatedAt: new Date(),
+          // A file's "Modified" is its content's: a rename or move leaves it.
+          ...(node.kind === 'folder' && { updatedAt: new Date() }),
         })
         .where(eq(nodes.id, id))
         .returning(),
@@ -184,7 +185,11 @@ export async function moveNodes(
     const updated = await guardName(moving[0]?.name ?? '', () =>
       tx
         .update(nodes)
-        .set({ parentId, updatedAt: new Date() })
+        .set({
+          parentId,
+          // A file's "Modified" is its content's: a move leaves it.
+          updatedAt: sql`CASE WHEN ${nodes.kind} = 'folder' THEN now() ELSE ${nodes.updatedAt} END`,
+        })
         .where(sql`${nodes.id} = ANY(${uuidArray(movingIds)})`)
         .returning(),
     )

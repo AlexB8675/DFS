@@ -231,7 +231,13 @@ export const handlers = [
       request,
       async () => {
         const input = createUploadSchema.parse(await request.json())
-        return db.createUpload(input.parentId, input.name, input.sizeBytes, input.mimeType)
+        return db.createUpload(
+          input.parentId,
+          input.name,
+          input.sizeBytes,
+          input.mimeType,
+          input.modifiedAt,
+        )
       },
       { status: 201 },
     ),

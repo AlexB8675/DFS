@@ -30,9 +30,12 @@ export async function startUpload(
   parentId: string,
   name: string,
   sizeBytes: number,
+  { modifiedAt }: { modifiedAt?: string } = {},
 ): Promise<UploadSession> {
   const { results } = await client.call('POST', '/uploads/batch', uploadBatchResultSchema, {
-    json: { uploads: [{ parentId, name, sizeBytes, mimeType: 'application/octet-stream' }] },
+    json: {
+      uploads: [{ parentId, name, sizeBytes, mimeType: 'application/octet-stream', modifiedAt }],
+    },
   })
   const [result] = results
   if (!result?.ok) throw new Error(`Upload of ${name} refused: ${JSON.stringify(result)}`)
@@ -80,8 +83,9 @@ export async function uploadFile(
   parentId: string,
   name: string,
   bytes: Uint8Array<ArrayBuffer>,
+  options: { modifiedAt?: string } = {},
 ): Promise<UploadSession> {
-  const session = await startUpload(client, parentId, name, bytes.length)
+  const session = await startUpload(client, parentId, name, bytes.length, options)
   for (let index = 0; index < session.chunkCount; index += 1) {
     await sendPart(client, session, index, bytes)
   }

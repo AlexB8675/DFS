@@ -2,6 +2,8 @@
 // entries (no compression), like the real API, which streams files that are
 // mostly already compressed. Names are UTF-8 (general-purpose flag bit 11),
 // so non-ASCII names survive on every OS. No ZIP64: mock archives are small.
+// Times are local, as the browser running the mock is the downloader, and
+// also in UTC as Info-ZIP's extended timestamp, as the real API writes them.
 
 export interface ZipEntry {
   /** Path inside the archive, `/`-separated; folders end with `/`. */
@@ -22,7 +24,9 @@ export function createZip(entries: readonly ZipEntry[]): Uint8Array<ArrayBuffer>
     const name = encoder.encode(entry.path)
     const data = entry.data ?? new Uint8Array()
     const crc = crc32(data)
-    const [time, date] = dosDateTime(entry.modifiedAt ?? new Date())
+    const modifiedAt = entry.modifiedAt ?? new Date()
+    const [time, date] = dosDateTime(modifiedAt)
+    const extra = extendedTimestamp(modifiedAt)
 
     const header = new DataView(new ArrayBuffer(30))
     header.setUint32(0, 0x04034b50, true) // local file header signature
@@ -35,8 +39,8 @@ export function createZip(entries: readonly ZipEntry[]): Uint8Array<ArrayBuffer>
     header.setUint32(18, data.length, true) // compressed size
     header.setUint32(22, data.length, true) // uncompressed size
     header.setUint16(26, name.length, true)
-    header.setUint16(28, 0, true) // extra field length
-    local.push(new Uint8Array(header.buffer), name, data)
+    header.setUint16(28, extra.length, true)
+    local.push(new Uint8Array(header.buffer), name, extra, data)
 
     const record = new DataView(new ArrayBuffer(46))
     record.setUint32(0, 0x02014b50, true) // central directory signature
@@ -50,12 +54,13 @@ export function createZip(entries: readonly ZipEntry[]): Uint8Array<ArrayBuffer>
     record.setUint32(20, data.length, true)
     record.setUint32(24, data.length, true)
     record.setUint16(28, name.length, true)
-    // Extra, comment, disk number and internal attributes stay 0.
+    record.setUint16(30, extra.length, true)
+    // Comment, disk number and internal attributes stay 0.
     record.setUint32(38, entry.path.endsWith('/') ? 0x10 : 0, true) // MS-DOS directory attribute
     record.setUint32(42, offset, true) // where the local header starts
-    central.push(new Uint8Array(record.buffer), name)
+    central.push(new Uint8Array(record.buffer), name, extra)
 
-    offset += 30 + name.length + data.length
+    offset += 30 + name.length + extra.length + data.length
   }
 
   const centralSize = central.reduce((total, part) => total + part.length, 0)
@@ -83,6 +88,18 @@ export function crc32(data: Uint8Array): number {
   let crc = 0xffffffff
   for (const byte of data) crc = (crcTable[(crc ^ byte) & 0xff] ?? 0) ^ (crc >>> 8)
   return (crc ^ 0xffffffff) >>> 0
+}
+
+/** Info-ZIP's extended timestamp: the modification time in UTC seconds, 1901 to 2038. */
+function extendedTimestamp(date: Date): Uint8Array {
+  const seconds = Math.floor(date.getTime() / 1000)
+  if (!(seconds >= -0x80000000 && seconds <= 0x7fffffff)) return new Uint8Array()
+  const extra = new DataView(new ArrayBuffer(9))
+  extra.setUint16(0, 0x5455, true)
+  extra.setUint16(2, 5, true)
+  extra.setUint8(4, 0x01) // the modification time, alone
+  extra.setInt32(5, seconds, true)
+  return new Uint8Array(extra.buffer)
 }
 
 /** MS-DOS time and date, in local time, with two-second precision. */

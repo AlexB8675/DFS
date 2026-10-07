@@ -1,8 +1,8 @@
-import { archiveTicketSchema } from '@dfs/shared'
+import { archiveTicketSchema, nodeSchema } from '@dfs/shared'
 import type { ApiClient } from './client.ts'
 import type { SuiteContext } from './context.ts'
 import { createFolder, startUpload, text, uploadFile, workspace } from './files.ts'
-import { readZip } from './zip-reader.ts'
+import { readZip, readZipTimes } from './zip-reader.ts'
 
 /** Fast for megabytes, unlike a deep `toEqual` of typed arrays. */
 function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
@@ -72,6 +72,25 @@ export function downloadTests({ describe, it, expect, owner, target }: SuiteCont
       const entries = readZip(bytes)
       expect([...entries.keys()].sort()).toEqual(['Trip/', 'Trip/Empty/', 'Trip/Grüße.txt'])
       expect(new TextDecoder().decode(entries.get('Trip/Grüße.txt'))).toBe('hello')
+    })
+
+    it('keeps a file’s own modification date, through a rename and a move, and in a ZIP', async () => {
+      const client = await owner()
+      const root = await workspace(client)
+      const from = await createFolder(client, root.id, 'From')
+      const to = await createFolder(client, root.id, 'To')
+      const modifiedAt = '2024-03-05T06:07:08.000Z'
+      const session = await uploadFile(client, from.id, 'old.txt', text('dated'), { modifiedAt })
+      const modified = async () =>
+        Date.parse((await client.call('GET', `/nodes/${session.nodeId}`, nodeSchema)).updatedAt)
+      expect(await modified()).toBe(Date.parse(modifiedAt))
+
+      await client.send('PATCH', `/nodes/${session.nodeId}`, { json: { name: 'renamed.txt' } })
+      await client.send('POST', '/nodes/move', { json: { ids: [session.nodeId], parentId: to.id } })
+      expect(await modified()).toBe(Date.parse(modifiedAt))
+
+      const { bytes } = await download(client, `/folders/${to.id}/archive?tz=Europe/Rome`)
+      expect(readZipTimes(bytes).get('To/renamed.txt')?.unix).toBe(Date.parse(modifiedAt) / 1000)
     })
 
     it('zips a selection through a link that works once', async () => {

@@ -120,6 +120,13 @@
       "when": 1791361452279,
       "tag": "0016_journal_shares_audit",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1791368355215,
+      "tag": "0017_version_modified_at",
+      "breakpoints": true
     }
   ]
 }

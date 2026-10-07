@@ -70,8 +70,9 @@ function zipNames(zip: Uint8Array): string[] {
     expect(view.getUint32(offset, true)).toBe(0x02014b50)
     expect(view.getUint16(offset + 8, true) & 0x0800).toBe(0x0800) // UTF-8 names
     const nameLength = view.getUint16(offset + 28, true)
+    const extraLength = view.getUint16(offset + 30, true)
     names.push(new TextDecoder().decode(zip.subarray(offset + 46, offset + 46 + nameLength)))
-    offset += 46 + nameLength
+    offset += 46 + nameLength + extraLength
   }
   return names
 }

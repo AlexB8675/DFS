@@ -813,6 +813,25 @@ describe('UploadEngine', () => {
     }
   })
 
+  it('sends each file’s own modification date, unless the browser doesn’t know it', async () => {
+    const { transport } = fakeApi()
+    const engine = new UploadEngine(transport)
+    const dated = new File(['a'], 'dated.txt', { lastModified: Date.parse('2024-03-05T06:07:08Z') })
+    const unknown = new File(['b'], 'unknown.txt', { lastModified: 0 })
+    await engine.enqueue('folder', [
+      { file: dated, relativeDir: '' },
+      { file: unknown, relativeDir: '' },
+    ])
+    await vi.waitFor(() => {
+      expect(transport.createSessions).toHaveBeenCalled()
+    })
+    const [uploads] = vi.mocked(transport.createSessions).mock.calls[0] ?? []
+    expect(uploads?.map((upload) => upload.modifiedAt)).toEqual([
+      '2024-03-05T06:07:08.000Z',
+      undefined,
+    ])
+  })
+
   it('cancels an upload paused for 5 hours, and says why', async () => {
     vi.useFakeTimers()
     try {

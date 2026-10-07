@@ -89,6 +89,8 @@ interface MockUpload {
   isNewVersion: boolean
   sizeBytes: number
   mimeType: string
+  /** The file's own modification date, its "Modified" once complete. */
+  modifiedAt: string | null
   chunkSize: number
   chunkCount: number
   /** Part index → the SHA-256 it arrived with, so a part sent again is recognized. */
@@ -533,7 +535,9 @@ export class MockDb {
       this.assertNameFree(parentId, name, node.id)
     }
 
-    Object.assign(node, { name, parentId, updatedAt: new Date().toISOString() })
+    // A file's "Modified" is its content's: a rename or move leaves it.
+    Object.assign(node, { name, parentId })
+    if (node.kind === 'folder') node.updatedAt = new Date().toISOString()
     this.changed()
     return this.toDto(node)
   }
@@ -545,7 +549,10 @@ export class MockDb {
       if (node.parentId !== parentId) this.assertNameFree(parentId, node.name, node.id)
     }
     const now = new Date().toISOString()
-    for (const node of nodes) Object.assign(node, { parentId, updatedAt: now })
+    for (const node of nodes) {
+      node.parentId = parentId
+      if (node.kind === 'folder') node.updatedAt = now
+    }
     this.changed()
   }
 
@@ -615,6 +622,7 @@ export class MockDb {
           input.name,
           input.sizeBytes,
           input.mimeType,
+          input.modifiedAt,
         )
         return { ok: true as const, session }
       } catch (error) {
@@ -634,6 +642,7 @@ export class MockDb {
     rawName: string,
     sizeBytes: number,
     mimeType: string,
+    modifiedAt?: string,
   ): UploadSession {
     this.requireFolder(parentId)
     const name = checkedName(rawName)
@@ -645,7 +654,15 @@ export class MockDb {
     }
     const node =
       existing ??
-      this.insert({ parentId, kind: 'file', name, mimeType, sizeBytes, syncState: 'uploading' })
+      this.insert({
+        parentId,
+        kind: 'file',
+        name,
+        mimeType,
+        sizeBytes,
+        syncState: 'uploading',
+        ...(modifiedAt && { updatedAt: modifiedAt }),
+      })
     const upload: MockUpload = {
       id: crypto.randomUUID(),
       nodeId: node.id,
@@ -653,6 +670,7 @@ export class MockDb {
       isNewVersion: existing !== undefined,
       sizeBytes,
       mimeType,
+      modifiedAt: modifiedAt ?? null,
       chunkSize: CHUNK_SIZE,
       chunkCount: Math.ceil(sizeBytes / CHUNK_SIZE),
       receivedParts: {},
@@ -761,7 +779,7 @@ export class MockDb {
       }
       node.syncState = 'syncing'
       node.syncCompletesAt = Date.now() + 2000 + Math.random() * 4000
-      node.updatedAt = new Date().toISOString()
+      node.updatedAt = upload.modifiedAt ?? new Date().toISOString()
       this.scheduleSyncCompletion(node)
     }
     upload.state = 'completed'

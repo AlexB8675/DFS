@@ -253,6 +253,7 @@ async function versionRecords(
       'id', version.id, 'nodeId', version.node_id, 'versionNo', version.version_no,
       'sizeBytes', version.size_bytes, 'chunkSize', version.chunk_size,
       'chunkCount', version.chunk_count, 'contentHash', encode(version.content_hash, 'hex'),
+      'modifiedAt', version.modified_at,
       'wrappedDek', encode(version.wrapped_dek, 'base64'), 'keyId', version.key_id,
       'chunks', (
         SELECT json_agg(json_build_object(
