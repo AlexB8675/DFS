@@ -10,6 +10,7 @@ import {
   nodes,
   purgeVersions,
   unneededVersions,
+  versionRecords,
   WORKING_LINK,
   QUEUES,
   textArray,
@@ -761,7 +762,9 @@ async function finishUpload(
     details: upload.version_no > 1 ? `${size}, new version` : size,
     nodeId: node.id,
   })
-  await appendJournal(tx, [...pruneRecords, ...nodeRecords([node]), ...audited])
+  // An empty file is stored now, with no blob for the bot to journal it after.
+  const stored = upload.chunk_count === 0 ? await versionRecords(tx, [upload.version_id]) : []
+  await appendJournal(tx, [...pruneRecords, ...nodeRecords([node]), ...stored, ...audited])
   return prunedIds
 }
 

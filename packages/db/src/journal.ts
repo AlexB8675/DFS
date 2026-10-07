@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm'
 import type { Database } from './client.ts'
+import { uuidArray } from './folder-stats.ts'
 import { LOCK_NAMESPACE, LOCKS } from './locks.ts'
 import { journal, type auditLog, type nodes, type shareLinks, type users } from './schema.ts'
 
@@ -79,6 +80,38 @@ export function shareRecords(shares: readonly ShareRow[]): JournalRecord[] {
     kind: 'share.upsert',
     record: { ...state, tokenHash: tokenHash.toString('hex') },
   }))
+}
+
+/**
+ * `version.stored` records (§8): what recovery needs to read a version
+ * without the database, its chunks with where each is. Written once a
+ * version is stored: by the bot when its last blob reaches Discord, and
+ * at completion for an empty file, which has no blob to wait for.
+ */
+export async function versionRecords(
+  tx: Executor,
+  versionIds: readonly string[],
+): Promise<JournalRecord[]> {
+  if (versionIds.length === 0) return []
+  const { rows } = await tx.execute<{ record: Record<string, unknown> }>(sql`
+    SELECT json_build_object(
+      'id', version.id, 'nodeId', version.node_id, 'versionNo', version.version_no,
+      'sizeBytes', version.size_bytes, 'chunkSize', version.chunk_size,
+      'chunkCount', version.chunk_count, 'contentHash', encode(version.content_hash, 'hex'),
+      'modifiedAt', version.modified_at,
+      'wrappedDek', encode(version.wrapped_dek, 'base64'), 'keyId', version.key_id,
+      'chunks', coalesce((
+        SELECT json_agg(json_build_object(
+          'idx', chunk.idx, 'blobId', chunk.blob_id, 'offset', chunk.blob_offset,
+          'plainSize', chunk.plain_size, 'frameSize', chunk.frame_size,
+          'plainSha256', encode(chunk.plain_sha256, 'hex'),
+          'frameSha256', encode(chunk.frame_sha256, 'hex')
+        ) ORDER BY chunk.idx)
+        FROM chunks chunk WHERE chunk.version_id = version.id
+      ), '[]'::json)
+    ) AS record
+    FROM file_versions version WHERE version.id = ANY(${uuidArray(versionIds)})`)
+  return rows.map((row) => ({ kind: 'version.stored', record: row.record }))
 }
 
 /** Share links turned off, which are deleted (§7.5): `{id}` each. */

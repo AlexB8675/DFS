@@ -13,7 +13,13 @@ import { readVersion, type ReadableVersion } from '../content/reader.ts'
 import { updateNode } from '../nodes/write.ts'
 import { testConfig } from '../testing/config.ts'
 import { seedUser } from '../testing/seed.ts'
-import { cancelUpload, createUploads, keepUploadsAlive, receivePart } from './uploads.ts'
+import {
+  cancelUpload,
+  completeUpload,
+  createUploads,
+  keepUploadsAlive,
+  receivePart,
+} from './uploads.ts'
 
 let database: TestDatabase
 let app: FastifyInstance
@@ -462,6 +468,18 @@ describe('the journal (§8)', () => {
       WHERE record->>'id' = ANY(${`{${ids.join(',')}}`}::text[]) ORDER BY id`)
     return rows
   }
+
+  it('records an empty file’s version as it completes: no blob will (§8)', async () => {
+    const empty = await start(0)
+    await completeUpload(app, auth, empty.uploadId)
+    expect(await journaled(empty.nodeId, empty.versionId)).toMatchObject([
+      { kind: 'node.upsert', record: { id: empty.nodeId, currentVersionId: empty.versionId } },
+      {
+        kind: 'version.stored',
+        record: { id: empty.versionId, nodeId: empty.nodeId, sizeBytes: 0, chunks: [] },
+      },
+    ])
+  })
 
   it('records a file once its upload completes, and nothing of one given up', async () => {
     const given = await start(app.config.sizes.chunkSize + 10)

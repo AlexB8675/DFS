@@ -2,6 +2,7 @@ import {
   appendJournal,
   notifySynced,
   uuidArray,
+  versionRecords,
   type Database,
   type JournalRecord,
   type Metrics,
@@ -241,30 +242,4 @@ async function storeBlob(
     })
   }
   return finished
-}
-
-/** `version.stored` records (§8): what recovery needs to read the version without the database. */
-async function versionRecords(
-  tx: Parameters<Parameters<Database['transaction']>[0]>[0],
-  versionIds: string[],
-): Promise<JournalRecord[]> {
-  const { rows } = await tx.execute<{ record: Record<string, unknown> }>(sql`
-    SELECT json_build_object(
-      'id', version.id, 'nodeId', version.node_id, 'versionNo', version.version_no,
-      'sizeBytes', version.size_bytes, 'chunkSize', version.chunk_size,
-      'chunkCount', version.chunk_count, 'contentHash', encode(version.content_hash, 'hex'),
-      'modifiedAt', version.modified_at,
-      'wrappedDek', encode(version.wrapped_dek, 'base64'), 'keyId', version.key_id,
-      'chunks', (
-        SELECT json_agg(json_build_object(
-          'idx', chunk.idx, 'blobId', chunk.blob_id, 'offset', chunk.blob_offset,
-          'plainSize', chunk.plain_size, 'frameSize', chunk.frame_size,
-          'plainSha256', encode(chunk.plain_sha256, 'hex'),
-          'frameSha256', encode(chunk.frame_sha256, 'hex')
-        ) ORDER BY chunk.idx)
-        FROM chunks chunk WHERE chunk.version_id = version.id
-      )
-    ) AS record
-    FROM file_versions version WHERE version.id = ANY(${uuidArray(versionIds)})`)
-  return rows.map((row) => ({ kind: 'version.stored', record: row.record }))
 }
