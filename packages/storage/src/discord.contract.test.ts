@@ -101,7 +101,7 @@ describe.skipIf(!enabled)('Discord contract', () => {
     await store.delete(blob)
     // The message is gone. Discord still signs new links to its attachment
     // (they answer 404), and a link that read it before keeps serving it
-    // from the CDN's cache for a while: a lost blob shows in its message,
+    // from the CDN's cache for a while: a deleted blob shows in its message,
     // not its URL (checked live, 2026-10-05).
     await expect(
       rest.get(Routes.channelMessage(channel.discordChannelId, location.messageId ?? '')),

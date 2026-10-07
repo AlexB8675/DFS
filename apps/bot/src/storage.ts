@@ -178,10 +178,18 @@ export async function refreshBlobUrls(
   )
   if (signed.size > 0) {
     const saved = [...signed].map(([id, url]) => ({ id, url: url.url, expires_at: url.expiresAt }))
+    // Saved only as a shortcut, so rows another transaction holds are left
+    // as they are, and the rest locked in ID order (locks.ts).
     await db.execute(sql`
+      WITH signed AS (
+        SELECT * FROM jsonb_to_recordset(${JSON.stringify(saved)}::jsonb)
+          AS signed(id bigint, url text, expires_at timestamptz)
+      ), free AS (
+        SELECT id FROM blobs WHERE id IN (SELECT id FROM signed)
+        ORDER BY id FOR NO KEY UPDATE SKIP LOCKED
+      )
       UPDATE blobs SET cdn_url = signed.url, cdn_url_expires_at = signed.expires_at
-      FROM jsonb_to_recordset(${JSON.stringify(saved)}::jsonb)
-        AS signed(id bigint, url text, expires_at timestamptz)
+      FROM signed JOIN free ON free.id = signed.id
       WHERE blobs.id = signed.id`)
   }
   return signed
