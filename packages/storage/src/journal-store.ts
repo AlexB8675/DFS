@@ -26,6 +26,22 @@ export function journalMessage(batch: JournalBatchToStore, instanceId: string): 
   return `dfs1 j=${String(batch.batchNo)} ids=${String(batch.firstId)}-${String(batch.lastId)} i=${instanceId}`
 }
 
+const JOURNAL_MESSAGE = /^dfs1 j=(\d+) ids=(\d+)-(\d+) i=([0-9a-f]{12})$/
+
+/** What a journal message says about its batch, or `null` if it isn't one. */
+export function parseJournalMessage(
+  content: string,
+): (JournalBatchToStore & { instanceId: string }) | null {
+  const match = JOURNAL_MESSAGE.exec(content)
+  if (!match?.[1] || !match[2] || !match[3] || !match[4]) return null
+  return {
+    batchNo: Number(match[1]),
+    firstId: Number(match[2]),
+    lastId: Number(match[3]),
+    instanceId: match[4],
+  }
+}
+
 export function journalFilename(batchNo: number): string {
   return `j${String(batchNo)}.bin`
 }

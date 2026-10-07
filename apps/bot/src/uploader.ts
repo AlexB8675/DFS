@@ -198,6 +198,7 @@ async function storeBlob(
           id: blobId,
           kind: blob.kind,
           sizeBytes: blob.size_bytes,
+          frameCount: blob.frame_count,
           sha256: blob.sha256?.toString('hex') ?? null,
           // Where it is for good, by Discord's IDs, which mean something
           // without this database (§8). The signed URL expires, so it stays out.

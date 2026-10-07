@@ -109,6 +109,7 @@ export async function recoverBlob(deps: RecoverDeps, blobId: number): Promise<st
           id: blobId,
           kind: blob.kind,
           sizeBytes: blob.size_bytes,
+          frameCount: blob.frame_count,
           sha256: blob.sha256?.toString('hex') ?? null,
           discordChannelId: record.discord_channel_id,
           messageId: location.messageId,
