@@ -2,6 +2,7 @@ import { dataChannels } from '@dfs/bot/storage'
 import { settleBlobs } from '@dfs/bot/testing'
 import { ApiClient, createFolder, text, uploadFile, workspace } from '@dfs/contract'
 import { storageChannels } from '@dfs/db'
+import { sql } from 'drizzle-orm'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
 import { DiscordBlobStore } from '@dfs/storage'
 import { FakeDiscord } from '@dfs/storage/testing'
@@ -15,8 +16,9 @@ import { seedUser } from '../testing/seed.ts'
 // Reading back from Discord (DESIGN.md §6.2), over real HTTP: a ZIP of a
 // folder of small files costs one CDN request per pack, not one per file, and
 // nothing the second time; a download stalls with its client instead of
-// fetching the whole file. Attachments of 4 MiB make a large file out of
-// little test data.
+// fetching the whole file, and finds a frame whose pack was compacted away
+// mid-download. Attachments of 4 MiB make a large file out of little test
+// data.
 
 let database: TestDatabase
 let app: FastifyInstance
@@ -107,5 +109,69 @@ describe('reading from Discord', () => {
     } finally {
       await body?.cancel()
     }
+  })
+
+  it('reads a frame where it is now when its pack was compacted away mid-download', async () => {
+    const { chunkSize } = app.config.sizes
+    // Large chunks of their own, and a small end packed (§6.6).
+    const bytes = new Uint8Array(12 * chunkSize + 1000).map((_, index) => index % 249)
+    const folder = await createFolder(client, (await workspace(client)).id, 'Moved')
+    const session = await uploadFile(client, folder.id, 'moved.bin', bytes)
+    const store = app.blobStore as DiscordBlobStore
+    await settleBlobs({ db: app.db, staging: app.staging, store, sizes: app.config.sizes })
+    const { rows } = await app.db.execute<{
+      id: number
+      channel: string
+      message: string
+      frames: number
+      size: number
+    }>(sql`
+      SELECT blob.id::float8 AS id, channel.discord_channel_id AS channel,
+        blob.message_id AS message, blob.frame_count AS frames, blob.size_bytes AS size
+      FROM chunks chunk JOIN blobs blob ON blob.id = chunk.blob_id
+      JOIN storage_channels channel ON channel.id = blob.channel_id
+      WHERE chunk.version_id = ${session.versionId} AND blob.kind = 'pack'`)
+    const old = rows[0]
+    if (!old) throw new Error('The end of the file wasn’t packed.')
+
+    const response = await client.fetch('GET', `/files/${session.nodeId}/content`)
+    const body = response.body?.getReader()
+    if (!body) throw new Error('No body.')
+    const received: Uint8Array[] = []
+    const first = await body.read()
+    if (first.value) received.push(first.value as Uint8Array)
+    // The server stalls with its client, every chunk looked up, the end not read.
+    await setTimeout(500)
+
+    // Compacted as the bot does it: the frames posted again as another pack,
+    // the chunks moved there, and the old message deleted.
+    const attachment = discord.messages.find((message) => message.id === old.message)
+      ?.attachments[0]?.url
+    const data = attachment ? discord.cdn.get(attachment) : undefined
+    if (!data) throw new Error('The old pack isn’t in Discord.')
+    const { rows: created } = await app.db.execute<{ id: number }>(sql`
+      INSERT INTO blobs (kind, state, size_bytes, live_bytes, frame_count)
+      VALUES ('pack', 'building', ${old.size}, 0, ${old.frames}) RETURNING id::float8 AS id`)
+    const moved = created[0]?.id ?? 0
+    const { location } = await store.put({ id: moved, kind: 'pack', frameCount: old.frames }, () =>
+      Promise.resolve(data),
+    )
+    await app.db.execute(sql`
+      UPDATE blobs SET state = 'stored', stored_at = now(), live_bytes = ${old.size},
+        channel_id = ${location.channelId}, message_id = ${location.messageId},
+        attachment_id = ${location.attachmentId}
+      WHERE id = ${moved}`)
+    await app.db.execute(sql`UPDATE chunks SET blob_id = ${moved} WHERE blob_id = ${old.id}`)
+    await app.db.execute(
+      sql`UPDATE blobs SET state = 'deleted', live_bytes = 0 WHERE id = ${old.id}`,
+    )
+    await discord.delete(`/channels/${old.channel}/messages/${old.message}`)
+
+    for (;;) {
+      const next = await body.read()
+      if (next.done) break
+      received.push(next.value as Uint8Array)
+    }
+    expect(Buffer.concat(received).equals(bytes)).toBe(true)
   })
 })

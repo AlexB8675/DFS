@@ -202,7 +202,8 @@ async function chunkLocations(
  * A frame from staging while its blob isn't stored: its own file, or its
  * place in a sealed pack (§6.6). From the blob store after. If the bot packs
  * or stores it and removes the staged file between the lookup and the read,
- * the chunk is looked up again.
+ * or compacts its pack and deletes the old one (§6.6), the chunk is looked
+ * up again and read where it is now.
  */
 async function readFrame(
   app: FastifyInstance,
@@ -217,25 +218,47 @@ async function readFrame(
         : await app.staging.readRange(pack ?? '', offset ?? 0, chunk.frame_size)
     } catch (error) {
       if ((error as { code?: unknown }).code !== 'ENOENT') throw error
-      const [moved] = await chunkLocations(app.db, versionId, chunk.idx, chunk.idx)
-      if (!moved || (moved.staged_path === own && moved.blob_staged_path === pack)) throw error
-      return readFrame(app, versionId, moved)
+      return readMoved(app, versionId, chunk, error)
     }
   }
   if (chunk.blob_id === null || chunk.blob_offset === null || chunk.blob_state !== 'stored') {
     throw new ContentError(`Chunk ${String(chunk.idx)} of ${versionId} is not readable.`)
   }
-  return app.blobStore.read(
-    {
-      id: chunk.blob_id,
-      channelId: chunk.channel_id,
-      messageId: chunk.message_id,
-      attachmentId: chunk.attachment_id,
-      url: cdnUrlOf(chunk),
-    },
-    chunk.blob_offset,
-    chunk.frame_size,
-  )
+  try {
+    return await app.blobStore.read(
+      {
+        id: chunk.blob_id,
+        channelId: chunk.channel_id,
+        messageId: chunk.message_id,
+        attachmentId: chunk.attachment_id,
+        url: cdnUrlOf(chunk),
+      },
+      chunk.blob_offset,
+      chunk.frame_size,
+    )
+  } catch (error) {
+    return readMoved(app, versionId, chunk, error)
+  }
+}
+
+/** The frame where it is now, if it moved since `chunk` was looked up; otherwise `error`. */
+async function readMoved(
+  app: FastifyInstance,
+  versionId: string,
+  chunk: ChunkLocation,
+  error: unknown,
+): Promise<Uint8Array> {
+  const [moved] = await chunkLocations(app.db, versionId, chunk.idx, chunk.idx)
+  if (
+    !moved ||
+    (moved.staged_path === chunk.staged_path &&
+      moved.blob_staged_path === chunk.blob_staged_path &&
+      moved.blob_id === chunk.blob_id &&
+      moved.blob_offset === chunk.blob_offset)
+  ) {
+    throw error
+  }
+  return readFrame(app, versionId, moved)
 }
 
 /**
