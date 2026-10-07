@@ -1,5 +1,6 @@
 import {
   appendJournal,
+  compactionFigures,
   isMissingTable,
   LOCK_NAMESPACE,
   LOCKS,
@@ -23,11 +24,19 @@ import { ApiError } from '../errors.ts'
 import { botHealth } from './system.ts'
 
 // Admin → Storage (DESIGN.md §9): what is stuck between staging and Discord,
-// and the tasks an admin can have the leading bot run now.
+// what compaction would merge (§6.6), and the tasks an admin can have the
+// leading bot run now.
 
 /** `GET /admin/storage`. */
 export async function storageStatus(app: FastifyInstance): Promise<StorageStatus> {
-  const [uploads, deletions] = await Promise.all([
+  const { config } = app
+  const rule = {
+    threshold: config.compactThreshold,
+    packTargetBytes: config.sizes.packTargetBytes,
+    minAgeDays: config.compactMinAgeDays,
+  }
+  const [compaction, uploads, deletions] = await Promise.all([
+    compactionFigures(app.db, rule),
     failingUploads(app),
     app.db.execute<{
       blob_id: string
@@ -42,7 +51,8 @@ export async function storageStatus(app: FastifyInstance): Promise<StorageStatus
       ORDER BY blob.attempts DESC, blob.id LIMIT 100`),
   ])
   return {
-    blobStore: app.config.blobStore,
+    blobStore: config.blobStore,
+    compaction: { minAgeDays: rule.minAgeDays, ...compaction },
     uploads,
     deletions: deletions.rows.map((row) => ({
       blobId: row.blob_id,

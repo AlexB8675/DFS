@@ -22,6 +22,8 @@ import { seedUser } from '../testing/seed.ts'
 // Admin → Storage (DESIGN.md §9): tasks go to the leading bot through the
 // job queue, only while one leads. A stand-in bot answers the health check.
 
+const MB = 1024 ** 2
+
 let database: TestDatabase
 let app: FastifyInstance
 let cleanup: () => Promise<void>
@@ -168,5 +170,23 @@ describe('Admin → Storage (§9)', () => {
       sizes: app.config.sizes,
     })
     expect((await admin.call('GET', '/admin/health', systemHealthSchema)).staging.usedBytes).toBe(0)
+  })
+
+  it('shows what compaction would merge, on its own and if asked now (§6.6)', async () => {
+    // Only this test's packs.
+    await app.db.execute(sql`UPDATE blobs SET state = 'deleted' WHERE state = 'stored'`)
+    const pack = (live: number, days: number) => sql`
+      ('pack', 'stored', ${8 * MB}, ${live}, 10, now() - make_interval(days => ${days}))`
+    // Two a week old holding little, one younger, and one holding too much to merge.
+    await app.db.execute(sql`
+      INSERT INTO blobs (kind, state, size_bytes, live_bytes, frame_count, stored_at)
+      VALUES ${sql.join([pack(MB, 8), pack(MB, 9), pack(MB, 1), pack(5 * MB, 8)], sql`, `)}`)
+
+    const { compaction } = await admin.call('GET', '/admin/storage', storageStatusSchema)
+    expect(compaction).toEqual({
+      minAgeDays: 7,
+      due: { packs: 2, into: 1, liveBytes: 2 * MB, freedBytes: 14 * MB },
+      all: { packs: 3, into: 1, liveBytes: 3 * MB, freedBytes: 21 * MB },
+    })
   })
 })

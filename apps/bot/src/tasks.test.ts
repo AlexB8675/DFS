@@ -2,7 +2,15 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { loadConfig, type Config } from '@dfs/config'
-import { createDatabase, createPool, QUEUES, storageChannels, type Database } from '@dfs/db'
+import {
+  appendJournal,
+  createDatabase,
+  createPool,
+  purgeVersions,
+  QUEUES,
+  storageChannels,
+  type Database,
+} from '@dfs/db'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
 import { DiscordBlobStore, LocalJournalStore, Staging } from '@dfs/storage'
 import { FakeDiscord, type FakeChannel } from '@dfs/storage/testing'
@@ -11,6 +19,7 @@ import { sql } from 'drizzle-orm'
 import type pg from 'pg'
 import { PgBoss } from 'pg-boss'
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest'
+import { Compactor } from './compactor.ts'
 import { Packer } from './packer.ts'
 import { dataChannels } from './storage.ts'
 import { runAdminTask, type TaskDeps } from './tasks.ts'
@@ -80,6 +89,11 @@ function deps(overrides: Partial<TaskDeps> = {}): TaskDeps {
     storage: { store, journal: new LocalJournalStore(directory), discord: discord as never },
     staging,
     packer: new Packer({ db, staging, sizes, maxWaitMs: 60_000 }),
+    compactor: new Compactor({
+      db,
+      store,
+      rule: { threshold: 0.3, packTargetBytes: sizes.packTargetBytes, minAgeDays: 7 },
+    }),
     log: log as never,
     ...overrides,
   }
@@ -125,6 +139,23 @@ describe('admin tasks (DESIGN.md §9)', () => {
       'Sealed 1 pack; it goes to Discord next.',
     )
     expect(await runAdminTask(deps(), task('packs.seal'))).toBe('Nothing was waiting to be packed.')
+  })
+
+  it('merges packs that hold little now, whatever their age', async () => {
+    const first = await uploadedFiles(db, staging, [100, 200])
+    await settleBlobs({ db, staging, store, sizes })
+    await uploadedFiles(db, staging, [100])
+    await settleBlobs({ db, staging, store, sizes })
+    await db.transaction(async (tx) => {
+      const gone = first.files.slice(0, 1).map((file) => file.versionId)
+      await appendJournal(tx, await purgeVersions(tx, first.ownerId, gone))
+    })
+    expect(await runAdminTask(deps(), task('packs.compact'))).toBe(
+      'Merged 2 packs into 1, freeing 100 B; the old messages go within a minute or two.',
+    )
+    expect(await runAdminTask(deps(), task('packs.compact'))).toBe(
+      'No packs held little enough to merge.',
+    )
   })
 
   it('tries failing deletions again now', async () => {

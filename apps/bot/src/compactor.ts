@@ -1,8 +1,10 @@
 import {
   appendJournal,
   bigintArray,
+  compactionCandidates,
+  compactionGroups,
+  type CompactionRule,
   type Database,
-  type Executor,
   type JournalRecord,
   type Metrics,
 } from '@dfs/db'
@@ -28,65 +30,6 @@ export const STALE_BUILDING_MS = 60 * 60_000
  * an orphan, so neither can while the move commits.
  */
 const BUILDING_FRESH_MS = 30 * 60_000
-
-/** Which packs compaction merges (D32). */
-export interface CompactionRule {
-  /** `COMPACT_THRESHOLD`: the share of a full pack under which a pack's live bytes qualify it. */
-  threshold: number
-  /** `PACK_TARGET_BYTES`: a full pack, which a merged one never exceeds. */
-  packTargetBytes: number
-  /** `COMPACT_MIN_AGE_DAYS`: how long ago a pack must have been stored. */
-  minAgeDays: number
-}
-
-export interface Candidate extends Record<string, unknown> {
-  id: number
-  live_bytes: number
-}
-
-/**
- * Packs compaction may merge (D32), in ID order: stored, their live bytes
- * under `threshold` of a full pack whatever their own size, and stored at
- * least `minAgeDays` ago, so files deleted soon after their upload go first.
- */
-export async function compactionCandidates(
-  db: Executor,
-  rule: CompactionRule,
-  skip: readonly number[] = [],
-): Promise<Candidate[]> {
-  const { rows } = await db.execute<Candidate>(sql`
-    SELECT id::float8 AS id, live_bytes FROM blobs
-    WHERE kind = 'pack' AND state = 'stored'
-      AND live_bytes < ${rule.threshold * rule.packTargetBytes}::float8
-      AND stored_at <= now() - make_interval(days => ${rule.minAgeDays}::int)
-      AND NOT id = ANY(${bigintArray(skip)})
-    ORDER BY id`)
-  return rows
-}
-
-/**
- * Candidates in groups, in ID order so files uploaded together stay
- * together: as many whole packs to a group as their live bytes fit in a full
- * pack. A group of one is left, as rewriting one pack saves no message.
- */
-export function compactionGroups(
-  candidates: readonly Candidate[],
-  packTargetBytes: number,
-): number[][] {
-  const groups: number[][] = [[]]
-  let bytes = 0
-  for (const pack of candidates) {
-    const group = groups.at(-1) ?? []
-    if (group.length > 0 && bytes + pack.live_bytes > packTargetBytes) {
-      groups.push([pack.id])
-      bytes = pack.live_bytes
-    } else {
-      group.push(pack.id)
-      bytes += pack.live_bytes
-    }
-  }
-  return groups.filter((group) => group.length >= 2)
-}
 
 export interface CompactionReport {
   /** New packs stored, one per group merged. */
@@ -166,7 +109,9 @@ export class Compactor {
     const candidates = await compactionCandidates(db, force ? { ...rule, minAgeDays: 0 } : rule, [
       ...this.#broken,
     ])
-    const groups = compactionGroups(candidates, rule.packTargetBytes)
+    const groups = compactionGroups(candidates, rule.packTargetBytes).map((group) =>
+      group.map((pack) => pack.id),
+    )
     const report: CompactionReport = { groups: 0, packs: 0, freedBytes: 0, failures: 0 }
     for (const group of force ? groups : groups.slice(0, 1)) await this.#merge(group, report)
     return report

@@ -49,6 +49,7 @@ import {
 import { mockDatabaseStatus } from './database'
 import { mockMetrics } from './metrics'
 
+const MB = 1024 ** 2
 const GB = 1024 ** 3
 const DAY = 24 * 60 * 60_000
 /** What the mock runs: a development build, as `GET /version` says it. */
@@ -588,13 +589,23 @@ export class AdminMockDb extends MockDb {
   private readonly tasks: AdminTask[] = []
   /** Whether the made-up failing deletion was tried again (and went). */
   private deletionsRetried = false
+  /** Whether the made-up packs that hold little were merged. */
+  private packsCompacted = false
 
   /** What is stuck in storage, made up from the seeded failed files (§9). */
   storageStatus(): StorageStatus {
     this.requireAdmin()
     const files = Object.values(this.state.nodes).filter((node) => node.kind === 'file')
+    const none = { packs: 0, into: 0, liveBytes: 0, freedBytes: 0 }
     return {
       blobStore: 'discord',
+      compaction: this.packsCompacted
+        ? { minAgeDays: 7, due: none, all: none }
+        : {
+            minAgeDays: 7,
+            due: { packs: 14, into: 3, liveBytes: 22 * MB, freedBytes: 118 * MB },
+            all: { packs: 23, into: 5, liveBytes: 37 * MB, freedBytes: 191 * MB },
+          },
       uploads: files
         .filter((node) => node.syncState === 'failed')
         .map((node, index) => ({
@@ -654,6 +665,15 @@ export class AdminMockDb extends MockDb {
       case 'packs.seal':
         result = 'Nothing was waiting to be packed.'
         break
+      case 'packs.compact': {
+        const { all } = this.storageStatus().compaction
+        result =
+          all.packs === 0
+            ? 'No packs held little enough to merge.'
+            : `Merged ${String(all.packs)} packs into ${String(all.into)}, freeing ${formatBytes(all.freedBytes)}; the old messages go within a minute or two.`
+        this.packsCompacted = true
+        break
+      }
       case 'orphans.reconcile':
         result = 'Checked 412 messages and deleted 0 orphans.'
         break

@@ -1,6 +1,6 @@
 import type { Config } from '@dfs/config'
 import { QUEUES, registerStorageChannels, type AdminTaskJob, type Database } from '@dfs/db'
-import { adminTaskRequestSchema, DISCORD_TASKS } from '@dfs/shared'
+import { adminTaskRequestSchema, DISCORD_TASKS, formatBytes } from '@dfs/shared'
 import {
   channelsInCategory,
   createDataChannel,
@@ -12,6 +12,7 @@ import { sql } from 'drizzle-orm'
 import type { FastifyBaseLogger } from 'fastify'
 import type { PgBoss } from 'pg-boss'
 import { retryFailedDeletions } from './collector.ts'
+import type { Compactor } from './compactor.ts'
 import { capitalized, setUpDiscord } from './discord-setup.ts'
 import type { Packer } from './packer.ts'
 import { reconcileOrphans } from './reconciler.ts'
@@ -28,12 +29,13 @@ export interface TaskDeps {
   storage: BotStorage
   staging: Staging
   packer: Packer
+  compactor: Compactor
   log: FastifyBaseLogger
 }
 
 /** Runs one task; returns what it did in a sentence, or throws saying why it couldn't. */
 export async function runAdminTask(deps: TaskDeps, job: AdminTaskJob): Promise<string> {
-  const { config, db, boss, storage, staging, packer, log } = deps
+  const { config, db, boss, storage, staging, packer, compactor, log } = deps
   // A task from a newer API than this bot fails here, not halfway.
   const task = adminTaskRequestSchema.parse(job)
   const discord = DISCORD_TASKS.includes(task.kind) ? discordOf(config, storage.discord) : null
@@ -60,6 +62,15 @@ export async function runAdminTask(deps: TaskDeps, job: AdminTaskJob): Promise<s
         return sealed === 0
           ? 'Nothing was waiting to be packed.'
           : `Sealed ${String(sealed)} ${sealed === 1 ? 'pack' : 'packs'}; ${sealed === 1 ? 'it goes' : 'they go'} to Discord next.`
+      }
+      case 'packs.compact': {
+        const { groups, packs, freedBytes, failures } = await compactor.compact({ force: true })
+        const damaged =
+          failures > 0
+            ? ` ${String(failures)} ${failures === 1 ? 'pack was' : 'packs were'} left out, damaged; the bot’s log says which.`
+            : ''
+        if (groups === 0) return `No packs held little enough to merge.${damaged}`
+        return `Merged ${String(packs)} packs into ${String(groups)}, freeing ${formatBytes(freedBytes)}; the old messages go within a minute or two.${damaged}`
       }
       case 'orphans.reconcile': {
         if (!discord) break

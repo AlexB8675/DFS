@@ -682,6 +682,7 @@ export const adminTaskKindSchema = z.enum([
   'channel.create',
   'discord.setup',
   'packs.seal',
+  'packs.compact',
   'orphans.reconcile',
   'uploads.retry',
   'deletions.retry',
@@ -699,6 +700,7 @@ export const ADMIN_TASK_LABELS: Record<AdminTaskKind, string> = {
   'channel.create': 'Create a storage channel',
   'discord.setup': 'Check the Discord layout',
   'packs.seal': 'Seal packs now',
+  'packs.compact': 'Compact packs now',
   'orphans.reconcile': 'Clean up orphan messages',
   'uploads.retry': 'Retry failed uploads',
   'deletions.retry': 'Retry failing deletions',
@@ -712,6 +714,7 @@ export const adminTaskRequestSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('channel.create') }),
   z.object({ kind: z.literal('discord.setup') }),
   z.object({ kind: z.literal('packs.seal') }),
+  z.object({ kind: z.literal('packs.compact') }),
   z.object({ kind: z.literal('orphans.reconcile') }),
   z.object({ kind: z.literal('uploads.retry') }),
   z.object({ kind: z.literal('deletions.retry') }),
@@ -731,9 +734,30 @@ export const adminTaskSchema = z.object({
 export type AdminTask = z.infer<typeof adminTaskSchema>
 export const adminTaskListSchema = z.array(adminTaskSchema)
 
-/** `GET /admin/storage`: what is stuck between staging and Discord. */
+/** What merging packs that hold little would do (§6.6). */
+const compactionFiguresSchema = z.object({
+  /** Packs merged: those that hold little, in groups of two or more. */
+  packs: count,
+  /** The new packs they become, one per group. */
+  into: count,
+  /** Their files' bytes, which go into the new packs. */
+  liveBytes: byteCount,
+  /** What they hold beyond that, deleted files' bytes, which leave Discord with them. */
+  freedBytes: byteCount,
+})
+
+/** `GET /admin/storage`: what is stuck between staging and Discord, and what compaction would merge. */
 export const storageStatusSchema = z.object({
   blobStore: z.enum(['discord', 'local', 'chaos']),
+  /** Packs that hold little (D32). */
+  compaction: z.object({
+    /** `COMPACT_MIN_AGE_DAYS`: how old a pack is before the bot merges it on its own. */
+    minAgeDays: count,
+    /** What the bot merges on its own, a group a minute: packs that old. */
+    due: compactionFiguresSchema,
+    /** What Compact packs now merges, whatever the packs' age. */
+    all: compactionFiguresSchema,
+  }),
   /** Blobs whose upload failed: retrying with backoff, or given up after every try. */
   uploads: z.array(
     z.object({

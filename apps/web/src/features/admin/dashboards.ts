@@ -240,12 +240,14 @@ export const MONITORING_SECTIONS: DashboardSection[] = [
       },
       {
         title: 'Storage work',
-        description: 'Per minute: blobs stored, messages deleted and packs sealed.',
+        description:
+          'Per minute: blobs stored, messages deleted, packs sealed, and packs that held little merged.',
         format: 'perMinute',
         lines: [
           { label: 'Blobs stored', color: 1, series: 'discord.posted:events' },
           { label: 'Messages deleted', color: 2, series: 'discord.deleted:rate' },
           { label: 'Packs sealed', color: 3, series: 'packs.sealed:rate' },
+          { label: 'Packs merged', color: 4, series: 'packs.compacted:rate' },
         ],
       },
       {
@@ -337,6 +339,20 @@ export const MONITORING_SECTIONS: DashboardSection[] = [
         lines: [{ label: 'Failed jobs', color: 'warning', series: 'queue.failed:avg' }],
       },
       backlog,
+      {
+        title: 'Freed by compaction',
+        description:
+          'Bytes per second of deleted files that left Discord as packs that held little were merged.',
+        format: 'bytesPerSecond',
+        lines: [{ label: 'Freed', color: 2, series: 'compaction.freed_bytes:rate' }],
+      },
+      {
+        title: 'Damaged packs',
+        description:
+          'Per minute: packs compaction found damaged. Their files may not download; the bot’s log says which.',
+        format: 'perMinute',
+        lines: [{ label: 'Damaged', color: 'critical', series: 'compaction.failures:rate' }],
+      },
     ],
   },
   {

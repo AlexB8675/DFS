@@ -171,7 +171,7 @@ export async function startLeaderWork(options: {
       if (!job) return null
       log.info({ task: job.data.kind, by: job.data.requestedBy }, 'running an admin task')
       const message = await runAdminTask(
-        { config, db, boss, storage, staging, packer, log },
+        { config, db, boss, storage, staging, packer, compactor, log },
         job.data,
       )
       return { message }

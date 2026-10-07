@@ -47,6 +47,8 @@ const LEVELS: Partial<Record<MetricName, number>> = {
   'discord.deleted': 0.05,
   'discord.signed': 1.5,
   'packs.sealed': 0.03,
+  'packs.compacted': 0.002,
+  'compaction.freed_bytes': 4 * 1024,
   'orphans.deleted': 0.0005,
   'bot.rss': 160 * MB,
   'bot.heap': 70 * MB,

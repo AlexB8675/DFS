@@ -364,6 +364,10 @@ export function adminTests({
       const admin = await owner()
       const status = await admin.call('GET', '/admin/storage', storageStatusSchema)
       expect(['discord', 'local', 'chaos']).toContain(status.blobStore)
+      // Compaction merges two packs or more into one: those due now are among all it could.
+      const { due, all } = status.compaction
+      for (const figures of [due, all]) expect(figures.into * 2 <= figures.packs).toBe(true)
+      expect(all.packs >= due.packs && all.freedBytes >= due.freedBytes).toBe(true)
       expect(Array.isArray(await admin.call('GET', '/admin/tasks', adminTaskListSchema))).toBe(true)
       for (const json of [{ kind: 'everything.delete' }, { kind: 'blob.recover' }]) {
         expect(await admin.error('POST', '/admin/tasks', { json })).toEqual({

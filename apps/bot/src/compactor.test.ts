@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
   appendJournal,
+  compactionCandidates,
+  compactionGroups,
   createDatabase,
   createPool,
   liveBytesDrift,
@@ -11,6 +13,7 @@ import {
   purgeVersions,
   storageChannels,
   uuidArray,
+  type CompactionRule,
   type Database,
 } from '@dfs/db'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
@@ -20,13 +23,7 @@ import { sql } from 'drizzle-orm'
 import type pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest'
 import { collectGarbage } from './collector.ts'
-import {
-  compactionCandidates,
-  compactionGroups,
-  Compactor,
-  dropStalePacks,
-  type CompactionRule,
-} from './compactor.ts'
+import { Compactor, dropStalePacks } from './compactor.ts'
 import { reconcileOrphans } from './reconciler.ts'
 import { dataChannels, instanceId } from './storage.ts'
 import { postJournal, settleBlobs, uploadedFiles, waitingForALock } from './testing.ts'
@@ -263,19 +260,19 @@ describe('Compactor (DESIGN.md §6.6)', () => {
   })
 
   it('groups whole packs in ID order while their live bytes fit in a full pack', () => {
-    const pack = (id: number, live: number) => ({ id, live_bytes: live })
-    expect(
-      compactionGroups([pack(1, 250), pack(2, 250), pack(3, 250), pack(4, 250), pack(5, 100)], 900),
-    ).toEqual([
+    const groups = (lives: number[]) =>
+      compactionGroups(
+        lives.map((live, index) => ({ id: index + 1, live_bytes: live })),
+        900,
+      ).map((group) => group.map((pack) => pack.id))
+    expect(groups([250, 250, 250, 250, 100])).toEqual([
       [1, 2, 3],
       [4, 5],
     ])
     // A group of one is left: rewriting one pack saves no message.
-    expect(compactionGroups([pack(1, 250), pack(2, 250), pack(3, 250), pack(4, 250)], 900)).toEqual(
-      [[1, 2, 3]],
-    )
-    expect(compactionGroups([pack(1, 100)], 900)).toEqual([])
-    expect(compactionGroups([], 900)).toEqual([])
+    expect(groups([250, 250, 250, 250])).toEqual([[1, 2, 3]])
+    expect(groups([100])).toEqual([])
+    expect(groups([])).toEqual([])
   })
 
   it('merges every group at once when forced, as Compact packs now does', async () => {

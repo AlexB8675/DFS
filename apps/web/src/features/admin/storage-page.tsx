@@ -5,7 +5,7 @@ import {
   type StorageStatus,
 } from '@dfs/shared'
 import { useQuery } from '@tanstack/react-query'
-import { CircleCheck, CircleX, Package, RotateCcw, ScanSearch, Wrench } from 'lucide-react'
+import { CircleCheck, CircleX, Combine, Package, RotateCcw, ScanSearch, Wrench } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -105,6 +105,13 @@ export function StoragePage() {
 
         {storage.data ? (
           <>
+            <Compaction
+              compaction={storage.data.compaction}
+              compacting={busy('packs.compact')}
+              onCompact={() => {
+                run('packs.compact')
+              }}
+            />
             <Uploads
               uploads={storage.data.uploads}
               retrying={busy('uploads.retry')}
@@ -192,6 +199,64 @@ function RecentTasks({ tasks }: { tasks: AdminTask[] | undefined }) {
       ))}
     </ul>
   )
+}
+
+/** How old a pack must be before the bot merges it on its own, in words. */
+function age(days: number): string {
+  if (days === 7) return 'a week'
+  return days === 1 ? 'a day' : `${String(days)} days`
+}
+
+/** Packs that hold little (§6.6, D32), and what merging them would do. */
+function Compaction({
+  compaction,
+  compacting,
+  onCompact,
+}: {
+  compaction: StorageStatus['compaction']
+  compacting: boolean
+  onCompact: () => void
+}) {
+  const { minAgeDays, due, all } = compaction
+  const row = (key: string, which: string, figures: typeof due) => ({
+    key,
+    cells: [
+      which,
+      String(figures.packs),
+      String(figures.into),
+      formatBytes(figures.liveBytes),
+      formatBytes(figures.freedBytes),
+    ],
+  })
+  return (
+    <Section
+      title="Packs that hold little"
+      description={`Packs whose files were mostly deleted. Once ${age(minAgeDays)} old, the bot merges them into fewer, a group a minute while nothing waits to be stored, and the deleted files’ bytes leave Discord with them.`}
+      action={
+        all.packs > 0 && (
+          <Button size="sm" variant="outline" disabled={compacting} onClick={onCompact}>
+            {compacting ? <Spinner /> : <Combine />} Compact packs now
+          </Button>
+        )
+      }
+    >
+      {all.packs === 0 ? (
+        <AllClear>No packs hold little enough to merge.</AllClear>
+      ) : (
+        <Rows
+          head={['Packs', 'Merged', 'Into', 'Files', 'Frees']}
+          rows={[
+            row('due', `${capitalized(age(minAgeDays))} old or more`, due),
+            row('all', 'Any age, with Compact packs now', all),
+          ]}
+        />
+      )}
+    </Section>
+  )
+}
+
+function capitalized(text: string): string {
+  return `${text.charAt(0).toUpperCase()}${text.slice(1)}`
 }
 
 function Uploads({
