@@ -88,11 +88,12 @@ export function describeSettings(
       entry('Storage', 'both', 'DISCORD_ATTACHMENT_LIMIT', size(discord.attachmentLimit)),
       entry('Storage', 'bot', 'UPLOAD_CHANNEL_CONCURRENCY', config.uploadChannelConcurrency),
       entry('Storage', 'api', 'PACK_THRESHOLD_BYTES', size(sizes.packThresholdBytes)),
-      entry('Storage', 'bot', 'PACK_TARGET_BYTES', size(sizes.packTargetBytes)),
+      // The bot packs to it and compacts packs by these (§6.6); the API
+      // shows what compaction would merge by them (Admin → Storage).
+      entry('Storage', 'both', 'PACK_TARGET_BYTES', size(sizes.packTargetBytes)),
       entry('Storage', 'bot', 'PACK_MAX_WAIT_MS', config.packMaxWaitMs),
-      // The bot compacts packs (§6.6).
-      entry('Storage', 'bot', 'COMPACT_THRESHOLD', config.compactThreshold),
-      entry('Storage', 'bot', 'COMPACT_MIN_AGE_DAYS', config.compactMinAgeDays),
+      entry('Storage', 'both', 'COMPACT_THRESHOLD', config.compactThreshold),
+      entry('Storage', 'both', 'COMPACT_MIN_AGE_DAYS', config.compactMinAgeDays),
       entry('Storage', 'both', 'LOCAL_BLOB_DIR', config.localBlobDir),
       entry('Disks', 'both', 'STAGING_DIR', config.stagingDir),
       entry('Disks', 'api', 'STAGING_MAX_BYTES', size(config.stagingMaxBytes)),
