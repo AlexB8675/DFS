@@ -13,6 +13,7 @@ import {
   type AdminShareOwner,
 } from '@dfs/shared'
 import type {
+  Release,
   AdminUser,
   AuditEntry,
   CreateChannelInput,
@@ -50,6 +51,8 @@ import { mockMetrics } from './metrics'
 
 const GB = 1024 ** 3
 const DAY = 24 * 60 * 60_000
+/** What the mock runs: a development build, as `GET /version` says it. */
+export const MOCK_RELEASE: Release = { version: 'dev', deployedAt: null }
 /** `DEFAULT_QUOTA_BYTES` and `TEMP_PASSWORD_DAYS` (§15). */
 const DEFAULT_QUOTA_BYTES = 100 * GB
 const TEMP_PASSWORD_DAYS = 7
@@ -693,6 +696,7 @@ export class AdminMockDb extends MockDb {
       instanceId: '2c750f2e9fd4',
       node: 'v24.14.1',
       apiStartedAt: new Date(Date.now() - 3 * DAY).toISOString(),
+      releases: { api: MOCK_RELEASE, bot: MOCK_RELEASE },
       settings: [
         setting('General', 'both', 'NODE_ENV', 'development'),
         setting('General', 'both', 'LOG_LEVEL', 'info'),

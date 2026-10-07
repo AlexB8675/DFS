@@ -1,3 +1,4 @@
+import { releaseSchema } from '@dfs/shared'
 import type { FastifyInstance } from 'fastify'
 import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import type pg from 'pg'
@@ -30,6 +31,14 @@ export function healthRoutes(app: FastifyInstance, _options: object, done: () =>
       })
     },
   )
+  /** `GET /api/version`: what is deployed, for pages to tell they run an older app. */
+  app
+    .withTypeProvider<ZodTypeProvider>()
+    .get(
+      '/version',
+      { config: { access: 'public' }, schema: { response: { 200: releaseSchema } } },
+      () => app.config.release,
+    )
   done()
 }
 

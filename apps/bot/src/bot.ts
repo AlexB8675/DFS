@@ -140,6 +140,7 @@ export function createBot({
         .filter((secret) => secret.usedBy !== 'api')
         .map(({ key, set }) => ({ key, set })),
       discord: { guildId, categoryName, gateway },
+      release: config.release,
     }
   })
 

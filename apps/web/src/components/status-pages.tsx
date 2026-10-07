@@ -1,4 +1,5 @@
 import { FileQuestion, TriangleAlert } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import { isRouteErrorResponse, Link, useRouteError } from 'react-router'
 import { AppLogo } from '@/components/app-logo'
 import { Button } from '@/components/ui/button'
@@ -12,6 +13,7 @@ import {
 } from '@/components/ui/empty'
 import { Spinner } from '@/components/ui/spinner'
 import { transitionLinkProps } from '@/lib/navigation'
+import { isMissingModule, reloadIfOutdated } from '@/lib/version-check'
 
 /** Shown while the first route loads (session check). */
 export function SplashScreen() {
@@ -48,6 +50,17 @@ export function NotFoundPage() {
 /** The router's error boundary: an unexpected error while rendering or loading a route. */
 export function RouteError() {
   const error = useRouteError()
+  // A page from before a deploy asks for a part of itself the deploy
+  // removed: it reloads into the new version instead, at the same address.
+  const [updating, setUpdating] = useState(() => isMissingModule(error))
+  useEffect(() => {
+    if (!updating) return
+    void reloadIfOutdated().then((reloading) => {
+      if (!reloading) setUpdating(false)
+    })
+  }, [updating])
+  if (updating) return <SplashScreen />
+
   const message = isRouteErrorResponse(error)
     ? `${error.status} ${error.statusText}`
     : error instanceof Error

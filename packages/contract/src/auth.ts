@@ -1,4 +1,4 @@
-import { adminUserSchema, sessionSchema } from '@dfs/shared'
+import { adminUserSchema, releaseSchema, sessionSchema } from '@dfs/shared'
 import { ApiClient } from './client.ts'
 import type { SuiteContext } from './context.ts'
 
@@ -12,6 +12,14 @@ export function authTests({
   newUser,
   activated,
 }: SuiteContext): void {
+  describe('the deploy (§13.2)', () => {
+    it('says what is deployed to anyone, signed in or not', async () => {
+      const { baseUrl, origin } = target()
+      const release = await new ApiClient(baseUrl, origin).call('GET', '/version', releaseSchema)
+      expect(release.version).not.toBe('')
+    })
+  })
+
   describe('sign-in (§7.1)', () => {
     it('signs the owner in, and answers alike for a wrong password and an unknown user', async () => {
       const { baseUrl, origin, owner: credentials } = target()

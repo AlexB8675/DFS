@@ -177,6 +177,9 @@ export async function buildApp({
   })
   app.addHook('onSend', async (request, reply) => {
     reply.header('x-request-id', request.id)
+    // Every answer says what is deployed, so a page running an older app
+    // knows at its next request (apps/web/src/lib/version-check.ts).
+    reply.header('x-dfs-version', app.config.release.version)
   })
   app.addHook('onResponse', (request, reply, done) => {
     const route = request.routeOptions.url

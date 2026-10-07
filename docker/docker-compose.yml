@@ -13,10 +13,16 @@ x-logging: &logging # The disk is shared with staging and the database: logs sta
     max-size: 10m
     max-file: '5'
 
+# What is deployed, set by docker/deploy.sh; `dev` when built by hand.
+x-release: &release
+  DFS_VERSION: ${DFS_VERSION:-dev}
+  DFS_DEPLOYED_AT: ${DFS_DEPLOYED_AT:-}
+
 x-server: &server
   build:
     context: ..
     dockerfile: docker/server.Dockerfile
+    args: *release
   image: dfs-server
   restart: unless-stopped
   logging: *logging
@@ -135,6 +141,7 @@ services:
     build:
       context: ..
       dockerfile: docker/caddy.Dockerfile
+      args: *release
     image: dfs-caddy
     restart: unless-stopped
     environment:

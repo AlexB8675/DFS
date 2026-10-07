@@ -16,7 +16,8 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { changePassword, signOut, useCurrentUser } from '@/features/auth/session'
 import { UserAvatar } from '@/layout/user-menu'
 import { errorMessage } from '@/lib/api/client'
-import { formatBytes } from '@/lib/format'
+import { appRelease } from '@/lib/env'
+import { formatBytes, formatFullDate } from '@/lib/format'
 import { shake } from '@/lib/motion'
 import { useThemeStore, type Theme } from '@/lib/theme'
 
@@ -105,6 +106,12 @@ export function SettingsPage() {
               </Button>
             </CardContent>
           </Card>
+
+          <p className="text-center text-xs text-muted-foreground">
+            {appRelease.version === 'dev'
+              ? 'DFS, a development build'
+              : `DFS ${appRelease.version}${appRelease.deployedAt ? `, deployed ${formatFullDate(appRelease.deployedAt)}` : ''}`}
+          </p>
         </div>
       </div>
     </div>

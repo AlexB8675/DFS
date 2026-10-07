@@ -19,6 +19,7 @@ import { Progress } from '@/components/ui/progress'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '@/components/ui/spinner'
 import { errorMessage } from '@/lib/api/client'
+import { appRelease } from '@/lib/env'
 import { formatBytes, formatDate, formatFullDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { isFinished, systemQuery, tasksQuery, useClearFrameCache, useStartTask } from './api'
@@ -79,11 +80,18 @@ export function SystemPage() {
 function SystemView({ system }: { system: SystemInfo }) {
   const blobStore = system.settings.find((setting) => setting.key === 'BLOB_STORE')?.value
   const differing = system.settings.filter((setting) => setting.botValue !== null)
+  const { api, bot } = system.releases
+  const deployed = api.deployedAt
 
   return (
     <>
       <ul className="flex flex-wrap gap-2 text-sm" aria-label="This DFS">
         <Chip label={system.environment} detail={`instance ${system.instanceId}`} />
+        <Chip
+          label="Version"
+          detail={deployed ? `${api.version} · deployed ${formatDate(deployed)}` : api.version}
+          title={deployed ? formatFullDate(deployed) : undefined}
+        />
         <Chip label="Node.js" detail={system.node} />
         <Chip
           label="API"
@@ -95,6 +103,8 @@ function SystemView({ system }: { system: SystemInfo }) {
           detail={blobStore === 'discord' ? 'in Discord' : `${blobStore ?? '?'} store`}
         />
       </ul>
+
+      <VersionsDiffer page={appRelease.version} api={api.version} bot={bot?.version ?? null} />
 
       {differing.length > 0 && (
         <p className="flex items-start gap-2 rounded-xl border border-status-warning/60 bg-card px-4 py-3 text-sm">
@@ -395,6 +405,28 @@ function Usage({
       <p className="text-xs text-muted-foreground">{note}</p>
       <p className="font-mono text-xs break-all text-muted-foreground">{dir}</p>
     </div>
+  )
+}
+
+/**
+ * The web app, the API and the bot come from one deploy: one that runs
+ * another version missed it, or this page is older than the deploy.
+ */
+function VersionsDiffer({ page, api, bot }: { page: string; api: string; bot: string | null }) {
+  const problems = [
+    bot !== null &&
+      bot !== api &&
+      `The bot runs ${bot} and the API ${api}: one didn’t restart with the last deploy.`,
+    page !== 'dev' &&
+      page !== api &&
+      `This page runs ${page}, older than the API’s ${api}: reload it.`,
+  ].filter((problem) => problem !== false)
+  if (problems.length === 0) return null
+  return (
+    <p className="flex items-start gap-2 rounded-xl border border-status-warning/60 bg-card px-4 py-3 text-sm">
+      <TriangleAlert className="mt-0.5 size-4 shrink-0 text-status-warning" aria-hidden />
+      <span>{problems.join(' ')}</span>
+    </p>
   )
 }
 

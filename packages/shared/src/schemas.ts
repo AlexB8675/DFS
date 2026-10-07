@@ -756,12 +756,25 @@ export type StorageStatus = z.infer<typeof storageStatusSchema>
 export const settingUserSchema = z.enum(['api', 'bot', 'both'])
 
 /** `GET /admin/system`: what this DFS is, how it is set up, and its disks. */
+/**
+ * A deploy (`GET /version`, and every API answer's `X-DFS-Version`): its git
+ * revision and when it was made, by docker/deploy.sh. `dev` and `null` for
+ * code not deployed.
+ */
+export const releaseSchema = z.object({
+  version: z.string(),
+  deployedAt: timestamp.nullable(),
+})
+export type Release = z.infer<typeof releaseSchema>
+
 export const systemInfoSchema = z.object({
   environment: z.enum(['development', 'test', 'production']),
   /** This database's name for itself, which its Discord messages carry (§4). */
   instanceId: z.string(),
   node: z.string(),
   apiStartedAt: timestamp,
+  /** What each service runs; the bot's `null` while it doesn't answer. */
+  releases: z.object({ api: releaseSchema, bot: releaseSchema.nullable() }),
   /**
    * The settings in effect, from a fixed list of those safe to show. One
    * read by the bot alone is as the bot has it, once it answers.

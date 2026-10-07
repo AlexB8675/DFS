@@ -1,19 +1,25 @@
 import { describe, expect, it } from 'vitest'
-import { entryScript, isOutdated } from './version-check'
+import { isMissingModule, isOutdated } from './version-check'
 
 describe('the version check', () => {
-  it('finds the entry script a built index.html loads', () => {
-    const html =
-      '<script type="module" crossorigin src="/assets/index-BjGKEVJC.js"></script>' +
-      '<link rel="modulepreload" crossorigin href="/assets/dist-88Oo_SvH.js">'
-    expect(entryScript(html)).toBe('/assets/index-BjGKEVJC.js')
-    expect(entryScript('<script type="module" src="/src/main.tsx"></script>')).toBeNull()
+  it('calls a page outdated only when the server says another version', () => {
+    expect(isOutdated('361410b', '0907f83')).toBe(true)
+    expect(isOutdated('361410b', '361410b')).toBe(false)
+    expect(isOutdated('361410b', null)).toBe(false)
+    expect(isOutdated('361410b', '')).toBe(false)
+    // A development build runs against whatever is there.
+    expect(isOutdated('dev', '361410b')).toBe(false)
   })
 
-  it('calls a page outdated only when both entries are known and differ', () => {
-    expect(isOutdated('/assets/index-a.js', '/assets/index-b.js')).toBe(true)
-    expect(isOutdated('/assets/index-a.js', '/assets/index-a.js')).toBe(false)
-    expect(isOutdated('/assets/index-a.js', null)).toBe(false)
-    expect(isOutdated(null, '/assets/index-b.js')).toBe(false)
+  it('knows a part of the app that failed to load, as each browser says it', () => {
+    for (const message of [
+      'Failed to fetch dynamically imported module: https://dfs.example/assets/trash-page-Bq2.js',
+      'error loading dynamically imported module: https://dfs.example/assets/trash-page-Bq2.js',
+      'Importing a module script failed.',
+    ]) {
+      expect(isMissingModule(new TypeError(message))).toBe(true)
+    }
+    expect(isMissingModule(new TypeError('Failed to fetch'))).toBe(false)
+    expect(isMissingModule(new Error('Importing a module script failed.'))).toBe(false)
   })
 })

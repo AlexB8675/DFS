@@ -31,7 +31,7 @@ import {
 } from '@dfs/shared'
 import { delay, http, HttpResponse, sse, type JsonBodyType } from 'msw'
 import { z, ZodError } from 'zod'
-import { AdminMockDb } from './admin-db'
+import { AdminMockDb, MOCK_RELEASE } from './admin-db'
 import { MockApiError, type MockEvent, type MockFileContent } from './db'
 import { MOCK_RESPONSE_HEADER } from './marker'
 import { DEMO_ACCOUNTS } from './seed'
@@ -109,6 +109,7 @@ export const handlers = [
       public: true,
     }),
   ),
+  http.get('/api/version', ({ request }) => respond(request, () => MOCK_RELEASE, { public: true })),
   // Mock only: the demo sign-ins the login page offers.
   http.get('/api/dev/accounts', ({ request }) =>
     respond(request, () => DEMO_ACCOUNTS, { public: true }),

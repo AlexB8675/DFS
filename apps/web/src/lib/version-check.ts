@@ -1,73 +1,61 @@
+import { releaseSchema } from '@dfs/shared'
 import { toast } from 'sonner'
+import { appRelease } from '@/lib/env'
 
 // After a deploy, a page opened before it, or restored from the browser's
-// history, still runs the old app against the new API. A production page
-// compares the entry script it loaded with the one the server's index.html
-// names now: at startup, a newer one reloads the page at once (once per new
-// version, so a stale cache can't loop it); later, the page offers a reload,
-// which asks first while uploads are under way, since it would cancel them.
+// history, still runs the old app against the new API. Every API answer says
+// what is deployed (`X-DFS-Version`), and a production page compares that
+// with the version it was built as: at startup, a newer one reloads the page
+// at once (once per version, so a stale cache can't loop it); later, the
+// page offers a reload, which asks first while uploads are under way, since
+// it would cancel them. A page that makes no requests asks `/api/version`
+// now and then. One that can't load a part of itself, which the deploy
+// removed, reloads into the new version at once (`RouteError`).
 
 const CHECK_EVERY_MS = 5 * 60_000
 const RELOADED_FOR = 'dfs.reloaded-for'
 const TOAST_ID = 'new-version'
 
-/** The hashed entry script an index.html loads, such as `/assets/index-BjGKEVJC.js`. */
-export function entryScript(html: string): string | null {
-  return /\/assets\/index-[\w-]+\.js/.exec(html)?.[0] ?? null
+let offered = false
+
+/** Whether the server runs another version than `running`. A development build never compares. */
+export function isOutdated(running: string, deployed: string | null): deployed is string {
+  return running !== 'dev' && deployed !== null && deployed !== '' && deployed !== running
 }
 
-/** Whether the server now has another app than the one this page runs. */
-export function isOutdated(running: string | null, deployed: string | null): boolean {
-  return running !== null && deployed !== null && running !== deployed
-}
-
-function runningEntry(): string | null {
-  const script = document.querySelector<HTMLScriptElement>(
-    'script[type="module"][src*="/assets/index-"]',
+/**
+ * Whether an error is a part of the app failing to load: a module the
+ * browser couldn't fetch, as each browser words it.
+ */
+export function isMissingModule(error: unknown): boolean {
+  return (
+    error instanceof TypeError &&
+    /dynamically imported module|importing a module script failed/i.test(error.message)
   )
-  return script ? new URL(script.src).pathname : null
 }
 
-async function deployedEntry(): Promise<string | null> {
-  try {
-    const response = await fetch('/', { cache: 'no-store' })
-    return response.ok ? entryScript(await response.text()) : null
-  } catch {
-    // Offline, or the server restarting: the next check will tell.
-    return null
-  }
+/** Each API answer's `X-DFS-Version`: a newer deploy is offered at once. */
+export function noticeDeployed(version: string | null): void {
+  if (isOutdated(appRelease.version, version)) offerReload()
 }
 
-function offerReload(): void {
-  toast('DFS has been updated', {
-    id: TOAST_ID,
-    description: 'Reload to use the new version.',
-    duration: Infinity,
-    action: {
-      label: 'Reload',
-      onClick: () => {
-        location.reload()
-      },
-    },
-  })
+/**
+ * Reloads into the version deployed now if it is newer, and returns whether
+ * it does: for a page that finds a part of itself gone.
+ */
+export async function reloadIfOutdated(): Promise<boolean> {
+  const deployed = await deployedVersion()
+  return isOutdated(appRelease.version, deployed) && reload(deployed)
 }
 
-/** Watches for a newer deployed app, from startup on. Production builds only. */
+/** Watches for a newer deploy, from startup on. Production builds only. */
 export function watchForNewVersion(): void {
-  const running = runningEntry()
-  if (!running) return
-  let offered = false
-
+  if (appRelease.version === 'dev') return
   const check = async (atStartup: boolean) => {
     if (offered) return
-    const deployed = await deployedEntry()
-    if (!isOutdated(running, deployed) || !deployed) return
-    if (atStartup && readReloadedFor() !== deployed) {
-      writeReloadedFor(deployed)
-      location.reload()
-      return
-    }
-    offered = true
+    const deployed = await deployedVersion()
+    if (!isOutdated(appRelease.version, deployed)) return
+    if (atStartup && reload(deployed)) return
     offerReload()
   }
 
@@ -82,6 +70,42 @@ export function watchForNewVersion(): void {
   })
 }
 
+async function deployedVersion(): Promise<string | null> {
+  try {
+    const response = await fetch('/api/version', { cache: 'no-store' })
+    if (!response.ok) return null
+    const release = releaseSchema.safeParse(await response.json())
+    return release.success ? release.data.version : null
+  } catch {
+    // Offline, or the server restarting: the next check will tell.
+    return null
+  }
+}
+
+/** Reloads into `deployed`, unless this tab did already: then a stale cache serves the old app, and reloading again would loop. */
+function reload(deployed: string): boolean {
+  if (readReloadedFor() === deployed) return false
+  writeReloadedFor(deployed)
+  location.reload()
+  return true
+}
+
+function offerReload(): void {
+  if (offered) return
+  offered = true
+  toast('DFS has been updated', {
+    id: TOAST_ID,
+    description: 'Reload to use the new version.',
+    duration: Infinity,
+    action: {
+      label: 'Reload',
+      onClick: () => {
+        location.reload()
+      },
+    },
+  })
+}
+
 function readReloadedFor(): string | null {
   try {
     return sessionStorage.getItem(RELOADED_FOR)
@@ -90,9 +114,9 @@ function readReloadedFor(): string | null {
   }
 }
 
-function writeReloadedFor(entry: string): void {
+function writeReloadedFor(version: string): void {
   try {
-    sessionStorage.setItem(RELOADED_FOR, entry)
+    sessionStorage.setItem(RELOADED_FOR, version)
   } catch {
     // Without storage, a reload loop is still bounded by the cache serving the new page.
   }

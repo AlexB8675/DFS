@@ -28,6 +28,8 @@ rm -rf /opt/dfs.prev
 if [[ -d /opt/dfs ]]; then mv /opt/dfs /opt/dfs.prev; fi
 mv /opt/dfs.next /opt/dfs
 cd /opt/dfs/docker
+# Built into the images: every API answer and the web app carry them.
+export DFS_VERSION=$1 DFS_DEPLOYED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 docker compose up -d --build --remove-orphans
 docker compose ps --format 'table {{.Service}}\t{{.State}}\t{{.Status}}'
 REMOTE

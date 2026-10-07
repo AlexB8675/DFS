@@ -31,16 +31,26 @@
 		}
 	}
 
+	# Built assets carry their hash in their name, so each is the same file
+	# for good. One a page from an older deploy asks for is gone: a 404, which
+	# the page takes as its cue to reload (apps/web/src/lib/version-check.ts),
+	# never the app's HTML in its place, kept for a year.
+	handle /assets/* {
+		root * /srv
+		encode zstd gzip
+		@built file
+		header @built Cache-Control "public, max-age=31536000, immutable"
+		@gone not file
+		header @gone Cache-Control "no-store"
+		file_server
+	}
+
+	# The app itself is never stored, so even a page restored from the
+	# browser's history loads the version deployed now.
 	handle {
 		root * /srv
 		encode zstd gzip
-		# Built assets carry their hash in their name; the app itself is
-		# never stored, so even a page restored from the browser's history
-		# loads the version deployed now.
-		@assets path /assets/*
-		header @assets Cache-Control "public, max-age=31536000, immutable"
-		@app not path /assets/*
-		header @app Cache-Control "no-store"
+		header Cache-Control "no-store"
 		try_files {path} /index.html
 		file_server
 	}

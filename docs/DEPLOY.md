@@ -122,11 +122,16 @@ On the development PC, after `pnpm check` and a commit (D26):
 docker/deploy.sh
 ```
 
-Only committed code goes; the script warns about anything uncommitted.
-Migrations run on their own before the API and the bot start again. To go back,
-deploy the earlier commit (`git checkout <commit>`, then `docker/deploy.sh`):
-migrations only add, so older code runs on a newer database unless a release
-says otherwise.
+Only committed code goes; the script warns about anything uncommitted. The
+commit's short hash is the deploy's version, built into the images with the
+time (`DFS_VERSION`, `DFS_DEPLOYED_AT`): pages opened before reload or offer to,
+Settings shows it, and Admin → System shows the API's and the bot's. Images
+built by hand with `docker compose up --build` say `dev`, which turns the
+pages' version check off. Migrations run on their own before the API and the
+bot start again. To go back, deploy the earlier commit (`git checkout
+<commit>`, then `docker/deploy.sh`): older code runs on a newer database only
+when the migrations since added things. 0019 (`0c14ae7`) and 0020 (`361410b`)
+dropped columns and states, so code from before them can't.
 
 ## Looking after it
 

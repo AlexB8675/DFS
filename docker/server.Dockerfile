@@ -36,6 +36,11 @@ COPY apps/bot apps/bot
 RUN mkdir -p /data/staging /data/cache /data/blobs && chown -R node:node /data
 
 ENV NODE_ENV=production
+# The deploy's version and time (docker/deploy.sh), which every API answer
+# carries and Admin → System shows. Last, so a new deploy rebuilds nothing else.
+ARG DFS_VERSION=dev
+ARG DFS_DEPLOYED_AT=
+ENV DFS_VERSION=$DFS_VERSION DFS_DEPLOYED_AT=$DFS_DEPLOYED_AT
 USER node
 EXPOSE 3000 3001
 CMD ["node", "apps/api/src/main.ts"]

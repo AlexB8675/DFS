@@ -23,6 +23,8 @@ const botSettingsSchema = z.object({
     categoryName: z.string(),
     gateway: z.boolean(),
   }),
+  /** Since 2026-10-07; a bot from before doesn't say. */
+  release: z.object({ version: z.string(), deployedAt: z.string().nullable() }).optional(),
 })
 type BotSettings = z.infer<typeof botSettingsSchema>
 
@@ -68,6 +70,7 @@ export async function systemInfo(app: FastifyInstance): Promise<SystemInfo> {
     instanceId: instance.rows[0]?.id ?? 'unknown',
     node: process.version,
     apiStartedAt: apiStartedAt.toISOString(),
+    releases: { api: config.release, bot: bot?.release ?? null },
     ...mergeSettings(describeSettings(config, process.env), bot),
     botSettings: bot !== null,
     discord: {

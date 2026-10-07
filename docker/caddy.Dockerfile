@@ -24,7 +24,11 @@ RUN --mount=type=cache,id=dfs-pnpm-store,target=/pnpm-store \
 
 COPY packages/shared packages/shared
 COPY apps/web apps/web
-RUN pnpm --filter @dfs/web build
+# The deploy's version and time, built into the app (docker/deploy.sh): a
+# page compares them with what the API says is deployed.
+ARG DFS_VERSION=dev
+ARG DFS_DEPLOYED_AT=
+RUN VITE_DFS_VERSION=$DFS_VERSION VITE_DFS_DEPLOYED_AT=$DFS_DEPLOYED_AT     pnpm --filter @dfs/web build
 
 FROM caddy:2-alpine
 COPY docker/Caddyfile /etc/caddy/Caddyfile

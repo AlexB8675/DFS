@@ -1,5 +1,6 @@
 import { apiErrorSchema } from '@dfs/shared'
 import type { z } from 'zod'
+import { noticeDeployed } from '@/lib/version-check'
 
 /** An HTTP error from the API, with the machine-readable `code` from its error body. */
 export class ApiError extends Error {
@@ -73,6 +74,7 @@ export async function apiFetch(path: string, options: RequestOptions = {}): Prom
     signal,
     keepalive,
   })
+  noticeDeployed(response.headers.get('X-DFS-Version'))
   if (!response.ok) throw await toApiError(response)
   return response
 }
@@ -154,6 +156,7 @@ export function apiUpload(
     signal?.addEventListener('abort', abort, { once: true })
     request.addEventListener('loadend', () => {
       signal?.removeEventListener('abort', abort)
+      if (request.status !== 0) noticeDeployed(request.getResponseHeader('X-DFS-Version'))
       if (signal?.aborted) reject(signal.reason as Error)
       // Like fetch, a request that got no answer is a TypeError: worth retrying.
       else if (request.status === 0) reject(new TypeError('The upload couldn’t reach the server.'))

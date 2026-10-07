@@ -12,7 +12,11 @@ describe('API with a database', () => {
 
   beforeAll(async () => {
     database = await createTestDatabase(inject('testPostgres'))
-    const { config } = await testConfig({ DATABASE_URL: database.url })
+    const { config } = await testConfig({
+      DATABASE_URL: database.url,
+      DFS_VERSION: '361410b',
+      DFS_DEPLOYED_AT: '2026-10-07T20:15:00Z',
+    })
     app = await buildApp({ config, logger: false })
   })
 
@@ -26,6 +30,14 @@ describe('API with a database', () => {
     expect(response.statusCode).toBe(200)
     expect(response.json()).toEqual({ status: 'ok', database: 'ok' })
     expect(response.headers['x-request-id']).toMatch(/^[0-9a-f-]{36}$/)
+  })
+
+  it('says what is deployed, on its own and with every answer, errors too', async () => {
+    const version = await app.inject({ method: 'GET', url: '/api/version' })
+    expect(version.json()).toEqual({ version: '361410b', deployedAt: '2026-10-07T20:15:00Z' })
+    const refused = await app.inject({ method: 'GET', url: '/api/auth/me' })
+    expect(refused.statusCode).toBe(401)
+    expect(refused.headers['x-dfs-version']).toBe('361410b')
   })
 
   it('counts and times what it answers; health checks are timed, not counted (§16)', async () => {

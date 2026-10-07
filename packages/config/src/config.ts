@@ -55,6 +55,17 @@ export interface Config {
   apiPort: number
   botPort: number
   trustedProxyCidrs: string[]
+  /** What is deployed: built into the images by docker/deploy.sh. */
+  release: Release
+}
+
+/**
+ * A deploy: its git revision and when it was made (`DFS_VERSION`,
+ * `DFS_DEPLOYED_AT`); `dev` and `null` for code not deployed.
+ */
+export interface Release {
+  version: string
+  deployedAt: string | null
 }
 
 export class ConfigError extends Error {
@@ -165,6 +176,8 @@ const envSchema = z.object({
   API_PORT: port(3000),
   BOT_PORT: port(3001),
   TRUSTED_PROXY_CIDRS: setting(z.string().default('127.0.0.1/32,::1/128')),
+  DFS_VERSION: setting(z.string().default('dev')),
+  DFS_DEPLOYED_AT: setting(z.iso.datetime().optional()),
 })
 
 /**
@@ -326,5 +339,6 @@ export function loadConfig(env: Record<string, string | undefined>, options: Loa
     apiPort: raw.API_PORT,
     botPort: raw.BOT_PORT,
     trustedProxyCidrs,
+    release: { version: raw.DFS_VERSION, deployedAt: raw.DFS_DEPLOYED_AT ?? null },
   }
 }
