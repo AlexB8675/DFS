@@ -12,6 +12,7 @@ import {
   adminTaskRequestSchema,
   auditQuerySchema,
   loginSchema,
+  passwordResetRequestSchema,
   lookupNodesSchema,
   metricsQuerySchema,
   moderationSchema,
@@ -110,6 +111,15 @@ export const handlers = [
     }),
   ),
   http.get('/api/version', ({ request }) => respond(request, () => MOCK_RELEASE, { public: true })),
+  http.post('/api/auth/password-reset', ({ request }) =>
+    respondEmpty(
+      request,
+      async () => {
+        db.requestPasswordReset(passwordResetRequestSchema.parse(await request.json()))
+      },
+      { public: true },
+    ),
+  ),
   // Mock only: the demo sign-ins the login page offers.
   http.get('/api/dev/accounts', ({ request }) =>
     respond(request, () => DEMO_ACCOUNTS, { public: true }),

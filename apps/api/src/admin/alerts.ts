@@ -35,6 +35,8 @@ export interface AlertFigures {
   stagingMaxBytes: number
   /** Released blobs that failed to delete `LIMITS.deleteAttempts` times or more. */
   failingDeletions: number
+  /** Accounts someone asked a new password for on the sign-in page (§7.1). */
+  passwordResets: number
   database: {
     connections: number
     maxConnections: number
@@ -211,6 +213,18 @@ export function healthAlerts(figures: AlertFigures): SystemAlert[] {
     })
   }
   // Critical first; otherwise in the order above, most telling first.
+  if (figures.passwordResets > 0) {
+    alerts.push({
+      code: 'password_resets',
+      level: 'warning',
+      title:
+        figures.passwordResets === 1
+          ? 'Someone asked for a new password'
+          : `${String(figures.passwordResets)} people asked for new passwords`,
+      detail:
+        'Admin → Users marks who. Make sure it was them, then give them a temporary password with Reset password.',
+    })
+  }
   return alerts.sort((a, b) => Number(b.level === 'critical') - Number(a.level === 'critical'))
 }
 

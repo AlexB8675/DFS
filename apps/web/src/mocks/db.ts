@@ -16,6 +16,7 @@ import {
   type NodePath,
   type Page,
   type PasswordChange,
+  type PasswordResetRequest,
   type PublicShare,
   type SearchResult,
   type Session,
@@ -171,7 +172,7 @@ export class MockFileExists extends MockApiError {
   }
 }
 
-const STATE_VERSION = 11
+const STATE_VERSION = 12
 const STORAGE_KEY = 'dfs.mock-db'
 /** `CHUNK_SIZE` at the 10 MiB attachment limit (§7.3). */
 export const CHUNK_SIZE = 10 * 1024 * 1024 - 128 * 1024
@@ -273,9 +274,26 @@ export class MockDb {
     this.state.userId = user.id
     this.state.signedIn = true
     user.lastSeenAt = new Date().toISOString()
+    // Back in: a request for a new password is moot.
+    user.passwordResetRequestedAt = null
     this.audit('auth.login', user.displayName)
     this.save()
     return this.session()
+  }
+
+  /**
+   * `POST /auth/password-reset`: asks the admins for a new password, by
+   * username (§7.1). Answers alike whether or not the account exists, and
+   * records an account's request once a quarter hour.
+   */
+  requestPasswordReset({ username }: PasswordResetRequest): void {
+    const user = this.state.users.find((candidate) => candidate.username === username)
+    if (!user || user.disabled) return
+    const last = user.passwordResetRequestedAt
+    if (last !== null && Date.now() - Date.parse(last) < 15 * 60_000) return
+    user.passwordResetRequestedAt = new Date().toISOString()
+    this.audit('auth.password_reset_requested', user.displayName, null, 'Unknown')
+    this.save()
   }
 
   signOut(): void {
@@ -298,6 +316,7 @@ export class MockDb {
 
     user.password = newPassword
     user.temporaryPasswordExpiresAt = null
+    user.passwordResetRequestedAt = null
     user.activatedAt ??= new Date().toISOString()
     this.audit('auth.password_changed', user.displayName)
     this.save()

@@ -2,6 +2,7 @@ import {
   sessionSchema,
   type ChangePasswordInput,
   type LoginInput,
+  type PasswordResetRequest,
   type Session,
   type User,
 } from '@dfs/shared'
@@ -89,6 +90,14 @@ export async function signIn(credentials: LoginInput): Promise<Session> {
   const session = await apiSend('POST', '/auth/login', credentials, sessionSchema)
   acceptSession(session)
   return session
+}
+
+/**
+ * Asks the admins for a new password, by username (§7.1). The answer is the
+ * same whether or not the account exists.
+ */
+export async function requestPasswordReset(input: PasswordResetRequest): Promise<void> {
+  await apiSend('POST', '/auth/password-reset', input)
 }
 
 /** Changes the password. The API renews this session and ends every other one. */

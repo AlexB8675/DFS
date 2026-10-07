@@ -8,6 +8,7 @@ const calm: AlertFigures = {
   stagedBytes: 10,
   stagingMaxBytes: 100,
   failingDeletions: 0,
+  passwordResets: 0,
   database: { connections: 12, maxConnections: 100, oldestTransactionSeconds: 2, longLockWaits: 0 },
   lastHour: { rateLimited: 3, serverErrors: 0, cdnFailures: 0, postFailures: 0, deadlocks: 0 },
   network: { discordDown: false, internetDown: false },
@@ -72,6 +73,19 @@ describe('health alerts (DESIGN.md §16)', () => {
     )
     expect(alerts.find((alert) => alert.code === 'db_lock_waits')?.detail).toBe(
       '1 query waited 30 s or more; Admin → Database shows what blocks them.',
+    )
+  })
+
+  it('says when someone asked for a new password, for the admins to give one', () => {
+    expect(healthAlerts({ ...calm, passwordResets: 1 })).toEqual([
+      expect.objectContaining({
+        code: 'password_resets',
+        level: 'warning',
+        title: 'Someone asked for a new password',
+      }),
+    ])
+    expect(healthAlerts({ ...calm, passwordResets: 3 })[0]?.title).toBe(
+      '3 people asked for new passwords',
     )
   })
 

@@ -1,4 +1,4 @@
-import { adminUserSchema, releaseSchema, sessionSchema } from '@dfs/shared'
+import { adminUserPageSchema, adminUserSchema, releaseSchema, sessionSchema } from '@dfs/shared'
 import { ApiClient } from './client.ts'
 import type { SuiteContext } from './context.ts'
 
@@ -107,6 +107,34 @@ export function authTests({
       const { baseUrl, origin } = target()
       const session = await new ApiClient(baseUrl, origin).signIn(username, reset)
       expect(session.passwordChange).toBe('reset')
+    })
+
+    it('asks the admins for a new password, answering alike for an account that doesn’t exist', async () => {
+      const admin = await owner()
+      const { user, username } = await newUser(admin)
+      const { baseUrl, origin } = target()
+      const asker = new ApiClient(baseUrl, origin)
+      const asked = async () =>
+        (await admin.call('GET', '/admin/users', adminUserPageSchema)).items.find(
+          (listed) => listed.id === user.id,
+        )?.passwordResetRequestedAt
+      expect(await asked()).toBe(null)
+
+      await asker.send('POST', '/auth/password-reset', {
+        json: { username: username.toUpperCase() },
+      })
+      await asker.send('POST', '/auth/password-reset', { json: { username: 'nobody-at-all' } })
+      const requested = await asked()
+      expect(requested).not.toBe(null)
+      // Asked again soon: still the first request.
+      await asker.send('POST', '/auth/password-reset', { json: { username } })
+      expect(await asked()).toBe(requested)
+
+      // An admin's temporary password answers it.
+      await admin.call('POST', `/admin/users/${user.id}/password`, adminUserSchema, {
+        json: { temporaryPassword: `reset-${crypto.randomUUID()}` },
+      })
+      expect(await asked()).toBe(null)
     })
 
     it('never changes the owner from the app (D28)', async () => {

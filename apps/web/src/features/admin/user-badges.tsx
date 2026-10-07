@@ -1,10 +1,13 @@
 import type { AdminUser } from '@dfs/shared'
-import { Crown } from 'lucide-react'
+import { Crown, KeyRound } from 'lucide-react'
 import { useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { formatFullDate } from '@/lib/format'
 
-/** Owner, and where the account stands: disabled, waiting for a first sign-in, or reset. */
+/**
+ * Owner, where the account stands (disabled, waiting for a first sign-in, or
+ * reset), and a request for a new password from the sign-in page (§7.1).
+ */
 export function UserBadges({ user }: { user: AdminUser }) {
   // Read once, so the badge doesn't change between renders.
   const [now] = useState(Date.now)
@@ -32,6 +35,7 @@ export function UserBadges({ user }: { user: AdminUser }) {
     }
   }
 
+  const asked = user.passwordResetRequestedAt
   return (
     <>
       {user.isOwner && (
@@ -42,6 +46,17 @@ export function UserBadges({ user }: { user: AdminUser }) {
       {status && (
         <Badge variant="outline" title={status.title} className={status.tone}>
           {status.label}
+        </Badge>
+      )}
+      {asked && !user.disabled && (
+        <Badge
+          variant="outline"
+          title={`Asked on the sign-in page, ${formatFullDate(asked)}. Make sure it was them, then ${
+            user.isOwner ? 'run dfs owner on the server' : 'give them one with Reset password'
+          }.`}
+          className="border-amber-500/40 text-amber-600 dark:text-amber-400"
+        >
+          <KeyRound /> Asked for a new password
         </Badge>
       )}
     </>

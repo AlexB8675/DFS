@@ -106,6 +106,14 @@ export const loginSchema = z.object({
 export type LoginInput = z.infer<typeof loginSchema>
 
 /**
+ * `POST /auth/password-reset`: someone who forgot their password asks the
+ * admins for a new one, by username (§7.1). The answer never says whether
+ * the account exists.
+ */
+export const passwordResetRequestSchema = z.object({ username: loginSchema.shape.username })
+export type PasswordResetRequest = z.infer<typeof passwordResetRequestSchema>
+
+/**
  * `POST /auth/password`. `currentPassword` may only be left out by a session
  * that must choose a password; the change ends the user's other sessions.
  */
@@ -443,6 +451,8 @@ export const adminUserSchema = userSchema.extend({
   activatedAt: timestamp.nullable(),
   /** Set while their password is a temporary one from an admin, which stops working then. */
   temporaryPasswordExpiresAt: timestamp.nullable(),
+  /** When someone asked for a new password for them on the sign-in page; until an admin sets one or they sign in. */
+  passwordResetRequestedAt: timestamp.nullable(),
   fileCount: count,
   createdAt: timestamp,
   lastSeenAt: timestamp.nullable(),

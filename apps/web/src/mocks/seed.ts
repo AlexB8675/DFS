@@ -371,6 +371,7 @@ export function createSeed(version: number): MockState {
     disabled: false,
     activatedAt: ago(420 * DAY),
     temporaryPasswordExpiresAt: null,
+    passwordResetRequestedAt: null,
     createdAt: ago(420 * DAY),
     lastSeenAt: ago(MINUTE),
   }
@@ -391,6 +392,7 @@ export function createSeed(version: number): MockState {
       disabled: false,
       activatedAt: createdAt,
       temporaryPasswordExpiresAt: null,
+      passwordResetRequestedAt: null,
       createdAt,
       lastSeenAt: ago(between(1, 72) * 60 * MINUTE),
       ...fields,
@@ -403,6 +405,8 @@ export function createSeed(version: number): MockState {
     displayName: 'Sam Rivera',
     role: 'user',
     quotaBytes: 100 * GB,
+    // Forgot it: the admins are asked for a new one (§7.1).
+    passwordResetRequestedAt: ago(40 * MINUTE),
   })
   photos(folder(sam, 'Photos'), 140, 1, 20 * DAY)
   const samWork = folder(sam, 'Work')

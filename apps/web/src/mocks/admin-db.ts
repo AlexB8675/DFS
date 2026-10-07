@@ -117,6 +117,7 @@ export class AdminMockDb extends MockDb {
       disabled: false,
       activatedAt: null,
       temporaryPasswordExpiresAt: temporaryPasswordExpiry(now),
+      passwordResetRequestedAt: null,
       createdAt: now.toISOString(),
       lastSeenAt: null,
     }
@@ -152,6 +153,7 @@ export class AdminMockDb extends MockDb {
 
     user.password = temporaryPassword
     user.temporaryPasswordExpiresAt = temporaryPasswordExpiry(new Date())
+    user.passwordResetRequestedAt = null
     this.audit('user.password_reset', user.displayName)
     this.save()
     return this.adminUser(user)
@@ -308,6 +310,21 @@ export class AdminMockDb extends MockDb {
     const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? '' : 's'}`
     // The same alerts the API raises for these figures (apps/api/src/admin/alerts.ts).
     const alerts: SystemHealth['alerts'] = []
+    const asking = this.state.users.filter(
+      (user) => user.passwordResetRequestedAt !== null && !user.disabled,
+    ).length
+    if (asking > 0) {
+      alerts.push({
+        code: 'password_resets',
+        level: 'warning',
+        title:
+          asking === 1
+            ? 'Someone asked for a new password'
+            : `${String(asking)} people asked for new passwords`,
+        detail:
+          'Admin → Users marks who. Make sure it was them, then give them a temporary password with Reset password.',
+      })
+    }
     if (failed > 0) {
       alerts.push({
         code: 'uploads_failed',

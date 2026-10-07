@@ -29,6 +29,9 @@ export function UsersPage() {
 
   if (!users.data) return <ListSkeleton />
   const waiting = users.data.items.filter((user) => user.activatedAt === null).length
+  const asking = users.data.items.filter(
+    (user) => user.passwordResetRequestedAt !== null && !user.disabled,
+  ).length
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -36,6 +39,7 @@ export function UsersPage() {
         <p className="text-sm text-muted-foreground">
           {users.data.items.length.toLocaleString()} users
           {waiting > 0 && ` · ${waiting.toLocaleString()} not signed in yet`}
+          {asking > 0 && ` · ${asking.toLocaleString()} asked for a new password`}
         </p>
         <Button
           size="sm"

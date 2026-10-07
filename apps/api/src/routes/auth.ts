@@ -1,8 +1,14 @@
-import { changePasswordSchema, loginSchema, sessionSchema, type Session } from '@dfs/shared'
+import {
+  changePasswordSchema,
+  loginSchema,
+  passwordResetRequestSchema,
+  sessionSchema,
+  type Session,
+} from '@dfs/shared'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { requireAuth } from '../auth/access.ts'
-import { changePassword, signIn } from '../auth/accounts.ts'
+import { changePassword, requestPasswordReset, signIn } from '../auth/accounts.ts'
 import {
   clearSessionCookie,
   endSession,
@@ -29,6 +35,17 @@ export function authRoutes(app: FastifyInstance, _options: object, done: () => v
       const { user, session } = await signIn(app, request.body, clientOf(request))
       setSessionCookie(reply, app.config, session.token, session.expiresAt)
       return toSession(user, session.csrfToken)
+    },
+  )
+
+  // Public too, and from our own pages only, as signing in is.
+  routes.post(
+    '/auth/password-reset',
+    { config: { access: 'public' }, schema: { body: passwordResetRequestSchema } },
+    async (request, reply) => {
+      assertOwnOrigin(app, request)
+      await requestPasswordReset(app, request.body, clientOf(request))
+      return reply.code(204).send()
     },
   )
 

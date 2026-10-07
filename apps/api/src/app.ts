@@ -34,7 +34,7 @@ declare module 'fastify' {
     pool: pg.Pool
     db: Database
     /** Per-instance request limits (DESIGN.md §7.5). */
-    limits: { signIn: RateLimiter; shareUnlock: RateLimiter }
+    limits: { signIn: RateLimiter; shareUnlock: RateLimiter; passwordResets: RateLimiter }
     /** Frames received but not yet stored (§6.1), and whether there is room for more. */
     staging: Staging
     stagingLimit: StagingLimit
@@ -130,10 +130,12 @@ export async function buildApp({
   app.decorate('config', config)
   app.decorate('pool', pool)
   app.decorate('db', db)
-  // Failed sign-ins per client address (§7.1), and wrong share passwords per address and link (§7.5).
+  // Failed sign-ins and requests for a new password per client address
+  // (§7.1), and wrong share passwords per address and link (§7.5).
   app.decorate('limits', {
     signIn: new RateLimiter(30, 10 * 60_000),
     shareUnlock: new RateLimiter(10, 10 * 60_000),
+    passwordResets: new RateLimiter(5, 15 * 60_000),
   })
   app.decorate('staging', new Staging(config.stagingDir))
   app.decorate('stagingLimit', new StagingLimit(db, config.stagingMaxBytes))

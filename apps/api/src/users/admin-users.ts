@@ -156,6 +156,7 @@ export async function resetPassword(
         passwordExpiresAt: temporaryPasswordExpiry(app),
         failedSignIns: 0,
         signInLockedUntil: null,
+        passwordResetRequestedAt: null,
       })
       .where(eq(users.id, id))
       .returning()
@@ -179,6 +180,7 @@ export function toAdminUser(user: UserRow, files: number): AdminUser {
     disabled: user.disabledAt !== null,
     activatedAt: user.activatedAt?.toISOString() ?? null,
     temporaryPasswordExpiresAt: user.passwordExpiresAt?.toISOString() ?? null,
+    passwordResetRequestedAt: user.passwordResetRequestedAt?.toISOString() ?? null,
     fileCount: files,
     createdAt: user.createdAt.toISOString(),
     lastSeenAt: user.lastSeenAt?.toISOString() ?? null,

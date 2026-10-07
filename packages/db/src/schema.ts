@@ -90,6 +90,11 @@ export const users = pgTable(
     /** Sign-in failures in a row, and the wait they impose (§7.1). */
     failedSignIns: integer('failed_sign_ins').notNull().default(0),
     signInLockedUntil: timestamptz('sign_in_locked_until'),
+    /**
+     * When someone asked for a new password for this account from the
+     * sign-in page; until an admin sets one, or they sign in (§7.1).
+     */
+    passwordResetRequestedAt: timestamptz('password_reset_requested_at'),
     createdAt: timestamptz('created_at').notNull().defaultNow(),
     lastSeenAt: timestamptz('last_seen_at'),
   },

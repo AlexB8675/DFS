@@ -41,8 +41,8 @@ type ShareRow = typeof shareLinks.$inferSelect
 type AuditRow = typeof auditLog.$inferSelect
 
 /**
- * A user's state for recovery. Usage, reservations and sign-in counters are
- * derived or transient, so they are left out (§8).
+ * A user's state for recovery. Usage, reservations, sign-in counters and a
+ * request for a new password are derived or transient, so they are left out (§8).
  */
 export function userRecord(user: UserRow): JournalRecord {
   const {
@@ -51,6 +51,7 @@ export function userRecord(user: UserRow): JournalRecord {
     failedSignIns: _failed,
     signInLockedUntil: _locked,
     lastSeenAt: _seen,
+    passwordResetRequestedAt: _resetRequested,
     ...state
   } = user
   return { kind: 'user.upsert', record: state }

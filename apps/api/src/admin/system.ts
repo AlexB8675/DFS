@@ -95,12 +95,15 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
     // and how far the journal is behind.
     app.db.execute<{
       failing_deletions: number
+      password_resets: number
       journal_behind: number
       journal_error: string | null
     }>(sql`
       SELECT
         (SELECT count(*)::int FROM blobs
           WHERE state = 'deleting' AND attempts >= ${FAILING_DELETE_ATTEMPTS}) AS failing_deletions,
+        (SELECT count(*)::int FROM users
+          WHERE password_reset_requested_at IS NOT NULL AND disabled_at IS NULL) AS password_resets,
         -- The oldest change not in #dfs-journal: not sealed yet, or sealed and not posted (§8).
         greatest(
           (SELECT extract(epoch FROM now() - min(created_at)) FROM journal WHERE batch_no IS NULL),
@@ -142,6 +145,7 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
       stagedBytes: figures.stagedBytes,
       stagingMaxBytes: app.config.stagingMaxBytes,
       failingDeletions: troubles.rows[0]?.failing_deletions ?? 0,
+      passwordResets: troubles.rows[0]?.password_resets ?? 0,
       database: {
         connections: database.rows[0]?.connections ?? 0,
         maxConnections: database.rows[0]?.max_connections ?? 0,
@@ -403,7 +407,8 @@ export async function auditLog(app: FastifyInstance, query: AuditQuery): Promise
     items: page.map((row) => ({
       id: row.id,
       at: new Date(row.at).toISOString(),
-      actorName: row.actor ?? (row.action === 'auth.login_failed' ? 'Unknown' : 'System'),
+      // Signed-out actions: by whoever was at the sign-in page.
+      actorName: row.actor ?? (row.action.startsWith('auth.') ? 'Unknown' : 'System'),
       action: row.action,
       target: row.target ?? '',
       details: row.details,

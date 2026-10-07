@@ -26,12 +26,19 @@ const CHANNEL = sql`(SELECT discord_channel_id FROM storage_channels WHERE id = 
 const TABLES: readonly TableSpec[] = [
   // Its ID is all there is; when it was made, the new database made it.
   { table: 'instance', key: ['id'], exclude: ['created_at'] },
-  // Sign-in counters and the last visit are transient (§8); reservations
-  // belong to uploads in progress, which recovery doesn't bring back.
+  // Sign-in counters, the last visit and a request for a new password are
+  // transient (§8); reservations belong to uploads in progress, which
+  // recovery doesn't bring back.
   {
     table: 'users',
     key: ['id'],
-    exclude: ['failed_sign_ins', 'sign_in_locked_until', 'last_seen_at', 'reserved_bytes'],
+    exclude: [
+      'failed_sign_ins',
+      'sign_in_locked_until',
+      'password_reset_requested_at',
+      'last_seen_at',
+      'reserved_bytes',
+    ],
   },
   { table: 'nodes', key: ['id'], exclude: [] },
   { table: 'file_versions', key: ['id'], exclude: [] },

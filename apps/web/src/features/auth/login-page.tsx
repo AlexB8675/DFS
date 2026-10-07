@@ -1,6 +1,6 @@
-import { loginSchema } from '@dfs/shared'
+import { loginSchema, passwordResetRequestSchema } from '@dfs/shared'
 import { useQuery } from '@tanstack/react-query'
-import { CircleAlert, FlaskConical, LogIn } from 'lucide-react'
+import { ArrowLeft, CircleAlert, CircleCheck, FlaskConical, KeyRound, LogIn } from 'lucide-react'
 import { useRef, useState, type SubmitEvent } from 'react'
 import { useNavigate, useSearchParams } from 'react-router'
 import { z } from 'zod'
@@ -23,8 +23,9 @@ import { mocksEnabled } from '@/lib/env'
 import { formatDuration } from '@/lib/format'
 import { shake } from '@/lib/motion'
 import { prepareNavTransition } from '@/lib/navigation'
+import { cn } from '@/lib/utils'
 import { AuthScreen } from './auth-screen'
-import { safeNextPath, signIn } from './session'
+import { requestPasswordReset, safeNextPath, signIn } from './session'
 
 interface Notice {
   title: string
@@ -37,6 +38,15 @@ const REASONS: Record<string, Notice> = {
     title: 'Your session has ended',
     detail: 'Sign in again to pick up where you left off.',
   },
+}
+
+/** Too many tries, with how long to wait when the server says. */
+function tooMany(error: ApiError): Notice {
+  const wait = error.retryAfterMs === null ? null : formatDuration(error.retryAfterMs / 1000)
+  return {
+    title: 'Too many tries',
+    detail: wait ? `Wait ${wait} before trying again.` : 'Wait a little before trying again.',
+  }
 }
 
 /** What a failed sign-in means, by error code (§7.1). */
@@ -55,13 +65,7 @@ function describeFailure(error: unknown): Notice {
     case 'password_expired':
       return { title: 'Your temporary password has expired', detail: error.message }
     default:
-      if (error.status === 429) {
-        const wait = error.retryAfterMs === null ? null : formatDuration(error.retryAfterMs / 1000)
-        return {
-          title: 'Too many tries',
-          detail: wait ? `Wait ${wait} before trying again.` : 'Wait a little before trying again.',
-        }
-      }
+      if (error.status === 429) return tooMany(error)
       return { title: 'Couldn’t sign in', detail: error.message }
   }
 }
@@ -73,6 +77,7 @@ export function LoginPage() {
   const [password, setPassword] = useState('')
   const [pending, setPending] = useState(false)
   const [failure, setFailure] = useState<Notice | null>(null)
+  const [forgot, setForgot] = useState(false)
   const cardRef = useRef<HTMLDivElement>(null)
   const usernameRef = useRef<HTMLInputElement>(null)
   const passwordRef = useRef<HTMLInputElement>(null)
@@ -125,61 +130,74 @@ export function LoginPage() {
         </CardHeader>
 
         <CardContent>
-          <form className="grid gap-4" noValidate onSubmit={(event) => void handleSubmit(event)}>
-            {notice && (
-              <div
-                role="alert"
-                className="flex animate-in gap-3 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm fade-in-0 zoom-in-95 motion-spring"
-              >
-                <CircleAlert className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden />
-                <div className="grid gap-0.5">
-                  <p className="font-medium">{notice.title}</p>
-                  <p className="text-muted-foreground">{notice.detail}</p>
-                </div>
+          {forgot ? (
+            <ForgotPassword
+              username={username}
+              onUsername={setUsername}
+              onBack={() => {
+                setForgot(false)
+                setFailure(null)
+              }}
+              onFail={() => {
+                shake(cardRef.current)
+              }}
+            />
+          ) : (
+            <form className="grid gap-4" noValidate onSubmit={(event) => void handleSubmit(event)}>
+              {notice && <NoticeBox notice={notice} />}
+
+              <div className="grid gap-2">
+                <Label htmlFor="username">Username</Label>
+                <Input
+                  ref={usernameRef}
+                  id="username"
+                  name="username"
+                  autoComplete="username"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  autoFocus
+                  value={username}
+                  aria-invalid={failure !== null && !username}
+                  onChange={(event) => {
+                    setUsername(event.target.value)
+                  }}
+                />
               </div>
-            )}
+              <div className="grid gap-2">
+                <Label htmlFor="password">Password</Label>
+                <PasswordInput
+                  ref={passwordRef}
+                  id="password"
+                  name="password"
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(event) => {
+                    setPassword(event.target.value)
+                  }}
+                />
+              </div>
 
-            <div className="grid gap-2">
-              <Label htmlFor="username">Username</Label>
-              <Input
-                ref={usernameRef}
-                id="username"
-                name="username"
-                autoComplete="username"
-                autoCapitalize="none"
-                autoCorrect="off"
-                spellCheck={false}
-                autoFocus
-                value={username}
-                aria-invalid={failure !== null && !username}
-                onChange={(event) => {
-                  setUsername(event.target.value)
-                }}
-              />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="password">Password</Label>
-              <PasswordInput
-                ref={passwordRef}
-                id="password"
-                name="password"
-                autoComplete="current-password"
-                value={password}
-                onChange={(event) => {
-                  setPassword(event.target.value)
-                }}
-              />
-            </div>
+              <Button type="submit" size="lg" className="mt-1 h-10" disabled={pending}>
+                {pending ? <Spinner /> : <LogIn />}
+                Sign in
+              </Button>
 
-            <Button type="submit" size="lg" className="mt-1 h-10" disabled={pending}>
-              {pending ? <Spinner /> : <LogIn />}
-              Sign in
-            </Button>
-
-            <p className="text-center text-xs text-muted-foreground">
-              An admin makes your account. If you forgot your password, ask them to reset it.
-            </p>
-          </form>
+              <p className="text-center text-xs text-muted-foreground">
+                An admin makes your account.{' '}
+                <button
+                  type="button"
+                  className="font-medium text-foreground underline-offset-4 hover:underline"
+                  onClick={() => {
+                    setForgot(true)
+                    setFailure(null)
+                  }}
+                >
+                  Forgot your password?
+                </button>
+              </p>
+            </form>
+          )}
         </CardContent>
 
         {mocksEnabled && (
@@ -193,6 +211,121 @@ export function LoginPage() {
         )}
       </Card>
     </AuthScreen>
+  )
+}
+
+function NoticeBox({ notice, done = false }: { notice: Notice; done?: boolean }) {
+  return (
+    <div
+      role={done ? 'status' : 'alert'}
+      className={cn(
+        'flex animate-in gap-3 rounded-lg border p-3 text-sm fade-in-0 zoom-in-95 motion-spring',
+        done ? 'border-border bg-muted/50' : 'border-destructive/30 bg-destructive/10',
+      )}
+    >
+      {done ? (
+        <CircleCheck className="mt-0.5 size-4 shrink-0 text-status-good" aria-hidden />
+      ) : (
+        <CircleAlert className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden />
+      )}
+      <div className="grid gap-0.5">
+        <p className="font-medium">{notice.title}</p>
+        <p className="text-muted-foreground">{notice.detail}</p>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Asks the admins for a new password (§7.1): only they can tell it's really
+ * you, and they give you a temporary one. An email link will replace this.
+ */
+function ForgotPassword({
+  username,
+  onUsername,
+  onBack,
+  onFail,
+}: {
+  username: string
+  onUsername: (username: string) => void
+  onBack: () => void
+  onFail: () => void
+}) {
+  const [pending, setPending] = useState(false)
+  const [notice, setNotice] = useState<{ notice: Notice; done: boolean } | null>(null)
+
+  async function handleSubmit(event: SubmitEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const input = passwordResetRequestSchema.safeParse({ username })
+    if (!input.success) {
+      setNotice({
+        notice: { title: 'Enter your username', detail: 'It’s the name you sign in with.' },
+        done: false,
+      })
+      onFail()
+      return
+    }
+    setPending(true)
+    try {
+      await requestPasswordReset(input.data)
+      setNotice({
+        notice: {
+          title: 'Your admins have been told',
+          detail: `If ${input.data.username} is an account here, an admin will give you a temporary password. Sign in with it, then choose your own.`,
+        },
+        done: true,
+      })
+    } catch (error) {
+      setNotice({
+        notice:
+          error instanceof ApiError && error.status === 429
+            ? tooMany(error)
+            : { title: 'Couldn’t ask for a new password', detail: errorMessage(error) },
+        done: false,
+      })
+      onFail()
+    } finally {
+      setPending(false)
+    }
+  }
+
+  return (
+    <form className="grid gap-4" noValidate onSubmit={(event) => void handleSubmit(event)}>
+      <div className="grid gap-1 text-center">
+        <p className="font-medium">Forgot your password?</p>
+        <p className="text-sm text-muted-foreground">
+          Give your username, and your admins will be asked for a new one.
+        </p>
+      </div>
+      {notice && <NoticeBox notice={notice.notice} done={notice.done} />}
+      {!notice?.done && (
+        <>
+          <div className="grid gap-2">
+            <Label htmlFor="reset-username">Username</Label>
+            <Input
+              id="reset-username"
+              name="username"
+              autoComplete="username"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              autoFocus
+              value={username}
+              onChange={(event) => {
+                onUsername(event.target.value)
+              }}
+            />
+          </div>
+          <Button type="submit" size="lg" className="h-10" disabled={pending}>
+            {pending ? <Spinner /> : <KeyRound />}
+            Ask for a new password
+          </Button>
+        </>
+      )}
+      <Button type="button" variant="ghost" onClick={onBack}>
+        <ArrowLeft /> Back to sign in
+      </Button>
+    </form>
   )
 }
 

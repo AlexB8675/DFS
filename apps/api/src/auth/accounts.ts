@@ -1,6 +1,6 @@
-import type { ChangePasswordInput, LoginInput } from '@dfs/shared'
+import type { ChangePasswordInput, LoginInput, PasswordResetRequest } from '@dfs/shared'
 import { appendJournal, userRecord, users } from '@dfs/db'
-import { and, eq, isNull, sql } from 'drizzle-orm'
+import { and, eq, isNull, lt, or, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { audit, auditAlone } from '../audit.ts'
 import { ApiError } from '../errors.ts'
@@ -21,6 +21,8 @@ const FREE_FAILURES = 10
 const FIRST_LOCK_MS = 60_000
 const MAX_LOCK_MS = 60 * 60_000
 const MAX_LOCK_EXPONENT = Math.ceil(Math.log2(MAX_LOCK_MS / FIRST_LOCK_MS))
+/** An account's request for a new password is recorded once in this long. */
+const RESET_REQUEST_EVERY_MS = 15 * 60_000
 
 export interface SignedIn {
   user: UserRow
@@ -80,9 +82,15 @@ export async function signIn(
         'This temporary password has expired. Ask an admin for a new one.',
       )
     }
+    // Back in: a request for a new password is moot.
     const [current] = await tx
       .update(users)
-      .set({ failedSignIns: 0, signInLockedUntil: null, lastSeenAt: new Date() })
+      .set({
+        failedSignIns: 0,
+        signInLockedUntil: null,
+        passwordResetRequestedAt: null,
+        lastSeenAt: new Date(),
+      })
       .where(eq(users.id, user.id))
       .returning()
     if (!current) throw new ApiError(401, 'invalid_credentials', 'Wrong username or password.')
@@ -130,6 +138,7 @@ export async function changePassword(
       .set({
         passwordHash,
         passwordExpiresAt: null,
+        passwordResetRequestedAt: null,
         activatedAt: sql`coalesce(${users.activatedAt}, now())`,
       })
       // The account may have changed while the password checks and hash ran.
@@ -151,6 +160,57 @@ export async function changePassword(
     })
     await appendJournal(tx, [userRecord(updated), ...audited])
     return { user: updated, session }
+  })
+}
+
+/**
+ * `POST /auth/password-reset`: someone who forgot their password asks for a
+ * new one by username (§7.1). Nothing but an admin can tell it's really
+ * them, so the request goes to the admins, who set a temporary password as
+ * for any reset; an email link will replace that. The answer is the same
+ * whether or not the account exists, an account's request is recorded once
+ * a quarter hour, and an address may ask a few times in that long.
+ */
+export async function requestPasswordReset(
+  app: FastifyInstance,
+  input: PasswordResetRequest,
+  client: SessionClient,
+): Promise<void> {
+  const wait = app.limits.passwordResets.waitMs(client.ip)
+  if (wait > 0) {
+    throw new ApiError(
+      429,
+      'rate_limited',
+      'Too many requests for a new password. Wait a little, then try again.',
+      { 'retry-after': String(Math.ceil(wait / 1000)) },
+    )
+  }
+  app.limits.passwordResets.hit(client.ip)
+  await app.db.transaction(async (tx) => {
+    const [user] = await tx
+      .update(users)
+      .set({ passwordResetRequestedAt: new Date() })
+      .where(
+        and(
+          eq(users.username, input.username),
+          isNull(users.disabledAt),
+          or(
+            isNull(users.passwordResetRequestedAt),
+            lt(users.passwordResetRequestedAt, new Date(Date.now() - RESET_REQUEST_EVERY_MS)),
+          ),
+        ),
+      )
+      .returning()
+    if (!user) return
+    await appendJournal(
+      tx,
+      await audit(tx, {
+        actorId: null,
+        action: 'auth.password_reset_requested',
+        target: user.displayName,
+        details: client.ip,
+      }),
+    )
   })
 }
 

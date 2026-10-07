@@ -76,6 +76,11 @@ const ACTIONS: Record<string, { label: string; icon: LucideIcon; tone?: string }
     icon: Database,
     tone: 'text-amber-500',
   },
+  'auth.password_reset_requested': {
+    label: 'Asked for a new password',
+    icon: KeyRound,
+    tone: 'text-amber-500',
+  },
   'backup.completed': { label: 'Backup completed', icon: DatabaseBackup, tone: 'text-emerald-500' },
   'scrub.completed': { label: 'Scrub completed', icon: ScanSearch },
 }
