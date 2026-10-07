@@ -55,7 +55,7 @@ flowchart LR
 | **Admin console** | Everything about the running system can be seen and done from the admin pages: graphs of what it does, its health, and the actions that needed the command line. |
 | **First deployment** | DFS runs on the Fedora VPS behind Caddy, privately, with test data. |
 | **M4 · Durability** | GC, compaction, scrubber, metadata journal, nightly backups, and a recovery drill that passes. Real data is allowed from here. |
-| **M5 · Finish** | Previews and version history in the UI (the rest of M3), admin search, slash commands, hardening. |
+| **M5 · Finish** | Previews in the UI (the rest of M3; no version history, D33), admin search, slash commands, hardening. |
 
 ---
 
@@ -286,7 +286,16 @@ The admin pages grow from a status page into the place to watch and run DFS, bef
 
 ### 4.7 M5 · Finish
 
-Previews and version history (the rest of M3), admin search, slash commands, the remaining items of [DESIGN §18.1](DESIGN.md#181-status-and-future-work), and hardening from running it.
+**Tasks**
+
+- [ ] **Previews, phase 1** (DESIGN §10.3, D33): images, PDFs, text and code, designed with the user on 2026-10-08 and built in five commits, each passing `pnpm check`. Their decisions: version history is out (earlier versions are internal, kept only for share links); audio and video come after, as their own plan; viewing a shared file never counts toward its download limit, only Download does; PDFs through pdf.js; Markdown formatted and JSON pretty-printed; office documents stay out.
+  - [ ] **1 · The API:** `304 Not Modified` for `If-None-Match` naming the version on both content routes (the ETag is the version's ID; a `304` is no download), and `?preview=1` on the share content route, which never counts. The contract suite, on the mock and the API: a revalidation answers `304` with no body and another version `200`; a link with one download left serves previews without using it, and Download still counts. The mock does the same.
+  - [ ] **2 · The viewer, with images:** `?preview=<id>` on the drive's and the search's URLs; double-click, Enter and the context menu open a previewable file (`previewKind(name, mimeType)` in `apps/web/src/lib`, unit-tested), others download as before; previous and next through the list's previewable files (a large folder's next page at its end), the keyboard and swipes; the header's Download, Share and Details; fit, 1:1, zoom around the pointer and pan; the next image loaded ahead; "no preview" with Download for an image the browser can't decode. The mock gets sample images (an SVG made per file). Checked in the browser on the mock, at a phone's width too.
+  - [ ] **3 · Text and code:** the first 5 MiB by Range; decoding and binary detection (`decodeText`, unit-tested: UTF-8, byte-order marks, UTF-16, NUL bytes, a character cut at the cap); a read-only CodeMirror 6 with each language loaded when first needed, line numbers, wrap, search; Markdown formatted (`react-markdown` with `remark-gfm`, no raw HTML, links in a new tab with `noopener`) with a switch to its source; JSON pretty-printed with a switch to the file as it is. The mock gets sample text, code, Markdown and JSON.
+  - [ ] **4 · PDF:** `pdfjs-dist` loaded with the first PDF, its worker, character maps and standard fonts as static files, its viewer with Range loading, zoom and the page count, `isEvalSupported: false`. The CSP checked in a production build behind Caddy, as for the deploy versioning, with `'wasm-unsafe-eval'` only if pdf.js needs it. The mock gets a small PDF. Checked on a review stack against Discord with a large PDF.
+  - [ ] **5 · The share page, then docs and a review:** a file link's preview on the page above Download, a folder link's files in the viewer, previews with `?preview=1`. A review of all five against DESIGN §10.3, then deploy on the user's word.
+- [ ] Audio and video (phase 2 of previews): a dedicated player, streaming and what a player needs. Its own plan, with the user.
+- [ ] Admin search (`GET /admin/search`), slash commands, the remaining items of [DESIGN §18.1](DESIGN.md#181-status-and-future-work), and hardening from running it.
 
 ---
 
@@ -337,7 +346,7 @@ pnpm dev                                                # web :5173, api :3000, 
 | Done | Rows that get a new version don't replay their "new" animation. |
 | Done | Downloads use plain navigation with the real API (already built; first exercised here). |
 | Done | The mock's demo channels use the names of DESIGN §4 (`storage-00` …) instead of `dfs-data-N`. |
-| M5 | Preview and version history screens; the share page shows previews. |
+| M5 | Previews of images, PDFs, text and code, in the drive and on the share page (DESIGN §10.3); audio and video after. |
 
 ---
 
