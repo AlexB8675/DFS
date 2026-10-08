@@ -37,7 +37,8 @@ import {
   type UploadSessionStatus,
   type User,
 } from '@dfs/shared'
-import { sampleImage } from './samples'
+import { previewKind } from '@/lib/preview-kind'
+import { sampleImage, sampleText } from './samples'
 import { createSeed } from './seed'
 import { createZip, type ZipEntry } from './zip'
 
@@ -176,7 +177,7 @@ export class MockFileExists extends MockApiError {
   }
 }
 
-const STATE_VERSION = 13
+const STATE_VERSION = 14
 const STORAGE_KEY = 'dfs.mock-db'
 /** `CHUNK_SIZE` at the 10 MiB attachment limit (§7.3). */
 export const CHUNK_SIZE = 10 * 1024 * 1024 - 128 * 1024
@@ -1435,15 +1436,20 @@ export class MockDb {
 
 /**
  * What a mock file holds, since the mock keeps no bytes but those uploaded:
- * a made-up image for an image (§10.3), and otherwise a line of text.
+ * a made-up image or text for those the viewer shows (§10.3), and otherwise
+ * a line of text.
  */
 function mockContent(
   node: MockNode,
   mimeType: string | null,
 ): Pick<MockFileContent, 'mimeType' | 'body'> {
-  const image =
-    fileCategory(node.name, mimeType) === 'image' ? sampleImage(node.id, node.name) : null
-  const { mimeType: type, body } = image ?? {
+  const sample =
+    fileCategory(node.name, mimeType) === 'image'
+      ? sampleImage(node.id, node.name)
+      : previewKind(node.name, mimeType) === 'text'
+        ? sampleText(node.id, node.name, node.sizeBytes)
+        : null
+  const { mimeType: type, body } = sample ?? {
     mimeType: 'text/plain',
     body: `Mock content of “${node.name}” (${node.sizeBytes} bytes in the real file).\n`,
   }

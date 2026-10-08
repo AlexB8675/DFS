@@ -70,7 +70,7 @@ export function DrivePreview({ nodes, hasMore, isLoadingMore, onLoadMore }: Driv
   useEffect(() => {
     if (!ahead) return
     const image = new Image()
-    image.src = contentUrl(ahead)
+    image.src = `/api${contentPath(ahead)}`
   }, [ahead])
 
   const missing = fetched.error instanceof ApiError && fetched.error.status === 404
@@ -89,7 +89,7 @@ export function DrivePreview({ nodes, hasMore, isLoadingMore, onLoadMore }: Driv
       open={previewId !== null}
       file={node?.kind === 'file' ? node : null}
       error={error}
-      contentUrl={shownId ? contentUrl(shownId) : null}
+      contentPath={shownId ? contentPath(shownId) : null}
       previous={
         before
           ? () => {
@@ -120,6 +120,6 @@ export function DrivePreview({ nodes, hasMore, isLoadingMore, onLoadMore }: Driv
   )
 }
 
-function contentUrl(id: string): string {
-  return `/api/files/${id}/content`
+function contentPath(id: string): string {
+  return `/files/${id}/content`
 }

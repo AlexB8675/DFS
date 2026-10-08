@@ -456,3 +456,73 @@ html[data-nav='section']::view-transition-new(page) {
     cursor: grabbing !important;
   }
 }
+
+/* A Markdown file in the viewer (§10.3), laid out as GitHub shows one. */
+@layer components {
+  .markdown > * + * {
+    @apply mt-4;
+  }
+  .markdown h1,
+  .markdown h2 {
+    @apply border-b pb-2 font-semibold;
+  }
+  .markdown h1 {
+    @apply text-3xl;
+  }
+  .markdown h2 {
+    @apply mt-8 text-2xl;
+  }
+  .markdown h3 {
+    @apply mt-6 text-xl font-semibold;
+  }
+  .markdown h4,
+  .markdown h5,
+  .markdown h6 {
+    @apply mt-6 font-semibold;
+  }
+  .markdown a {
+    @apply text-primary underline underline-offset-2;
+  }
+  .markdown ul {
+    @apply list-disc pl-6;
+  }
+  .markdown ol {
+    @apply list-decimal pl-6;
+  }
+  .markdown li + li,
+  .markdown li > ul,
+  .markdown li > ol {
+    @apply mt-1;
+  }
+  .markdown li:has(> input[type='checkbox']) {
+    @apply list-none;
+  }
+  .markdown input[type='checkbox'] {
+    @apply mr-2 -ml-6 align-middle;
+  }
+  .markdown blockquote {
+    @apply border-l-4 pl-4 text-muted-foreground;
+  }
+  .markdown code {
+    @apply rounded bg-muted px-1.5 py-0.5 font-mono text-[0.85em];
+  }
+  .markdown pre {
+    @apply overflow-x-auto rounded-lg bg-muted p-4 text-sm leading-6;
+  }
+  .markdown pre code {
+    @apply bg-transparent p-0 text-[1em];
+  }
+  .markdown hr {
+    @apply my-8;
+  }
+  .markdown table {
+    @apply block w-max max-w-full overflow-x-auto text-sm;
+  }
+  .markdown th,
+  .markdown td {
+    @apply border px-3 py-1.5 text-left;
+  }
+  .markdown th {
+    @apply bg-muted font-semibold;
+  }
+}

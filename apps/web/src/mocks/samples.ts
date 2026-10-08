@@ -87,3 +87,173 @@ function seeded(text: string): () => number {
     return ((mixed ^ (mixed >>> 14)) >>> 0) / 4294967296
   }
 }
+
+/** Logs are made as large as they say, up to this: enough to pass the viewer's 5 MiB. */
+const LOG_LIMIT = 8 * 1024 * 1024
+
+/**
+ * Text, by the file's kind: a Markdown page with GitHub's extras (and raw
+ * HTML, which must not run), JSON with a number too large for a double,
+ * code, prose, or a log as large as the file, to pass the viewer's cap.
+ */
+export function sampleText(id: string, name: string, sizeBytes: number): SampleFile {
+  const extension = splitExtension(name).extension.toLowerCase()
+  const random = seeded(id)
+  switch (extension) {
+    case '.md':
+      return { mimeType: 'text/markdown', body: markdown(name) }
+    case '.json':
+      return { mimeType: 'application/json', body: json(name) }
+    case '.log':
+      return { mimeType: 'text/plain', body: log(random, Math.min(sizeBytes, LOG_LIMIT)) }
+    case '.ts':
+    case '.tsx':
+      return { mimeType: 'text/x-typescript', body: typescript(name) }
+    case '.yaml':
+    case '.yml':
+      return { mimeType: 'application/yaml', body: yaml() }
+    case '.css':
+      return { mimeType: 'text/css', body: css() }
+    case '.html':
+      return { mimeType: 'text/html', body: html(name) }
+    default:
+      return { mimeType: 'text/plain', body: prose(random, name) }
+  }
+}
+
+function markdown(name: string): string {
+  return [
+    `# ${name.replace(/\.md$/i, '')}`,
+    '',
+    'Notes kept in **Markdown**, shown _formatted_ in the viewer, with a switch to the source.',
+    '',
+    '## This week',
+    '',
+    '- [x] Upload the photos from Lisbon',
+    '- [x] Share the album with the family',
+    '- [ ] Sort the 2023 folder',
+    '',
+    '| Day | Plan | Hours |',
+    '| --- | --- | ---: |',
+    '| Monday | Paperwork | 2 |',
+    '| Tuesday | ~~Gym~~ Rest | 0 |',
+    '',
+    '> A quote, set apart.',
+    '',
+    'Some `inline code`, and a block:',
+    '',
+    '```ts',
+    'const greeting = `Hello, ${name}!`',
+    'console.log(greeting)',
+    '```',
+    '',
+    'A link to [the project](https://github.com) opens in a new tab, and an image',
+    'from elsewhere is not loaded: ![a diagram of the stack](https://example.com/stack.png)',
+    '',
+    'Raw HTML is left out: <script>alert("never runs")</script><b>not bold</b>',
+    '',
+    '---',
+    '',
+    'Last edited on a Sunday.',
+    '',
+  ].join('\n')
+}
+
+function json(name: string): string {
+  return JSON.stringify({
+    name: name.replace(/\.json$/i, ''),
+    version: '1.4.0',
+    private: true,
+    scripts: { dev: 'vite', build: 'vite build', test: 'vitest run' },
+    dependencies: { react: '^19.3.0', 'react-dom': '^19.3.0' },
+    keywords: [],
+    config: {},
+  }).replace('"private":true', '"private":true,"snowflake":12345678901234567890')
+}
+
+function log(random: () => number, size: number): string {
+  const levels = ['INFO', 'INFO', 'INFO', 'DEBUG', 'WARN', 'ERROR']
+  const paths = ['/api/nodes', '/api/files/content', '/api/uploads', '/api/search', '/api/s/link']
+  const lines: string[] = []
+  let length = 0
+  let time = Date.UTC(2026, 9, 1)
+  while (length < size) {
+    time += Math.floor(random() * 2000)
+    const level = levels[Math.floor(random() * levels.length)] ?? 'INFO'
+    const path = paths[Math.floor(random() * paths.length)] ?? '/api'
+    const ms = Math.floor(random() * 400)
+    const line = `${new Date(time).toISOString()} ${level.padEnd(5)} request ${path} answered in ${String(ms)} ms (id ${Math.floor(random() * 1e9).toString(36)})`
+    lines.push(line)
+    length += line.length + 1
+  }
+  return `${lines.join('\n')}\n`.slice(0, size)
+}
+
+function typescript(name: string): string {
+  return [
+    "import { useState } from 'react'",
+    '',
+    `/** ${name}: a small component, to show code in the viewer. */`,
+    'export function Counter({ start = 0 }: { start?: number }) {',
+    '  const [count, setCount] = useState(start)',
+    '  return (',
+    '    <button type="button" onClick={() => setCount(count + 1)}>',
+    '      Clicked {count} times',
+    '    </button>',
+    '  )',
+    '}',
+    '',
+  ].join('\n')
+}
+
+function yaml(): string {
+  return ['packages:', "  - 'apps/*'", "  - 'packages/*'", 'catalog:', '  zod: ^4.6.5', ''].join(
+    '\n',
+  )
+}
+
+function css(): string {
+  return [
+    ':root {',
+    '  --accent: oklch(0.7 0.15 250);',
+    '}',
+    '',
+    'body {',
+    '  margin: 0;',
+    '  font-family: system-ui, sans-serif;',
+    '}',
+    '',
+  ].join('\n')
+}
+
+function html(name: string): string {
+  return [
+    '<!doctype html>',
+    '<html lang="en">',
+    '  <head>',
+    `    <title>${escapeXml(name)}</title>`,
+    '    <script>alert("shown as source, never run")</script>',
+    '  </head>',
+    '  <body>',
+    '    <h1>Hello</h1>',
+    '  </body>',
+    '</html>',
+    '',
+  ].join('\n')
+}
+
+function prose(random: () => number, name: string): string {
+  const words =
+    'the a drive file folder link photo note list plan week trip copy share upload sync quiet bright small long'.split(
+      ' ',
+    )
+  const paragraphs = [name, '']
+  for (let paragraph = 0; paragraph < 6; paragraph += 1) {
+    const sentence = Array.from(
+      { length: 40 + Math.floor(random() * 40) },
+      () => words[Math.floor(random() * words.length)],
+    ).join(' ')
+    paragraphs.push(`${sentence.charAt(0).toUpperCase()}${sentence.slice(1)}.`, '')
+  }
+  return paragraphs.join('\n')
+}

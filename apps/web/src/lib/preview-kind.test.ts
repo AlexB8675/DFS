@@ -1,6 +1,6 @@
 import type { DriveNode } from '@dfs/shared'
 import { describe, expect, it } from 'vitest'
-import { isPreviewable, previewKind, supportOf } from './preview-kind'
+import { isPreviewable, previewKind, supportOf, textFormat } from './preview-kind'
 
 const chrome = { appleImages: false }
 const safari = { appleImages: true }
@@ -38,8 +38,8 @@ describe('previewKind (§10.3)', () => {
     }
   })
 
-  it('trusts the MIME type over the name', () => {
-    expect(previewKind('photo.jpg', 'text/plain', chrome)).toBeNull()
+  it('trusts an image or text MIME type over the name', () => {
+    expect(previewKind('photo.jpg', 'text/plain', chrome)).toBe('text')
     expect(previewKind('photo.txt', 'image/png', chrome)).toBe('image')
     // Images no browser draws.
     expect(previewKind('layers.psd', 'image/vnd.adobe.photoshop', chrome)).toBeNull()
@@ -49,9 +49,56 @@ describe('previewKind (§10.3)', () => {
   it('goes by the extension when the upload gave no type', () => {
     expect(previewKind('IMG_0001.JPG', null, chrome)).toBe('image')
     expect(previewKind('icon.ico', 'application/octet-stream', chrome)).toBe('image')
-    // Sent without its type, an SVG isn't drawn.
-    expect(previewKind('logo.svg', null, chrome)).toBeNull()
+    // Sent without its type, an SVG isn't drawn: its source shows.
+    expect(previewKind('logo.svg', null, chrome)).toBe('text')
     expect(previewKind('notes', null, chrome)).toBeNull()
+  })
+
+  it('shows text and code, by type or by name', () => {
+    for (const type of [
+      'text/plain',
+      'text/markdown',
+      'text/html',
+      'text/csv',
+      'application/json',
+      'application/ld+json',
+      'application/xml',
+      'application/javascript',
+      'application/x-sh',
+      'application/yaml',
+    ]) {
+      expect(previewKind('file', type, chrome)).toBe('text')
+    }
+    for (const name of [
+      'main.tsx',
+      'App.vue',
+      'query.SQL',
+      'Dockerfile',
+      '.gitignore',
+      'LICENSE',
+    ]) {
+      expect(previewKind(name, null, chrome)).toBe('text')
+    }
+    // RTF is a document, not text to read.
+    expect(previewKind('letter.rtf', 'text/rtf', chrome)).toBeNull()
+  })
+
+  it('goes by the name when a browser gives code a wrong type', () => {
+    // Windows calls TypeScript an MPEG transport stream.
+    expect(previewKind('router.ts', 'video/mp2t', chrome)).toBe('text')
+    expect(previewKind('clip.mp4', 'video/mp4', chrome)).toBeNull()
+    expect(previewKind('report.pdf', 'application/pdf', chrome)).toBeNull()
+  })
+})
+
+describe('textFormat', () => {
+  it('formats Markdown and JSON, and shows the rest as it is', () => {
+    expect(textFormat('README.md', null)).toBe('markdown')
+    expect(textFormat('notes', 'text/markdown')).toBe('markdown')
+    expect(textFormat('package.json', null)).toBe('json')
+    expect(textFormat('data', 'application/ld+json')).toBe('json')
+    expect(textFormat('main.ts', 'video/mp2t')).toBe('plain')
+    expect(textFormat('index.html', 'text/html')).toBe('plain')
   })
 })
 

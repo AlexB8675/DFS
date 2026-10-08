@@ -1,16 +1,16 @@
 import type { SyncState } from '@dfs/shared'
-import { ChevronLeft, ChevronRight, Download, FileX, Info, Share2, X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Download, Info, Share2, X } from 'lucide-react'
 import { Dialog as DialogPrimitive } from 'radix-ui'
-import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
-import { Button } from '@/components/ui/button'
 import {
-  Empty,
-  EmptyContent,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from '@/components/ui/empty'
+  lazy,
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from 'react'
+import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
 import { NodeIcon } from '@/components/node-icon'
 import { SyncStatus } from '@/components/sync-status'
@@ -18,7 +18,12 @@ import { fileCategory, fileCategoryLabel } from '@/lib/file-types'
 import { formatBytes, formatFullDate } from '@/lib/format'
 import { previewKind } from '@/lib/preview-kind'
 import { cn } from '@/lib/utils'
-import { ImageView, type ZoomHandle } from './image-view'
+import { ImageView } from './image-view'
+import { NoPreview } from './no-preview'
+import type { ViewHandle } from './view-handle'
+
+// Text, with its editor, loads with the first text file opened.
+const TextView = lazy(() => import('./text-view'))
 
 /** A file as the viewer shows it: from the drive, or from a share link. */
 export interface ViewedFile {
@@ -36,7 +41,8 @@ interface FileViewerProps {
   /** `null` while it loads, or when it can't be shown (`error`). */
   file: ViewedFile | null
   error: { title: string; description: string } | null
-  contentUrl: string | null
+  /** Where its bytes are, as an API path (`/files/:id/content`). */
+  contentPath: string | null
   /** The previewable files around it in the list it was opened from. */
   previous: (() => void) | null
   next: (() => void) | null
@@ -61,7 +67,7 @@ export function FileViewer({
   open,
   file,
   error,
-  contentUrl,
+  contentPath,
   previous,
   next,
   position,
@@ -73,7 +79,7 @@ export function FileViewer({
   const contentRef = useRef<HTMLDivElement>(null)
   /** What had the focus before it opened (the list), to give it back. */
   const opener = useRef<Element | null>(null)
-  const zoom = useRef<ZoomHandle>(null)
+  const view = useRef<ViewHandle>(null)
   const [detailsOpen, setDetailsOpen] = useState(false)
   const [failedId, setFailedId] = useState<string | null>(null)
 
@@ -82,14 +88,22 @@ export function FileViewer({
   }, [open, covered])
 
   function handleKeyDown(event: KeyboardEvent<HTMLDivElement>) {
-    if (event.altKey || event.ctrlKey || event.metaKey || isEditable(event.target)) return
+    if (event.altKey || isEditable(event.target)) return
+    const command = event.ctrlKey || event.metaKey
+    const find = view.current?.find
+    if (command && event.key === 'f' && find) {
+      event.preventDefault()
+      find()
+      return
+    }
+    if (command) return
     const actions: Record<string, (() => void) | null | undefined> = {
       ArrowLeft: previous,
       ArrowRight: next,
-      '+': zoom.current?.zoomIn,
-      '=': zoom.current?.zoomIn,
-      '-': zoom.current?.zoomOut,
-      '0': zoom.current?.reset,
+      '+': view.current?.zoomIn,
+      '=': view.current?.zoomIn,
+      '-': view.current?.zoomOut,
+      '0': view.current?.reset,
     }
     const action = actions[event.key]
     if (!action) return
@@ -102,18 +116,14 @@ export function FileViewer({
   let body: ReactNode
   if (error) {
     body = <NoPreview title={error.title} description={error.description} />
-  } else if (!file || !contentUrl) {
-    body = (
-      <div className="flex size-full items-center justify-center text-muted-foreground">
-        <Spinner className="size-6" />
-      </div>
-    )
+  } else if (!file || !contentPath) {
+    body = <Loading />
   } else if (kind === 'image' && failedId !== file.id) {
     body = (
       <ImageView
         key={file.id}
-        ref={zoom}
-        src={contentUrl}
+        ref={view}
+        src={`/api${contentPath}`}
         alt={file.name}
         vector={file.mimeType === 'image/svg+xml' || /\.svg$/i.test(file.name)}
         onSwipe={(direction) => {
@@ -123,6 +133,20 @@ export function FileViewer({
           setFailedId(file.id)
         }}
       />
+    )
+  } else if (kind === 'text') {
+    body = (
+      <Suspense fallback={<Loading />}>
+        <TextView
+          key={file.id}
+          ref={view}
+          name={file.name}
+          mimeType={file.mimeType}
+          sizeBytes={file.sizeBytes}
+          contentPath={contentPath}
+          onDownload={onDownload}
+        />
+      </Suspense>
     )
   } else {
     body = (
@@ -164,9 +188,14 @@ export function FileViewer({
               opener.current.focus()
           }}
           onEscapeKeyDown={(event) => {
-            if (!detailsOpen) return
-            event.preventDefault()
-            setDetailsOpen(false)
+            // What is open inside closes first: the text's search, then Details.
+            if (view.current?.dismiss?.()) {
+              event.preventDefault()
+              contentRef.current?.focus()
+            } else if (detailsOpen) {
+              event.preventDefault()
+              setDetailsOpen(false)
+            }
           }}
           onKeyDown={handleKeyDown}
         >
@@ -229,33 +258,11 @@ export function FileViewer({
   )
 }
 
-/** Shown when the viewer can't show the file. */
-function NoPreview({
-  title,
-  description,
-  onDownload,
-}: {
-  title: string
-  description: string
-  onDownload?: () => void
-}) {
+function Loading() {
   return (
-    <Empty className="size-full">
-      <EmptyHeader>
-        <EmptyMedia variant="icon">
-          <FileX />
-        </EmptyMedia>
-        <EmptyTitle>{title}</EmptyTitle>
-        <EmptyDescription>{description}</EmptyDescription>
-      </EmptyHeader>
-      {onDownload && (
-        <EmptyContent>
-          <Button onClick={onDownload}>
-            <Download /> Download
-          </Button>
-        </EmptyContent>
-      )}
-    </Empty>
+    <div className="flex size-full items-center justify-center text-muted-foreground">
+      <Spinner className="size-6" />
+    </div>
   )
 }
 

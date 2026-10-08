@@ -183,6 +183,8 @@ export function createSeed(version: number): MockState {
   file(dfs, 'README.md', 6 * KB, { age: 50 * MINUTE })
   file(dfs, 'package.json', 1 * KB, { age: 50 * MINUTE })
   file(dfs, 'pnpm-workspace.yaml', 80, { age: 2 * DAY })
+  // Larger than the viewer reads: it shows the first 5 MiB (§10.3).
+  file(dfs, 'server.log', 7 * MB, { age: 30 * MINUTE })
   file(folder(dfs, 'docs'), 'DESIGN.md', 64 * KB, { age: 90 * MINUTE })
   const webSrc = folderPath(dfs, ['apps', 'web', 'src'])
   file(webSrc, 'main.tsx', 2 * KB, { age: 40 * MINUTE })

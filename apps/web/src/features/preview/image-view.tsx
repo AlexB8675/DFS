@@ -11,22 +11,15 @@ import {
 import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
 import { cn } from '@/lib/utils'
+import type { ViewHandle } from './view-handle'
 import { canPan, clampView, fitScale, zoomAt, type Point, type Size, type View } from './zoom'
-
-/** What the viewer's keys do to a zoomable view. */
-export interface ZoomHandle {
-  zoomIn: () => void
-  zoomOut: () => void
-  /** Back to fitting the screen. */
-  reset: () => void
-}
 
 interface ImageViewProps {
   src: string
   alt: string
   /** An SVG: it grows to fill the screen, since it stays sharp. */
   vector: boolean
-  ref?: Ref<ZoomHandle>
+  ref?: Ref<ViewHandle>
   /** A swipe on a touch screen: 1 for the next file, -1 for the previous. */
   onSwipe: (direction: 1 | -1) => void
   /** The browser couldn't draw it. */
