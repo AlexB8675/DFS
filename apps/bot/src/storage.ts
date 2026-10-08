@@ -24,7 +24,7 @@ import { sql } from 'drizzle-orm'
 // Where the bot stores blobs (BLOB_STORE, DESIGN.md §15), and the signed URLs
 // it hands the API for reading them back from Discord (§6.2).
 
-/** Posting a 10 MiB attachment takes longer than Discord's 15 s default on a slow uplink. */
+/** Posting a 20 MiB attachment takes longer than Discord's 15 s default on a slow uplink. */
 const DISCORD_TIMEOUT_MS = 120_000
 
 export interface BotStorage {

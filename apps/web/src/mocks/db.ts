@@ -179,8 +179,8 @@ export class MockFileExists extends MockApiError {
 
 const STATE_VERSION = 16
 const STORAGE_KEY = 'dfs.mock-db'
-/** `CHUNK_SIZE` at the 10 MiB attachment limit (§7.3). */
-export const CHUNK_SIZE = 10 * 1024 * 1024 - 128 * 1024
+/** `CHUNK_SIZE` at the 20 MiB attachment limit (§7.3). */
+export const CHUNK_SIZE = 20 * 1024 * 1024 - 128 * 1024
 const CSRF_TOKEN = 'mock-csrf-token'
 /** Archive links from `POST /archive` work once, for a minute (§9). */
 const ARCHIVE_TICKET_MS = 60_000

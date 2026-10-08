@@ -180,7 +180,7 @@ describe('Admin → Storage (§9)', () => {
     // Two a week old holding little, one younger, and one holding too much to merge.
     await app.db.execute(sql`
       INSERT INTO blobs (kind, state, size_bytes, live_bytes, frame_count, stored_at)
-      VALUES ${sql.join([pack(MB, 8), pack(MB, 9), pack(MB, 1), pack(5 * MB, 8)], sql`, `)}`)
+      VALUES ${sql.join([pack(MB, 8), pack(MB, 9), pack(MB, 1), pack(7 * MB, 8)], sql`, `)}`)
 
     const { compaction } = await admin.call('GET', '/admin/storage', storageStatusSchema)
     expect(compaction).toEqual({

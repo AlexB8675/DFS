@@ -102,7 +102,7 @@ export async function readBlobFromCdn(
 
 /**
  * Reads `length` bytes at `offset` with an HTTP Range request, so a frame
- * out of a 10 MiB pack moves only its own bytes. If the CDN ignores the
+ * out of a 20 MiB pack moves only its own bytes. If the CDN ignores the
  * range and sends the whole file, the frame is cut out of it.
  */
 export async function readCdnRange(

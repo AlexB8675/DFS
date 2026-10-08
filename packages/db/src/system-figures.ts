@@ -7,7 +7,7 @@ import { QUEUES } from './queues.ts'
 // The state of the whole system in figures (DESIGN.md §16): the admin
 // overview shows them as they are, and the leading bot samples them into the
 // metrics once a minute. Every query reads an index or a small table, except
-// the storage totals, one pass over `blobs` (a row per 10 MiB stored, or per
+// the storage totals, one pass over `blobs` (a row per 20 MiB stored, or per
 // pack), which the overview may take from a while ago.
 
 /**

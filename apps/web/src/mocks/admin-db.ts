@@ -773,7 +773,7 @@ export class AdminMockDb extends MockDb {
         dir: 'D:\\dfs\\.data\\cache',
         usedBytes: this.cachedBytes,
         maxBytes: CACHE_MAX_BYTES,
-        frames: Math.round(this.cachedBytes / (10 * 1024 * 1024)),
+        frames: Math.round(this.cachedBytes / (20 * 1024 * 1024)),
       },
       journal: {
         lastBatch: 4812,

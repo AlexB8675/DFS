@@ -301,7 +301,7 @@ It uses a temporary directory and no database or account. Each scenario reports
 elapsed time, throughput, CPU time, sampled peak process memory and maximum
 event-loop delay. It compares encryption alone, sequential writes and hashing,
 unrestricted overlap, and the application's load-aware overlap policy at one,
-four and eight concurrent parts. It tests 1 KiB, 1 MiB and 10 MiB parts.
+four and eight concurrent parts. It tests 1 KiB, 1 MiB and 20 MiB parts.
 
 To compare native thread-pool sizes, set the variable before starting each Node
 process and restore your previous setting afterwards:

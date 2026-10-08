@@ -17,7 +17,7 @@ export interface DiscordRest {
 }
 
 /**
- * `timeoutMs` bounds each request; the bot raises it, since posting a 10 MiB
+ * `timeoutMs` bounds each request; the bot raises it, since posting a 20 MiB
  * attachment on a slow uplink takes longer than the 15 s default.
  */
 /** The REST client itself, which the bot's gateway connection also uses. */

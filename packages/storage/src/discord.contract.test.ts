@@ -54,7 +54,7 @@ describe.skipIf(!enabled)('Discord contract', () => {
     store = new DiscordBlobStore({
       rest,
       channels: () => Promise.resolve([channel]),
-      maxBytes: 10 * MiB - 64 * 1024,
+      maxBytes: 20 * MiB - 64 * 1024,
       instanceId: () => Promise.resolve('c0ffee000000'),
       perChannel: 2,
     })

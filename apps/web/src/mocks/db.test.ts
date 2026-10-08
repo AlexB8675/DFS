@@ -189,7 +189,7 @@ describe('mock API database', () => {
   })
 
   it('reports the parts it has, so an upload can resume', async () => {
-    const upload = db.createUpload(rootId(), 'movie.mkv', 25 * 1024 * 1024, 'video/x-matroska')
+    const upload = db.createUpload(rootId(), 'movie.mkv', 45 * 1024 * 1024, 'video/x-matroska')
     expect(upload.chunkCount).toBe(3)
     const part = new Uint8Array(upload.chunkSize).buffer
     await db.receivePart(upload.uploadId, 2, part, null)

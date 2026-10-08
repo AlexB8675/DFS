@@ -125,14 +125,16 @@ describe('streamed uploads (§6.1)', () => {
     const session = await startUpload(owner, bytes.length)
 
     await expect(stream(owner, session, 0, cutShort(bytes, chunkSize * 1.5))).rejects.toThrow()
+    // A part is hashed, sealed and written before it counts: some seconds, on a busy machine.
+    const settled = { timeout: 10_000 }
     await vi.waitFor(async () => {
       expect(await received(owner, session)).toEqual([0])
-    })
+    }, settled)
     // The part cut short left nothing behind in staging.
     await vi.waitFor(async () => {
       const staged = await readdir(path.join(app.staging.root, 'frames', session.versionId))
       expect(staged).toHaveLength(1)
-    })
+    }, settled)
 
     const resumed = await stream(owner, session, 1, bytes.slice(chunkSize))
     expect(resumed.status).toBe(204)

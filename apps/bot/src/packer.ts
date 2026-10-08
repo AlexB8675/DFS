@@ -5,7 +5,7 @@ import type { FastifyBaseLogger } from 'fastify'
 
 // Packing small frames (DESIGN.md §6.6). The frames of small files, and the
 // small ends of large files, wait in staging until the packer concatenates
-// them into a pack of about 10 MiB: one Discord message for many files, and
+// them into a pack of about 20 MiB: one Discord message for many files, and
 // files uploaded together side by side. The packer needs no keys, since
 // frames are self-delimiting ciphertext. Only the leading bot runs it.
 

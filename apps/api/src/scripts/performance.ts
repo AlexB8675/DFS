@@ -16,7 +16,7 @@ const context = chunkContext(versionId, 0)
 const iterations = 96
 
 try {
-  for (const size of [1024, 1024 * 1024, 10 * 1024 * 1024]) {
+  for (const size of [1024, 1024 * 1024, 20 * 1024 * 1024]) {
     const bytes = new Uint8Array(size).fill(7)
     for (const concurrency of [1, 4, 8]) {
       for (const mode of ['encrypt', 'serial', 'overlap', 'bounded'] as const) {

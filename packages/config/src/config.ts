@@ -153,7 +153,7 @@ const envSchema = z.object({
   ),
   DISCORD_CATEGORY_NAME: setting(z.string().optional()),
   DISCORD_GATEWAY: setting(z.enum(['on', 'off']).optional()),
-  DISCORD_ATTACHMENT_LIMIT: byteSize(10 * MiB),
+  DISCORD_ATTACHMENT_LIMIT: byteSize(20 * MiB),
   PACK_THRESHOLD_BYTES: byteSize(4 * MiB),
   PACK_TARGET_BYTES: optionalByteSize,
   PACK_MAX_WAIT_MS: integer(30_000),

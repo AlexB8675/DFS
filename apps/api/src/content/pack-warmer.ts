@@ -15,7 +15,7 @@ import type { FastifyInstance } from 'fastify'
  * Discord's CDN as measured (DESIGN.md §6.2): a request's round trip, and
  * how fast bytes come. A pack is fetched whole when the round trips it saves
  * outweigh the bytes it adds: for files of 100 KB, from about a quarter of a
- * 10 MiB pack on. Fewer of its files are read with a range each.
+ * pack on, whatever its size. Fewer of its files are read with a range each.
  */
 const ROUND_TRIP_MS = 40
 const BYTES_PER_MS = 7_000

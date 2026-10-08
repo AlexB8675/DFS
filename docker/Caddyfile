@@ -10,11 +10,13 @@
 	}
 
 	handle /api/* {
-		# One upload part, and headroom (§6.1). A file streamed whole is as
-		# large as the file: the API checks its length against the upload.
+		# One upload part (a chunk, just under the 20 MiB attachment limit),
+		# and headroom (§6.1); a test in packages/config checks it. A file
+		# streamed whole is as large as the file: the API checks its length
+		# against the upload.
 		@bounded not path_regexp ^/api/uploads/[^/]+/content$
 		request_body @bounded {
-			max_size 12MiB
+			max_size 22MiB
 		}
 		# Bodies stream both ways, unbuffered: uploaded files, downloads,
 		# archives and live events. Only the API's JSON answers are

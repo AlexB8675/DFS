@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -35,13 +35,22 @@ describe('parseByteSize', () => {
 })
 
 describe('loadConfig', () => {
-  it('derives the sizes of DESIGN §7.3 from the 10 MiB attachment limit', () => {
+  it('derives the sizes of DESIGN §7.3 from the 20 MiB attachment limit', () => {
     const { sizes } = loadConfig({}, api)
-    expect(sizes.blobMaxBytes).toBe(10 * MiB - 64 * 1024)
-    expect(sizes.chunkSize).toBe(10_354_688)
+    expect(sizes.blobMaxBytes).toBe(20 * MiB - 64 * 1024)
+    expect(sizes.chunkSize).toBe(20 * MiB - 128 * 1024)
     // A solo blob: one chunk plus the 38-byte frame overhead.
-    expect(sizes.chunkSize + 38).toBe(10_354_726)
+    expect(sizes.chunkSize + 38).toBe(20_840_486)
     expect(sizes.packTargetBytes).toBe(sizes.blobMaxBytes - 256 * 1024)
+  })
+
+  it('lets one upload part through Caddy, whose body limit is set by hand (docker/Caddyfile)', () => {
+    const { sizes } = loadConfig({}, api)
+    const caddyfile = readFileSync(new URL('../../../docker/Caddyfile', import.meta.url), 'utf8')
+    const limit = parseByteSize(/max_size\s+(\S+)/.exec(caddyfile)?.[1] ?? '')
+    // The API takes a part of up to a chunk and 1 MiB (apps/api/src/routes/uploads.ts).
+    expect(limit).not.toBeNull()
+    expect(limit ?? 0).toBeGreaterThanOrEqual(sizes.chunkSize + MiB)
   })
 
   it('runs in development with no settings, against the dev compose database', () => {
@@ -167,8 +176,8 @@ describe('loadConfig', () => {
   })
 
   it('refuses pack sizes that can never fit an attachment', () => {
-    expect(problems({ PACK_THRESHOLD_BYTES: '10 MiB', PACK_TARGET_BYTES: '10 MiB' })).toEqual([
-      expect.stringMatching(/^PACK_THRESHOLD_BYTES: must be at most 10420186 bytes/),
+    expect(problems({ PACK_THRESHOLD_BYTES: '20 MiB', PACK_TARGET_BYTES: '20 MiB' })).toEqual([
+      expect.stringMatching(/^PACK_THRESHOLD_BYTES: must be at most 20905946 bytes/),
       expect.stringMatching(/^PACK_TARGET_BYTES: must be at most BLOB_MAX_BYTES/),
     ])
   })

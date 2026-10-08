@@ -62,7 +62,7 @@ declare module 'fastify' {
 
 /**
  * Frames in flight ahead of what downloads have sent, across all of them:
- * about 25 frames of 10 MiB. A download that finds no room reads one frame
+ * about 12 frames of 20 MiB. A download that finds no room reads one frame
  * at a time instead.
  */
 const READ_AHEAD_BYTES = 256 * 1024 * 1024
