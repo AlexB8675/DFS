@@ -217,6 +217,39 @@ describe('examining audio and video (§6.7)', () => {
   })
 })
 
+describe('without a media service (§6.7)', () => {
+  it('still serves what was found, and says it can’t examine the rest', async () => {
+    const found = await uploadFile(client, folderId, 'found.mp3', text('found'))
+    await vi.waitFor(async () => {
+      expect(await kept(found.versionId)).not.toBeNull()
+    })
+    answer = 'down'
+    const unexamined = await uploadFile(client, folderId, 'unexamined.mp3', text('not yet'))
+    await vi.waitFor(() => {
+      expect(probes.map((probe) => probe.versionId)).toContain(unexamined.versionId)
+    })
+
+    const setup = await testConfig({ DATABASE_URL: database.url })
+    const bare = await buildApp({ config: setup.config, logger: false })
+    try {
+      expect(bare.media).toBeNull()
+      const bareUrl = await bare.listen({ port: 0, host: '127.0.0.1' })
+      const other = new ApiClient(bareUrl, setup.config.publicBaseUrl)
+      await other.signIn('owner', 'the-owner-password')
+      expect(
+        (await other.call('GET', `/files/${found.nodeId}/media`, fileMediaSchema)).info,
+      ).toEqual(SONG)
+      expect(await other.error('GET', `/files/${unexamined.nodeId}/media`)).toEqual({
+        status: 503,
+        code: 'media_unavailable',
+      })
+    } finally {
+      await bare.close()
+      await setup.cleanup()
+    }
+  })
+})
+
 describe('the internal route the media service reads from (§6.7)', () => {
   let versionId: string
 

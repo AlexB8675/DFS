@@ -52,16 +52,8 @@ export class MediaExaminer {
   }
 
   /** What examining the version found before, if it was. */
-  async kept(versionId: string): Promise<Examined | null> {
-    const [row] = await this.#db
-      .select({ info: mediaInfo.info, problem: mediaInfo.problem })
-      .from(mediaInfo)
-      .where(eq(mediaInfo.versionId, versionId))
-    if (!row) return null
-    // Kept by an earlier API: read within today's bounds, or examined again.
-    const info = row.info === null ? null : mediaInfoSchema.safeParse(row.info)
-    if (info && !info.success) return null
-    return { info: info?.data ?? null, problem: row.problem }
+  kept(versionId: string): Promise<Examined | null> {
+    return keptExamination(this.#db, versionId)
   }
 
   /** Examines the version, once however many ask, and keeps what is found. */
@@ -123,6 +115,22 @@ export class MediaExaminer {
     }
     return examined
   }
+}
+
+/**
+ * What examining a version found before, if it was: read from the database,
+ * so it is served even while the media service is away.
+ */
+export async function keptExamination(db: Executor, versionId: string): Promise<Examined | null> {
+  const [row] = await db
+    .select({ info: mediaInfo.info, problem: mediaInfo.problem })
+    .from(mediaInfo)
+    .where(eq(mediaInfo.versionId, versionId))
+  if (!row) return null
+  // Kept by an earlier API: read within today's bounds, or examined again.
+  const info = row.info === null ? null : mediaInfoSchema.safeParse(row.info)
+  if (info && !info.success) return null
+  return { info: info?.data ?? null, problem: row.problem }
 }
 
 export { MediaUnavailableError }

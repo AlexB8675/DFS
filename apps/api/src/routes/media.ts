@@ -7,7 +7,7 @@ import { z } from 'zod'
 import { requireAuth } from '../auth/access.ts'
 import { sendFile, type DownloadableFile } from '../content/send.ts'
 import { ApiError } from '../errors.ts'
-import { MediaUnavailableError, type Examined } from '../media/examine.ts'
+import { keptExamination, MediaUnavailableError, type Examined } from '../media/examine.ts'
 import { mediaTokenValid } from '../media/token.ts'
 import { visibleNode } from '../nodes/read.ts'
 import { downloadableFile } from './content.ts'
@@ -74,7 +74,8 @@ async function examined(
   file: Pick<DownloadableFile, 'version_id' | 'size_bytes'>,
 ): Promise<Examined> {
   if (file.size_bytes === 0) return { info: null, problem: 'It’s empty.' }
-  const kept = await app.media?.kept(file.version_id)
+  // Kept, it is served even while the media service is away.
+  const kept = await keptExamination(app.db, file.version_id)
   if (kept) return kept
   if (!app.media) {
     throw new ApiError(

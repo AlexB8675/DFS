@@ -86,6 +86,8 @@ const UNTIMED_ROUTES = new Set([
   '/api/s/:token/files/:id/content',
   '/api/s/:token/archive',
   '/internal/media/:versionId',
+  // Quick once a file is examined; the first ask waits for ffprobe.
+  '/api/files/:id/media',
 ])
 
 export interface AppOptions {
