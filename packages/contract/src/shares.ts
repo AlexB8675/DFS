@@ -219,6 +219,40 @@ export function shareTests({ describe, it, expect, owner, target }: SuiteContext
       })
     })
 
+    it('never counts a preview, or a browser that has the file, toward the limit (D33)', async () => {
+      const client = await owner()
+      const root = await workspace(client)
+      const file = await uploadFile(client, root.id, 'photo.txt', text('a look is free'))
+      const { token, client: stranger } = visitor(
+        (await share(client, file.nodeId, { maxDownloads: 1 })).url,
+      )
+      const path = `/s/${token}/files/${file.nodeId}/content`
+      const left = async () => {
+        const opened = await stranger.call('GET', `/s/${token}`, publicShareSchema)
+        return opened.locked ? null : opened.downloadsLeft
+      }
+
+      for (let look = 0; look < 3; look += 1) {
+        const preview = await stranger.fetch('GET', `${path}?preview=1`)
+        expect(await preview.text()).toBe('a look is free')
+      }
+      const ranged = await stranger.fetch('GET', `${path}?preview=1`, {
+        headers: { Range: 'bytes=0-4' },
+      })
+      expect(await ranged.text()).toBe('a loo')
+      const etag = ranged.headers.get('etag') ?? ''
+      const revalidated = await stranger.fetch('GET', path, { headers: { 'If-None-Match': etag } })
+      expect(revalidated.status).toBe(304)
+      expect(await left()).toBe(1)
+
+      // Download counts, and the link's last one ends it, previews too.
+      expect(await (await stranger.fetch('GET', path)).text()).toBe('a look is free')
+      expect(await stranger.error('GET', `${path}?preview=1`)).toEqual({
+        status: 410,
+        code: 'share_used_up',
+      })
+    })
+
     it('says why a link is dead: expired, or gone (turned off or unknown)', async () => {
       const client = await owner()
       const root = await workspace(client)

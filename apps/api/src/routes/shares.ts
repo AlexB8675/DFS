@@ -14,7 +14,7 @@ import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
 import { requireAuth } from '../auth/access.ts'
 import { archiveEntries } from '../content/archive.ts'
-import { archiveQuery, requestedRange, sendFile, sendZip } from '../content/send.ts'
+import { archiveQuery, notModified, requestedRange, sendFile, sendZip } from '../content/send.ts'
 import {
   countDownload,
   describeShare,
@@ -119,7 +119,13 @@ export function shareRoutes(app: FastifyInstance, _options: object, done: () => 
 
   routes.get(
     '/s/:token/files/:id/content',
-    { config: open, schema: { params: byToken.extend({ id: z.uuid() }) } },
+    {
+      config: open,
+      schema: {
+        params: byToken.extend({ id: z.uuid() }),
+        querystring: z.object({ preview: z.literal('1').optional() }),
+      },
+    },
     async (request, reply) => {
       const { share, root } = await openShare(app, request, request.params.token)
       const node = await nodeInShare(app, root, request.params.id)
@@ -129,10 +135,13 @@ export function shareRoutes(app: FastifyInstance, _options: object, done: () => 
         node.id,
         node.id === root.id ? share.version_id : null,
       )
-      // Only a request from byte 0 is a download; seeking in a video isn't (§7.5).
+      // Only a download counts (§7.5): a request from byte 0, so seeking in a
+      // video doesn't, and never a preview or a browser that has the file.
       const range = requestedRange(request, file)
       if (
         request.method !== 'HEAD' &&
+        request.query.preview === undefined &&
+        !notModified(request, file) &&
         (range === null || (range !== 'unsatisfiable' && range.start === 0))
       )
         await countDownload(app, share)

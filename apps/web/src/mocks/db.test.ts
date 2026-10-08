@@ -470,14 +470,18 @@ describe('mock API database', () => {
       })
     })
 
-    it('counts downloads from byte 0 only, and stops at the limit', () => {
+    it('counts only downloads, and stops at the limit', () => {
       const resume = db.publicShare('demo-resume')
       if (resume.locked) throw new Error('Unexpectedly locked')
       expect(resume.downloadsLeft).toBe(6)
 
-      db.shareFileContent('demo-resume', resume.root.id, false)
+      db.shareFileContent('demo-resume', resume.root.id)
       expect(db.publicShare('demo-resume')).toMatchObject({ downloadsLeft: 6 })
-      for (let i = 0; i < 6; i += 1) db.shareFileContent('demo-resume', resume.root.id, true)
+      for (let i = 0; i < 6; i += 1) db.countShareDownload('demo-resume')
+      expect(apiError(() => db.shareFileContent('demo-resume', resume.root.id))).toEqual({
+        status: 410,
+        code: 'share_used_up',
+      })
       expect(apiError(() => db.publicShare('demo-resume'))).toEqual({
         status: 410,
         code: 'share_used_up',

@@ -130,6 +130,8 @@ export interface MockFileContent {
   name: string
   mimeType: string
   body: Uint8Array
+  /** The version's ETag, as the API's names its version (§6.2). */
+  etag: string
 }
 
 export interface MockState {
@@ -476,12 +478,16 @@ export class MockDb {
   /** What a file holds: the bytes uploaded in this page's lifetime, or placeholder text. */
   protected contentOf(node: MockNode): MockFileContent {
     const bytes = this.fileBytes.get(node.id)
-    if (bytes)
-      return { name: node.name, mimeType: node.mimeType ?? 'application/octet-stream', body: bytes }
+    const etag = versionTag(node, node.versionNo ?? 1)
+    if (bytes) {
+      const mimeType = node.mimeType ?? 'application/octet-stream'
+      return { name: node.name, mimeType, body: bytes, etag }
+    }
     return {
       name: node.name,
       mimeType: 'text/plain',
       body: new TextEncoder().encode(mockContent(node)),
+      etag,
     }
   }
 
@@ -1066,14 +1072,13 @@ export class MockDb {
   }
 
   /**
-   * `GET /s/:token/files/:id/content`. Counts toward the download limit only
-   * when the request starts at byte 0, so seeking in a video doesn't use it up.
+   * `GET /s/:token/files/:id/content`, which counts toward the download limit
+   * only when it is a download (`countShareDownload`, §7.5).
    */
-  shareFileContent(token: string, id: string, fromStart: boolean): MockFileContent {
+  shareFileContent(token: string, id: string): MockFileContent {
     const { share, root } = this.liveShare(token)
     const node = this.nodeInShare(root, id)
     if (node.kind !== 'file') throw notFound()
-    if (fromStart) this.countDownload(share)
     // A file link serves its own version, which may be an earlier one.
     const earlier = node.id === root.id ? this.sharedVersion(share, root) : undefined
     if (!earlier) return this.contentOf(node)
@@ -1082,7 +1087,13 @@ export class MockDb {
       name: node.name,
       mimeType: earlier.mimeType ?? 'application/octet-stream',
       body: bytes ?? new TextEncoder().encode(mockContent(node)),
+      etag: versionTag(node, earlier.no),
     }
+  }
+
+  /** A download through a link: one less left. */
+  countShareDownload(token: string): void {
+    this.countDownload(this.liveShare(token).share)
   }
 
   /** A file link's version when it is an earlier one than the file's. */
@@ -1430,6 +1441,11 @@ export class MockDb {
 /** What a mock file contains: a line of text, since the mock stores no bytes. */
 function mockContent(node: MockNode): string {
   return `Mock content of “${node.name}” (${node.sizeBytes} bytes in the real file).\n`
+}
+
+/** A version's ETag: the API's is the version's ID, the mock's its file and number. */
+function versionTag(node: MockNode, versionNo: number): string {
+  return `"${node.id}.${String(versionNo)}"`
 }
 
 /** A share link that still works: not expired or used up (§7.5). */

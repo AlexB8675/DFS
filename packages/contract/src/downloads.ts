@@ -60,6 +60,35 @@ export function downloadTests({ describe, it, expect, owner, target }: SuiteCont
       expect(beyond.response.status).toBe(416)
     })
 
+    it('answers a browser that has the version with 304 and no bytes, and another version in full', async () => {
+      const client = await owner()
+      const root = await workspace(client)
+      const session = await uploadFile(client, root.id, 'notes.txt', text('first'))
+      const path = `/files/${session.nodeId}/content`
+      const first = await download(client, path)
+      const etag = first.response.headers.get('etag') ?? ''
+      expect(etag).toMatch(/^".+"$/)
+      // The version, not its sync state: the same once stored.
+      await target().settle()
+      expect((await download(client, path)).response.headers.get('etag')).toBe(etag)
+
+      for (const tag of [etag, `W/${etag}`, `"another", ${etag}`]) {
+        const again = await download(client, path, { 'If-None-Match': tag })
+        expect(again.response.status).toBe(304)
+        expect(again.response.headers.get('etag')).toBe(etag)
+        expect(again.bytes.length).toBe(0)
+      }
+      // Before any range: the browser has all of it.
+      const ranged = await download(client, path, { 'If-None-Match': etag, Range: 'bytes=0-1' })
+      expect(ranged.response.status).toBe(304)
+
+      await uploadFile(client, root.id, 'notes.txt', text('second'))
+      const replaced = await download(client, path, { 'If-None-Match': etag })
+      expect(replaced.response.status).toBe(200)
+      expect(new TextDecoder().decode(replaced.bytes)).toBe('second')
+      expect(replaced.response.headers.get('etag')).not.toBe(etag)
+    })
+
     it('zips a folder with its subfolders, empty ones included', async () => {
       const client = await owner()
       const root = await workspace(client)

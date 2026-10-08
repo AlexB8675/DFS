@@ -12,19 +12,24 @@ export interface DownloadableFile extends ReadableVersion {
   mime_type: string | null
 }
 
-/** Sends a file, or the byte range asked for with `206 Partial Content`. */
+/**
+ * Sends a file, or the byte range asked for with `206 Partial Content`; a
+ * browser that has this version gets `304 Not Modified` and no bytes.
+ */
 export function sendFile(
   app: FastifyInstance,
   request: FastifyRequest,
   reply: FastifyReply,
   file: DownloadableFile,
 ): FastifyReply {
+  void reply.header('etag', `"${file.version_id}"`).header('cache-control', 'private, no-cache')
+  // Before the range: a browser that has the version needs none of it.
+  if (notModified(request, file)) return reply.code(304).send()
+
   const size = file.size_bytes
   const range = requestedRange(request, file)
   void reply
     .header('accept-ranges', 'bytes')
-    .header('etag', `"${file.version_id}"`)
-    .header('cache-control', 'private, no-cache')
     .header('content-type', file.mime_type ?? 'application/octet-stream')
     .header('content-disposition', attachment(file.name))
     .header('x-content-type-options', 'nosniff')
@@ -62,6 +67,23 @@ export function sendZip(
     .header('cache-control', 'private, no-store')
     .header('x-content-type-options', 'nosniff')
     .send(Readable.from(writeZip(entries, { timeZone: zipTimeZone(timeZone) })))
+}
+
+/**
+ * Whether the browser already has this version: `If-None-Match` names it
+ * (our ETag, compared weakly, in a list or as `*`), so a `304` answers it.
+ */
+export function notModified(
+  request: FastifyRequest,
+  file: Pick<DownloadableFile, 'version_id'>,
+): boolean {
+  const header = request.headers['if-none-match']
+  if (header === undefined) return false
+  const etag = `"${file.version_id}"`
+  return header
+    .split(',')
+    .map((tag) => tag.trim().replace(/^W\//, ''))
+    .some((tag) => tag === '*' || tag === etag)
 }
 
 /**

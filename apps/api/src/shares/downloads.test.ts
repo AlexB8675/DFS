@@ -73,6 +73,38 @@ describe('share download limits', () => {
     expect(await download.text()).toBe('')
   })
 
+  it('answers a browser that has the file with 304 and nothing else, which is no download', async () => {
+    const path = await link()
+    const etag = (await owner.fetch('HEAD', `/files/${fileId}/content`)).headers.get('etag') ?? ''
+    const revalidated = await stranger.fetch('GET', path, { headers: { 'If-None-Match': etag } })
+    expect(revalidated.status).toBe(304)
+    expect(revalidated.headers.get('etag')).toBe(etag)
+    expect(revalidated.headers.get('content-length')).toBeNull()
+    expect(revalidated.headers.get('content-type')).toBeNull()
+    expect(revalidated.headers.get('content-disposition')).toBeNull()
+    expect((await revalidated.arrayBuffer()).byteLength).toBe(0)
+    expect(await (await stranger.fetch('GET', path)).text()).toBe('hello')
+    // Used up, the link refuses even a browser that has the file, and its previews.
+    expect(await stranger.error('GET', path, { headers: { 'If-None-Match': etag } })).toEqual({
+      status: 410,
+      code: 'share_used_up',
+    })
+    expect(await stranger.error('GET', `${path}?preview=1`)).toEqual({
+      status: 410,
+      code: 'share_used_up',
+    })
+  })
+
+  it('takes only ?preview=1 as a preview', async () => {
+    const path = await link()
+    expect(await stranger.error('GET', `${path}?preview=yes`)).toEqual({
+      status: 400,
+      code: 'invalid_request',
+    })
+    expect(await (await stranger.fetch('GET', `${path}?preview=1`)).text()).toBe('hello')
+    expect(await (await stranger.fetch('GET', path)).text()).toBe('hello')
+  })
+
   it('does not consume a download for archive HEAD requests', async () => {
     const path = await link()
     const archive = path.replace(/\/files\/[^/]+\/content$/, '/archive')

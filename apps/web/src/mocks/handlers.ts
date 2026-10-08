@@ -494,10 +494,16 @@ export const handlers = [
     respond(
       request,
       () => {
-        // Only a request from byte 0 counts as a download (§7.5).
+        const file = db.shareFileContent(params.token, params.id)
+        // Only a download counts (§7.5): a request from byte 0, so seeking in
+        // a video doesn't, and never a preview or a browser that has the file.
         const range = request.headers.get('Range')
         const fromStart = range === null || range.startsWith('bytes=0-')
-        return fileResponse(request, db.shareFileContent(params.token, params.id, fromStart))
+        const preview = new URL(request.url).searchParams.get('preview') === '1'
+        if (fromStart && !preview && !notModified(request, file)) {
+          db.countShareDownload(params.token)
+        }
+        return fileResponse(request, file)
       },
       { public: true },
     ),
@@ -622,10 +628,18 @@ function toErrorResponse(error: unknown): Response {
   throw error
 }
 
-/** A file, or the single byte range asked for, as the real API sends it (§6.2). */
+/**
+ * A file, or the single byte range asked for, as the real API sends it (§6.2);
+ * `304 Not Modified` to a browser that has this version.
+ */
 function fileResponse(request: Request, file: MockFileContent): Response {
+  const revalidation = { ETag: file.etag, 'Cache-Control': 'private, no-cache' }
+  if (notModified(request, file)) {
+    return new HttpResponse(null, { status: 304, headers: revalidation })
+  }
   const size = file.body.length
   const headers: Record<string, string> = {
+    ...revalidation,
     'Content-Type': file.mimeType,
     'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(file.name)}`,
     'Accept-Ranges': 'bytes',
@@ -644,6 +658,16 @@ function fileResponse(request: Request, file: MockFileContent): Response {
     status: 206,
     headers: { ...headers, 'Content-Range': `bytes ${start}-${end}/${size}` },
   })
+}
+
+/** Whether `If-None-Match` names the file's version (compared weakly, in a list, or `*`). */
+function notModified(request: Request, file: MockFileContent): boolean {
+  const header = request.headers.get('If-None-Match')
+  if (header === null) return false
+  return header
+    .split(',')
+    .map((tag) => tag.trim().replace(/^W\//, ''))
+    .some((tag) => tag === '*' || tag === file.etag)
 }
 
 function zipResponse(body: Uint8Array<ArrayBuffer>, fileName: string): Response {

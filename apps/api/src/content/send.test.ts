@@ -1,6 +1,6 @@
 import type { FastifyRequest } from 'fastify'
 import { describe, expect, it } from 'vitest'
-import { requestedRange } from './send.ts'
+import { notModified, requestedRange } from './send.ts'
 
 const file = { version_id: '01a11353-edcb-7c90-8918-70850edcd1f9', size_bytes: 100 }
 
@@ -27,5 +27,22 @@ describe('resumed downloads (§6.2)', () => {
         file,
       ),
     ).toBeNull()
+  })
+})
+
+describe('revalidation (§6.2)', () => {
+  it('knows a browser has the version when If-None-Match names it', () => {
+    const etag = `"${file.version_id}"`
+    expect(notModified(request({ 'if-none-match': etag }), file)).toBe(true)
+    expect(notModified(request({ 'if-none-match': `W/${etag}` }), file)).toBe(true)
+    expect(notModified(request({ 'if-none-match': `"another-version", ${etag}` }), file)).toBe(true)
+    expect(notModified(request({ 'if-none-match': '*' }), file)).toBe(true)
+  })
+
+  it('sends the file when the browser has another version, or none', () => {
+    expect(notModified(request({}), file)).toBe(false)
+    expect(notModified(request({ 'if-none-match': '"another-version"' }), file)).toBe(false)
+    // Unquoted, it isn't our ETag.
+    expect(notModified(request({ 'if-none-match': file.version_id }), file)).toBe(false)
   })
 })
