@@ -1,3 +1,4 @@
+import { MEDIA_EXTENSION_KINDS } from './media.ts'
 import { splitExtension } from './names.ts'
 
 // What kind of file a name and MIME type suggest: for icons in the web app
@@ -26,16 +27,8 @@ const EXTENSIONS: Record<string, FileCategory> = {
   '.heic': 'image',
   '.avif': 'image',
   '.svg': 'image',
-  '.mp4': 'video',
-  '.mov': 'video',
-  '.mkv': 'video',
-  '.avi': 'video',
-  '.webm': 'video',
-  '.mp3': 'audio',
-  '.flac': 'audio',
-  '.wav': 'audio',
-  '.m4a': 'audio',
-  '.ogg': 'audio',
+  // Audio and video as the players know them.
+  ...MEDIA_EXTENSION_KINDS,
   '.pdf': 'pdf',
   '.zip': 'archive',
   '.7z': 'archive',

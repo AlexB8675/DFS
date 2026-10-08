@@ -47,6 +47,7 @@ export default tseslint.config(
     files: [
       'apps/api/**/*.ts',
       'apps/bot/**/*.ts',
+      'apps/media/**/*.ts',
       'packages/config/**/*.ts',
       'packages/db/**/*.ts',
     ],

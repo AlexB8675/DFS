@@ -1,0 +1,22 @@
+{
+  "name": "@dfs/media",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/main.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "eslint .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@dfs/shared": "workspace:*",
+    "fastify": "^5.12.5",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.1",
+    "testcontainers": "^12.2.0",
+    "vitest": "^5.0.3"
+  }
+}
