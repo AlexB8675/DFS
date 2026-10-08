@@ -66,6 +66,7 @@ const ACTIONS: Record<string, { label: string; icon: LucideIcon; tone?: string }
   'upload.cancelled': { label: 'Gave up an upload', icon: XCircle, tone: 'text-amber-500' },
   'database.vacuumed': { label: 'Vacuumed a table', icon: Database },
   'system.cache_cleared': { label: 'Cleared the frame cache', icon: Database },
+  'storage.reset': { label: 'Started storage over', icon: Trash2, tone: 'text-destructive' },
   'database.query_cancelled': {
     label: 'Cancelled a query',
     icon: Database,

@@ -162,6 +162,31 @@ docker compose run --rm --no-deps -T \
   api node apps/api/src/cli.ts drill --from discord
 ```
 
+## Starting storage over
+
+`dfs reset-storage` deletes every file, with its blobs, the storage
+channels on Discord (every message in them) and the journal, and keeps the
+accounts, folders, links to folders and the audit log. It then starts the
+journal again from what it kept, so `dfs drill` still rebuilds everything,
+and makes the channels again with `dfs setup`'s names. It can't be undone.
+It takes the database's instance ID (`SELECT id FROM instance`), refuses
+while the API or the bot is running, and can be run again if it fails
+partway. Like the drill, it runs in a one-off API container given the bot
+token, which reaches staging and the frame cache too:
+
+```bash
+docker compose stop api bot
+docker compose run --rm --no-deps -T \
+  -v /etc/dfs/secrets/discord_bot_token:/run/secrets/dfs_discord_bot_token:ro \
+  -e DISCORD_BOT_TOKEN_FILE=/run/secrets/dfs_discord_bot_token \
+  api node apps/api/src/cli.ts reset-storage --instance <id>
+docker compose start api bot
+```
+
+Once the bot has posted the new journal, `dfs drill` should find nothing
+different. In development: `pnpm dfs reset-storage --instance <id>`, with
+the API and the bot stopped.
+
 After losing the VPS: set it up again as above (the same `DISCORD_GUILD_ID`,
 category and master key file), stop the API and the bot, recover into the
 new, empty database with `recover --into <database-url>` in the same kind of

@@ -172,6 +172,20 @@ export class FakeDiscord implements DiscordRest {
 
   delete = (route: DiscordRoute): Promise<unknown> => {
     this.requests.push(`DELETE ${route}`)
+    const whole = /^\/channels\/(\d+)$/.exec(route)
+    if (whole) {
+      // A channel goes with every message in it.
+      const index = this.channels.findIndex((found) => found.id === whole[1])
+      if (index < 0) return refuse(404, 10003, 'Unknown Channel', 'DELETE', route)
+      this.channels.splice(index, 1)
+      for (let at = this.messages.length - 1; at >= 0; at -= 1) {
+        const gone = this.messages[at]
+        if (!gone || gone.channel_id !== whole[1]) continue
+        for (const attachment of gone.attachments) this.#deleted.add(attachment.url)
+        this.messages.splice(at, 1)
+      }
+      return answer(undefined)
+    }
     const message = /^\/channels\/(\d+)\/messages\/(\d+)$/.exec(route)
     if (message) {
       const index = this.messages.findIndex(

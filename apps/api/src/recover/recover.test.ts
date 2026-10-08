@@ -1,3 +1,4 @@
+import { readdir } from 'node:fs/promises'
 import { collectGarbage } from '@dfs/bot/collector'
 import { Compactor } from '@dfs/bot/compactor'
 import { JournalUploader } from '@dfs/bot/journal-uploader'
@@ -51,6 +52,7 @@ import {
 import { readJournal, RecoveryError } from './read-journal.ts'
 import { highestLocalBlob, highestPostedBlob, recover } from './recover.ts'
 import { writeRecovered } from './write.ts'
+import { resetStorage, ResetRefusedError, type ResetOptions } from '../reset-storage.ts'
 
 // The recovery drill (DESIGN.md §8, §17): a drive used every way the journal
 // records, then rebuilt from the journal alone into an empty database, which
@@ -82,6 +84,9 @@ interface Stack {
   recovery: () => Promise<Recovery>
   /** A new, migrated, empty database to recover into. */
   emptyDatabase: () => Promise<Database>
+  instanceId: string
+  /** How `dfs reset-storage` reaches this stack's storage. */
+  reset: Pick<ResetOptions, 'discord' | 'directories'>
   close: () => Promise<void>
 }
 
@@ -95,6 +100,10 @@ async function startStack(storage: 'local' | 'discord'): Promise<Stack> {
 
   let store: BlobStore = new LocalBlobStore(app.config.localBlobDir)
   let journal: JournalStore = new LocalJournalStore(app.config.localBlobDir)
+  let reset: Stack['reset'] = {
+    discord: null,
+    directories: [app.config.stagingDir, app.config.localBlobDir],
+  }
   let recovery = (): Promise<Recovery> =>
     Promise.resolve({
       source: new LocalJournalSource(app.config.localBlobDir),
@@ -113,11 +122,19 @@ async function startStack(storage: 'local' | 'discord'): Promise<Stack> {
       const channel = discord.addTextChannel(name, category.id)
       await app.db.insert(storageChannels).values({ discordChannelId: channel.id, name, kind })
     }
-    const [journalChannel] = await app.db
-      .select()
-      .from(storageChannels)
-      .where(eq(storageChannels.kind, 'journal'))
-    if (!journalChannel) throw new Error('No journal channel.')
+    // As the bot finds it: `dfs reset-storage` makes a new one.
+    const journalChannel = async () => {
+      const [channel] = await app.db
+        .select()
+        .from(storageChannels)
+        .where(eq(storageChannels.kind, 'journal'))
+      if (!channel) throw new Error('No journal channel.')
+      return channel
+    }
+    reset = {
+      discord: { rest: discord, guildId: discord.guildId, categoryName },
+      directories: [app.config.stagingDir],
+    }
     store = new DiscordBlobStore({
       rest: discord,
       channels: () => dataChannels(app.db),
@@ -128,7 +145,7 @@ async function startStack(storage: 'local' | 'discord'): Promise<Stack> {
     })
     journal = new DiscordJournalStore({
       rest: discord,
-      channel: () => Promise.resolve(journalChannel),
+      channel: journalChannel,
       instanceId: () => Promise.resolve(instanceId),
     })
     recovery = async () => {
@@ -177,6 +194,8 @@ async function startStack(storage: 'local' | 'discord'): Promise<Stack> {
     owner,
     sam,
     recovery,
+    instanceId,
+    reset,
     emptyDatabase: async () => {
       const target = await createTestDatabase(inject('testPostgres'))
       const pool = createPool(target.url, {
@@ -579,6 +598,129 @@ for (const storage of ['local', 'discord'] as const) {
       expect(report.settled.droppedFiles).toEqual([
         { id: pending.nodeId, ownerId: owner.user.id, name: 'unsynced.bin' },
       ])
+    })
+  })
+}
+
+for (const storage of ['local', 'discord'] as const) {
+  describe(`dfs reset-storage, with ${storage} storage (docs/DEPLOY.md)`, () => {
+    let stack: Stack
+
+    beforeAll(async () => {
+      stack = await startStack(storage)
+      await useTheDrive(stack)
+      await settleStack(stack)
+    })
+
+    afterAll(async () => {
+      await stack.close()
+    })
+
+    /** Rows per table, of what the reset keeps or drops. */
+    async function tally() {
+      const { rows } = await stack.app.db.execute<Record<string, number>>(sql`
+        SELECT (SELECT count(*) FROM users)::int AS users,
+          (SELECT count(*) FROM nodes WHERE kind = 'folder')::int AS folders,
+          (SELECT count(*) FROM nodes WHERE kind = 'file')::int AS files,
+          (SELECT count(*) FROM file_versions)::int AS versions,
+          (SELECT count(*) FROM chunks)::int AS chunks,
+          (SELECT count(*) FROM blobs)::int AS blobs,
+          (SELECT count(*) FROM share_links)::int AS links,
+          (SELECT count(*) FROM share_links link JOIN nodes node ON node.id = link.node_id
+           WHERE node.kind = 'folder')::int AS folder_links,
+          (SELECT count(*) FROM audit_log)::int AS audit,
+          (SELECT coalesce(sum(used_bytes), 0) FROM users)::int AS used_bytes`)
+      return rows[0] ?? {}
+    }
+
+    it('refuses another database, and one the API is using', async () => {
+      const { app, instanceId, reset } = stack
+      await expect(
+        resetStorage(app.db, { ...reset, instance: 'not-this-one', services: [] }),
+      ).rejects.toThrow(ResetRefusedError)
+      // This stack's API is connected, by the name a running API has.
+      await expect(resetStorage(app.db, { ...reset, instance: instanceId })).rejects.toThrow(
+        /dfs-api is using this database/,
+      )
+      expect((await tally()).files).toBeGreaterThan(0)
+    })
+
+    it('deletes every file, keeps accounts and folders, and journals them afresh', async () => {
+      const { app, instanceId, reset } = stack
+      const before = await tally()
+      expect(before.folder_links).toBeGreaterThan(0)
+      expect(before.links).toBeGreaterThan(before.folder_links ?? 0)
+      const oldChannels = await app.db.select().from(storageChannels)
+
+      const report = await resetStorage(app.db, { ...reset, instance: instanceId, services: [] })
+      expect(report.files).toBe(before.files)
+      // The reset's own entry, then one per channel it registers.
+      const audited = (before.audit ?? 0) + 1
+      expect(await tally()).toEqual({
+        ...before,
+        files: 0,
+        versions: 0,
+        chunks: 0,
+        blobs: 0,
+        links: before.folder_links,
+        audit: audited + report.setup.registered.length,
+        used_bytes: 0,
+      })
+      expect(report.baseline).toEqual({
+        users: before.users,
+        folders: before.folders,
+        shares: before.folder_links,
+        auditEntries: audited,
+      })
+      const { rows: batches } = await app.db.execute(sql`SELECT 1 FROM journal_batches`)
+      expect(batches).toHaveLength(0)
+      expect(await readdir(app.config.stagingDir)).toEqual([])
+
+      if (storage === 'discord') {
+        // The old channels went, messages and all, and new ones took their place.
+        const discord = reset.discord?.rest as FakeDiscord
+        for (const channel of oldChannels) {
+          expect(discord.channels.some((found) => found.id === channel.discordChannelId)).toBe(
+            false,
+          )
+          expect(
+            discord.messages.some((found) => found.channel_id === channel.discordChannelId),
+          ).toBe(false)
+        }
+        expect(report.channels.deleted.sort()).toEqual(oldChannels.map((c) => c.name).sort())
+        const now = await app.db.select().from(storageChannels)
+        expect(now.map((channel) => channel.name).sort()).toEqual([
+          'dfs-backups',
+          'dfs-journal',
+          'dfs-log',
+          'storage-00',
+          'storage-01',
+          'storage-02',
+          'storage-03',
+        ])
+      }
+
+      // Posted from batch 1, the new journal alone rebuilds what is left.
+      await settleStack(stack)
+      const target = await stack.emptyDatabase()
+      const recovered = await recover({ db: target, keys: app.keys, ...(await stack.recovery()) })
+      expect(recovered.batches).toBeGreaterThan(0)
+      expect(await compareDatabases(app.db, target)).toEqual([])
+    })
+
+    it('runs again, and changes nothing more but the channels it makes', async () => {
+      const { app, instanceId, reset } = stack
+      const before = await tally()
+      const report = await resetStorage(app.db, { ...reset, instance: instanceId, services: [] })
+      expect(report.files).toBe(0)
+      expect(await tally()).toEqual({
+        ...before,
+        audit: (before.audit ?? 0) + 1 + report.setup.registered.length,
+      })
+      await settleStack(stack)
+      const target = await stack.emptyDatabase()
+      await recover({ db: target, keys: app.keys, ...(await stack.recovery()) })
+      expect(await compareDatabases(app.db, target)).toEqual([])
     })
   })
 }

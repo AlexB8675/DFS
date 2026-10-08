@@ -183,6 +183,31 @@ export class ChannelRefusedError extends Error {
 }
 
 /**
+ * Deletes a channel and every message in it, for `dfs reset-storage`: only
+ * ever one registered for this environment. `false` when it was gone already.
+ */
+export async function deleteChannel(rest: DiscordRest, discordChannelId: string): Promise<boolean> {
+  try {
+    await rest.delete(Routes.channel(discordChannelId))
+    return true
+  } catch (error) {
+    if (error instanceof DiscordAPIError && error.status === 404) return false
+    throw error
+  }
+}
+
+/** Whether a channel is still there. One the bot may no longer see counts as there. */
+export async function channelExists(rest: DiscordRest, discordChannelId: string): Promise<boolean> {
+  try {
+    await rest.get(Routes.channel(discordChannelId))
+    return true
+  } catch (error) {
+    if (error instanceof DiscordAPIError && error.status === 404) return false
+    throw error
+  }
+}
+
+/**
  * Checks a channel an admin registers by its ID (Admin → Channels): a text
  * channel of this server, inside this environment's category, so development
  * can't take production's channels (D25). Makes it private to the bot like

@@ -19,6 +19,7 @@ import { hashPassword } from './auth/passwords.ts'
 import { endUserSessions } from './auth/sessions.ts'
 import { setUpDiscord } from './discord-setup.ts'
 import { drillCommand, printReport, recoverCommand } from './recover/commands.ts'
+import { resetStorage, storageCounts, type ResetOptions } from './reset-storage.ts'
 import { createUser } from './users/users.ts'
 
 // `dfs`: admin commands run on the server (DESIGN.md §4, §7.1).
@@ -28,6 +29,7 @@ import { createUser } from './users/users.ts'
 //   pnpm dfs master-key <file>
 //   pnpm dfs recover --into <database-url> [--from discord|local] [--instance <id>] [--key-file <file>]
 //   pnpm dfs drill [--from discord|local] [--instance <id>] [--key-file <file>]
+//   pnpm dfs reset-storage --instance <id>
 //
 // `owner` creates the owner account with a temporary password, or, when the
 // owner exists, gives it a new one and signs it out everywhere: the way back
@@ -47,9 +49,14 @@ import { createUser } from './users/users.ts'
 // says how it differs from the one in use, and drops it (§17). Both take the
 // master keys from MASTER_KEY_FILE, or --key-file with every key, current
 // and retired.
+//
+// `reset-storage` deletes every file, its blobs and their Discord channels,
+// and the journal, keeping accounts, folders, links to folders and the audit
+// log, which a fresh journal holds (docs/DEPLOY.md). It asks for the
+// database's instance ID, and refuses while the API or the bot is running.
 
 const USAGE =
-  'Usage: dfs owner [--username <name>] | dfs setup | dfs master-key <file> | dfs recover --into <database-url> [--from discord|local] [--instance <id>] [--key-file <file>] | dfs drill [--from discord|local] [--instance <id>] [--key-file <file>]'
+  'Usage: dfs owner [--username <name>] | dfs setup | dfs master-key <file> | dfs recover --into <database-url> [--from discord|local] [--instance <id>] [--key-file <file>] | dfs drill [--from discord|local] [--instance <id>] [--key-file <file>] | dfs reset-storage --instance <id>'
 const DAY_MS = 24 * 60 * 60_000
 const rootDir = path.resolve(import.meta.dirname, '../../..')
 
@@ -78,6 +85,13 @@ const valid =
     values.username === undefined) ||
   (command === 'drill' &&
     positionals.length === 1 &&
+    values.into === undefined &&
+    values.username === undefined) ||
+  (command === 'reset-storage' &&
+    positionals.length === 1 &&
+    values.instance !== undefined &&
+    values.from === undefined &&
+    values['key-file'] === undefined &&
     values.into === undefined &&
     values.username === undefined)
 const from = values.from ?? undefined
@@ -149,6 +163,8 @@ const pool = createPool(config.databaseUrl, {
 })
 try {
   if (command === 'owner') await owner(createDatabase(pool), config, values.username)
+  else if (command === 'reset-storage')
+    await reset(createDatabase(pool), config, values.instance ?? '')
   else await setup(createDatabase(pool), config)
 } catch (error) {
   console.error(
@@ -238,6 +254,42 @@ async function setup(db: Database, config: Config): Promise<void> {
   if (report.changes.length === 0 && report.registered.length === 0) {
     console.info(`[INFO] “${categoryName}” and its channels were already set up.`)
   }
+}
+
+async function reset(db: Database, config: Config, instance: string): Promise<void> {
+  let discord: ResetOptions['discord'] = null
+  if (config.blobStore === 'discord') {
+    const { botToken, guildId, categoryName } = config.discord
+    if (!botToken || !guildId) {
+      throw new Error('Set DISCORD_BOT_TOKEN and DISCORD_GUILD_ID in the root .env first.')
+    }
+    discord = { rest: createDiscordRest(botToken), guildId, categoryName }
+  }
+  const before = await storageCounts(db)
+  console.info(
+    `[INFO] To delete: ${String(before.files)} files (${String(before.versions)} versions, ${String(before.blobs)} blobs), ${String(before.journalRecords)} journal records, and the storage channels; accounts, folders and the audit log stay.`,
+  )
+  const report = await resetStorage(db, {
+    instance,
+    discord,
+    // The frame cache too, where it is mounted: frames of blobs that are gone.
+    directories: [
+      config.stagingDir,
+      config.cacheDir,
+      ...(config.blobStore === 'discord' ? [] : [config.localBlobDir]),
+    ],
+  })
+  const { channels, baseline, setup: made } = report
+  if (channels.deleted.length > 0)
+    console.info(`[INFO] Discord: deleted #${channels.deleted.join(', #')}.`)
+  if (channels.gone.length > 0)
+    console.info(`[INFO] Discord: #${channels.gone.join(', #')} were gone already.`)
+  for (const change of made.changes) console.info(`[INFO] Discord: ${change}.`)
+  if (made.registered.length > 0)
+    console.info(`[INFO] Registered for storage: ${made.registered.join(', ')}.`)
+  console.info(
+    `[INFO] The journal starts again with ${String(baseline.users)} accounts, ${String(baseline.folders)} folders, ${String(baseline.shares)} links and ${String(baseline.auditEntries)} audit entries; the bot posts it once it runs.`,
+  )
 }
 
 async function ask(question: string): Promise<string> {

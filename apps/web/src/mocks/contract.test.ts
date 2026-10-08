@@ -22,6 +22,10 @@ vi.hoisted(() => {
   })
 })
 
+// As long as the API's run of the same suite allows (apps/api/vitest.config.ts):
+// a streamed upload is two 20 MiB parts and more, hashed in JavaScript.
+vi.setConfig({ testTimeout: 20_000 })
+
 const { db, handlers, setResponseDelay } = await import('./handlers')
 const { DEMO_ACCOUNTS } = await import('./seed')
 const server = setupServer(...handlers)
