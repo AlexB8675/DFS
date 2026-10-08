@@ -2,10 +2,12 @@ import type { DriveNode } from '@dfs/shared'
 import { toast } from 'sonner'
 import { useCurrentUser } from '@/features/auth/session'
 import { countShareLinks } from '@/features/shares/api'
+import { usePreview } from '@/features/preview/use-preview'
 import { pickFiles } from '@/features/uploads/picked-files'
 import { enqueueUploads } from '@/features/uploads/upload-engine'
 import { errorMessage } from '@/lib/api/client'
 import { useTransitionNavigate } from '@/lib/navigation'
+import { isPreviewable } from '@/lib/preview-kind'
 import {
   downloadNodes,
   isArchiveDownload,
@@ -30,6 +32,7 @@ export interface MoveTarget {
 /** Everything a user can do to files and folders, shared by menus, toolbars, shortcuts and drag and drop. */
 export function useNodeActions() {
   const navigate = useTransitionNavigate()
+  const preview = usePreview()
   const { rootFolderId } = useCurrentUser()
   const openDialog = useDialogStore((state) => state.open)
   const moveNodes = useMoveNodes()
@@ -138,9 +141,10 @@ export function useNodeActions() {
   }
 
   return {
-    /** Folders open in place; files download (previews are a later milestone). */
+    /** Folders open in place, files the viewer can show in it (§10.3), and others download. */
     open: (node: DriveNode) => {
       if (node.kind === 'folder') navigate(folderUrl(node.id, rootFolderId), 'forward')
+      else if (isPreviewable(node)) preview.open(node.id)
       else void download([node])
     },
     /** Opens the folder that contains `node`, with `node` selected. */

@@ -1,6 +1,7 @@
 import type { DriveNode } from '@dfs/shared'
 import {
   Download,
+  Eye,
   FileArchive,
   FileUp,
   FolderInput,
@@ -13,6 +14,7 @@ import {
   Trash2,
   type LucideIcon,
 } from 'lucide-react'
+import { isPreviewable } from '@/lib/preview-kind'
 import { useNodeActions } from './use-node-actions'
 
 export interface MenuAction {
@@ -72,11 +74,11 @@ export function useNodeMenu(
   const single = targets.length === 1 ? targets[0] : undefined
   const menu: MenuAction[] = []
 
-  if (single?.kind === 'folder') {
+  if (single?.kind === 'folder' || (single && isPreviewable(single))) {
     menu.push({
       key: 'open',
-      label: 'Open',
-      icon: FolderOpen,
+      label: single.kind === 'folder' ? 'Open' : 'Preview',
+      icon: single.kind === 'folder' ? FolderOpen : Eye,
       shortcut: 'Enter',
       onSelect: () => {
         actions.open(single)

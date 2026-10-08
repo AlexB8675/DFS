@@ -1,4 +1,5 @@
 import {
+  fileCategory,
   formatBytes,
   nameKey,
   normalizeName,
@@ -36,6 +37,7 @@ import {
   type UploadSessionStatus,
   type User,
 } from '@dfs/shared'
+import { sampleImage } from './samples'
 import { createSeed } from './seed'
 import { createZip, type ZipEntry } from './zip'
 
@@ -174,7 +176,7 @@ export class MockFileExists extends MockApiError {
   }
 }
 
-const STATE_VERSION = 12
+const STATE_VERSION = 13
 const STORAGE_KEY = 'dfs.mock-db'
 /** `CHUNK_SIZE` at the 10 MiB attachment limit (§7.3). */
 export const CHUNK_SIZE = 10 * 1024 * 1024 - 128 * 1024
@@ -475,7 +477,7 @@ export class MockDb {
     return this.contentOf(node)
   }
 
-  /** What a file holds: the bytes uploaded in this page's lifetime, or placeholder text. */
+  /** What a file holds: the bytes uploaded in this page's lifetime, or made-up content. */
   protected contentOf(node: MockNode): MockFileContent {
     const bytes = this.fileBytes.get(node.id)
     const etag = versionTag(node, node.versionNo ?? 1)
@@ -483,12 +485,7 @@ export class MockDb {
       const mimeType = node.mimeType ?? 'application/octet-stream'
       return { name: node.name, mimeType, body: bytes, etag }
     }
-    return {
-      name: node.name,
-      mimeType: 'text/plain',
-      body: new TextEncoder().encode(mockContent(node)),
-      etag,
-    }
+    return { name: node.name, ...mockContent(node, node.mimeType), etag }
   }
 
   // ── Archives (§6.2) ────────────────────────────────────────────────────────
@@ -1083,12 +1080,10 @@ export class MockDb {
     const earlier = node.id === root.id ? this.sharedVersion(share, root) : undefined
     if (!earlier) return this.contentOf(node)
     const bytes = this.versionBytes.get(`${node.id}#${String(earlier.no)}`)
-    return {
-      name: node.name,
-      mimeType: earlier.mimeType ?? 'application/octet-stream',
-      body: bytes ?? new TextEncoder().encode(mockContent(node)),
-      etag: versionTag(node, earlier.no),
-    }
+    const etag = versionTag(node, earlier.no)
+    if (!bytes) return { name: node.name, ...mockContent(node, earlier.mimeType), etag }
+    const mimeType = earlier.mimeType ?? 'application/octet-stream'
+    return { name: node.name, mimeType, body: bytes, etag }
   }
 
   /** A download through a link: one less left. */
@@ -1438,9 +1433,21 @@ export class MockDb {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/** What a mock file contains: a line of text, since the mock stores no bytes. */
-function mockContent(node: MockNode): string {
-  return `Mock content of “${node.name}” (${node.sizeBytes} bytes in the real file).\n`
+/**
+ * What a mock file holds, since the mock keeps no bytes but those uploaded:
+ * a made-up image for an image (§10.3), and otherwise a line of text.
+ */
+function mockContent(
+  node: MockNode,
+  mimeType: string | null,
+): Pick<MockFileContent, 'mimeType' | 'body'> {
+  const image =
+    fileCategory(node.name, mimeType) === 'image' ? sampleImage(node.id, node.name) : null
+  const { mimeType: type, body } = image ?? {
+    mimeType: 'text/plain',
+    body: `Mock content of “${node.name}” (${node.sizeBytes} bytes in the real file).\n`,
+  }
+  return { mimeType: type, body: new TextEncoder().encode(body) }
 }
 
 /** A version's ETag: the API's is the version's ID, the mock's its file and number. */

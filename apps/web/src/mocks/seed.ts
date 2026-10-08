@@ -193,6 +193,8 @@ export function createSeed(version: number): MockState {
   const assets = folder(website, 'assets')
   file(assets, 'logo.svg', 4 * KB)
   file(assets, 'hero.webp', 380 * KB)
+  // An image no browser can draw: its preview says so (§10.3).
+  file(assets, 'banner (damaged).png', 220 * KB)
   const icons = folderPath(projects, [
     'Archive',
     '2019',

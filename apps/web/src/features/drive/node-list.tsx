@@ -4,6 +4,7 @@ import { Spinner } from '@/components/ui/spinner'
 import { ContextMenu, ContextMenuContent, ContextMenuTrigger } from '@/components/ui/context-menu'
 import { VirtualList } from '@/components/virtual-list'
 import { beginPointerDrag } from '@/features/drag/drag-controller'
+import { DrivePreview } from '@/features/preview/drive-preview'
 import { useElementWidth } from '@/lib/use-element-width'
 import { usePreferences } from '@/lib/preferences'
 import { ListHeader } from './list-header'
@@ -34,7 +35,8 @@ interface NodeListProps {
 
 /**
  * Files and folders as a virtualized list or grid, with mouse and keyboard
- * selection and a context menu, like a desktop file manager.
+ * selection and a context menu, like a desktop file manager; files open in
+ * the viewer over it (§10.3).
  */
 export function NodeList({
   nodes,
@@ -162,6 +164,12 @@ export function NodeList({
       <ContextMenuContent className="w-56">
         <ContextMenuActions actions={menu} />
       </ContextMenuContent>
+      <DrivePreview
+        nodes={nodes}
+        hasMore={hasMore}
+        isLoadingMore={isLoadingMore}
+        onLoadMore={onLoadMore}
+      />
     </ContextMenu>
   )
 }
