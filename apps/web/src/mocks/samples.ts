@@ -257,3 +257,50 @@ function prose(random: () => number, name: string): string {
   }
   return paragraphs.join('\n')
 }
+
+/**
+ * A PDF of three pages of text, in Helvetica, which it doesn't embed, so
+ * pdf.js reads its standard fonts. `null` for one named “(damaged)”.
+ */
+export function samplePdf(name: string): SampleFile | null {
+  if (name.includes('(damaged)')) return null
+  // PDF strings here are ASCII: others would need an encoding of their own.
+  const text = (value: string) =>
+    value.replace(/[^\x20-\x7e]/g, '-').replace(/[\\()]/g, (char) => `\\${char}`)
+  const lines = [
+    'This PDF was made up by the demo, so the viewer has something to show.',
+    'Its pages are drawn as they scroll into view, and its text can be selected.',
+    'Zoom with the buttons below, Ctrl and the wheel, or + and -.',
+  ]
+  const pages = [1, 2, 3].map((number) =>
+    [
+      'BT /F1 22 Tf 72 700 Td',
+      `(${text(name)}) Tj`,
+      '/F1 12 Tf 0 -40 Td 16 TL',
+      ...lines.map((line) => `(${text(line)}) Tj T*`),
+      `0 -560 Td (Page ${String(number)} of 3) Tj`,
+      'ET',
+    ].join('\n'),
+  )
+  // Objects: 1 catalog, 2 pages, 3 the font, then a page and its content for each page.
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    `<< /Type /Pages /Kids [${pages.map((_, index) => `${String(4 + index * 2)} 0 R`).join(' ')}] /Count ${String(pages.length)} >>`,
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>',
+    ...pages.flatMap((content, index) => [
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents ${String(5 + index * 2)} 0 R >>`,
+      `<< /Length ${String(content.length)} >>\nstream\n${content}\nendstream`,
+    ]),
+  ]
+  let body = '%PDF-1.4\n'
+  const offsets = objects.map((object, index) => {
+    const offset = body.length
+    body += `${String(index + 1)} 0 obj\n${object}\nendobj\n`
+    return offset
+  })
+  const xref = body.length
+  body += `xref\n0 ${String(objects.length + 1)}\n0000000000 65535 f \n`
+  body += offsets.map((offset) => `${String(offset).padStart(10, '0')} 00000 n \n`).join('')
+  body += `trailer\n<< /Size ${String(objects.length + 1)} /Root 1 0 R >>\nstartxref\n${String(xref)}\n%%EOF\n`
+  return { mimeType: 'application/pdf', body }
+}

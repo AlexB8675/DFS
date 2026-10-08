@@ -137,6 +137,8 @@ export function createSeed(version: number): MockState {
   const contracts = folder(documents, 'Contracts')
   file(contracts, 'Lease agreement.pdf', 3.1 * MB)
   file(contracts, 'Employment contract.pdf', 640 * KB)
+  // A PDF no reader can open: its preview says so (§10.3).
+  file(contracts, 'Scan (damaged).pdf', 210 * KB)
   file(contracts, 'NDA – Acme Corp.docx', 48 * KB)
   const notes = folder(documents, 'Notes')
   file(notes, 'Meeting notes.md', 12 * KB, { age: 2 * DAY })

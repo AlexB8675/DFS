@@ -38,7 +38,7 @@ import {
   type User,
 } from '@dfs/shared'
 import { previewKind } from '@/lib/preview-kind'
-import { sampleImage, sampleText } from './samples'
+import { sampleImage, samplePdf, sampleText } from './samples'
 import { createSeed } from './seed'
 import { createZip, type ZipEntry } from './zip'
 
@@ -177,7 +177,7 @@ export class MockFileExists extends MockApiError {
   }
 }
 
-const STATE_VERSION = 14
+const STATE_VERSION = 15
 const STORAGE_KEY = 'dfs.mock-db'
 /** `CHUNK_SIZE` at the 10 MiB attachment limit (§7.3). */
 export const CHUNK_SIZE = 10 * 1024 * 1024 - 128 * 1024
@@ -1443,12 +1443,16 @@ function mockContent(
   node: MockNode,
   mimeType: string | null,
 ): Pick<MockFileContent, 'mimeType' | 'body'> {
+  const kind =
+    fileCategory(node.name, mimeType) === 'image' ? 'image' : previewKind(node.name, mimeType)
   const sample =
-    fileCategory(node.name, mimeType) === 'image'
+    kind === 'image'
       ? sampleImage(node.id, node.name)
-      : previewKind(node.name, mimeType) === 'text'
-        ? sampleText(node.id, node.name, node.sizeBytes)
-        : null
+      : kind === 'pdf'
+        ? samplePdf(node.name)
+        : kind === 'text'
+          ? sampleText(node.id, node.name, node.sizeBytes)
+          : null
   const { mimeType: type, body } = sample ?? {
     mimeType: 'text/plain',
     body: `Mock content of “${node.name}” (${node.sizeBytes} bytes in the real file).\n`,

@@ -22,8 +22,9 @@ import { ImageView } from './image-view'
 import { NoPreview } from './no-preview'
 import type { ViewHandle } from './view-handle'
 
-// Text, with its editor, loads with the first text file opened.
+// Text, with its editor, loads with the first text file opened; pdf.js with the first PDF.
 const TextView = lazy(() => import('./text-view'))
+const PdfView = lazy(() => import('./pdf-view'))
 
 /** A file as the viewer shows it: from the drive, or from a share link. */
 export interface ViewedFile {
@@ -134,6 +135,18 @@ export function FileViewer({
         }}
       />
     )
+  } else if (kind === 'pdf') {
+    body = (
+      <Suspense fallback={<Loading />}>
+        <PdfView
+          key={file.id}
+          ref={view}
+          contentPath={contentPath}
+          sizeBytes={file.sizeBytes}
+          onDownload={onDownload}
+        />
+      </Suspense>
+    )
   } else if (kind === 'text') {
     body = (
       <Suspense fallback={<Loading />}>
@@ -213,6 +226,31 @@ export function FileViewer({
               <span className="px-1 text-xs text-muted-foreground tabular-nums max-sm:hidden">
                 {position.index + 1} / {position.total}
               </span>
+            )}
+            {/* On a phone, where the side arrows would cover the file. */}
+            {(previous ?? next) && (
+              <>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="sm:hidden"
+                  aria-label="Previous file"
+                  disabled={!previous}
+                  onClick={() => previous?.()}
+                >
+                  <ChevronLeft />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="sm:hidden"
+                  aria-label="Next file"
+                  disabled={!next}
+                  onClick={() => next?.()}
+                >
+                  <ChevronRight />
+                </Button>
+              </>
             )}
             {file && (
               <Button variant="ghost" size="icon" aria-label="Download" onClick={onDownload}>

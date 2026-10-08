@@ -87,7 +87,14 @@ describe('previewKind (§10.3)', () => {
     // Windows calls TypeScript an MPEG transport stream.
     expect(previewKind('router.ts', 'video/mp2t', chrome)).toBe('text')
     expect(previewKind('clip.mp4', 'video/mp4', chrome)).toBeNull()
-    expect(previewKind('report.pdf', 'application/pdf', chrome)).toBeNull()
+  })
+
+  it('shows PDFs, by type or by name', () => {
+    expect(previewKind('report', 'application/pdf', chrome)).toBe('pdf')
+    expect(previewKind('Scan.PDF', null, chrome)).toBe('pdf')
+    expect(previewKind('Scan.pdf', 'application/octet-stream', chrome)).toBe('pdf')
+    // A type that says otherwise wins.
+    expect(previewKind('notes.pdf', 'text/plain', chrome)).toBe('text')
   })
 })
 

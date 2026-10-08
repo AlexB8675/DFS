@@ -4,6 +4,7 @@ import tailwindcss from '@tailwindcss/vite'
 import react, { reactCompilerPreset } from '@vitejs/plugin-react'
 import { msw } from 'msw/vite'
 import { defineConfig, loadEnv } from 'vite'
+import { pdfjsAssets } from './pdfjs-assets.ts'
 
 export default defineConfig(({ command, mode }) => {
   const env = loadEnv(mode, import.meta.dirname)
@@ -15,6 +16,7 @@ export default defineConfig(({ command, mode }) => {
       react(),
       babel({ presets: [reactCompilerPreset()] }),
       tailwindcss(),
+      pdfjsAssets(),
       useMocks && msw({ mode: 'worker-only' }),
     ],
     resolve: {

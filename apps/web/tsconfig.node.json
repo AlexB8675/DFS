@@ -3,5 +3,5 @@
   "compilerOptions": {
     "types": ["node"]
   },
-  "include": ["vite.config.ts", "csp.test.ts"]
+  "include": ["vite.config.ts", "pdfjs-assets.ts", "csp.test.ts"]
 }

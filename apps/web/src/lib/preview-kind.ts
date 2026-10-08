@@ -3,7 +3,7 @@ import { splitExtension, type DriveNode } from '@dfs/shared'
 // Which viewer shows a file (DESIGN.md §10.3): only files the browser can
 // draw open in one; the rest download, as before previews.
 
-export type PreviewKind = 'image' | 'text'
+export type PreviewKind = 'image' | 'pdf' | 'text'
 
 /** How a text file is shown: Markdown formatted, JSON pretty-printed, the rest as it is. */
 export type TextFormat = 'markdown' | 'json' | 'plain'
@@ -131,8 +131,10 @@ export function previewKind(
       ? 'image'
       : null
   }
+  if (type === 'application/pdf' || type === 'application/x-pdf') return 'pdf'
   if (type && isTextType(type)) return 'text'
   const extension = splitExtension(name).extension.toLowerCase()
+  if (extension === '.pdf') return 'pdf'
   if (
     IMAGE_EXTENSIONS.has(extension) ||
     (support.appleImages && APPLE_IMAGE_EXTENSIONS.has(extension))
