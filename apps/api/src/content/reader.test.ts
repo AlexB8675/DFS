@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { Readable, Writable } from 'node:stream'
 import { setImmediate } from 'node:timers/promises'
 import { chunkContext, generateDek, importAesKey, sealFrame, sha256 } from '@dfs/crypto'
 import { Metrics, type Executor } from '@dfs/db'
@@ -10,6 +11,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { DataKeyCache } from '../keys.ts'
 import { FrameCache, MemoryBudget } from './frame-cache.ts'
 import { ContentError, readVersion, type ReadableVersion } from './reader.ts'
+import { paced } from './send.ts'
 
 async function fixture() {
   const versionId = crypto.randomUUID()
@@ -101,6 +103,31 @@ describe('readVersion', () => {
     })
     for await (const part of readVersion(app, version, 0, 7)) expect(part).toHaveLength(4)
     expect(read).toHaveBeenCalledTimes(2)
+  })
+
+  it('reads ahead for a response only once it has sent the first piece', async () => {
+    const { app, version, read } = await fixture()
+    const waiting: (() => void)[] = []
+    const response = new Writable({
+      highWaterMark: 1,
+      write(_piece, _encoding, callback) {
+        waiting.push(callback)
+      },
+    })
+    Readable.from(paced(response, readVersion(app, version, 0, 11))).pipe(response)
+    await vi.waitFor(() => {
+      expect(waiting).toHaveLength(1)
+    })
+    await setImmediate()
+    // A request cancelled now, as a seek cancels one, cost one chunk.
+    expect(read).toHaveBeenCalledTimes(1)
+    waiting.shift()?.()
+    await vi.waitFor(() => {
+      expect(waiting).toHaveLength(1)
+    })
+    // The client keeps up: the next chunk, and one ahead.
+    expect(read).toHaveBeenCalledTimes(3)
+    response.destroy()
   })
 
   it('reads one chunk at a time when the memory for reading ahead is taken', async () => {

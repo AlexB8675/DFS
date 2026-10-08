@@ -1,4 +1,4 @@
-import { Readable } from 'node:stream'
+import { Readable, type Writable } from 'node:stream'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { z } from 'zod'
 import { readVersion, type ReadableVersion } from './reader.ts'
@@ -44,7 +44,7 @@ export function sendFile(
   if (range)
     reply.code(206).header('content-range', `bytes ${String(start)}-${String(end)}/${String(size)}`)
   void reply.header('content-length', String(end - start + 1))
-  return reply.send(Readable.from(readVersion(app, file, start, end)))
+  return reply.send(Readable.from(paced(reply.raw, readVersion(app, file, start, end))))
 }
 
 /** An archive's query: the downloader's time zone (IANA), for its times. */
@@ -66,7 +66,40 @@ export function sendZip(
     .header('content-length', String(zipLength(entries)))
     .header('cache-control', 'private, no-store')
     .header('x-content-type-options', 'nosniff')
-    .send(Readable.from(writeZip(entries, { timeZone: zipTimeZone(timeZone) })))
+    .send(Readable.from(paced(reply.raw, writeZip(entries, { timeZone: zipTimeZone(timeZone) }))))
+}
+
+/**
+ * `source`'s pieces, each asked for only once the response has sent the one
+ * before it. `Readable.from` asks for the next piece as soon as it hands one
+ * on, before the client has any of it, so the reader would start reading
+ * ahead for a request about to be cancelled, as a seek cancels one (DESIGN.md
+ * §6.2). A response that closes instead ends the source.
+ */
+export async function* paced(
+  response: Writable,
+  source: AsyncIterable<Uint8Array>,
+): AsyncGenerator<Uint8Array> {
+  for await (const piece of source) {
+    yield piece
+    if (response.destroyed) return
+    if (response.writableNeedDrain && !(await drained(response))) return
+  }
+}
+
+/** Resolves `true` once `stream` drains, `false` if it closes first. */
+function drained(stream: Writable): Promise<boolean> {
+  return new Promise((resolve) => {
+    const settle = (result: boolean) => () => {
+      stream.off('drain', onDrain)
+      stream.off('close', onClose)
+      resolve(result)
+    }
+    const onDrain = settle(true)
+    const onClose = settle(false)
+    stream.once('drain', onDrain)
+    stream.once('close', onClose)
+  })
 }
 
 /**
