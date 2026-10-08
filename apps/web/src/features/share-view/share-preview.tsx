@@ -9,6 +9,8 @@ interface SharePreviewProps {
   token: string
   /** The folder's items, as far as they have loaded. */
   nodes: SharedNode[]
+  /** The folder's first page has come. */
+  loaded: boolean
   hasMore: boolean
   isLoadingMore: boolean
   onLoadMore: () => void
@@ -21,6 +23,7 @@ interface SharePreviewProps {
 export function SharePreview({
   token,
   nodes,
+  loaded,
   hasMore,
   isLoadingMore,
   onLoadMore,
@@ -35,7 +38,7 @@ export function SharePreview({
     findMissing: true,
   })
   const node = list.listed ?? null
-  const gone = list.shownId !== null && !node && !hasMore && !isLoadingMore
+  const gone = list.shownId !== null && !node && loaded && !hasMore && !isLoadingMore
   const error =
     gone || node?.kind === 'folder'
       ? { title: 'This file can’t be opened', description: 'It isn’t in this folder any more.' }

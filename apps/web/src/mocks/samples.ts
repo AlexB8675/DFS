@@ -88,6 +88,8 @@ function seeded(text: string): () => number {
   }
 }
 
+const logs = new Map<string, string>()
+
 /** Logs are made as large as they say, up to this: enough to pass the viewer's 5 MiB. */
 const LOG_LIMIT = 8 * 1024 * 1024
 
@@ -104,8 +106,12 @@ export function sampleText(id: string, name: string, sizeBytes: number): SampleF
       return { mimeType: 'text/markdown', body: markdown(name) }
     case '.json':
       return { mimeType: 'application/json', body: json(name) }
-    case '.log':
-      return { mimeType: 'text/plain', body: log(random, Math.min(sizeBytes, LOG_LIMIT)) }
+    case '.log': {
+      // Megabytes of it: made once, and kept for the next read.
+      const body = logs.get(id) ?? log(random, Math.min(sizeBytes, LOG_LIMIT))
+      logs.set(id, body)
+      return { mimeType: 'text/plain', body }
+    }
     case '.ts':
     case '.tsx':
       return { mimeType: 'text/x-typescript', body: typescript(name) }
@@ -260,7 +266,9 @@ function prose(random: () => number, name: string): string {
 
 /**
  * A PDF of three pages of text, in Helvetica, which it doesn't embed, so
- * pdf.js reads its standard fonts. `null` for one named “(damaged)”.
+ * pdf.js reads its standard fonts, each with a picture, which makes the file
+ * larger than pdf.js's first read: the rest comes in ranges. `null` for one
+ * named “(damaged)”.
  */
 export function samplePdf(name: string): SampleFile | null {
   if (name.includes('(damaged)')) return null
@@ -280,17 +288,22 @@ export function samplePdf(name: string): SampleFile | null {
       ...lines.map((line) => `(${text(line)}) Tj T*`),
       `0 -560 Td (Page ${String(number)} of 3) Tj`,
       'ET',
+      'q 300 0 0 300 156 230 cm /Im0 Do Q',
     ].join('\n'),
   )
-  // Objects: 1 catalog, 2 pages, 3 the font, then a page and its content for each page.
+  // Objects: 1 catalog, 2 pages, 3 the font, then each page's page, content and picture.
   const objects = [
     '<< /Type /Catalog /Pages 2 0 R >>',
-    `<< /Type /Pages /Kids [${pages.map((_, index) => `${String(4 + index * 2)} 0 R`).join(' ')}] /Count ${String(pages.length)} >>`,
+    `<< /Type /Pages /Kids [${pages.map((_, index) => `${String(4 + index * 3)} 0 R`).join(' ')}] /Count ${String(pages.length)} >>`,
     '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>',
-    ...pages.flatMap((content, index) => [
-      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents ${String(5 + index * 2)} 0 R >>`,
-      `<< /Length ${String(content.length)} >>\nstream\n${content}\nendstream`,
-    ]),
+    ...pages.flatMap((content, index) => {
+      const picture = gradient(index)
+      return [
+        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> /XObject << /Im0 ${String(6 + index * 3)} 0 R >> >> /Contents ${String(5 + index * 3)} 0 R >>`,
+        `<< /Length ${String(content.length)} >>\nstream\n${content}\nendstream`,
+        `<< /Type /XObject /Subtype /Image /Width 96 /Height 96 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /ASCIIHexDecode /Length ${String(picture.length)} >>\nstream\n${picture}\nendstream`,
+      ]
+    }),
   ]
   let body = '%PDF-1.4\n'
   const offsets = objects.map((object, index) => {
@@ -303,4 +316,18 @@ export function samplePdf(name: string): SampleFile | null {
   body += offsets.map((offset) => `${String(offset).padStart(10, '0')} 00000 n \n`).join('')
   body += `trailer\n<< /Size ${String(objects.length + 1)} /Root 1 0 R >>\nstartxref\n${String(xref)}\n%%EOF\n`
   return { mimeType: 'application/pdf', body }
+}
+
+/** A 96 × 96 picture, as hexadecimal text, so the PDF stays ASCII and its offsets its length. */
+function gradient(seed: number): string {
+  const hex = (value: number) => Math.round(value).toString(16).padStart(2, '0')
+  const rows: string[] = []
+  for (let y = 0; y < 96; y += 1) {
+    let row = ''
+    for (let x = 0; x < 96; x += 1) {
+      row += hex((x / 95) * 255) + hex((y / 95) * 255) + hex(((seed + 1) * 80) % 256)
+    }
+    rows.push(row)
+  }
+  return `${rows.join('\n')}>`
 }

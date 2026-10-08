@@ -644,7 +644,10 @@ function fileResponse(request: Request, file: MockFileContent): Response {
     'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(file.name)}`,
     'Accept-Ranges': 'bytes',
   }
-  const match = /^bytes=(\d*)-(\d*)$/.exec(request.headers.get('Range') ?? '')
+  // A range of another version than the one asked about is the whole file (If-Range).
+  const ifRange = request.headers.get('If-Range')
+  const range = ifRange === null || ifRange === file.etag ? request.headers.get('Range') : null
+  const match = /^bytes=(\d*)-(\d*)$/.exec(range ?? '')
   if (!match || (match[1] === '' && match[2] === '')) {
     return new HttpResponse(file.body.slice(), { headers })
   }

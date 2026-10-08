@@ -36,6 +36,8 @@ interface Gesture {
   pointers: Map<number, Point>
   /** The view and pointers when the pointers last changed. */
   start: { view: View; points: Point[] } | null
+  /** The view the gesture last set, which a render may not have shown yet. */
+  latest: View | null
   moved: boolean
   lastTap: { at: number; point: Point } | null
 }
@@ -47,7 +49,13 @@ interface Gesture {
  */
 export function ImageView({ src, alt, vector, ref, onSwipe, onError }: ImageViewProps) {
   const stageRef = useRef<HTMLDivElement>(null)
-  const gesture = useRef<Gesture>({ pointers: new Map(), start: null, moved: false, lastTap: null })
+  const gesture = useRef<Gesture>({
+    pointers: new Map(),
+    start: null,
+    latest: null,
+    moved: false,
+    lastTap: null,
+  })
   const [stage, setStage] = useState<Size>({ width: 0, height: 0 })
   const [natural, setNatural] = useState<Size | null>(null)
   /** `null` while it fits the screen, so it keeps fitting as the window changes. */
@@ -106,16 +114,21 @@ export function ImageView({ src, alt, vector, ref, onSwipe, onError }: ImageView
 
   // The wheel zooms. React's wheel handlers can't stop the page from zooming
   // with Ctrl (a trackpad's pinch), so this one is added by hand.
+  const { width: imageWidth, height: imageHeight } = image
+  const { width: stageWidth, height: stageHeight } = stage
   useEffect(() => {
     const element = stageRef.current
     if (!element) return
+    const picture = { width: imageWidth, height: imageHeight }
+    const room = { width: stageWidth, height: stageHeight }
     const onWheel = (event: WheelEvent) => {
       event.preventDefault()
       const lines = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : 1
       const factor = Math.exp(-event.deltaY * lines * (event.ctrlKey ? 0.01 : 0.002))
       const point = fromCentre(element, event)
       setZoom((current) => {
-        const next = zoomAt(current ?? fitted, factor, point, image, stage, fit)
+        const from = current ?? { scale: fit, x: 0, y: 0 }
+        const next = zoomAt(from, factor, point, picture, room, fit)
         return Math.abs(next.scale - fit) < 0.001 ? null : next
       })
     }
@@ -123,10 +136,17 @@ export function ImageView({ src, alt, vector, ref, onSwipe, onError }: ImageView
     return () => {
       element.removeEventListener('wheel', onWheel)
     }
-  })
+  }, [imageWidth, imageHeight, stageWidth, stageHeight, fit])
 
   function begin(points: Map<number, Point>, from: View) {
     gesture.current.start = points.size > 0 ? { view: from, points: [...points.values()] } : null
+    gesture.current.latest = from
+  }
+
+  /** Shows `next`, and keeps it for the gesture's next step. */
+  function follow(next: View) {
+    gesture.current.latest = next
+    setZoom(next)
   }
 
   function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
@@ -151,7 +171,7 @@ export function ImageView({ src, alt, vector, ref, onSwipe, onError }: ImageView
       const from = midpoint(a0, b0)
       const to = midpoint(a, b)
       const zoomed = zoomAt(start.view, distance(a, b) / distance(a0, b0), from, image, stage, fit)
-      setZoom(
+      follow(
         clampView(
           { ...zoomed, x: zoomed.x + to.x - from.x, y: zoomed.y + to.y - from.y },
           image,
@@ -165,9 +185,7 @@ export function ImageView({ src, alt, vector, ref, onSwipe, onError }: ImageView
     const dy = a.y - a0.y
     if (Math.abs(dx) + Math.abs(dy) > 4) gesture.current.moved = true
     if (canPan(start.view, image, stage)) {
-      setZoom(
-        clampView({ ...start.view, x: start.view.x + dx, y: start.view.y + dy }, image, stage),
-      )
+      follow(clampView({ ...start.view, x: start.view.x + dx, y: start.view.y + dy }, image, stage))
     }
   }
 
@@ -195,7 +213,7 @@ export function ImageView({ src, alt, vector, ref, onSwipe, onError }: ImageView
         gesture.current.lastTap = { at: now, point }
       }
     }
-    begin(pointers, view)
+    begin(pointers, gesture.current.latest ?? view)
   }
 
   const percent = Math.round(view.scale * 100)

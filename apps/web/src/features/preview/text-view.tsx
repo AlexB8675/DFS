@@ -10,6 +10,7 @@ import { fileCategory } from '@/lib/file-types'
 import { formatBytes } from '@/lib/format'
 import { textFormat } from '@/lib/preview-kind'
 import { CodeView } from './code-view'
+import { rangeTotal } from './content-range'
 import { NoPreview } from './no-preview'
 import { decodeText, formatJson, TEXT_CAP, type DecodedText } from './text'
 import type { ViewHandle } from './view-handle'
@@ -160,11 +161,11 @@ async function readText(path: string, sizeBytes: number, signal: AbortSignal): P
       return { binary: false, text: '', cut: false }
     throw error
   }
-  const total = Number(/\/(\d+)$/.exec(response.headers.get('Content-Range') ?? '')?.[1] ?? NaN)
+  const total = rangeTotal(response)
   let bytes = new Uint8Array(await response.arrayBuffer())
   // A server that sent all of it anyway: the start will do.
   if (bytes.length > TEXT_CAP) bytes = bytes.subarray(0, TEXT_CAP)
-  const size = Number.isFinite(total) ? total : sizeBytes
+  const size = total ?? sizeBytes
   const cut = size > bytes.length
   return { ...decodeText(bytes, cut), cut, size }
 }

@@ -1,4 +1,5 @@
 import type { KeyboardEvent } from 'react'
+import { isEditable } from '@/lib/editable'
 import type { ViewHandle } from './view-handle'
 
 /**
@@ -31,11 +32,4 @@ export function handlePreviewKey(
   if (!action) return
   event.preventDefault()
   action()
-}
-
-function isEditable(target: EventTarget): boolean {
-  return (
-    target instanceof HTMLElement &&
-    (target.isContentEditable || target.closest('input, textarea, select') !== null)
-  )
 }

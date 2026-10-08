@@ -126,20 +126,22 @@ export function previewKind(
   support: PreviewSupport = browserSupport,
 ): PreviewKind | null {
   const type = baseType(mimeType)
+  const extension = splitExtension(name).extension.toLowerCase()
+  const imageByName =
+    IMAGE_EXTENSIONS.has(extension) ||
+    (support.appleImages && APPLE_IMAGE_EXTENSIONS.has(extension))
   if (type?.startsWith('image/')) {
-    return IMAGE_TYPES.has(type) || (support.appleImages && APPLE_IMAGE_TYPES.has(type))
+    // One it doesn't know (`image/jpg`, `image/x-png`) defers to the name.
+    return IMAGE_TYPES.has(type) ||
+      (support.appleImages && APPLE_IMAGE_TYPES.has(type)) ||
+      imageByName
       ? 'image'
       : null
   }
   if (type === 'application/pdf' || type === 'application/x-pdf') return 'pdf'
   if (type && isTextType(type)) return 'text'
-  const extension = splitExtension(name).extension.toLowerCase()
   if (extension === '.pdf') return 'pdf'
-  if (
-    IMAGE_EXTENSIONS.has(extension) ||
-    (support.appleImages && APPLE_IMAGE_EXTENSIONS.has(extension))
-  )
-    return 'image'
+  if (imageByName) return 'image'
   if (TEXT_EXTENSIONS.has(extension) || TEXT_NAMES.has(name.toLowerCase())) return 'text'
   return null
 }

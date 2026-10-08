@@ -89,6 +89,22 @@ export function downloadTests({ describe, it, expect, owner, target }: SuiteCont
       expect(replaced.response.headers.get('etag')).not.toBe(etag)
     })
 
+    it('serves a range only of the version it names (If-Range), and another whole', async () => {
+      const client = await owner()
+      const root = await workspace(client)
+      const session = await uploadFile(client, root.id, 'grows.txt', text('first version'))
+      const path = `/files/${session.nodeId}/content`
+      const etag = (await download(client, path)).response.headers.get('etag') ?? ''
+      const same = await download(client, path, { Range: 'bytes=6-12', 'If-Range': etag })
+      expect(same.response.status).toBe(206)
+      expect(new TextDecoder().decode(same.bytes)).toBe('version')
+
+      await uploadFile(client, root.id, 'grows.txt', text('second version'))
+      const other = await download(client, path, { Range: 'bytes=6-12', 'If-Range': etag })
+      expect(other.response.status).toBe(200)
+      expect(new TextDecoder().decode(other.bytes)).toBe('second version')
+    })
+
     it('zips a folder with its subfolders, empty ones included', async () => {
       const client = await owner()
       const root = await workspace(client)

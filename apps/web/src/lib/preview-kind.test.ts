@@ -43,6 +43,9 @@ describe('previewKind (§10.3)', () => {
     expect(previewKind('photo.txt', 'image/png', chrome)).toBe('image')
     // Images no browser draws.
     expect(previewKind('layers.psd', 'image/vnd.adobe.photoshop', chrome)).toBeNull()
+    // A type no browser gives, with a name that says what it is.
+    expect(previewKind('photo.jpg', 'image/jpg', chrome)).toBe('image')
+    expect(previewKind('photo', 'image/jpg', chrome)).toBeNull()
     expect(previewKind('raw.cr2', 'image/x-canon-cr2', safari)).toBeNull()
   })
 

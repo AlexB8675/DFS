@@ -206,8 +206,13 @@ function SharedFile({ token, share, file }: { token: string; share: OpenShare; f
     }
   }
 
-  const downloadButton = (
-    <Button disabled={downloading} onClick={() => void download()}>
+  const downloadButton = (large: boolean) => (
+    <Button
+      size={large ? 'lg' : 'default'}
+      className={large ? 'px-6' : undefined}
+      disabled={downloading}
+      onClick={() => void download()}
+    >
       {downloading ? <Spinner /> : <Download />} Download
     </Button>
   )
@@ -226,7 +231,7 @@ function SharedFile({ token, share, file }: { token: string; share: OpenShare; f
               lead={`${formatBytes(file.sizeBytes)} · modified ${formatDate(file.updatedAt)}`}
             />
           </div>
-          {downloadButton}
+          {downloadButton(false)}
         </div>
         <InlinePreview
           file={file}
@@ -246,9 +251,7 @@ function SharedFile({ token, share, file }: { token: string; share: OpenShare; f
           {formatBytes(file.sizeBytes)} · modified {formatDate(file.updatedAt)}
         </p>
       </div>
-      <Button size="lg" className="px-6" disabled={downloading} onClick={() => void download()}>
-        {downloading ? <Spinner /> : <Download />} Download
-      </Button>
+      {downloadButton(true)}
       <ShareFacts share={share} />
     </Centered>
   )
@@ -399,6 +402,7 @@ function SharedFolder({ token, share }: { token: string; share: OpenShare }) {
       <SharePreview
         token={token}
         nodes={nodes}
+        loaded={listing.isSuccess}
         hasMore={listing.hasNextPage}
         isLoadingMore={listing.isFetchingNextPage}
         onLoadMore={() => void listing.fetchNextPage()}

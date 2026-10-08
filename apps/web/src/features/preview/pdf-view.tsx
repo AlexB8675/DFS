@@ -15,6 +15,7 @@ import 'pdfjs-dist/web/pdf_viewer.css'
 import { useEffect, useImperativeHandle, useRef, useState, type Ref } from 'react'
 import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
+import { rangeTotal } from './content-range'
 import { NoPreview } from './no-preview'
 import type { ViewHandle } from './view-handle'
 
@@ -64,10 +65,9 @@ class RangeReader extends PDFDataRangeTransport {
   }
 
   async #read(begin: number, end: number): Promise<void> {
-    const response = await fetch(this.#url, {
-      headers: { Range: `bytes=${String(begin)}-${String(end - 1)}`, 'If-Range': this.#etag },
-      signal: this.#signal,
-    })
+    const headers: Record<string, string> = { Range: `bytes=${String(begin)}-${String(end - 1)}` }
+    if (this.#etag) headers['If-Range'] = this.#etag
+    const response = await fetch(this.#url, { headers, signal: this.#signal })
     if (response.status !== 206) {
       void response.body?.cancel()
       throw new Error('The file changed while it was open.')
@@ -85,11 +85,10 @@ async function readFirst(url: string, signal: AbortSignal): Promise<FirstRead | 
   if (response.status === 416) return null
   if (!response.ok) throw new Error(`The file couldn’t be read (${String(response.status)}).`)
   const bytes = new Uint8Array(await response.arrayBuffer())
-  const total = /\/(\d+)$/.exec(response.headers.get('Content-Range') ?? '')?.[1]
   return {
     bytes,
     // All of it, when the server sent it whole.
-    length: total === undefined ? bytes.length : Number(total),
+    length: rangeTotal(response) ?? bytes.length,
     etag: response.headers.get('ETag') ?? '',
   }
 }
@@ -146,6 +145,8 @@ export default function PdfView({ contentPath, onDownload, ref }: PdfViewProps) 
 
     const url = `/api${contentPath}`
     const stop = new AbortController()
+    /** The view went away: whatever comes back after an await is for nobody. */
+    const closed = () => stop.signal.aborted
     let task: PDFDocumentLoadingTask | null = null
     const open = async () => {
       const first = await readFirst(url, stop.signal)
@@ -153,7 +154,7 @@ export default function PdfView({ contentPath, onDownload, ref }: PdfViewProps) 
         setStatus('damaged')
         return
       }
-      if (stop.signal.aborted) return
+      if (closed()) return
       task = getDocument({
         range: new RangeReader(url, first, stop.signal, () => {
           setStatus('failed')
@@ -169,6 +170,7 @@ export default function PdfView({ contentPath, onDownload, ref }: PdfViewProps) 
         disableAutoFetch: true,
       })
       const pdf = await task.promise
+      if (closed()) return
       pdfViewer.setDocument(pdf)
       linkService.setDocument(pdf)
       setPages(pdf.numPages)
@@ -177,7 +179,7 @@ export default function PdfView({ contentPath, onDownload, ref }: PdfViewProps) 
       element.focus({ preventScroll: true })
     }
     open().catch((error: unknown) => {
-      if (stop.signal.aborted) return
+      if (closed()) return
       if (error instanceof PasswordException) setStatus('locked')
       else if (error instanceof InvalidPDFException) setStatus('damaged')
       else setStatus('failed')

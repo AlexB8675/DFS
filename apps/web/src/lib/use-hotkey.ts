@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import { isEditable } from './editable'
 
 /**
  * Calls `handler` when `key` is pressed anywhere, unless the user is typing
@@ -22,12 +23,5 @@ export function useHotkey(key: string, handler: () => void): void {
 function inDialog(target: EventTarget | null): boolean {
   return (
     target instanceof Element && target.closest('[role="dialog"], [role="alertdialog"]') !== null
-  )
-}
-
-function isEditable(target: EventTarget | null): boolean {
-  return (
-    target instanceof HTMLElement &&
-    (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))
   )
 }
