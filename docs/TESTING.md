@@ -1,7 +1,9 @@
 # Testing DFS locally
 
 Run these commands in PowerShell from `D:\Dev\Claude\Code\dfs`. Use Node.js 24 or
-newer and start Docker Desktop before running integration tests.
+newer and start Docker Desktop before running integration tests. The media
+service's tests build its image the first time (about a minute) and run ffmpeg
+in it: no ffmpeg is needed on this machine.
 
 ## Set up pnpm
 
@@ -49,7 +51,9 @@ VITE_API_MOCKS=off
 This makes the browser use the real API. Set `BLOB_STORE=local` in the root
 `.env` for local storage. The root `.env.example` documents the other settings.
 
-Start and migrate the development database:
+Start and migrate the development database. `pnpm db:up` also builds and
+starts the media service, which examines audio and video (about a minute the
+first time):
 
 ```powershell
 pnpm db:up

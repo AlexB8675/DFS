@@ -15,7 +15,7 @@
     "check": "prettier --check . && turbo run typecheck lint test",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "db:up": "docker compose -f docker/docker-compose.dev.yml up -d --wait",
+    "db:up": "docker compose -f docker/docker-compose.dev.yml up -d --build --wait",
     "db:down": "docker compose -f docker/docker-compose.dev.yml down",
     "db:migrate": "pnpm --filter @dfs/db migrate",
     "dfs": "pnpm --silent --filter @dfs/api dfs"

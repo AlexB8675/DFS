@@ -16,12 +16,15 @@ import { FrameCache, MemoryBudget } from './content/frame-cache.ts'
 import { registerErrorHandling } from './errors.ts'
 import { EventHub } from './events/hub.ts'
 import { DataKeyCache, loadMasterKeys } from './keys.ts'
+import { MediaClient } from './media/client.ts'
+import { MediaExaminer } from './media/examine.ts'
 import { JobQueue } from './queue.ts'
 import { adminRoutes } from './routes/admin.ts'
 import { authRoutes } from './routes/auth.ts'
 import { contentRoutes } from './routes/content.ts'
 import { eventRoutes } from './routes/events.ts'
 import { healthRoutes } from './routes/health.ts'
+import { internalMediaRoutes, mediaRoutes } from './routes/media.ts'
 import { nodeRoutes } from './routes/nodes.ts'
 import { shareRoutes } from './routes/shares.ts'
 import { uploadStreamRoutes } from './routes/upload-stream.ts'
@@ -57,6 +60,8 @@ declare module 'fastify' {
     checks: Checks
     /** Seals the journal into batches for Discord (§8); `main.ts` starts it. */
     journalFlusher: JournalFlusher
+    /** Examines audio and video through the media service (§6.7); `null` without one. */
+    media: MediaExaminer | null
   }
 }
 
@@ -80,6 +85,7 @@ const UNTIMED_ROUTES = new Set([
   '/api/uploads/:id/content',
   '/api/s/:token/files/:id/content',
   '/api/s/:token/archive',
+  '/internal/media/:versionId',
 ])
 
 export interface AppOptions {
@@ -158,6 +164,17 @@ export async function buildApp({
   app.decorate('frameCache', frameCache)
   if (frameCache) metrics.gauge('cache.bytes', () => frameCache.bytes)
   app.decorate('readBudget', new MemoryBudget(READ_AHEAD_BYTES))
+  app.decorate(
+    'media',
+    config.mediaInternalUrl
+      ? new MediaExaminer({
+          client: new MediaClient(config.mediaInternalUrl),
+          db,
+          keys: app.keys,
+          log: app.log,
+        })
+      : null,
+  )
   const checks = new Checks(metrics)
   app.decorate('checks', checks)
   const journalFlusher = new JournalFlusher(app)
@@ -209,6 +226,9 @@ export async function buildApp({
   await app.register(eventRoutes, { prefix: '/api' })
   await app.register(contentRoutes, { prefix: '/api' })
   await app.register(shareRoutes, { prefix: '/api' })
+  await app.register(mediaRoutes, { prefix: '/api' })
+  // Outside /api: the media service's alone, which the edge never forwards.
+  await app.register(internalMediaRoutes)
   return app
 }
 

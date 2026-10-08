@@ -542,7 +542,7 @@ async function storePart(
   // The frame stays if its chunk row may have committed: once the transaction
   // reached COMMIT, whose answer can be lost. A throw before that rolls back.
   const attempt = { published: false, committing: false }
-  let pruned: string[] = []
+  let finished: Finished = { pruned: [], completed: null }
   try {
     const { frame, hash: frameHash } = await stageFrame(
       app.staging,
@@ -576,7 +576,7 @@ async function storePart(
       }
       // In the same transaction as the part: one lock of the session and one
       // commit per small file.
-      if (queue) pruned = await finishUpload(app, tx, queue, auth, current)
+      if (queue) finished = await finishUpload(app, tx, queue, auth, current)
       attempt.committing = true
     })
   } finally {
@@ -586,7 +586,7 @@ async function storePart(
       })
     }
   }
-  await removeStagedVersions(app, pruned)
+  await afterFinishing(app, finished)
 }
 
 /** Whether this part already arrived with these bytes; other bytes are a conflict. */
@@ -619,11 +619,17 @@ export async function completeUpload(
 ): Promise<void> {
   if (partSha256) await checkParts(app, auth, uploadId, partSha256)
   const queue = await app.queue.get()
-  const pruned = await app.db.transaction(async (tx) => {
+  const finished = await app.db.transaction(async (tx) => {
     const upload = await findUpload(tx, auth, uploadId, { lock: true })
     return finishUpload(app, tx, queue, auth, upload)
   })
-  await removeStagedVersions(app, pruned)
+  await afterFinishing(app, finished)
+}
+
+/** Once an upload's completion commits: its pruned versions' frames go, and audio and video are examined (§6.7). */
+async function afterFinishing(app: FastifyInstance, finished: Finished): Promise<void> {
+  await removeStagedVersions(app, finished.pruned)
+  if (finished.completed) app.media?.afterUpload(finished.completed)
 }
 
 /**
@@ -670,18 +676,23 @@ async function checkParts(
   throw new ApiError(400, 'hash_mismatch', 'Some parts were corrupted in transit.')
 }
 
-/**
- * Completes an upload whose session the caller's transaction has locked.
- * Returns the pruned versions, whose staged frames go once it commits.
- */
+/** What completing an upload did, for what follows its commit. */
+interface Finished {
+  /** Versions pruned, whose staged frames go. */
+  pruned: string[]
+  /** The version completed now, if this did it. */
+  completed: { versionId: string; name: string; mimeType: string | null; size: number } | null
+}
+
+/** Completes an upload whose session the caller's transaction has locked. */
 async function finishUpload(
   app: FastifyInstance,
   tx: Executor,
   queue: PgBoss,
   auth: Auth,
   upload: UploadRow,
-): Promise<string[]> {
-  if (upload.state === 'completed') return []
+): Promise<Finished> {
+  if (upload.state === 'completed') return { pruned: [], completed: null }
 
   const { rows: parts } = await tx.execute<{ plain_sha256: Buffer }>(sql`
     SELECT plain_sha256 FROM chunks WHERE version_id = ${upload.version_id} ORDER BY idx`)
@@ -765,7 +776,15 @@ async function finishUpload(
   // An empty file is stored now, with no blob for the bot to journal it after.
   const stored = upload.chunk_count === 0 ? await versionRecords(tx, [upload.version_id]) : []
   await appendJournal(tx, [...pruneRecords, ...nodeRecords([node]), ...stored, ...audited])
-  return prunedIds
+  return {
+    pruned: prunedIds,
+    completed: {
+      versionId: upload.version_id,
+      name: node.name,
+      mimeType: node.mimeType,
+      size: upload.size_bytes,
+    },
+  }
 }
 
 /** `DELETE /uploads/:id`. A completed upload stays: its file is in the drive now. */

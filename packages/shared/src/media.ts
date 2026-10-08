@@ -137,3 +137,15 @@ export const probeResultSchema = z.discriminatedUnion('ok', [
 ])
 
 export type ProbeResult = z.infer<typeof probeResultSchema>
+
+/**
+ * `GET /files/:id/media`: what examining the current version found, or why
+ * it holds nothing to play (`problem`).
+ */
+export const fileMediaSchema = z.object({
+  versionId: z.uuid(),
+  info: mediaInfoSchema.nullable(),
+  problem: z.string().max(300).nullable(),
+})
+
+export type FileMedia = z.infer<typeof fileMediaSchema>

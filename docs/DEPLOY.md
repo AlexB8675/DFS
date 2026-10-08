@@ -133,9 +133,15 @@ bot start again. To go back, deploy the earlier commit (`git checkout
 when the migrations since added things. 0019 (`0c14ae7`) and 0020 (`361410b`)
 dropped columns and states, so code from before them can't.
 
+The first deploy with the media service (DESIGN §6.7) builds its image too,
+`dfs-media`: about 1 GB, most of it ffmpeg's libraries, and a few minutes on
+the VPS. It needs no secret and no setting of its own, and has nothing to
+back up: what it found about each file is in the database, and is found again
+if lost.
+
 ## Looking after it
 
-- **Logs:** `docker compose logs -f api` (or `bot`, `caddy`, `postgres`).
+- **Logs:** `docker compose logs -f api` (or `bot`, `media`, `caddy`, `postgres`).
   They rotate at 10 MB, five files per service.
 - **Disk:** `df -h /` and `docker system df`. Staging is capped at
   `STAGING_MAX_BYTES` and the cache at `CACHE_MAX_BYTES`; old images go with

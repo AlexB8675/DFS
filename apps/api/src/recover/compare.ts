@@ -101,8 +101,13 @@ const TABLES: readonly TableSpec[] = [
   },
 ]
 
-/** Tables recovery leaves empty: sessions, uploads in progress, tickets, graphs, the outbox. */
+/**
+ * Tables recovery leaves empty: sessions, uploads in progress, tickets,
+ * graphs, the outbox, and what examining audio and video found, which is
+ * found again as they are played (§6.7).
+ */
 const NOT_RECOVERED = new Set([
+  'media_info',
   'sessions',
   'upload_sessions',
   'archive_tickets',

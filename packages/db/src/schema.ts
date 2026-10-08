@@ -1,3 +1,4 @@
+import type { MediaInfo } from '@dfs/shared'
 import { sql } from 'drizzle-orm'
 import {
   bigint,
@@ -539,4 +540,25 @@ export const metrics = pgTable(
     max: doublePrecision('max').notNull(),
   },
   (t) => [primaryKey({ name: 'metrics_pkey', columns: [t.name, t.step, t.at] })],
+)
+
+// ── Media (§6.7) ─────────────────────────────────────────────────────────────
+
+/**
+ * What examining an audio or video version found: its media info, or why it
+ * holds nothing ffmpeg reads (`problem`), so it isn't examined again. It is
+ * derived, so not journaled: after a recovery, files are examined again as
+ * they are played. It goes with its version.
+ */
+export const mediaInfo = pgTable(
+  'media_info',
+  {
+    versionId: uuid('version_id')
+      .primaryKey()
+      .references(() => fileVersions.id, { onDelete: 'cascade' }),
+    info: jsonb('info').$type<MediaInfo>(),
+    problem: text('problem'),
+    examinedAt: timestamptz('examined_at').notNull().defaultNow(),
+  },
+  (t) => [check('media_info_found', sql`(${t.info} IS NULL) <> (${t.problem} IS NULL)`)],
 )

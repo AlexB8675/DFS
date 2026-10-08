@@ -162,6 +162,13 @@
       "when": 1791403549352,
       "tag": "0022_password_reset_requests",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1791492990994,
+      "tag": "0023_media_info",
+      "breakpoints": true
     }
   ]
 }

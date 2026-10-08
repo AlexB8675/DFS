@@ -58,8 +58,9 @@ function recentTotals(app: FastifyInstance, now = Date.now()): Promise<StorageTo
  * and storage.
  */
 export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> {
-  const [bot, figures, recent, troubles, database] = await Promise.all([
+  const [bot, media, figures, recent, troubles, database] = await Promise.all([
     botHealth(app),
+    mediaHealth(app),
     systemFigures(app.db, () => recentTotals(app)),
     // From the metrics: what reached Discord lately, the cache's hits this
     // last hour, and the failures of the last hour that make alerts.
@@ -171,6 +172,7 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
     services: [
       { name: 'API', status: 'ok', detail: `up ${uptime()}` },
       bot,
+      media,
       {
         name: 'Database',
         status: 'ok',
@@ -263,6 +265,25 @@ export async function botHealth(app: FastifyInstance): Promise<SystemHealth['ser
     }
   } catch {
     return { name: 'Bot', status: 'down', detail: 'Not answering' }
+  }
+}
+
+/** The media service (§6.7): which ffmpeg it runs, or that audio and video play only as they are. */
+export async function mediaHealth(app: FastifyInstance): Promise<SystemHealth['services'][number]> {
+  if (!app.media) {
+    return {
+      name: 'Media',
+      status: 'degraded',
+      detail: 'Not set up: audio and video play as they are',
+    }
+  }
+  try {
+    const health = await app.media.client.health()
+    // "ffprobe version 7.1.5-0+deb13u1 Copyright …" says ffmpeg 7.1.5.
+    const version = /version (\d[\w.]*)/.exec(health.ffmpeg)?.[1]
+    return { name: 'Media', status: 'ok', detail: version ? `ffmpeg ${version}` : 'Up' }
+  } catch {
+    return { name: 'Media', status: 'down', detail: 'Not answering' }
   }
 }
 

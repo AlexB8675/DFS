@@ -1,5 +1,5 @@
-# Production on one host (DESIGN.md §3.2, §13.2): caddy, api, bot, postgres,
-# and migrate, which runs once before the API and the bot start. Settings
+# Production on one host (DESIGN.md §3.2, §13.2): caddy, api, bot, media,
+# postgres, and migrate, which runs once before the API and the bot start. Settings
 # come from docker/.env (from .env.example); secrets are files in DFS_SECRETS
 # (/etc/dfs/secrets), mounted read-only in /run/secrets. Only Caddy publishes
 # ports; Postgres has no way out at all.
@@ -114,6 +114,7 @@ services:
       CACHE_DIR: /data/cache
       CACHE_MAX_BYTES: ${CACHE_MAX_BYTES:-15GiB}
       MASTER_KEY_FILE: /run/secrets/dfs_master_key
+      MEDIA_INTERNAL_URL: http://media:3002
     secrets: [dfs_database_url, dfs_internal_rpc_secret, dfs_master_key]
     volumes:
       - staging:/data/staging
@@ -136,6 +137,41 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+
+  # ffmpeg, which parses what anyone with an account uploads (§6.7): no
+  # secrets, no way out, nothing to write but /tmp, and little of the VPS.
+  media:
+    build:
+      context: ..
+      dockerfile: docker/media.Dockerfile
+      args:
+        DFS_VERSION: ${DFS_VERSION:-dev}
+    image: dfs-media
+    restart: unless-stopped
+    environment:
+      API_INTERNAL_URL: http://api:3000
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    cpus: 1
+    mem_limit: 512m
+    pids_limit: 256
+    networks: [internal]
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://localhost:3002/health').then((r) => process.exit(r.ok ? 0 : 1),
+          () => process.exit(1))
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging: *logging
 
   caddy:
     build:

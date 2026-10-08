@@ -887,6 +887,7 @@ Expected profile (D7): **few users (≤ ~20), many files.** The design targets *
 |---|---|
 | Node.js 24 LTS + **pnpm** (via Corepack) | Native on Windows. `pnpm` itself must be on the PATH (`corepack enable pnpm`), because Turborepo calls it; `corepack pnpm …` alone is not enough |
 | PostgreSQL 18 | `pnpm db:up` (Docker Desktop), then `pnpm db:migrate`. Port `5432` is published to **localhost only**. It starts with `pg_stat_statements` loaded, as production will, for Admin → Database (§16) |
+| media (`:3002`) | `pnpm db:up` too: its image, with ffmpeg, which the development machine needn't have (§6.7), built the first time (about a minute) and again when it changes. It reads files from the API on the host through Docker Desktop's `host.docker.internal`; port `3002` is published to localhost only. Without it, Admin → System says it isn't answering, and audio and video play only as they are |
 | api (`:3000`), bot (`:3001`), web (`:5173`) | `pnpm dev` (pnpm runs all three in parallel, avoiding Windows batch-shell shutdown hangs: `node --watch` on the TypeScript sources, D22, and Vite) |
 | First account | `dfs owner` creates the owner and prints a temporary password, as in production (§7.1) |
 | Web → API | The Vite dev server proxies `/api` to `localhost:3000`, so the browser sees one origin, as it will in production |
@@ -931,7 +932,7 @@ dfs/
 ├─ tools/
 │  └─ cli/            `dfs` admin CLI (setup, recover, rotate-key, verify)
 ├─ docker/
-│  ├─ docker-compose.dev.yml    local dev: Postgres only
+│  ├─ docker-compose.dev.yml    local dev: Postgres and the media service
 │  ├─ docker-compose.yml        production: caddy, api, bot, media, postgres, migrate
 │  ├─ Caddyfile                 TLS, SPA, route allowlist, streaming settings
 │  └─ *.Dockerfile              multi-stage builds per app
@@ -985,7 +986,8 @@ The **`BlobStore` interface** (`put(blob) → ref`, `get(ref, range?) → stream
 | `MASTER_KEY_FILE` | `/run/secrets/dfs_master_key` | api only. Holds the current key and every retired key, each with its `key_id` (§7.3). `dfs master-key <file>` makes a new one, never over an existing file |
 | `STAGING_DIR` / `STAGING_MAX_BYTES` | `/data/staging` / `20 GiB` | shared volume |
 | `CACHE_DIR` / `CACHE_MAX_BYTES` | `/data/cache` / `5 GiB` | per api instance |
-| `MEDIA_INTERNAL_URL` | `http://media:3002` | api only: the media service (§6.7); unset, audio and video play only as they are |
+| `MEDIA_INTERNAL_URL` | `http://media:3002` | api only: the media service (§6.7); unset, audio and video play only as they are. Development: `http://localhost:3002`; tests: none |
+| `API_INTERNAL_URL` / `MEDIA_PORT` | `http://api:3000` / `3002` | media only: where it reads files from, with the API's token for each (never a caller's URL), and where it listens. It reads no other setting, and no secret |
 | `MEDIA_REMUXES` | `4` | media only: remuxes running at once, across all viewers |
 | `MEDIA_CACHE_DIR` / `MEDIA_CACHE_MAX_BYTES` | `/data/media` / `10 GiB` | media only: segments, subtitles and covers, encrypted with a key kept in memory |
 | `UPLOAD_CHANNEL_CONCURRENCY` | `2` | in-flight uploads per channel |
@@ -1003,7 +1005,7 @@ The **`BlobStore` interface** (`put(blob) → ref`, `get(ref, range?) → stream
 
 **Secrets from files:** `DATABASE_URL`, `INTERNAL_RPC_SECRET` and `DISCORD_BOT_TOKEN` may each come from a file instead, named by `<NAME>_FILE` (as Compose mounts them, §13.2), without its line ending; setting both is an error. Commands and migrations need only the database: the API–bot secret is required of the API and the bot alone.
 
-**Development defaults:** with `NODE_ENV` set to `development` (the default) or `test`, every setting has a default that works with `docker/docker-compose.dev.yml`: `DATABASE_URL` points at it, `INTERNAL_RPC_SECRET` has a fixed development value, `PUBLIC_BASE_URL` is the Vite dev server (`http://localhost:5173`), `MASTER_KEY_FILE` is `./.data/master-key.json` (created on first start if missing, in development only), `BOT_INTERNAL_URL` is `http://localhost:3001`, `BLOB_STORE` is `local`, `DISCORD_CATEGORY_NAME` is `DFS Dev`, `DISCORD_GATEWAY` is `off` (D25), and staging and the cache live under `./.data`. Relative directories resolve against the repository root. Production has no defaults for the database and the secrets, and requires `INTERNAL_RPC_SECRET` to be at least 32 characters.
+**Development defaults:** with `NODE_ENV` set to `development` (the default) or `test`, every setting has a default that works with `docker/docker-compose.dev.yml`: `DATABASE_URL` points at it, `INTERNAL_RPC_SECRET` has a fixed development value, `PUBLIC_BASE_URL` is the Vite dev server (`http://localhost:5173`), `MASTER_KEY_FILE` is `./.data/master-key.json` (created on first start if missing, in development only), `BOT_INTERNAL_URL` is `http://localhost:3001`, `MEDIA_INTERNAL_URL` is `http://localhost:3002` (development only), `BLOB_STORE` is `local`, `DISCORD_CATEGORY_NAME` is `DFS Dev`, `DISCORD_GATEWAY` is `off` (D25), and staging and the cache live under `./.data`. Relative directories resolve against the repository root. Production has no defaults for the database and the secrets, and requires `INTERNAL_RPC_SECRET` to be at least 32 characters.
 
 At startup, config parsing rejects size settings that can't work: it requires `PACK_THRESHOLD_BYTES + 38 ≤ BLOB_MAX_BYTES` (otherwise some small-file frames could never be packed) and `PACK_TARGET_BYTES ≤ BLOB_MAX_BYTES`.
 

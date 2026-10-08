@@ -51,6 +51,11 @@ export interface Config {
   tempPasswordDays: number
   internalRpcSecret: string
   botInternalUrl: string
+  /**
+   * The media service (§6.7), which the API alone calls; `null` without one,
+   * when audio and video play only as they are.
+   */
+  mediaInternalUrl: string | null
   /** Where users reach DFS, without a trailing slash: share links and the sign-in `Origin` check. Empty only for a production bot. */
   publicBaseUrl: string
   apiPort: number
@@ -85,6 +90,8 @@ const DEVELOPMENT = {
   INTERNAL_RPC_SECRET: 'development-only-internal-rpc-secret',
   PUBLIC_BASE_URL: 'http://localhost:5173',
   BOT_INTERNAL_URL: 'http://localhost:3001',
+  /** Its container, from `pnpm db:up` (docker-compose.dev.yml); tests have none. */
+  MEDIA_INTERNAL_URL: 'http://localhost:3002',
   BLOB_STORE: 'local',
   DISCORD_CATEGORY_NAME: 'DFS Dev',
   DISCORD_GATEWAY: 'off',
@@ -174,6 +181,7 @@ const envSchema = z.object({
   TEMP_PASSWORD_DAYS: integer(7, 1),
   INTERNAL_RPC_SECRET: setting(z.string().optional()),
   BOT_INTERNAL_URL: setting(z.url().optional()),
+  MEDIA_INTERNAL_URL: setting(z.url().optional()),
   PUBLIC_BASE_URL: setting(z.url().optional()),
   API_PORT: port(3000),
   BOT_PORT: port(3001),
@@ -335,6 +343,11 @@ export function loadConfig(env: Record<string, string | undefined>, options: Loa
     tempPasswordDays: raw.TEMP_PASSWORD_DAYS,
     internalRpcSecret,
     botInternalUrl: raw.BOT_INTERNAL_URL ?? defaults.BOT_INTERNAL_URL,
+    mediaInternalUrl:
+      (
+        raw.MEDIA_INTERNAL_URL ??
+        (raw.NODE_ENV === 'development' ? DEVELOPMENT.MEDIA_INTERNAL_URL : null)
+      )?.replace(/\/+$/, '') ?? null,
     publicBaseUrl: (raw.PUBLIC_BASE_URL ?? (production ? '' : DEVELOPMENT.PUBLIC_BASE_URL)).replace(
       /\/+$/,
       '',

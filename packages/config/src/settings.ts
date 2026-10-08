@@ -79,6 +79,7 @@ export function describeSettings(
       entry('General', 'api', 'API_PORT', config.apiPort),
       entry('General', 'bot', 'BOT_PORT', config.botPort),
       entry('General', 'api', 'TRUSTED_PROXY_CIDRS', config.trustedProxyCidrs.join(', ')),
+      entry('General', 'api', 'MEDIA_INTERNAL_URL', config.mediaInternalUrl ?? 'none'),
       entry('Storage', 'both', 'BLOB_STORE', config.blobStore),
       // The API reads these only to show them.
       entry('Storage', 'bot', 'DISCORD_GUILD_ID', discord.guildId ?? 'none'),

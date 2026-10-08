@@ -1,5 +1,6 @@
-# Local development: PostgreSQL 18 only (DESIGN §13.1). The app runs on the
-# host with `pnpm dev`. The port is published on localhost only.
+# Local development (DESIGN §13.1): PostgreSQL 18, and the media service,
+# which needs ffmpeg (§6.7). The app runs on the host with `pnpm dev`. Ports
+# are published on localhost only.
 #
 #   docker compose -f docker/docker-compose.dev.yml up -d
 name: dfs-dev
@@ -23,6 +24,35 @@ services:
       - postgres-data:/var/lib/postgresql
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U dfs -d dfs']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # It reads files from the API on the host: Docker Desktop's
+  # host.docker.internal reaches the API there, bound to localhost.
+  media:
+    build:
+      context: ..
+      dockerfile: docker/media.Dockerfile
+    image: dfs-media:dev
+    restart: unless-stopped
+    environment:
+      API_INTERNAL_URL: http://host.docker.internal:3000
+    extra_hosts: ['host.docker.internal:host-gateway']
+    ports:
+      - '127.0.0.1:3002:3002'
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://localhost:3002/health').then((r) => process.exit(r.ok ? 0 : 1),
+          () => process.exit(1))
       interval: 2s
       timeout: 3s
       retries: 30
