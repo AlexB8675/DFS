@@ -10,7 +10,8 @@ import type { FastifyInstance } from 'fastify'
 // the requested slice. Chunks are read ahead while the current one is sent,
 // more of them as the reader keeps up, never past the requested range. A
 // response asks for its next piece only once its socket has taken the last
-// (`paced`, send.ts).
+// (`paced`, send.ts), and gives up on what is being read once its client has
+// gone (`cancellation`), so a cancelled seek stops fetching at once.
 
 /** What reading needs to know about a file version. */
 export interface ReadableVersion extends Record<string, unknown> {
@@ -57,12 +58,17 @@ export class ContentError extends Error {
   }
 }
 
-/** Bytes `start` to `end` (inclusive) of a version, as plaintext. */
+/**
+ * Bytes `start` to `end` (inclusive) of a version, as plaintext. Once
+ * `signal` aborts, the chunks being read are given up on, unless another
+ * reader waits for them too, and the stream fails with its reason.
+ */
 export async function* readVersion(
   app: FastifyInstance,
   version: ReadableVersion,
   start: number,
   end: number,
+  signal?: AbortSignal,
 ): AsyncGenerator<Uint8Array> {
   if (end < start) return
   const { version_id: versionId, chunk_size: chunkSize } = version
@@ -90,7 +96,11 @@ export async function* readVersion(
             ? NOTHING_TO_GIVE_BACK
             : app.readBudget.tryTake(chunk.frame_size)
         if (!giveBack) break
-        reading.push({ chunk, plaintext: prefetchChunk(app, versionId, key, chunk), giveBack })
+        reading.push({
+          chunk,
+          plaintext: prefetchChunk(app, versionId, key, chunk, signal),
+          giveBack,
+        })
         upcoming = await locations.next()
       }
       const current = reading.shift()
@@ -111,7 +121,8 @@ export async function* readVersion(
       ahead = Math.min(MAX_READ_AHEAD, ahead + 1)
     }
   } finally {
-    // Reads ahead that nobody will send finish into the cache, then give their memory back.
+    // Reads ahead that nobody will send give their memory back once given up
+    // on (`signal`), or else finish into the cache.
     for (const { plaintext, giveBack } of reading) void plaintext.then(giveBack, giveBack)
     await locations.return(undefined)
   }
@@ -143,8 +154,9 @@ function prefetchChunk(
   versionId: string,
   key: AesKey,
   chunk: ChunkLocation,
+  signal: AbortSignal | undefined,
 ): Promise<Uint8Array> {
-  const next = readChunk(app, versionId, key, chunk)
+  const next = readChunk(app, versionId, key, chunk, signal)
   // The original promise still rejects when awaited; observe it immediately,
   // since backpressure or a disconnected client can delay or skip that await.
   void next.catch(() => undefined)
@@ -156,8 +168,9 @@ async function readChunk(
   versionId: string,
   key: AesKey,
   chunk: ChunkLocation,
+  signal: AbortSignal | undefined,
 ): Promise<Uint8Array> {
-  const frame = await checkedFrame(app, versionId, chunk)
+  const frame = await checkedFrame(app, versionId, chunk, signal)
   const plaintext = await openFrame(key, frame, chunkContext(versionId, chunk.idx))
   if (plaintext.length !== chunk.plain_size) {
     throw new ContentError(`Chunk ${String(chunk.idx)} of ${versionId} has the wrong size.`)
@@ -170,16 +183,21 @@ async function checkedFrame(
   app: FastifyInstance,
   versionId: string,
   chunk: ChunkLocation,
+  signal: AbortSignal | undefined,
 ): Promise<Uint8Array> {
-  const read = async () => {
-    const frame = await readFrame(app, versionId, chunk)
+  // Through the cache, the fetch has its own signal: the cache gives up on it
+  // only once every reader waiting for the frame has.
+  const read = async (fetchSignal: AbortSignal | undefined) => {
+    const frame = await readFrame(app, versionId, chunk, fetchSignal)
     if (!Buffer.from(await sha256(frame)).equals(chunk.frame_sha256)) {
       throw new ContentError(`Chunk ${String(chunk.idx)} of ${versionId} is corrupt.`)
     }
     return frame
   }
   const stored = !chunk.staged_path && !chunk.blob_staged_path && chunk.blob_state === 'stored'
-  return stored && app.frameCache ? app.frameCache.load(chunk.frame_sha256, read) : read()
+  return stored && app.frameCache
+    ? app.frameCache.load(chunk.frame_sha256, read, signal)
+    : read(signal)
 }
 
 async function chunkLocations(
@@ -211,6 +229,7 @@ async function readFrame(
   app: FastifyInstance,
   versionId: string,
   chunk: ChunkLocation,
+  signal: AbortSignal | undefined,
 ): Promise<Uint8Array> {
   const { staged_path: own, blob_staged_path: pack, blob_offset: offset } = chunk
   if (own || (pack && offset !== null)) {
@@ -220,7 +239,7 @@ async function readFrame(
         : await app.staging.readRange(pack ?? '', offset ?? 0, chunk.frame_size)
     } catch (error) {
       if ((error as { code?: unknown }).code !== 'ENOENT') throw error
-      return readMoved(app, versionId, chunk, error)
+      return readMoved(app, versionId, chunk, error, signal)
     }
   }
   if (chunk.blob_id === null || chunk.blob_offset === null || chunk.blob_state !== 'stored') {
@@ -237,9 +256,12 @@ async function readFrame(
       },
       chunk.blob_offset,
       chunk.frame_size,
+      signal,
     )
   } catch (error) {
-    return readMoved(app, versionId, chunk, error)
+    // Given up on: it didn't fail where it was.
+    if (signal?.aborted) throw error
+    return readMoved(app, versionId, chunk, error, signal)
   }
 }
 
@@ -249,6 +271,7 @@ async function readMoved(
   versionId: string,
   chunk: ChunkLocation,
   error: unknown,
+  signal: AbortSignal | undefined,
 ): Promise<Uint8Array> {
   const [moved] = await chunkLocations(app.db, versionId, chunk.idx, chunk.idx)
   if (
@@ -260,7 +283,7 @@ async function readMoved(
   ) {
     throw error
   }
-  return readFrame(app, versionId, moved)
+  return readFrame(app, versionId, moved, signal)
 }
 
 /**

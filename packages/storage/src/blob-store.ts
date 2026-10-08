@@ -36,8 +36,17 @@ export interface PutResult {
 }
 
 export interface BlobReader {
-  /** Reads `length` bytes from `offset`: one frame out of a pack, or a whole solo blob. */
-  read: (blob: StoredBlob, offset: number, length: number) => Promise<Uint8Array>
+  /**
+   * Reads `length` bytes from `offset`: one frame out of a pack, or a whole
+   * solo blob. Once `signal` aborts, a read still under way gives up with its
+   * reason, which is no failure of the store.
+   */
+  read: (
+    blob: StoredBlob,
+    offset: number,
+    length: number,
+    signal?: AbortSignal,
+  ) => Promise<Uint8Array>
   /**
    * Fresh signed URLs, by blob ID, for a store read through a CDN, so a
    * reader can sign a whole batch at once. A blob that is gone gets none.

@@ -46,6 +46,13 @@ export class FakeDiscord implements DiscordRest {
   readonly requests: string[] = []
   /** Requests the CDN has answered. */
   cdnRequests = 0
+  /**
+   * The CDN holds its answers from this request on (counting from 1, as
+   * `cdnRequests` does) until `releaseCdn`; one whose signal aborts
+   * meanwhile rejects with its reason, and counts in `cdnAborted`.
+   */
+  holdCdnFrom = Infinity
+  cdnAborted = 0
   /** Stores the next message, then fails as if its answer were lost. */
   loseNextAnswer = false
   /** Keeps one byte less of the next attachment. */
@@ -59,6 +66,7 @@ export class FakeDiscord implements DiscordRest {
   readonly #served = new Set<string>()
   /** Attachments of deleted messages, by unsigned URL. */
   readonly #deleted = new Set<string>()
+  #held = Promise.withResolvers<undefined>()
   #sequence = 0n
 
   addChannel(
@@ -106,6 +114,12 @@ export class FakeDiscord implements DiscordRest {
   /** Makes every URL signed so far stop working, as expiry would. */
   revokeUrls(): void {
     this.#signed.clear()
+  }
+
+  /** Lets the CDN answer what it holds (`holdCdnFrom`). */
+  releaseCdn(): void {
+    this.#held.resolve(undefined)
+    this.#held = Promise.withResolvers<undefined>()
   }
 
   get = (route: DiscordRoute, options?: RequestData): Promise<unknown> => {
@@ -204,6 +218,29 @@ export class FakeDiscord implements DiscordRest {
   /** The CDN: serves attachments by signed URL, with Range requests. */
   fetch = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     this.cdnRequests += 1
+    const signal = init?.signal
+    if (this.cdnRequests >= this.holdCdnFrom) {
+      const held = this.#held.promise
+      return new Promise((resolve, reject) => {
+        const giveUp = () => {
+          this.cdnAborted += 1
+          reject(signal?.reason as Error)
+        }
+        if (signal?.aborted) {
+          giveUp()
+          return
+        }
+        signal?.addEventListener('abort', giveUp, { once: true })
+        void held.then(() => {
+          signal?.removeEventListener('abort', giveUp)
+          resolve(this.#answer(input, init))
+        })
+      })
+    }
+    return this.#answer(input, init)
+  }
+
+  #answer(input: string | URL | Request, init?: RequestInit): Promise<Response> {
     const url = new URL(input instanceof Request ? input.url : input)
     const data = this.cdn.get(`${url.origin}${url.pathname}`)
     if (!data) return Promise.resolve(new Response('Not found', { status: 404 }))

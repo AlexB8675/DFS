@@ -14,7 +14,14 @@ import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
 import { requireAuth } from '../auth/access.ts'
 import { archiveEntries } from '../content/archive.ts'
-import { archiveQuery, notModified, requestedRange, sendFile, sendZip } from '../content/send.ts'
+import {
+  archiveQuery,
+  cancellation,
+  notModified,
+  requestedRange,
+  sendFile,
+  sendZip,
+} from '../content/send.ts'
 import {
   countDownload,
   describeShare,
@@ -161,7 +168,7 @@ export function shareRoutes(app: FastifyInstance, _options: object, done: () => 
     async (request, reply) => {
       const { share, root } = await openShare(app, request, request.params.token)
       const node = request.query.nodeId ? await nodeInShare(app, root, request.query.nodeId) : root
-      const entries = await archiveEntries(app, [node])
+      const entries = await archiveEntries(app, [node], cancellation(reply.raw))
       // A ZIP counts as one download (§7.5).
       if (request.method !== 'HEAD') await countDownload(app, share)
       return sendZip(reply, `${node.name}.zip`, entries, request.query.tz)

@@ -22,6 +22,8 @@ export interface RequestOptions {
   headers?: Record<string, string>
   /** Leave out the CSRF header, to test that it is required. */
   withoutCsrf?: boolean
+  /** Cancels the request, as a browser does on a seek. */
+  signal?: AbortSignal
 }
 
 export class ApiClient {
@@ -57,12 +59,15 @@ export class ApiClient {
       headers.set('Content-Type', 'application/octet-stream')
       body = options.body
     }
-    const response = await fetch(`${this.baseUrl}/api${path}`, { method, headers, body }).catch(
-      (error: unknown) => {
-        // A network failure doesn't say which request it was; this does.
-        throw new Error(`${method} ${path}: ${String(error)}`, { cause: error })
-      },
-    )
+    const response = await fetch(`${this.baseUrl}/api${path}`, {
+      method,
+      headers,
+      body,
+      signal: options.signal,
+    }).catch((error: unknown) => {
+      // A network failure doesn't say which request it was; this does.
+      throw new Error(`${method} ${path}: ${String(error)}`, { cause: error })
+    })
     this.#keepCookies(response)
     return response
   }

@@ -76,19 +76,20 @@ export async function readBlobFromCdn(
   offset: number,
   length: number,
   sign: (blob: StoredBlob) => Promise<CdnUrl | null>,
+  signal?: AbortSignal,
 ): Promise<Uint8Array> {
   const known = isFresh(blob.url) ? blob.url : null
   const url = known ?? (await sign(blob))
   try {
     if (!url) throw new CdnRefusedError(404)
-    return await readCdnRange(fetcher, url.url, offset, length)
+    return await readCdnRange(fetcher, url.url, offset, length, signal)
   } catch (error) {
     if (!(error instanceof CdnRefusedError)) throw error
     // A URL from the database may have been revoked; a newly signed one wasn't.
     const again = known ? await sign(blob) : null
     if (again) {
       try {
-        return await readCdnRange(fetcher, again.url, offset, length)
+        return await readCdnRange(fetcher, again.url, offset, length, signal)
       } catch (retry) {
         if (!(retry instanceof CdnRefusedError)) throw retry
       }
@@ -103,20 +104,23 @@ export async function readBlobFromCdn(
 /**
  * Reads `length` bytes at `offset` with an HTTP Range request, so a frame
  * out of a 20 MiB pack moves only its own bytes. If the CDN ignores the
- * range and sends the whole file, the frame is cut out of it.
+ * range and sends the whole file, the frame is cut out of it. Once `signal`
+ * aborts, the request stops and rejects with its reason.
  */
 export async function readCdnRange(
   fetcher: typeof fetch,
   url: string,
   offset: number,
   length: number,
+  signal?: AbortSignal,
 ): Promise<Uint8Array> {
   let response: Response
   let bytes: Uint8Array
+  const timeout = AbortSignal.timeout(CDN_TIMEOUT_MS)
   try {
     response = await fetcher(url, {
       headers: { Range: `bytes=${String(offset)}-${String(offset + length - 1)}` },
-      signal: AbortSignal.timeout(CDN_TIMEOUT_MS),
+      signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
     })
     if (response.status !== 200 && response.status !== 206) {
       await response.body?.cancel()
@@ -130,6 +134,8 @@ export async function readCdnRange(
     }
     bytes = new Uint8Array(await response.arrayBuffer())
   } catch (error) {
+    // Given up on by its reader: not the CDN's failure, and nothing to retry.
+    if (signal?.aborted) throw signal.reason
     if (error instanceof BlobStoreError) throw error
     throw new BlobStoreError('Reading from the Discord CDN failed.', {
       retryable: true,

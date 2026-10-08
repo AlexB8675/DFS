@@ -139,11 +139,23 @@ export class DiscordBlobStore implements BlobStore {
     }
   }
 
-  async read(blob: StoredBlob, offset: number, length: number): Promise<Uint8Array> {
-    return readBlobFromCdn(this.#fetch, blob, offset, length, async (unsigned) => {
-      const urls = await this.signUrls([unsigned])
-      return urls.get(unsigned.id) ?? null
-    })
+  async read(
+    blob: StoredBlob,
+    offset: number,
+    length: number,
+    signal?: AbortSignal,
+  ): Promise<Uint8Array> {
+    return readBlobFromCdn(
+      this.#fetch,
+      blob,
+      offset,
+      length,
+      async (unsigned) => {
+        const urls = await this.signUrls([unsigned])
+        return urls.get(unsigned.id) ?? null
+      },
+      signal,
+    )
   }
 
   async delete(blob: StoredBlob): Promise<void> {

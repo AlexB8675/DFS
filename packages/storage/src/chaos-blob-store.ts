@@ -48,9 +48,14 @@ export class ChaosBlobStore implements BlobStore {
     return stored
   }
 
-  async read(blob: StoredBlob, offset: number, length: number): Promise<Uint8Array> {
+  async read(
+    blob: StoredBlob,
+    offset: number,
+    length: number,
+    signal?: AbortSignal,
+  ): Promise<Uint8Array> {
     await this.#trouble('read')
-    return this.#inner.read(blob, offset, length)
+    return this.#inner.read(blob, offset, length, signal)
   }
 
   async delete(blob: StoredBlob): Promise<void> {

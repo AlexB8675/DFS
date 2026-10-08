@@ -63,6 +63,65 @@ describe('FrameCache (DESIGN.md §6.2)', () => {
     expect(fetch).toHaveBeenCalledOnce()
   })
 
+  it('stops a fetch once every reader has given up on it, and keeps nothing of it', async () => {
+    const cache = open(10_000)
+    await cache.ready()
+    const { bytes, hash } = await frame(5)
+    let fetchSignal: AbortSignal | undefined
+    const fetch = vi.fn((signal: AbortSignal) => {
+      fetchSignal = signal
+      return new Promise<Uint8Array>((_, reject) => {
+        signal.addEventListener('abort', () => {
+          reject(signal.reason as Error)
+        })
+      })
+    })
+    const first = new AbortController()
+    const second = new AbortController()
+    const firstRead = cache.load(hash, fetch, first.signal)
+    const secondRead = cache.load(hash, fetch, second.signal)
+    await vi.waitFor(() => {
+      expect(fetch).toHaveBeenCalledOnce()
+    })
+    first.abort()
+    await expect(firstRead).rejects.toMatchObject({ name: 'AbortError' })
+    // The other reader still waits for it.
+    expect(fetchSignal?.aborted).toBe(false)
+    second.abort()
+    await expect(secondRead).rejects.toMatchObject({ name: 'AbortError' })
+    expect(fetchSignal?.aborted).toBe(true)
+
+    // A reader that comes later fetches it afresh.
+    const again = vi.fn(() => Promise.resolve(bytes))
+    expect(await cache.load(hash, again)).toEqual(bytes)
+    expect(again).toHaveBeenCalledOnce()
+  })
+
+  it('goes on fetching for a reader that stays, and keeps the frame', async () => {
+    const cache = open(10_000)
+    await cache.ready()
+    const { bytes, hash } = await frame(6)
+    const release = Promise.withResolvers<Uint8Array>()
+    let fetchSignal: AbortSignal | undefined
+    const fetch = vi.fn((signal: AbortSignal) => {
+      fetchSignal = signal
+      return release.promise
+    })
+    const leaving = new AbortController()
+    const gone = cache.load(hash, fetch, leaving.signal)
+    const staying = cache.load(hash, fetch)
+    await vi.waitFor(() => {
+      expect(fetch).toHaveBeenCalledOnce()
+    })
+    leaving.abort()
+    await expect(gone).rejects.toMatchObject({ name: 'AbortError' })
+    release.resolve(bytes)
+    expect(await staying).toEqual(bytes)
+    expect(fetchSignal?.aborted).toBe(false)
+    await cache.idle()
+    expect(cache.has(hash)).toBe(true)
+  })
+
   it('fetches again when its copy fails the check, and keeps nothing a fetch failed', async () => {
     const cache = open(10_000)
     await cache.ready()

@@ -44,7 +44,8 @@ export function sendFile(
   if (range)
     reply.code(206).header('content-range', `bytes ${String(start)}-${String(end)}/${String(size)}`)
   void reply.header('content-length', String(end - start + 1))
-  return reply.send(Readable.from(paced(reply.raw, readVersion(app, file, start, end))))
+  const pieces = readVersion(app, file, start, end, cancellation(reply.raw))
+  return reply.send(Readable.from(paced(reply.raw, pieces)))
 }
 
 /** An archive's query: the downloader's time zone (IANA), for its times. */
@@ -86,6 +87,21 @@ export async function* paced(
     if (response.destroyed) return
     if (response.writableNeedDrain && !(await drained(response))) return
   }
+}
+
+/**
+ * A signal that aborts once `response` closes before it has finished, as
+ * when its client cancels it: a seek does, and Chrome's player does on
+ * opening a video, so what is being read for it can stop at once. Unlike the
+ * socket taking pieces, this doesn't wait for the connection's buffers
+ * (DESIGN.md §6.2).
+ */
+export function cancellation(response: Writable): AbortSignal {
+  const controller = new AbortController()
+  response.once('close', () => {
+    if (!response.writableFinished) controller.abort()
+  })
+  return controller.signal
 }
 
 /** Resolves `true` once `stream` drains, `false` if it closes first. */

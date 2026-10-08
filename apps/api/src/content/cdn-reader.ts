@@ -36,16 +36,29 @@ export class CdnBlobReader implements BlobReader {
     this.#metrics = options.metrics
   }
 
-  async read(blob: StoredBlob, offset: number, length: number): Promise<Uint8Array> {
+  async read(
+    blob: StoredBlob,
+    offset: number,
+    length: number,
+    signal?: AbortSignal,
+  ): Promise<Uint8Array> {
     try {
-      const data = await readBlobFromCdn(this.#fetch, blob, offset, length, async (unsigned) => {
-        const urls = await this.signUrls([unsigned])
-        return urls.get(unsigned.id) ?? null
-      })
+      const data = await readBlobFromCdn(
+        this.#fetch,
+        blob,
+        offset,
+        length,
+        async (unsigned) => {
+          const urls = await this.signUrls([unsigned])
+          return urls.get(unsigned.id) ?? null
+        },
+        signal,
+      )
       this.#metrics?.record('cdn.reads', data.length)
       return data
     } catch (error) {
-      this.#metrics?.record('cdn.failures')
+      // A read its reader gave up on didn't fail.
+      if (!signal?.aborted) this.#metrics?.record('cdn.failures')
       throw error
     }
   }

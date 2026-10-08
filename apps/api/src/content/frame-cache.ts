@@ -40,6 +40,13 @@ export class MemoryBudget {
   }
 }
 
+/** A frame being fetched, and how many callers wait for it. */
+interface Loading {
+  frame: Promise<Uint8Array>
+  controller: AbortController
+  waiting: number
+}
+
 export class FrameCache {
   readonly #dir: string
   readonly #maxBytes: number
@@ -53,7 +60,7 @@ export class FrameCache {
   #writingBytes = 0
   readonly #writes = new Set<Promise<void>>()
   /** Fetches under way, so readers of the same frame share one. */
-  readonly #loading = new Map<string, Promise<Uint8Array>>()
+  readonly #loading = new Map<string, Loading>()
   readonly #ready: Promise<void>
   /** Since start, for measuring. */
   readonly stats = { hits: 0, misses: 0 }
@@ -119,8 +126,15 @@ export class FrameCache {
   /**
    * The frame with this SHA-256: from the cache if it holds a good copy, or
    * from `fetch`, which must check what it returns, once however many ask.
+   * Once `signal` aborts, this caller stops waiting, rejecting with its
+   * reason; the fetch gives up (through the signal it was given) once every
+   * caller has, and what it gave up on isn't cached.
    */
-  async load(frameSha256: Uint8Array, fetch: () => Promise<Uint8Array>): Promise<Uint8Array> {
+  async load(
+    frameSha256: Uint8Array,
+    fetch: (signal: AbortSignal) => Promise<Uint8Array>,
+    signal?: AbortSignal,
+  ): Promise<Uint8Array> {
     const key = Buffer.from(frameSha256).toString('hex')
     const cached = await this.#read(key)
     if (cached) {
@@ -133,19 +147,46 @@ export class FrameCache {
     }
     this.stats.misses += 1
     this.#metrics?.record('cache.misses')
+    signal?.throwIfAborted()
     let loading = this.#loading.get(key)
     if (!loading) {
-      loading = fetch()
-      void loading.then(
+      const controller = new AbortController()
+      const started: Loading = { frame: fetch(controller.signal), controller, waiting: 0 }
+      void started.frame.then(
         (frame) => {
-          this.#loading.delete(key)
+          if (this.#loading.get(key) === started) this.#loading.delete(key)
           this.put(frameSha256, frame)
         },
-        () => this.#loading.delete(key),
+        () => {
+          if (this.#loading.get(key) === started) this.#loading.delete(key)
+        },
       )
-      this.#loading.set(key, loading)
+      this.#loading.set(key, started)
+      loading = started
     }
-    return loading
+    return this.#wait(key, loading, signal)
+  }
+
+  /** `loading`'s frame, unless `signal` aborts first; the last caller to leave stops the fetch. */
+  async #wait(key: string, loading: Loading, signal: AbortSignal | undefined): Promise<Uint8Array> {
+    loading.waiting += 1
+    const aborted = Promise.withResolvers<never>()
+    const giveUp = () => {
+      aborted.reject(signal?.reason as Error)
+    }
+    signal?.addEventListener('abort', giveUp, { once: true })
+    try {
+      return await Promise.race([loading.frame, aborted.promise])
+    } finally {
+      signal?.removeEventListener('abort', giveUp)
+      loading.waiting -= 1
+      // Stopping a fetch that has finished does nothing.
+      if (signal?.aborted && loading.waiting === 0) {
+        // Nobody wants it now: a reader that comes later starts afresh.
+        if (this.#loading.get(key) === loading) this.#loading.delete(key)
+        loading.controller.abort()
+      }
+    }
   }
 
   /** Keeps a frame whose SHA-256 has been checked. Skipped when too much waits for the disk. */

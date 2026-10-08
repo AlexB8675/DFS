@@ -26,11 +26,13 @@ interface TreeRow extends ReadableVersion {
 /**
  * The entries of a ZIP holding these items and everything below them, files
  * still uploading or failed left out: they can't be read. Top-level names
- * that clash get ` (1)`, … added.
+ * that clash get ` (1)`, … added. Once `signal` aborts, what is being read
+ * is given up on.
  */
 export async function archiveEntries(
   app: FastifyInstance,
   roots: readonly NodeRow[],
+  signal?: AbortSignal,
 ): Promise<ZipEntry[]> {
   const entries: ZipEntry[] = []
   if (roots.length === 0) return entries
@@ -64,7 +66,7 @@ export async function archiveEntries(
           size: row.size_bytes,
           data: async function* () {
             await warmer?.before(row.version_id)
-            yield* readVersion(app, row, 0, row.size_bytes - 1)
+            yield* readVersion(app, row, 0, row.size_bytes - 1, signal)
           },
         })
       }

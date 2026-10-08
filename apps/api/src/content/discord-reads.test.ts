@@ -8,7 +8,7 @@ import { DiscordBlobStore } from '@dfs/storage'
 import { FakeDiscord } from '@dfs/storage/testing'
 import { setTimeout } from 'node:timers/promises'
 import type { FastifyInstance } from 'fastify'
-import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest'
 import { buildApp } from '../app.ts'
 import { testConfig } from '../testing/config.ts'
 import { seedUser } from '../testing/seed.ts'
@@ -16,9 +16,9 @@ import { seedUser } from '../testing/seed.ts'
 // Reading back from Discord (DESIGN.md §6.2), over real HTTP: a ZIP of a
 // folder of small files costs one CDN request per pack, not one per file, and
 // nothing the second time; a download stalls with its client instead of
-// fetching the whole file, and finds a frame whose pack was compacted away
-// mid-download. Attachments of 4 MiB make a large file out of little test
-// data.
+// fetching the whole file, stops fetching for one its client cancels, and
+// finds a frame whose pack was compacted away mid-download. Attachments of
+// 4 MiB make a large file out of little test data.
 
 let database: TestDatabase
 let app: FastifyInstance
@@ -109,6 +109,86 @@ describe('reading from Discord', () => {
     } finally {
       await body?.cancel()
     }
+  })
+
+  /** A stored file of `chunks` whole chunks, never read yet. */
+  async function storedFile(name: string, chunks: number) {
+    const bytes = new Uint8Array(chunks * app.config.sizes.chunkSize).map((_, i) => i % 241)
+    const folder = await createFolder(client, (await workspace(client)).id, name)
+    const session = await uploadFile(client, folder.id, `${name}.bin`, bytes)
+    const store = app.blobStore as DiscordBlobStore
+    await settleBlobs({ db: app.db, staging: app.staging, store, sizes: app.config.sizes })
+    return session
+  }
+
+  it('stops fetching for a download cancelled before its first byte, as a seek is', async () => {
+    const session = await storedFile('Cancelled early', 4)
+    discord.cdnRequests = 0
+    discord.cdnAborted = 0
+    discord.holdCdnFrom = 1
+    try {
+      const controller = new AbortController()
+      const download = client.fetch('GET', `/files/${session.nodeId}/content`, {
+        headers: { Range: 'bytes=0-' },
+        signal: controller.signal,
+      })
+      await vi.waitFor(() => {
+        expect(discord.cdnRequests).toBe(1)
+      })
+      controller.abort()
+      await expect(download).rejects.toThrow()
+      await vi.waitFor(() => {
+        expect(discord.cdnAborted).toBe(1)
+      })
+    } finally {
+      discord.holdCdnFrom = Infinity
+      discord.releaseCdn()
+    }
+    await setTimeout(200)
+    expect(discord.cdnRequests).toBe(1)
+    // Nothing given up on was cached: the next reader fetches it afresh.
+    await app.frameCache?.idle()
+    const again = await client.fetch('GET', `/files/${session.nodeId}/content`, {
+      headers: { Range: 'bytes=0-9' },
+    })
+    expect((await again.arrayBuffer()).byteLength).toBe(10)
+    expect(discord.cdnRequests).toBe(2)
+  })
+
+  it('stops what it reads ahead when its client cancels the download', async () => {
+    const { chunkSize } = app.config.sizes
+    const session = await storedFile('Cancelled ahead', 6)
+    discord.cdnRequests = 0
+    discord.cdnAborted = 0
+    // The first chunk comes; those read ahead wait.
+    discord.holdCdnFrom = 2
+    try {
+      const controller = new AbortController()
+      const response = await client.fetch('GET', `/files/${session.nodeId}/content`, {
+        headers: { Range: 'bytes=0-' },
+        signal: controller.signal,
+      })
+      const body = response.body?.getReader()
+      if (!body) throw new Error('No body.')
+      // The whole first chunk taken, so the server reads ahead.
+      for (let received = 0; received < chunkSize;) {
+        const next = await body.read()
+        if (next.done) throw new Error('The download ended early.')
+        received += (next.value as Uint8Array).length
+      }
+      await vi.waitFor(() => {
+        expect(discord.cdnRequests).toBe(3)
+      })
+      controller.abort()
+      await vi.waitFor(() => {
+        expect(discord.cdnAborted).toBe(2)
+      })
+    } finally {
+      discord.holdCdnFrom = Infinity
+      discord.releaseCdn()
+    }
+    await setTimeout(200)
+    expect(discord.cdnRequests).toBe(3)
   })
 
   it('reads a frame where it is now when its pack was compacted away mid-download', async () => {

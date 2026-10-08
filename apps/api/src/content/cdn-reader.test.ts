@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import { Metrics } from '@dfs/db'
+import { describe, expect, it, vi } from 'vitest'
 import { CdnBlobReader } from './cdn-reader.ts'
 
 const blob = (id: number) => ({ id, channelId: 'c', messageId: 'm', attachmentId: 'a' })
@@ -45,5 +46,30 @@ describe('CdnBlobReader (DESIGN.md §6.2)', () => {
     })
     await expect(reader.signUrls([blob(1)])).rejects.toMatchObject({ retryable: true })
     await expect(reader.read(blob(1), 0, 4)).rejects.toMatchObject({ retryable: true })
+  })
+
+  it('stops a read its reader gave up on, and counts no failure', async () => {
+    const metrics = new Metrics()
+    const record = vi.spyOn(metrics, 'record')
+    const reader = new CdnBlobReader({
+      botUrl: 'http://bot.test',
+      secret: 'secret',
+      metrics,
+      fetch: (_input, init) =>
+        new Promise((_, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            reject(new DOMException('The operation was aborted.', 'AbortError'))
+          })
+        }),
+    })
+    const url = {
+      url: 'https://cdn.discordapp.com/attachments/1/2/1.bin?ex=1',
+      expiresAt: new Date(Date.now() + 60 * 60_000),
+    }
+    const controller = new AbortController()
+    const reading = reader.read({ ...blob(1), url }, 0, 4, controller.signal)
+    controller.abort()
+    await expect(reading).rejects.toMatchObject({ name: 'AbortError' })
+    expect(record).not.toHaveBeenCalledWith('cdn.failures')
   })
 })

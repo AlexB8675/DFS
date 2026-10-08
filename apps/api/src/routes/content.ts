@@ -6,7 +6,13 @@ import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
 import { requireAuth } from '../auth/access.ts'
 import { archiveEntries, createArchiveTicket, redeemArchiveTicket } from '../content/archive.ts'
-import { archiveQuery, sendFile, sendZip, type DownloadableFile } from '../content/send.ts'
+import {
+  archiveQuery,
+  cancellation,
+  sendFile,
+  sendZip,
+  type DownloadableFile,
+} from '../content/send.ts'
 import { ApiError } from '../errors.ts'
 import { visibleFolder, visibleNode } from '../nodes/read.ts'
 
@@ -28,7 +34,7 @@ export function contentRoutes(app: FastifyInstance, _options: object, done: () =
     async (request, reply) => {
       const auth = requireAuth(request.auth)
       const folder = await visibleFolder(app.db, auth.user.id, request.params.id)
-      const entries = await archiveEntries(app, [folder])
+      const entries = await archiveEntries(app, [folder], cancellation(reply.raw))
       return sendZip(reply, `${folder.name}.zip`, entries, request.query.tz)
     },
   )
@@ -53,7 +59,8 @@ export function contentRoutes(app: FastifyInstance, _options: object, done: () =
         requireAuth(request.auth),
         request.params.token,
       )
-      return sendZip(reply, fileName, await archiveEntries(app, nodes), request.query.tz)
+      const entries = await archiveEntries(app, nodes, cancellation(reply.raw))
+      return sendZip(reply, fileName, entries, request.query.tz)
     },
   )
 
