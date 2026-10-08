@@ -1,41 +1,15 @@
-import type { SyncState } from '@dfs/shared'
 import { ChevronLeft, ChevronRight, Download, Info, Share2, X } from 'lucide-react'
 import { Dialog as DialogPrimitive } from 'radix-ui'
-import {
-  lazy,
-  Suspense,
-  useEffect,
-  useRef,
-  useState,
-  type KeyboardEvent,
-  type ReactNode,
-} from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
-import { Spinner } from '@/components/ui/spinner'
 import { NodeIcon } from '@/components/node-icon'
 import { SyncStatus } from '@/components/sync-status'
 import { fileCategory, fileCategoryLabel } from '@/lib/file-types'
 import { formatBytes, formatFullDate } from '@/lib/format'
-import { previewKind } from '@/lib/preview-kind'
 import { cn } from '@/lib/utils'
-import { ImageView } from './image-view'
-import { NoPreview } from './no-preview'
+import { handlePreviewKey } from './keys'
+import { PreviewBody, type ViewedFile } from './preview-body'
 import type { ViewHandle } from './view-handle'
-
-// Text, with its editor, loads with the first text file opened; pdf.js with the first PDF.
-const TextView = lazy(() => import('./text-view'))
-const PdfView = lazy(() => import('./pdf-view'))
-
-/** A file as the viewer shows it: from the drive, or from a share link. */
-export interface ViewedFile {
-  id: string
-  name: string
-  mimeType: string | null
-  sizeBytes: number
-  updatedAt: string
-  /** Where its bytes are; a share link's files don't say. */
-  syncState?: SyncState | null
-}
 
 interface FileViewerProps {
   open: boolean
@@ -82,98 +56,10 @@ export function FileViewer({
   const opener = useRef<Element | null>(null)
   const view = useRef<ViewHandle>(null)
   const [detailsOpen, setDetailsOpen] = useState(false)
-  const [failedId, setFailedId] = useState<string | null>(null)
 
   useEffect(() => {
     if (open && !covered) contentRef.current?.focus()
   }, [open, covered])
-
-  function handleKeyDown(event: KeyboardEvent<HTMLDivElement>) {
-    if (event.altKey || isEditable(event.target)) return
-    const command = event.ctrlKey || event.metaKey
-    const find = view.current?.find
-    if (command && event.key === 'f' && find) {
-      event.preventDefault()
-      find()
-      return
-    }
-    if (command) return
-    const actions: Record<string, (() => void) | null | undefined> = {
-      ArrowLeft: previous,
-      ArrowRight: next,
-      '+': view.current?.zoomIn,
-      '=': view.current?.zoomIn,
-      '-': view.current?.zoomOut,
-      '0': view.current?.reset,
-    }
-    const action = actions[event.key]
-    if (!action) return
-    event.preventDefault()
-    action()
-  }
-
-  const readable = file && file.syncState !== 'uploading' && file.syncState !== 'failed'
-  const kind = file && readable ? previewKind(file.name, file.mimeType) : null
-  let body: ReactNode
-  if (error) {
-    body = <NoPreview title={error.title} description={error.description} />
-  } else if (!file || !contentPath) {
-    body = <Loading />
-  } else if (kind === 'image' && failedId !== file.id) {
-    body = (
-      <ImageView
-        key={file.id}
-        ref={view}
-        src={`/api${contentPath}`}
-        alt={file.name}
-        vector={file.mimeType === 'image/svg+xml' || /\.svg$/i.test(file.name)}
-        onSwipe={(direction) => {
-          ;(direction === 1 ? next : previous)?.()
-        }}
-        onError={() => {
-          setFailedId(file.id)
-        }}
-      />
-    )
-  } else if (kind === 'pdf') {
-    body = (
-      <Suspense fallback={<Loading />}>
-        <PdfView
-          key={file.id}
-          ref={view}
-          contentPath={contentPath}
-          sizeBytes={file.sizeBytes}
-          onDownload={onDownload}
-        />
-      </Suspense>
-    )
-  } else if (kind === 'text') {
-    body = (
-      <Suspense fallback={<Loading />}>
-        <TextView
-          key={file.id}
-          ref={view}
-          name={file.name}
-          mimeType={file.mimeType}
-          sizeBytes={file.sizeBytes}
-          contentPath={contentPath}
-          onDownload={onDownload}
-        />
-      </Suspense>
-    )
-  } else {
-    body = (
-      <NoPreview
-        title="No preview"
-        description={
-          kind
-            ? 'This file can’t be shown here: it may be damaged, or in a format this browser can’t draw.'
-            : 'This kind of file can’t be shown here.'
-        }
-        onDownload={onDownload}
-      />
-    )
-  }
 
   return (
     <DialogPrimitive.Root
@@ -210,7 +96,9 @@ export function FileViewer({
               setDetailsOpen(false)
             }
           }}
-          onKeyDown={handleKeyDown}
+          onKeyDown={(event) => {
+            handlePreviewKey(event, view.current, previous, next)
+          }}
         >
           <header className="flex h-14 shrink-0 items-center gap-1 px-2 sm:gap-2 sm:px-3">
             <DialogPrimitive.Close asChild>
@@ -277,7 +165,15 @@ export function FileViewer({
             )}
           </header>
           <div className="relative min-h-0 flex-1">
-            {body}
+            <PreviewBody
+              file={file}
+              error={error}
+              contentPath={contentPath}
+              view={view}
+              previous={previous}
+              next={next}
+              onDownload={onDownload}
+            />
             {previous && (
               <StepButton side="left" label="Previous file" onClick={previous}>
                 <ChevronLeft />
@@ -293,14 +189,6 @@ export function FileViewer({
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>
     </DialogPrimitive.Root>
-  )
-}
-
-function Loading() {
-  return (
-    <div className="flex size-full items-center justify-center text-muted-foreground">
-      <Spinner className="size-6" />
-    </div>
   )
 }
 
@@ -361,13 +249,5 @@ function Details({ file }: { file: ViewedFile }) {
         ))}
       </dl>
     </section>
-  )
-}
-
-/** Keys typed into a field are the field's. */
-function isEditable(target: EventTarget): boolean {
-  return (
-    target instanceof HTMLElement &&
-    (target.isContentEditable || target.closest('input, textarea, select') !== null)
   )
 }

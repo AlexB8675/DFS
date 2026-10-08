@@ -120,7 +120,7 @@ export function createSeed(version: number): MockState {
 
   // ── My Drive ──────────────────────────────────────────────────────────────
   const root = folder(null, 'My Drive')
-  file(root, 'Welcome to DFS.pdf', 1.4 * MB, { age: 400 * DAY })
+  const welcome = file(root, 'Welcome to DFS.pdf', 1.4 * MB, { age: 400 * DAY })
   file(root, 'Budget 2026.xlsx', 86 * KB, { age: 25 * MINUTE })
   file(root, 'todo.txt', 2 * KB, { age: 3 * MINUTE })
 
@@ -337,7 +337,8 @@ export function createSeed(version: number): MockState {
 
   // ── Share links ───────────────────────────────────────────────────────────
   // Readable tokens, so the demo links can be tried: /s/demo-lisbon (password
-  // "lisbon"), /s/demo-resume, and the expired one.
+  // "lisbon"), /s/demo-resume, /s/demo-welcome (a PDF, previewed on the page),
+  // and the expired one.
   const share = (nodeId: string, token: string, fields: Partial<MockShare>): MockShare => ({
     id: makeUuid(random),
     nodeId,
@@ -361,6 +362,7 @@ export function createSeed(version: number): MockState {
     share(resume, 'demo-resume', { maxDownloads: 10, downloadCount: 4 }),
     share(wedding, 'demo-expired', { expiresAt: ago(DAY), downloadCount: 12 }),
     share(documents, 'demo-documents', {}),
+    share(welcome, 'demo-welcome', { maxDownloads: 3 }),
   ]
 
   // ── Other users (for the admin pages) ─────────────────────────────────────

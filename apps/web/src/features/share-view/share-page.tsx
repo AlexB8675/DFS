@@ -1,7 +1,7 @@
 import type { PublicShare, SharedNode } from '@dfs/shared'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { ChevronRight, Download, FileArchive, Link2Off, Lock, TriangleAlert } from 'lucide-react'
-import { Fragment, useActionState, useState, type ReactNode } from 'react'
+import { Fragment, useActionState, useEffect, useRef, useState, type ReactNode } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router'
 import { toast } from 'sonner'
 import { AppLogo } from '@/components/app-logo'
@@ -12,19 +12,26 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Spinner } from '@/components/ui/spinner'
 import { VirtualList } from '@/components/virtual-list'
+import { handlePreviewKey } from '@/features/preview/keys'
+import { PreviewBody } from '@/features/preview/preview-body'
+import { usePreview } from '@/features/preview/use-preview'
+import type { ViewHandle } from '@/features/preview/view-handle'
 import { ThemeMenu } from '@/layout/theme-menu'
 import { ApiError, errorMessage } from '@/lib/api/client'
 import { formatBytes, formatDate, formatFullDate } from '@/lib/format'
 import { formText } from '@/lib/form-data'
 import { transitionLinkProps } from '@/lib/navigation'
+import { isPreviewable } from '@/lib/preview-kind'
 import { cn } from '@/lib/utils'
 import {
   downloadSharedFile,
   downloadSharedFolder,
   publicShareQuery,
   sharedFolderQuery,
+  sharedPreviewPath,
   useUnlockShare,
 } from './api'
+import { SharePreview } from './share-preview'
 
 const ROW_HEIGHT = 44
 
@@ -32,8 +39,9 @@ type OpenShare = Extract<PublicShare, { locked: false }>
 
 /**
  * `/s/:token`: what someone with a share link sees, signed in or not (§10.1).
- * A password prompt if the link has one, then the file, or the folder to
- * browse, with downloads of single files and ZIPs of folders.
+ * A password prompt if the link has one, then the file, previewed when it
+ * can be (§10.3), or the folder to browse, its files opening in the viewer,
+ * with downloads of single files and ZIPs of folders.
  */
 export function SharePage() {
   const { token = '' } = useParams()
@@ -185,6 +193,7 @@ function PasswordGate({ token }: { token: string }) {
 
 function SharedFile({ token, share, file }: { token: string; share: OpenShare; file: SharedNode }) {
   const [downloading, setDownloading] = useState(false)
+  const previewable = isPreviewable(file)
 
   async function download() {
     setDownloading(true)
@@ -195,6 +204,37 @@ function SharedFile({ token, share, file }: { token: string; share: OpenShare; f
     } finally {
       setDownloading(false)
     }
+  }
+
+  const downloadButton = (
+    <Button disabled={downloading} onClick={() => void download()}>
+      {downloading ? <Spinner /> : <Download />} Download
+    </Button>
+  )
+
+  if (previewable) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="flex shrink-0 items-center gap-3 border-b px-4 py-2">
+          <NodeIcon node={file} className="size-6 shrink-0" />
+          <div className="min-w-0 flex-1">
+            <h1 className="truncate font-semibold" title={file.name}>
+              {file.name}
+            </h1>
+            <ShareFacts
+              share={share}
+              lead={`${formatBytes(file.sizeBytes)} · modified ${formatDate(file.updatedAt)}`}
+            />
+          </div>
+          {downloadButton}
+        </div>
+        <InlinePreview
+          file={file}
+          contentPath={sharedPreviewPath(token, file.id)}
+          onDownload={() => void download()}
+        />
+      </div>
+    )
   }
 
   return (
@@ -214,10 +254,49 @@ function SharedFile({ token, share, file }: { token: string; share: OpenShare; f
   )
 }
 
+/** A file link's preview, under its name and Download: dark, as in the viewer. */
+function InlinePreview({
+  file,
+  contentPath,
+  onDownload,
+}: {
+  file: SharedNode
+  contentPath: string
+  onDownload: () => void
+}) {
+  const frame = useRef<HTMLDivElement>(null)
+  const view = useRef<ViewHandle>(null)
+  // The keys are the preview's: + − 0 zoom, Ctrl+F searches text.
+  useEffect(() => {
+    frame.current?.focus({ preventScroll: true })
+  }, [])
+  return (
+    <div
+      ref={frame}
+      tabIndex={-1}
+      className="dark relative min-h-0 flex-1 bg-neutral-950 text-foreground outline-none"
+      onKeyDown={(event) => {
+        handlePreviewKey(event, view.current, null, null)
+      }}
+    >
+      <PreviewBody
+        file={file}
+        error={null}
+        contentPath={contentPath}
+        view={view}
+        previous={null}
+        next={null}
+        onDownload={onDownload}
+      />
+    </div>
+  )
+}
+
 // ── Folders ──────────────────────────────────────────────────────────────────
 
 function SharedFolder({ token, share }: { token: string; share: OpenShare }) {
   const [searchParams] = useSearchParams()
+  const preview = usePreview()
   const folderId = searchParams.get('folder')
   const listing = useInfiniteQuery(sharedFolderQuery(token, folderId))
   const nodes = listing.data?.pages.flatMap((page) => page.items) ?? []
@@ -301,14 +380,45 @@ function SharedFolder({ token, share }: { token: string; share: OpenShare }) {
               ? () => void listing.fetchNextPage()
               : undefined
           }
-          renderItem={(node) => <SharedRow token={token} node={node} url={folderUrl(node.id)} />}
+          renderItem={(node) => (
+            <SharedRow
+              token={token}
+              node={node}
+              url={folderUrl(node.id)}
+              onPreview={
+                isPreviewable(node)
+                  ? () => {
+                      preview.open(node.id)
+                    }
+                  : undefined
+              }
+            />
+          )}
         />
       )}
+      <SharePreview
+        token={token}
+        nodes={nodes}
+        hasMore={listing.hasNextPage}
+        isLoadingMore={listing.isFetchingNextPage}
+        onLoadMore={() => void listing.fetchNextPage()}
+      />
     </div>
   )
 }
 
-function SharedRow({ token, node, url }: { token: string; node: SharedNode; url: string }) {
+function SharedRow({
+  token,
+  node,
+  url,
+  onPreview,
+}: {
+  token: string
+  node: SharedNode
+  url: string
+  /** Opens the file in the viewer, if it can show it. */
+  onPreview?: () => void
+}) {
   const name = (
     <span className="flex min-w-0 items-center gap-3">
       <NodeIcon node={node} className="size-5 shrink-0" />
@@ -331,6 +441,14 @@ function SharedRow({ token, node, url }: { token: string; node: SharedNode; url:
         >
           {name}
         </Link>
+      ) : onPreview ? (
+        <button
+          type="button"
+          className="min-w-0 rounded text-left outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring"
+          onClick={onPreview}
+        >
+          {name}
+        </button>
       ) : (
         name
       )}
@@ -366,9 +484,17 @@ function SharedRow({ token, node, url }: { token: string; node: SharedNode; url:
 
 // ── Pieces ───────────────────────────────────────────────────────────────────
 
-/** Who shared it, until when, and how many downloads are left. */
-function ShareFacts({ share, className }: { share: OpenShare; className?: string }) {
-  const facts = [`Shared by ${share.sharedBy}`]
+/** Who shared it, until when, and how many downloads are left; `lead` comes first. */
+function ShareFacts({
+  share,
+  lead,
+  className,
+}: {
+  share: OpenShare
+  lead?: string
+  className?: string
+}) {
+  const facts = lead ? [lead, `shared by ${share.sharedBy}`] : [`Shared by ${share.sharedBy}`]
   if (share.expiresAt) facts.push(`until ${formatFullDate(share.expiresAt)}`)
   if (share.downloadsLeft !== null) {
     facts.push(`${share.downloadsLeft} download${share.downloadsLeft === 1 ? '' : 's'} left`)

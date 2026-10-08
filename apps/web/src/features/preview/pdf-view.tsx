@@ -7,6 +7,7 @@ import {
   PasswordException,
   PDFDataRangeTransport,
   version,
+  type PDFDocumentLoadingTask,
 } from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import { EventBus, LinkTarget, PDFLinkService, PDFViewer } from 'pdfjs-dist/web/pdf_viewer.mjs'
@@ -25,48 +26,77 @@ const ASSETS = `/assets/pdfjs-${version}/`
 /** pdf.js's zooms that follow the window's size. */
 const FITTING = new Set(['auto', 'page-width', 'page-fit'])
 
+/** The first read: pdf.js's chunk size, which gives the file's length too. */
+const FIRST_BYTES = 64 * 1024
+
+/** The file's first bytes, its length, and its version's ETag (§6.2). */
+interface FirstRead {
+  bytes: Uint8Array
+  length: number
+  etag: string
+}
+
 /**
  * pdf.js's reads, each a Range request made here. Given a URL, pdf.js would
  * first ask for the whole file and drop the request once it had seen the
- * headers, which costs the API chunks read from Discord for nobody.
+ * headers, which costs the API chunks read from Discord for nobody. Each
+ * names the version the first read found (`If-Range`): another would come
+ * whole, and is refused rather than mixed with it.
  */
 class RangeReader extends PDFDataRangeTransport {
   readonly #url: string
-  readonly #stop = new AbortController()
+  readonly #etag: string
+  readonly #signal: AbortSignal
   readonly #onError: () => void
 
-  constructor(url: string, length: number, onError: () => void) {
-    super(length, null)
+  constructor(url: string, first: FirstRead, signal: AbortSignal, onError: () => void) {
+    super(first.length, first.bytes)
     this.#url = url
+    this.#etag = first.etag
+    this.#signal = signal
     this.#onError = onError
   }
 
   override requestDataRange(begin: number, end: number): void {
     this.#read(begin, end).catch(() => {
-      if (!this.#stop.signal.aborted) this.#onError()
+      if (!this.#signal.aborted) this.#onError()
     })
-  }
-
-  override abort(): void {
-    this.#stop.abort()
   }
 
   async #read(begin: number, end: number): Promise<void> {
     const response = await fetch(this.#url, {
-      headers: { Range: `bytes=${String(begin)}-${String(end - 1)}` },
-      signal: this.#stop.signal,
+      headers: { Range: `bytes=${String(begin)}-${String(end - 1)}`, 'If-Range': this.#etag },
+      signal: this.#signal,
     })
-    // Another version since the list was read: its length no longer matches.
-    const total = Number(/\/(\d+)$/.exec(response.headers.get('Content-Range') ?? '')?.[1])
-    if (response.status !== 206 || total !== this.length) throw new Error('Unreadable range')
+    if (response.status !== 206) {
+      void response.body?.cancel()
+      throw new Error('The file changed while it was open.')
+    }
     this.onDataRange(begin, new Uint8Array(await response.arrayBuffer()))
+  }
+}
+
+/** The first bytes; `null` for an empty file, which has none. */
+async function readFirst(url: string, signal: AbortSignal): Promise<FirstRead | null> {
+  const response = await fetch(url, {
+    headers: { Range: `bytes=0-${String(FIRST_BYTES - 1)}` },
+    signal,
+  })
+  if (response.status === 416) return null
+  if (!response.ok) throw new Error(`The file couldn’t be read (${String(response.status)}).`)
+  const bytes = new Uint8Array(await response.arrayBuffer())
+  const total = /\/(\d+)$/.exec(response.headers.get('Content-Range') ?? '')?.[1]
+  return {
+    bytes,
+    // All of it, when the server sent it whole.
+    length: total === undefined ? bytes.length : Number(total),
+    etag: response.headers.get('ETag') ?? '',
   }
 }
 
 interface PdfViewProps {
   /** Where its bytes are, as an API path. */
   contentPath: string
-  sizeBytes: number
   onDownload: () => void
   ref?: Ref<ViewHandle>
 }
@@ -78,7 +108,7 @@ type Status = 'loading' | 'ready' | 'locked' | 'damaged' | 'failed'
  * view, with text that can be selected, zoom and the page count. It reads
  * the file with Range requests, so a large one opens at its first pages.
  */
-export default function PdfView({ contentPath, sizeBytes, onDownload, ref }: PdfViewProps) {
+export default function PdfView({ contentPath, onDownload, ref }: PdfViewProps) {
   const container = useRef<HTMLDivElement>(null)
   const viewer = useRef<PDFViewer | null>(null)
   const [status, setStatus] = useState<Status>('loading')
@@ -114,36 +144,44 @@ export default function PdfView({ contentPath, sizeBytes, onDownload, ref }: Pdf
       setScale(next)
     })
 
-    const reader = new RangeReader(`/api${contentPath}`, sizeBytes, () => {
-      setStatus('failed')
+    const url = `/api${contentPath}`
+    const stop = new AbortController()
+    let task: PDFDocumentLoadingTask | null = null
+    const open = async () => {
+      const first = await readFirst(url, stop.signal)
+      if (!first) {
+        setStatus('damaged')
+        return
+      }
+      if (stop.signal.aborted) return
+      task = getDocument({
+        range: new RangeReader(url, first, stop.signal, () => {
+          setStatus('failed')
+        }),
+        cMapUrl: `${ASSETS}cmaps/`,
+        standardFontDataUrl: `${ASSETS}standard_fonts/`,
+        // The CSP allows no WebAssembly: pdf.js's JavaScript decoders, from here.
+        wasmUrl: `${ASSETS}wasm/`,
+        useWasm: false,
+        // Only the ranges the pages on screen need, in pdf.js's 64 KiB chunks:
+        // it reads every page's dictionary when it opens a file, and larger
+        // chunks would read the pages around them too, often the whole file.
+        disableAutoFetch: true,
+      })
+      const pdf = await task.promise
+      pdfViewer.setDocument(pdf)
+      linkService.setDocument(pdf)
+      setPages(pdf.numPages)
+      setStatus('ready')
+      // Its own keys: arrows and space scroll it, ← and → still move on.
+      element.focus({ preventScroll: true })
+    }
+    open().catch((error: unknown) => {
+      if (stop.signal.aborted) return
+      if (error instanceof PasswordException) setStatus('locked')
+      else if (error instanceof InvalidPDFException) setStatus('damaged')
+      else setStatus('failed')
     })
-    const task = getDocument({
-      range: reader,
-      cMapUrl: `${ASSETS}cmaps/`,
-      standardFontDataUrl: `${ASSETS}standard_fonts/`,
-      // The CSP allows no WebAssembly: pdf.js's JavaScript decoders, from here.
-      wasmUrl: `${ASSETS}wasm/`,
-      useWasm: false,
-      // Only the ranges the pages on screen need, in pdf.js's 64 KiB chunks:
-      // it reads every page's dictionary when it opens a file, and larger
-      // chunks would read the pages around them too, often the whole file.
-      disableAutoFetch: true,
-    })
-    task.promise.then(
-      (pdf) => {
-        pdfViewer.setDocument(pdf)
-        linkService.setDocument(pdf)
-        setPages(pdf.numPages)
-        setStatus('ready')
-        // Its own keys: arrows and space scroll it, ← and → still move on.
-        element.focus({ preventScroll: true })
-      },
-      (error: unknown) => {
-        if (error instanceof PasswordException) setStatus('locked')
-        else if (error instanceof InvalidPDFException) setStatus('damaged')
-        else setStatus('failed')
-      },
-    )
 
     // Ctrl and the wheel, or a trackpad's pinch, zoom around the pointer.
     const onWheel = (event: WheelEvent) => {
@@ -169,11 +207,11 @@ export default function PdfView({ contentPath, sizeBytes, onDownload, ref }: Pdf
       viewer.current = null
       pdfViewer.setDocument(null)
       linkService.setDocument(null)
-      // The document with it, and the reads under way.
-      void task.destroy()
-      reader.abort()
+      // The reads under way, and the document.
+      stop.abort()
+      void task?.destroy()
     }
-  }, [contentPath, sizeBytes])
+  }, [contentPath])
 
   useImperativeHandle(ref, () => ({
     zoomIn: () => viewer.current?.increaseScale(),

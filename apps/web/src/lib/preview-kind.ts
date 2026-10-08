@@ -1,4 +1,4 @@
-import { splitExtension, type DriveNode } from '@dfs/shared'
+import { splitExtension, type DriveNode, type SyncState } from '@dfs/shared'
 
 // Which viewer shows a file (DESIGN.md §10.3): only files the browser can
 // draw open in one; the rest download, as before previews.
@@ -159,11 +159,16 @@ export function textFormat(name: string, mimeType: string | null): TextFormat {
   return 'plain'
 }
 
+/** A file in a list: from the drive, or a share link's, which says nothing of where its bytes are. */
+export type ListedFile = Pick<DriveNode, 'kind' | 'name' | 'mimeType'> & {
+  syncState?: SyncState | null
+}
+
 /** A file that opens in the viewer: one it can show, uploaded and readable. */
-export function isPreviewable(node: DriveNode, support: PreviewSupport = browserSupport): boolean {
+export function isPreviewable(node: ListedFile, support: PreviewSupport = browserSupport): boolean {
   return (
     node.kind === 'file' &&
-    (node.syncState === 'syncing' || node.syncState === 'stored') &&
+    (node.syncState === undefined || node.syncState === 'syncing' || node.syncState === 'stored') &&
     previewKind(node.name, node.mimeType, support) !== null
   )
 }
