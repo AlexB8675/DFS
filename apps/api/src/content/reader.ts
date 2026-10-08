@@ -9,9 +9,8 @@ import type { FastifyInstance } from 'fastify'
 // (stored, through the frame cache), check its SHA-256, decrypt it, and stream
 // the requested slice. Chunks are read ahead while the current one is sent,
 // more of them as the reader keeps up, never past the requested range. A
-// response asks for its next piece only once it has sent the last (`paced`,
-// send.ts), so a request cancelled before then, as a seek cancels one, costs
-// its first chunk alone.
+// response asks for its next piece only once its socket has taken the last
+// (`paced`, send.ts).
 
 /** What reading needs to know about a file version. */
 export interface ReadableVersion extends Record<string, unknown> {

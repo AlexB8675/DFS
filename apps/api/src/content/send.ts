@@ -70,11 +70,12 @@ export function sendZip(
 }
 
 /**
- * `source`'s pieces, each asked for only once the response has sent the one
- * before it. `Readable.from` asks for the next piece as soon as it hands one
- * on, before the client has any of it, so the reader would start reading
- * ahead for a request about to be cancelled, as a seek cancels one (DESIGN.md
- * §6.2). A response that closes instead ends the source.
+ * `source`'s pieces, each asked for only once the response's socket has
+ * taken the one before. `Readable.from` asks for the next piece as soon as it
+ * hands one on, so the reader would read ahead for a client taking nothing,
+ * and one more chunk would wait in the stream. A socket takes a piece before
+ * the client has it, as far as the connection's buffers go (DESIGN.md §6.2).
+ * A response that closes instead ends the source.
  */
 export async function* paced(
   response: Writable,
