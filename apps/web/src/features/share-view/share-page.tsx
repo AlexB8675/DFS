@@ -1,6 +1,14 @@
 import type { PublicShare, SharedNode } from '@dfs/shared'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
-import { ChevronRight, Download, FileArchive, Link2Off, Lock, TriangleAlert } from 'lucide-react'
+import {
+  ChevronRight,
+  Download,
+  FileArchive,
+  Info,
+  Link2Off,
+  Lock,
+  TriangleAlert,
+} from 'lucide-react'
 import { Fragment, useActionState, useEffect, useRef, useState, type ReactNode } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router'
 import { toast } from 'sonner'
@@ -12,6 +20,8 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Spinner } from '@/components/ui/spinner'
 import { VirtualList } from '@/components/virtual-list'
+import { MediaDetails } from '@/features/player/media-details'
+import { FileDetails } from '@/features/preview/file-viewer'
 import { handlePreviewKey } from '@/features/preview/keys'
 import { PreviewBody } from '@/features/preview/preview-body'
 import { usePreview } from '@/features/preview/use-preview'
@@ -22,7 +32,7 @@ import { linkPlace, type FilePlace } from '@/lib/file-place'
 import { formatBytes, formatDate, formatFullDate } from '@/lib/format'
 import { formText } from '@/lib/form-data'
 import { transitionLinkProps } from '@/lib/navigation'
-import { isPreviewable } from '@/lib/preview-kind'
+import { isPreviewable, previewKind } from '@/lib/preview-kind'
 import { cn } from '@/lib/utils'
 import {
   downloadSharedFile,
@@ -193,7 +203,11 @@ function PasswordGate({ token }: { token: string }) {
 
 function SharedFile({ token, share, file }: { token: string; share: OpenShare; file: SharedNode }) {
   const [downloading, setDownloading] = useState(false)
+  const [detailsOpen, setDetailsOpen] = useState(false)
   const previewable = isPreviewable(file)
+  const place = linkPlace(token, file.id)
+  // A video's Details hold what its header doesn't: its formats, and the connection test.
+  const video = previewKind(file.name, file.mimeType) === 'video'
 
   async function download() {
     setDownloading(true)
@@ -231,11 +245,32 @@ function SharedFile({ token, share, file }: { token: string; share: OpenShare; f
               lead={`${formatBytes(file.sizeBytes)} · modified ${formatDate(file.updatedAt)}`}
             />
           </div>
+          {video && (
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="Details"
+              aria-expanded={detailsOpen}
+              onClick={() => {
+                setDetailsOpen(!detailsOpen)
+              }}
+            >
+              <Info />
+            </Button>
+          )}
           {downloadButton(false)}
         </div>
         <InlinePreview
           file={file}
-          place={linkPlace(token, file.id)}
+          place={place}
+          details={
+            video && detailsOpen ? (
+              <FileDetails file={file} media={<MediaDetails place={place} />} />
+            ) : null
+          }
+          onCloseDetails={() => {
+            setDetailsOpen(false)
+          }}
           onDownload={() => void download()}
         />
       </div>
@@ -257,14 +292,18 @@ function SharedFile({ token, share, file }: { token: string; share: OpenShare; f
   )
 }
 
-/** A file link's preview, under its name and Download: dark, as in the viewer. */
+/** A file link's preview, under its name and Download: dark, as in the viewer, with its Details over it. */
 function InlinePreview({
   file,
   place,
+  details,
+  onCloseDetails,
   onDownload,
 }: {
   file: SharedNode
   place: FilePlace
+  details: ReactNode
+  onCloseDetails: () => void
   onDownload: () => void
 }) {
   const frame = useRef<HTMLDivElement>(null)
@@ -279,6 +318,11 @@ function InlinePreview({
       tabIndex={-1}
       className="dark relative min-h-0 flex-1 bg-neutral-950 text-foreground outline-none"
       onKeyDown={(event) => {
+        // Esc closes Details, as in the viewer.
+        if (event.key === 'Escape' && details) {
+          onCloseDetails()
+          return
+        }
         handlePreviewKey(event, view.current, null, null)
       }}
     >
@@ -291,6 +335,7 @@ function InlinePreview({
         next={null}
         onDownload={onDownload}
       />
+      {details}
     </div>
   )
 }

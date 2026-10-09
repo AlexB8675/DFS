@@ -191,7 +191,7 @@ export function FileViewer({
               </StepButton>
             )}
             {detailsOpen && file && (
-              <Details
+              <FileDetails
                 file={file}
                 media={
                   place && previewKind(file.name, file.mimeType) === 'video' ? (
@@ -234,8 +234,8 @@ function StepButton({
   )
 }
 
-/** The file's facts; a video's formats too (`media`). */
-function Details({ file, media }: { file: ViewedFile; media: ReactNode }) {
+/** The file's facts; a video's formats too (`media`): over the viewer, and over a file link's video. */
+export function FileDetails({ file, media }: { file: ViewedFile; media: ReactNode }) {
   const rows: [string, ReactNode][] = [
     ['Size', formatBytes(file.sizeBytes)],
     ['Type', file.mimeType ?? fileCategoryLabel(fileCategory(file.name, file.mimeType))],
