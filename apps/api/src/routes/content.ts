@@ -22,11 +22,19 @@ const byId = z.object({ id: z.uuid() })
 export function contentRoutes(app: FastifyInstance, _options: object, done: () => void): void {
   const routes = app.withTypeProvider<ZodTypeProvider>()
 
-  routes.get('/files/:id/content', { schema: { params: byId } }, async (request, reply) => {
-    const auth = requireAuth(request.auth)
-    await visibleNode(app.db, auth.user.id, request.params.id)
-    return sendFile(app, request, reply, await downloadableFile(app.db, request.params.id))
-  })
+  routes.get(
+    '/files/:id/content',
+    { schema: { params: byId, querystring: z.object({ version: z.uuid().optional() }) } },
+    async (request, reply) => {
+      const auth = requireAuth(request.auth)
+      await visibleNode(app.db, auth.user.id, request.params.id)
+      const file = await downloadableFile(app.db, request.params.id)
+      // A player names the version it plays, so a replaced file never mixes with it (§10.4).
+      const { version } = request.query
+      if (version && version !== file.version_id) throw versionChanged()
+      return sendFile(app, request, reply, file)
+    },
+  )
 
   routes.get(
     '/folders/:id/archive',
@@ -65,6 +73,11 @@ export function contentRoutes(app: FastifyInstance, _options: object, done: () =
   )
 
   done()
+}
+
+/** The version a player named is no longer the file's (§10.4). */
+export function versionChanged(): ApiError {
+  return new ApiError(412, 'version_changed', 'This file has been replaced since.')
 }
 
 /**

@@ -1,5 +1,5 @@
 import type { Executor } from '@dfs/db'
-import { fileMediaSchema, mediaKind } from '@dfs/shared'
+import { fileMediaSchema, mediaKind, playbackSchema, savePositionSchema } from '@dfs/shared'
 import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import type { ZodTypeProvider } from 'fastify-type-provider-zod'
@@ -8,11 +8,19 @@ import { requireAuth } from '../auth/access.ts'
 import { sendFile, type DownloadableFile } from '../content/send.ts'
 import { ApiError } from '../errors.ts'
 import { keptExamination, MediaUnavailableError, type Examined } from '../media/examine.ts'
+import {
+  clearPosition,
+  savedPosition,
+  savePosition,
+  subtitleFileAsWebVtt,
+  subtitleFilesBeside,
+} from '../media/playback.ts'
 import { mediaTokenValid } from '../media/token.ts'
-import { visibleNode } from '../nodes/read.ts'
-import { downloadableFile } from './content.ts'
+import { visibleNode, type NodeRow } from '../nodes/read.ts'
+import { downloadableFile, versionChanged } from './content.ts'
 
-// Audio and video (DESIGN.md §6.7, §9): what a file holds, for the players,
+// Audio and video (DESIGN.md §6.7, §9, §10.4): what a file holds, what a
+// player needs to start, where each user stopped and subtitles, for the players,
 // and the plaintext of a version for the media service, which examines it.
 
 const byId = z.object({ id: z.uuid() })
@@ -25,16 +33,91 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
     { schema: { params: byId, response: { 200: fileMediaSchema } } },
     async (request) => {
       const auth = requireAuth(request.auth)
-      const node = await visibleNode(app.db, auth.user.id, request.params.id)
-      if (node.kind !== 'file' || !mediaKind(node.name, node.mime_type)) {
-        throw new ApiError(422, 'not_media', 'This file isn’t audio or video.')
-      }
+      const node = await mediaNode(app.db, auth.user.id, request.params.id)
       const file = await downloadableFile(app.db, node.id)
       return { versionId: file.version_id, ...(await examined(app, file)) }
     },
   )
 
+  // What a player needs to start, from the database alone (§10.4).
+  routes.get(
+    '/files/:id/playback',
+    { schema: { params: byId, response: { 200: playbackSchema } } },
+    async (request) => {
+      const auth = requireAuth(request.auth)
+      const node = await mediaNode(app.db, auth.user.id, request.params.id)
+      const file = await downloadableFile(app.db, node.id)
+      const [positionMs, subtitleFiles] = await Promise.all([
+        savedPosition(app.db, auth.user.id, node.id, file.version_id),
+        subtitleFilesBeside(app.db, node),
+      ])
+      return { versionId: file.version_id, positionMs, subtitleFiles }
+    },
+  )
+
+  routes.put(
+    '/files/:id/position',
+    { schema: { params: byId, body: savePositionSchema } },
+    async (request, reply) => {
+      const auth = requireAuth(request.auth)
+      const node = await mediaNode(app.db, auth.user.id, request.params.id)
+      const { versionId, positionMs } = request.body
+      const file = await downloadableFile(app.db, node.id)
+      if (file.version_id !== versionId) throw versionChanged()
+      await savePosition(app.db, { userId: auth.user.id, nodeId: node.id, versionId, positionMs })
+      return reply.code(204).send()
+    },
+  )
+
+  routes.delete('/files/:id/position', { schema: { params: byId } }, async (request, reply) => {
+    const auth = requireAuth(request.auth)
+    const node = await mediaNode(app.db, auth.user.id, request.params.id)
+    await clearPosition(app.db, auth.user.id, node.id)
+    return reply.code(204).send()
+  })
+
+  // Subtitles as WebVTT (§6.7): a subtitle file beside the video, by its ID.
+  routes.get(
+    '/files/:id/media/:versionId/subtitles/:track',
+    {
+      schema: {
+        params: z.object({
+          id: z.uuid(),
+          versionId: z.uuid(),
+          track: z
+            .string()
+            .regex(/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}\.vtt$/i),
+        }),
+      },
+    },
+    async (request, reply) => {
+      const auth = requireAuth(request.auth)
+      const { id, versionId, track } = request.params
+      const node = await mediaNode(app.db, auth.user.id, id)
+      const file = await downloadableFile(app.db, node.id)
+      if (file.version_id !== versionId) throw versionChanged()
+      const vtt = await subtitleFileAsWebVtt(
+        app,
+        node,
+        track.slice(0, -'.vtt'.length).toLowerCase(),
+      )
+      return reply
+        .header('content-type', 'text/vtt; charset=utf-8')
+        .header('cache-control', 'private, no-cache')
+        .send(vtt)
+    },
+  )
+
   done()
+}
+
+/** One of the user's audio or video files, or a 404 or `422 not_media`. */
+async function mediaNode(db: Executor, userId: string, id: string): Promise<NodeRow> {
+  const node = await visibleNode(db, userId, id)
+  if (node.kind !== 'file' || !mediaKind(node.name, node.mime_type)) {
+    throw new ApiError(422, 'not_media', 'This file isn’t audio or video.')
+  }
+  return node
 }
 
 /**

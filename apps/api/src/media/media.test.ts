@@ -217,6 +217,23 @@ describe('examining audio and video (§6.7)', () => {
   })
 })
 
+describe('where users stopped (§10.4)', () => {
+  it('goes with its version once a new one replaces it', async () => {
+    const first = await uploadFile(client, folderId, 'resumed.mp3', text('first'))
+    await client.send('PUT', `/files/${first.nodeId}/position`, {
+      json: { versionId: first.versionId, positionMs: 61_000 },
+    })
+    const positions = async () =>
+      (
+        await app.db.execute<{ version_id: string }>(sql`
+          SELECT version_id FROM playback_positions WHERE node_id = ${first.nodeId}`)
+      ).rows
+    expect(await positions()).toEqual([{ version_id: first.versionId }])
+    await uploadFile(client, folderId, 'resumed.mp3', text('second'))
+    expect(await positions()).toEqual([])
+  })
+})
+
 describe('without a media service (§6.7)', () => {
   it('still serves what was found, and says it can’t examine the rest', async () => {
     const found = await uploadFile(client, folderId, 'found.mp3', text('found'))

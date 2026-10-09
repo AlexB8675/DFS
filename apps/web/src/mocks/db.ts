@@ -1,9 +1,15 @@
 import {
+  decodeSubtitles,
   fileCategory,
   formatBytes,
+  MAX_SUBTITLE_FILE_BYTES,
+  mediaKind,
   nameKey,
   normalizeName,
   splitExtension,
+  subtitleFileOf,
+  subtitleFormat,
+  toWebVtt,
   validateName,
   type AdminUser,
   type ArchiveTicket,
@@ -12,12 +18,14 @@ import {
   type CreateUploadInput,
   type DriveNode,
   type ExistingFile,
+  type FileMedia,
   type LoginInput,
   type NodeKind,
   type NodePath,
   type Page,
   type PasswordChange,
   type PasswordResetRequest,
+  type Playback,
   type PublicShare,
   type SearchResult,
   type Session,
@@ -26,6 +34,8 @@ import {
   type ShareCount,
   type ShareCountInput,
   type ShareLink,
+  type SavePositionInput,
+  type SubtitleFile,
   type SortField,
   type SortOrder,
   type SyncState,
@@ -38,6 +48,7 @@ import {
   type User,
 } from '@dfs/shared'
 import { previewKind } from '@/lib/preview-kind'
+import { sampleMediaInfo } from './media'
 import { sampleImage, samplePdf, sampleText } from './samples'
 import { createSeed } from './seed'
 import { createZip, type ZipEntry } from './zip'
@@ -69,6 +80,8 @@ export interface MockNode {
   moderationReason: string | null
   /** A file's current version, counting from 1 (D20). */
   versionNo?: number
+  /** Its ID, as an upload names it; made up from the file's for the demo's files. */
+  versionId?: string
   /** Earlier versions a share link still serves (§7.5); they count toward the quota (D24). */
   earlierVersions?: MockVersion[]
 }
@@ -148,6 +161,8 @@ export interface MockState {
   uploads: Record<string, MockUpload>
   channels: MockChannel[]
   audit: MockAuditEntry[]
+  /** Where each user stopped a video, by `userId:nodeId` (§10.4). */
+  positions?: Record<string, { versionId: string; positionMs: number }>
 }
 
 /** Live events (§6.1), as the SSE stream sends them. */
@@ -472,9 +487,11 @@ export class MockDb {
     }))
   }
 
-  fileContent(id: string): MockFileContent {
+  /** `GET /files/:id/content`, of the version a player names if it does (`?version=`, §10.4). */
+  fileContent(id: string, versionId: string | null = null): MockFileContent {
     const node = this.visibleNode(id)
     if (node.kind !== 'file') throw notFound()
+    if (versionId !== null && versionId !== versionIdOf(node)) throw versionChanged()
     return this.contentOf(node)
   }
 
@@ -487,6 +504,87 @@ export class MockDb {
       return { name: node.name, mimeType, body: bytes, etag }
     }
     return { name: node.name, ...mockContent(node, node.mimeType), etag }
+  }
+
+  // ── Audio and video (§6.7, §10.4) ──────────────────────────────────────────
+
+  /** `GET /files/:id/media`: what the media service would find, made up. */
+  media(id: string): FileMedia {
+    const { node, kind } = this.mediaNode(id)
+    const versionId = versionIdOf(node)
+    if (node.sizeBytes === 0) return { versionId, info: null, problem: 'It’s empty.' }
+    return { versionId, info: sampleMediaInfo(kind, node.name), problem: null }
+  }
+
+  /** `GET /files/:id/playback`: the version, where this user stopped, the subtitle files beside it. */
+  playback(id: string): Playback {
+    const { node } = this.mediaNode(id)
+    const versionId = versionIdOf(node)
+    const saved = this.state.positions?.[this.positionKey(node)]
+    return {
+      versionId,
+      positionMs: saved?.versionId === versionId ? saved.positionMs : null,
+      subtitleFiles: this.subtitleFilesBeside(node),
+    }
+  }
+
+  /** `PUT /files/:id/position` */
+  savePosition(id: string, { versionId, positionMs }: SavePositionInput): void {
+    const { node } = this.mediaNode(id)
+    if (versionId !== versionIdOf(node)) throw versionChanged()
+    this.state.positions = {
+      ...this.state.positions,
+      [this.positionKey(node)]: { versionId, positionMs },
+    }
+    this.save()
+  }
+
+  /** `DELETE /files/:id/position` */
+  clearPosition(id: string): void {
+    const { node } = this.mediaNode(id)
+    if (this.state.positions) Reflect.deleteProperty(this.state.positions, this.positionKey(node))
+    this.save()
+  }
+
+  /** `GET /files/:id/media/:versionId/subtitles/:track`: a subtitle file beside the video, as WebVTT. */
+  subtitles(id: string, versionId: string, track: string): string {
+    const { node } = this.mediaNode(id)
+    if (versionId !== versionIdOf(node)) throw versionChanged()
+    const fileId = track.replace(/\.vtt$/i, '').toLowerCase()
+    const beside = this.subtitleFilesBeside(node).find((file) => file.id === fileId)
+    const subtitle = beside && this.state.nodes[beside.id]
+    const format = beside && subtitleFormat(beside.name)
+    if (!beside || !subtitle || !format) {
+      throw new MockApiError(404, 'not_found', 'There are no such subtitles.')
+    }
+    return toWebVtt(decodeSubtitles(this.contentOf(subtitle).body, beside.language), format)
+  }
+
+  private mediaNode(id: string): { node: MockNode; kind: 'video' | 'audio' } {
+    const node = this.visibleNode(id)
+    const kind = node.kind === 'file' ? mediaKind(node.name, node.mimeType) : null
+    if (!kind) throw new MockApiError(422, 'not_media', 'This file isn’t audio or video.')
+    return { node, kind }
+  }
+
+  private positionKey(node: MockNode): string {
+    return `${this.state.userId}:${node.id}`
+  }
+
+  private subtitleFilesBeside(video: MockNode): SubtitleFile[] {
+    if (video.parentId === null) return []
+    return this.childrenOf(video.parentId)
+      .filter(
+        (node) =>
+          node.kind === 'file' &&
+          (node.syncState === 'syncing' || node.syncState === 'stored') &&
+          node.sizeBytes <= MAX_SUBTITLE_FILE_BYTES,
+      )
+      .flatMap((node) => {
+        const said = subtitleFileOf(video.name, node.name)
+        return said ? [{ id: node.id, name: node.name, ...said }] : []
+      })
+      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
   }
 
   // ── Archives (§6.2) ────────────────────────────────────────────────────────
@@ -857,6 +955,7 @@ export class MockDb {
         node.mimeType = upload.mimeType
         this.dropUnneededVersions(node)
       }
+      node.versionId = upload.versionId
       node.syncState = 'syncing'
       node.syncCompletesAt = Date.now() + 2000 + Math.random() * 4000
       node.updatedAt = upload.modifiedAt ?? new Date().toISOString()
@@ -1458,6 +1557,19 @@ function mockContent(
     body: `Mock content of “${node.name}” (${node.sizeBytes} bytes in the real file).\n`,
   }
   return { mimeType: type, body: new TextEncoder().encode(body) }
+}
+
+/**
+ * A file's version, by its ID: the upload's, or for the demo's files one made
+ * from the file's own ID and its version's number.
+ */
+function versionIdOf(node: MockNode): string {
+  return node.versionId ?? `${node.id.slice(0, 24)}${String(node.versionNo ?? 1).padStart(12, '0')}`
+}
+
+/** The version a player named is no longer the file's (§10.4). */
+function versionChanged(): MockApiError {
+  return new MockApiError(412, 'version_changed', 'This file has been replaced since.')
 }
 
 /** A version's ETag: the API's is the version's ID, the mock's its file and number. */

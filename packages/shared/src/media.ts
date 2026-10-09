@@ -149,3 +149,55 @@ export const fileMediaSchema = z.object({
 })
 
 export type FileMedia = z.infer<typeof fileMediaSchema>
+
+/**
+ * Subtitle streams the media service extracts as text (§6.7), by ffmpeg's
+ * codec names; the others (PGS, VobSub, DVB) are pictures, listed but not shown.
+ */
+export const TEXT_SUBTITLE_CODECS: ReadonlySet<string> = new Set([
+  'subrip',
+  'srt',
+  'ass',
+  'ssa',
+  'mov_text',
+  'webvtt',
+  'text',
+])
+
+/** A subtitle file beside a video (`Film.it.srt`), with what its name says (§6.7). */
+export const subtitleFileSchema = z.object({
+  /** The subtitle file's own ID. */
+  id: z.uuid(),
+  name: z.string(),
+  /** A BCP 47 tag, from its name; `null` when its name gives none. */
+  language: z.string().max(35).nullable(),
+  forced: z.boolean(),
+  hearingImpaired: z.boolean(),
+})
+
+export type SubtitleFile = z.infer<typeof subtitleFileSchema>
+
+/**
+ * `GET /files/:id/playback`: what a player needs to start, from the
+ * database alone, so it doesn't wait for the media info (§10.4).
+ */
+export const playbackSchema = z.object({
+  /** The version to play: named in the content route's `?version=`. */
+  versionId: z.uuid(),
+  /** Where this user stopped in this version; `null` for the start. */
+  positionMs: z.number().int().min(0).nullable(),
+  subtitleFiles: z.array(subtitleFileSchema),
+})
+
+export type Playback = z.infer<typeof playbackSchema>
+
+/** A week: longer than any video, so a larger position is a client's mistake. */
+const MAX_POSITION_MS = 7 * 24 * 60 * 60 * 1000
+
+/** `PUT /files/:id/position`: where this user stopped, in the version they played. */
+export const savePositionSchema = z.object({
+  versionId: z.uuid(),
+  positionMs: z.number().int().min(0).max(MAX_POSITION_MS),
+})
+
+export type SavePositionInput = z.infer<typeof savePositionSchema>

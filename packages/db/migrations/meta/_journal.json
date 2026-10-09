@@ -169,6 +169,13 @@
       "when": 1791492990994,
       "tag": "0023_media_info",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1791512991870,
+      "tag": "0024_playback_positions",
+      "breakpoints": true
     }
   ]
 }

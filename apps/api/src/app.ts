@@ -91,6 +91,8 @@ const UNTIMED_ROUTES = new Set([
   '/internal/media/:versionId',
   // Quick once a file is examined; the first ask waits for ffprobe.
   '/api/files/:id/media',
+  // Subtitles inside a file may be extracted on the first ask, reading it whole.
+  '/api/files/:id/media/:versionId/subtitles/:track',
 ])
 
 export interface AppOptions {
@@ -99,6 +101,8 @@ export interface AppOptions {
   logger?: FastifyServerOptions['logger']
   /** Defaults to the store `BLOB_STORE` names; tests read from a fake Discord. */
   blobStore?: BlobReader
+  /** The media service's HTTP, which tests stand in for; defaults to `fetch`. */
+  mediaFetch?: typeof fetch
 }
 
 /**
@@ -110,6 +114,7 @@ export async function buildApp({
   config,
   logger,
   blobStore,
+  mediaFetch,
 }: AppOptions): Promise<FastifyInstance> {
   const app = Fastify({
     logger: logger ?? loggerOptions(config),
@@ -178,7 +183,7 @@ export async function buildApp({
     'media',
     config.mediaInternalUrl
       ? new MediaExaminer({
-          client: new MediaClient(config.mediaInternalUrl),
+          client: new MediaClient(config.mediaInternalUrl, mediaFetch),
           db,
           keys: app.keys,
           log: app.log,

@@ -11,13 +11,14 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest'
 import { buildApp } from './app.ts'
 import { CdnBlobReader } from './content/cdn-reader.ts'
 import { testConfig } from './testing/config.ts'
+import { standInMediaFetch } from './testing/media-stand-in.ts'
 import { seedUser } from './testing/seed.ts'
 
 // The contract suite (BACKEND.md §5) against the real API, over real HTTP,
 // once on local storage and once on Discord: a Discord in memory, with the
-// bot's uploader, its URL signing and the API's CDN reader. `settle` does what
-// the bot would: delete versions no link serves, store staged blobs, fold
-// folder sizes.
+// bot's uploader, its URL signing and the API's CDN reader, and a stand-in
+// for the media service. `settle` does what the bot would: delete versions no
+// link serves, store staged blobs, fold folder sizes.
 
 for (const storage of ['local', 'discord'] as const) {
   describe(`with ${storage} storage`, () => {
@@ -29,7 +30,11 @@ for (const storage of ['local', 'discord'] as const) {
 
     beforeAll(async () => {
       database = await createTestDatabase(inject('testPostgres'))
-      const setup = await testConfig({ DATABASE_URL: database.url })
+      // A stand-in media service: every file it is asked about is a video.
+      const setup = await testConfig({
+        DATABASE_URL: database.url,
+        MEDIA_INTERNAL_URL: 'http://media.test',
+      })
       cleanup = setup.cleanup
       let store: BlobStore = new LocalBlobStore(setup.config.localBlobDir)
       let reader: BlobReader | undefined
@@ -60,6 +65,7 @@ for (const storage of ['local', 'discord'] as const) {
         config: setup.config,
         logger: { level: 'error' },
         blobStore: reader,
+        mediaFetch: standInMediaFetch,
       })
       const address = await app.listen({ port: 0, host: '127.0.0.1' })
       const owner = { username: 'owner', password: 'the-owner-password' }

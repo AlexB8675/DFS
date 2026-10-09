@@ -562,3 +562,31 @@ export const mediaInfo = pgTable(
   },
   (t) => [check('media_info_found', sql`(${t.info} IS NULL) <> (${t.problem} IS NULL)`)],
 )
+
+/**
+ * Where each user stopped a video, or a long audio file, so it follows them
+ * to another device (§10.4). Kept for the version they played: a new version
+ * leaves it unused, and it goes once that version is pruned. Not journaled.
+ */
+export const playbackPositions = pgTable(
+  'playback_positions',
+  {
+    nodeId: uuid('node_id')
+      .notNull()
+      .references(() => nodes.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    versionId: uuid('version_id')
+      .notNull()
+      .references(() => fileVersions.id, { onDelete: 'cascade' }),
+    positionMs: integer('position_ms').notNull(),
+    updatedAt: timestamptz('updated_at').notNull().defaultNow(),
+  },
+  (t) => [
+    // By file first: deleting files is far more common than deleting users.
+    primaryKey({ name: 'playback_positions_pkey', columns: [t.nodeId, t.userId] }),
+    index('playback_positions_version').on(t.versionId),
+    check('playback_positions_position', sql`${t.positionMs} >= 0`),
+  ],
+)

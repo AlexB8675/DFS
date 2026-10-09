@@ -20,6 +20,7 @@ import {
   nodeIdsSchema,
   nodeKindSchema,
   resetPasswordSchema,
+  savePositionSchema,
   sortFieldSchema,
   sortOrderSchema,
   unlockShareSchema,
@@ -288,7 +289,44 @@ export const handlers = [
 
   // ── Content ────────────────────────────────────────────────────────────────
   http.get<Id>('/api/files/:id/content', ({ request, params }) =>
-    respond(request, () => fileResponse(request, db.fileContent(params.id))),
+    respond(request, () =>
+      fileResponse(
+        request,
+        db.fileContent(params.id, new URL(request.url).searchParams.get('version')),
+      ),
+    ),
+  ),
+
+  // ── Audio and video (§6.7, §10.4) ──────────────────────────────────────────
+  http.get<Id>('/api/files/:id/media', ({ request, params }) =>
+    respond(request, () => db.media(params.id)),
+  ),
+  http.get<Id>('/api/files/:id/playback', ({ request, params }) =>
+    respond(request, () => db.playback(params.id)),
+  ),
+  http.put<Id>('/api/files/:id/position', ({ request, params }) =>
+    respondEmpty(request, async () => {
+      db.savePosition(params.id, savePositionSchema.parse(await request.json()))
+    }),
+  ),
+  http.delete<Id>('/api/files/:id/position', ({ request, params }) =>
+    respondEmpty(request, () => {
+      db.clearPosition(params.id)
+    }),
+  ),
+  http.get<Id & { versionId: string; track: string }>(
+    '/api/files/:id/media/:versionId/subtitles/:track',
+    ({ request, params }) =>
+      respond(
+        request,
+        () =>
+          new HttpResponse(db.subtitles(params.id, params.versionId, params.track), {
+            headers: {
+              'Content-Type': 'text/vtt; charset=utf-8',
+              'Cache-Control': 'private, no-cache',
+            },
+          }),
+      ),
   ),
 
   // ── Archives (§6.2) ────────────────────────────────────────────────────────
