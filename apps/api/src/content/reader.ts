@@ -21,10 +21,12 @@ import type { FastifyInstance } from 'fastify'
 // come from Discord streams instead: only the segments the range covers, by
 // Range, each checked and sent on as it arrives, so the first bytes don't
 // wait for the whole 20 MiB. Chunks are read ahead while the current one is sent,
-// more of them as the reader keeps up, never past the requested range. A
-// response asks for its next piece only once its socket has taken the last
-// (`paced`, send.ts), and gives up on what is being read once its client has
-// gone (`cancellation`), so a cancelled seek stops fetching at once.
+// the first once the client has taken some of the first chunk, more as it
+// keeps up, never past the requested range. A response asks for its next
+// piece only once its socket has taken the last (`paced`, send.ts), and gives
+// up on what is being read once its client has gone (`cancellation`), so a
+// cancelled seek stops fetching at once. A video's end is fetched into the
+// cache as its player opens (`warmEnd`), where its index usually is.
 
 /** What reading needs to know about a file version. */
 export interface ReadableVersion extends Record<string, unknown> {
@@ -57,11 +59,18 @@ interface ChunkLocation extends Record<string, unknown> {
 /** Chunk locations are looked up this many at a time, so a huge file isn't loaded at once. */
 const LOOKUP_BATCH = 64
 /**
- * Chunks read ahead at most, once a reader has kept up for as many: a seek
- * that stops after one chunk costs one, and a whole file streams with this
- * many requests overlapping (measured in DESIGN.md §6.2).
+ * Chunks read ahead at most, once a reader has kept up for as many: a whole
+ * file streams with this many requests overlapping (measured in DESIGN.md §6.2).
  */
 const MAX_READ_AHEAD = 2
+/**
+ * The next chunk is read once the client has taken this much of the first,
+ * or half of what it wants of it, whichever comes first: it plays from a
+ * seek, rather than passing by, and the next chunk is under way well before
+ * it is wanted, wherever in a chunk the seek landed. A seek left sooner reads
+ * nothing past its chunk; one left later gives up the read at once (`signal`).
+ */
+const READ_AHEAD_AFTER_BYTES = 2 * 1024 * 1024
 const NOTHING_TO_GIVE_BACK = () => undefined
 
 export class ContentError extends Error {
@@ -99,27 +108,33 @@ export async function* readVersion(
   const reading: { chunk: ChunkLocation; read: ChunkRead; giveBack: () => void }[] = []
   let upcoming = await locations.next()
   let ahead = 0
+  /** Chunks the client has taken whole. */
+  let taken = 0
+  /** Starts reading chunks until `count` are; while one is being sent, all of them read ahead. */
+  const startReads = async (count: number, sending: boolean) => {
+    while (!upcoming.done && reading.length < count) {
+      const chunk = upcoming.value
+      const giveBack =
+        (!sending && reading.length === 0) || !app.readBudget
+          ? NOTHING_TO_GIVE_BACK
+          : app.readBudget.tryTake(chunk.frame_size)
+      if (!giveBack) break
+      const chunkStart = chunk.idx * chunkSize
+      const from = Math.max(0, start - chunkStart)
+      const to = Math.min(chunk.plain_size - 1, end - chunkStart)
+      reading.push({
+        chunk,
+        read: new ChunkRead((emit) =>
+          readChunk(app, versionId, key, chunk, { from, to, signal, emit }),
+        ),
+        giveBack,
+      })
+      upcoming = await locations.next()
+    }
+  }
   try {
     for (;;) {
-      while (!upcoming.done && reading.length <= ahead) {
-        const chunk = upcoming.value
-        const giveBack =
-          reading.length === 0 || !app.readBudget
-            ? NOTHING_TO_GIVE_BACK
-            : app.readBudget.tryTake(chunk.frame_size)
-        if (!giveBack) break
-        const chunkStart = chunk.idx * chunkSize
-        const from = Math.max(0, start - chunkStart)
-        const to = Math.min(chunk.plain_size - 1, end - chunkStart)
-        reading.push({
-          chunk,
-          read: new ChunkRead((emit) =>
-            readChunk(app, versionId, key, chunk, { from, to, signal, emit }),
-          ),
-          giveBack,
-        })
-        upcoming = await locations.next()
-      }
+      await startReads(ahead + 1, false)
       const current = reading.shift()
       if (!current) return
       const chunkStart = current.chunk.idx * chunkSize
@@ -127,12 +142,19 @@ export async function* readVersion(
         Math.min(current.chunk.plain_size - 1, end - chunkStart) -
         Math.max(0, start - chunkStart) +
         1
+      // Pieces are counted once the client's socket has taken them (`paced`).
+      const readAheadAt =
+        ahead === 0 ? Math.min(READ_AHEAD_AFTER_BYTES, Math.ceil(expected / 2)) : Infinity
       let sent = 0
       try {
         for await (const piece of current.read.pieces()) {
           sent += piece.length
           app.metrics.record('downloads.bytes', piece.length)
           yield piece
+          if (ahead === 0 && sent >= readAheadAt) {
+            ahead = 1
+            await startReads(ahead, true)
+          }
         }
       } finally {
         current.giveBack()
@@ -143,8 +165,10 @@ export async function* readVersion(
           `Chunk ${String(current.chunk.idx)} of ${versionId} gave ${String(sent)} bytes of ${String(expected)}.`,
         )
       }
-      // Grown by whole chunks the client took, not by pieces of one.
-      ahead = Math.min(MAX_READ_AHEAD, ahead + 1)
+      // Grown by whole chunks the client took, not by pieces of one: the
+      // first's start only brings forward reading the one after it.
+      taken += 1
+      ahead = Math.min(MAX_READ_AHEAD, Math.max(ahead, taken))
     }
   } finally {
     // Reads ahead that nobody will send give their memory back once given up
@@ -306,6 +330,86 @@ function wanted(
     Math.max(0, range.from - start),
     Math.min(plaintext.length, range.to - start + 1),
   )
+}
+
+/**
+ * How much of a video's end is fetched as its player opens: the index most
+ * tools write last (an MP4's sample tables, about 2 MB an hour of video at
+ * 30 fps; an MKV's cues, a few kilobytes), which a browser reads before it
+ * plays, a round trip to Discord sooner.
+ */
+export const WARM_END_BYTES = 4 * 1024 * 1024
+/** A fetch of a video's end given up after this long: nobody waits for it. */
+const WARM_TIMEOUT_MS = 30_000
+/** Videos' ends fetched at once per API at most; more are left to their players. */
+const MAX_WARMING = 4
+/** The versions whose ends are being fetched, so a player asking again starts nothing. */
+const warming = new WeakMap<FastifyInstance, Set<string>>()
+
+/**
+ * Fetches the last `bytes` of a stored version from Discord into the frame
+ * cache, ahead of the reader who will want them: a player looks at a
+ * video's end for its index before it plays. What is kept, staged or being
+ * fetched is left as it is, nothing is sent anywhere, and it runs on if the
+ * viewer leaves, into the cache. Best effort: it never throws.
+ */
+export async function warmEnd(
+  app: FastifyInstance,
+  version: ReadableVersion,
+  bytes: number,
+): Promise<void> {
+  const cache = app.frameCache
+  const { version_id: versionId, chunk_size: chunkSize, size_bytes: size } = version
+  let under = warming.get(app)
+  if (!under) {
+    under = new Set()
+    warming.set(app, under)
+  }
+  if (!cache || !app.blobStore.stream || size === 0) return
+  if (under.has(versionId) || under.size >= MAX_WARMING) return
+  under.add(versionId)
+  const settled: Promise<unknown>[] = []
+  try {
+    const key = await app.dataKeys.get(versionId, () =>
+      app.keys.unwrapDek(version.wrapped_dek, version.key_id, uuidBytes(versionId)),
+    )
+    const signal = AbortSignal.timeout(WARM_TIMEOUT_MS)
+    const start = Math.max(0, size - bytes)
+    const chunks = chunksBetween(
+      app,
+      versionId,
+      Math.floor(start / chunkSize),
+      Math.floor((size - 1) / chunkSize),
+    )
+    for await (const chunk of chunks) {
+      const layout = streamable(app, chunk)
+        ? chunkFrameLayout(chunk.plain_size, chunk.frame_size)
+        : null
+      if (!layout) continue
+      const first = layout.segmentOf(Math.max(0, start - chunk.idx * chunkSize))
+      const last = layout.segments - 1
+      const wanted = Array.from({ length: last - first + 1 }, (_, index) => first + index)
+      // Kept already: nothing to fetch, nor to read off the cache's disk.
+      if (wanted.every((index) => cache.hasSegment(chunk.frame_sha256, index))) continue
+      // A frame fetched whole is held whole meanwhile: from the read-ahead budget.
+      const giveBack = app.readBudget
+        ? app.readBudget.tryTake(chunk.frame_size)
+        : NOTHING_TO_GIVE_BACK
+      if (!giveBack) continue
+      const fetch: SegmentFetch = { app, versionId, key, chunk, layout, signal }
+      const sources = [...planSegments(fetch, first, last, false).values()]
+      const done = Promise.allSettled(
+        sources.flatMap((source) => (source.kind === 'fetch' ? [source.plaintext] : [])),
+      ).then(giveBack)
+      settled.push(done)
+    }
+    await Promise.all(settled)
+  } catch (error) {
+    app.log.info({ err: error, versionId }, 'could not fetch a video’s end ahead')
+  } finally {
+    await Promise.allSettled(settled)
+    under.delete(versionId)
+  }
 }
 
 /**
