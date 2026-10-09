@@ -19,6 +19,7 @@ import {
   moveNodesSchema,
   nodeIdsSchema,
   nodeKindSchema,
+  playbackReportSchema,
   resetPasswordSchema,
   savePositionSchema,
   sortFieldSchema,
@@ -303,6 +304,13 @@ export const handlers = [
   ),
   http.get<Id>('/api/files/:id/playback', ({ request, params }) =>
     respond(request, () => db.playback(params.id)),
+  ),
+  http.post<Id>('/api/files/:id/playback-report', ({ request, params }) =>
+    respondEmpty(request, async () => {
+      // Checked as the API checks it, and then forgotten: the mock keeps no logs.
+      playbackReportSchema.parse(await request.json())
+      db.media(params.id)
+    }),
   ),
   http.put<Id>('/api/files/:id/position', ({ request, params }) =>
     respondEmpty(request, async () => {

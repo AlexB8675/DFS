@@ -134,6 +134,34 @@ export function mediaTests({
       })
     })
 
+    it('takes a player’s report of how a play went, within bounds', async () => {
+      const client = await owner()
+      const root = await workspace(client)
+      const video = await uploadFile(client, root.id, 'Reported.mp4', text('mp4'))
+      const report = {
+        versionId: video.versionId,
+        outcome: 'played',
+        firstFrameMs: 1850,
+        openMs: 64_000,
+        stalls: 2,
+        stallMs: 4100,
+        frames: 3000,
+        droppedFrames: 12,
+        arrivalBitsPerSecond: 2_700_000,
+        decoding: { supported: true, smooth: true, powerEfficient: true },
+        problem: null,
+      }
+      const path = `/files/${video.nodeId}/playback-report`
+      await client.send('POST', path, { json: report })
+      expect(await client.error('POST', path, { json: { ...report, stalls: -1 } })).toMatchObject({
+        status: 400,
+      })
+      const notes = await uploadFile(client, root.id, 'notes.txt', text('notes'))
+      expect(
+        await client.error('POST', `/files/${notes.nodeId}/playback-report`, { json: report }),
+      ).toEqual({ status: 422, code: 'not_media' })
+    })
+
     it('keeps where a user stopped, for them alone and that version', async () => {
       const client = await owner()
       const root = await workspace(client)

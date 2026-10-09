@@ -3,8 +3,11 @@ import {
   fileMediaSchema,
   isTextSubtitles,
   mediaKind,
+  playbackReportSchema,
   playbackSchema,
   savePositionSchema,
+  type MediaInfo,
+  type PlaybackReport,
 } from '@dfs/shared'
 import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
@@ -83,6 +86,31 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
     return reply.code(204).send()
   })
 
+  // How a play went, as the player saw it (§10.4, §16): logged, with its times on the graphs.
+  routes.post(
+    '/files/:id/playback-report',
+    { schema: { params: byId, body: playbackReportSchema } },
+    async (request, reply) => {
+      const auth = requireAuth(request.auth)
+      const node = await mediaNode(app.db, auth.user.id, request.params.id)
+      const report = request.body
+      const kept = await keptExamination(app.db, report.versionId)
+      request.log.info(
+        {
+          play: {
+            ...report,
+            nodeId: node.id,
+            video: kept?.info ? summary(kept.info) : null,
+            userAgent: request.headers['user-agent']?.slice(0, 300) ?? null,
+          },
+        },
+        'video play reported',
+      )
+      recordPlay(app, report)
+      return reply.code(204).send()
+    },
+  )
+
   // Subtitles as WebVTT (§6.7): a stream inside the file by its number, or a
   // subtitle file beside it by its ID.
   routes.get(
@@ -123,6 +151,24 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
   )
 
   done()
+}
+
+/** A play's times on the graphs (§16). */
+function recordPlay(app: FastifyInstance, report: PlaybackReport): void {
+  if (report.firstFrameMs !== null) app.metrics.time('player.first_frame_ms', report.firstFrameMs)
+  if (report.stalls > 0) app.metrics.record('player.stall_ms', report.stallMs)
+  if (report.outcome === 'failed') app.metrics.record('player.failures')
+}
+
+/** A video in a few words, for a play's log line: `av1 3840x2160 59.94fps pq, 24.3 Mbit/s`. */
+function summary(info: MediaInfo): string {
+  const video = info.streams.find((stream) => stream.type === 'video')
+  const audio = info.streams.find((stream) => stream.type === 'audio')
+  const picture = video
+    ? `${video.codec} ${String(video.width)}x${String(video.height)} ${String(video.frameRate)}fps${video.hdr ? ` ${video.hdr}` : ''}`
+    : 'no video'
+  const rate = info.bitRate ? `, ${String(Math.round(info.bitRate / 100_000) / 10)} Mbit/s` : ''
+  return `${info.container}: ${picture}${audio ? `, ${audio.codec}` : ''}${rate}`
 }
 
 /** One of the user's audio or video files, or a 404 or `422 not_media`. */

@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Download, Play, RotateCcw, VolumeX, X } from 'lucide-react'
+import { Cpu, Download, Film, Play, RotateCcw, Snail, VolumeX, X } from 'lucide-react'
 import {
   useCallback,
   useEffect,
@@ -25,9 +25,15 @@ import { errorMessage } from '@/lib/api/client'
 import { isEditable } from '@/lib/editable'
 import { cn } from '@/lib/utils'
 import { contentUrl, mediaQuery, playbackQuery } from './api'
-import { browserCanPlayType, codecLabel, playability } from './codecs'
+import { browserCanPlayType, codecLabel, playability, playedStreams } from './codecs'
 import { chooseAudioTrack } from './audio-tracks'
 import { Controls, type Chapter } from './controls'
+import {
+  decodingQuery,
+  playbackNotices,
+  usePlaybackStats,
+  type PlaybackNotice,
+} from './diagnostics'
 import { playerAction, stepSpeed, type PlayerAction } from './keys'
 import { usePlayerPreferences } from './preferences'
 import {
@@ -86,6 +92,13 @@ const SKIP_TAP_SECONDS = 10
 const SWIPE_PX = 60
 /** How long “Resumed at …” stays. */
 const RESUMED_NOTE_MS = 8000
+/** Each warning's icon. */
+const NOTICE_ICONS: Record<PlaybackNotice['key'], ReactNode> = {
+  sound: <VolumeX />,
+  decoding: <Cpu />,
+  slow: <Snail />,
+  dropping: <Film />,
+}
 
 interface Gesture {
   start: { x: number; y: number; type: string } | null
@@ -103,7 +116,7 @@ export default function VideoView({
   onDownload,
   onSwipe,
 }: VideoViewProps) {
-  const base = contentPath.replace(/\/content$/, '')
+  const base = baseOf(contentPath)
   const queryClient = useQueryClient()
   const playback = useQuery(playbackQuery(base))
   const media = useQuery(mediaQuery(base))
@@ -124,7 +137,8 @@ export default function VideoView({
   const [problem, setProblem] = useState<Problem | null>(null)
   /** The element showed no picture: Chrome plays the sound of a video it can't decode. */
   const [blank, setBlank] = useState(false)
-  const [silenceSeen, setSilenceSeen] = useState(false)
+  /** Warnings dismissed in this video. */
+  const [dismissed, setDismissed] = useState<ReadonlySet<string>>(new Set())
   /** Asked to play, and not playing yet nor refused: a spinner, not a play button. */
   const [starting, setStarting] = useState(true)
 
@@ -178,6 +192,22 @@ export default function VideoView({
   const stopped = shown !== null
   const visible = awake || state.paused || menuOpen
 
+  // Why it may be slow, as far as the player can tell, and the play's report when it ends.
+  const decoding = useQuery(decodingQuery(base, source?.versionId ?? null, info)).data ?? null
+  const signals = usePlaybackStats(video, base, source?.versionId ?? null, {
+    bitRate: info?.bitRate ?? null,
+    decoding,
+    problem: shown && problemText(shown),
+  })
+  const notices = playbackNotices({
+    silentCodec,
+    decoding,
+    picture: info ? playedStreams(info).video : null,
+    bitRate: info?.bitRate ?? null,
+    signals,
+  })
+  const shownNotices = stopped ? [] : notices.filter((notice) => !dismissed.has(notice.key))
+
   const chapters = useMemo<Chapter[]>(
     () =>
       info?.chapters.map((chapter, i) => ({
@@ -188,12 +218,14 @@ export default function VideoView({
   )
 
   // Subtitles: beside the file at once, inside it once the media info comes.
+  const subtitleFiles = playback.data?.subtitleFiles
   const options = useMemo<SubtitleOption[]>(
     () =>
       source
-        ? subtitleOptions(base, source.versionId, playback.data?.subtitleFiles ?? [], info)
+        ? subtitleOptions(baseOf(contentPath), source.versionId, subtitleFiles ?? [], info)
         : [],
-    [base, info, playback.data?.subtitleFiles, source],
+    // The prop, not `base`: the compiler takes a string it made for one it might change.
+    [contentPath, info, subtitleFiles, source],
   )
   /** The viewer's own choice in this video; until then, the default. */
   const [choice, setChoice] = useState<{ key: string | null } | null>(null)
@@ -276,7 +308,7 @@ export default function VideoView({
     hideTimer.current = window.setTimeout(() => {
       setAwake(false)
     }, HIDE_AFTER_MS)
-  }, [])
+  }, [setAwake])
 
   useEffect(() => {
     const onChange = () => {
@@ -661,26 +693,29 @@ export default function VideoView({
           </div>
         </div>
       )}
-      {silentCodec && !silenceSeen && !shown && (
-        <div className="absolute inset-x-0 top-3 flex justify-center px-3">
-          <div
-            role="status"
-            className="flex max-w-md items-center gap-2 rounded-lg bg-black/75 py-1.5 pr-1.5 pl-3 text-sm text-white shadow-lg"
-          >
-            <VolumeX className="size-4 shrink-0" />
-            <span>No sound here: this browser can’t play {silentCodec}.</span>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              aria-label="Dismiss"
-              className="text-white hover:bg-white/15 hover:text-white"
-              onClick={() => {
-                setSilenceSeen(true)
-              }}
+      {shownNotices.length > 0 && (
+        <div className="absolute inset-x-0 top-3 flex flex-col items-center gap-2 px-3">
+          {shownNotices.map((notice) => (
+            <div
+              key={notice.key}
+              role="status"
+              className="flex max-w-md items-center gap-2 rounded-lg bg-black/75 py-1.5 pr-1.5 pl-3 text-sm text-white shadow-lg [&>svg]:size-4 [&>svg]:shrink-0"
             >
-              <X />
-            </Button>
-          </div>
+              {NOTICE_ICONS[notice.key]}
+              <span>{notice.text}</span>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label="Dismiss"
+                className="shrink-0 text-white hover:bg-white/15 hover:text-white"
+                onClick={() => {
+                  setDismissed(new Set([...dismissed, notice.key]))
+                }}
+              >
+                <X />
+              </Button>
+            </div>
+          ))}
         </div>
       )}
       {video && !shown && (
@@ -718,6 +753,21 @@ export default function VideoView({
       )}
     </div>
   )
+}
+
+/** Why it doesn't play, in a few words, for the play's report. */
+function problemText(problem: Problem): string {
+  switch (problem.kind) {
+    case 'codec':
+      return `can’t decode ${problem.codec} video`
+    case 'unsupported':
+    case 'decode':
+      return `${problem.kind}: ${problem.detail}`
+    case 'network':
+      return 'a read failed while playing'
+    case 'replaced':
+      return 'replaced while playing'
+  }
 }
 
 /** In the middle: the spinner while it waits, a play button while it is paused. */
@@ -885,4 +935,9 @@ function setActionHandler(
   } catch {
     // Not supported here.
   }
+}
+
+/** A file's path from its content's: `/files/:id/content` → `/files/:id`. */
+function baseOf(contentPath: string): string {
+  return contentPath.replace(/\/content$/, '')
 }

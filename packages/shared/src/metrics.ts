@@ -74,6 +74,12 @@ export const METRICS = {
   'cdn.in_flight': byApi('gauge', 'count', 'CDN reads under way (peak)'),
   /** From sending a request to the CDN to its answer's headers: Discord's own time. */
   'cdn.first_byte_ms': byApi('timing', 'ms', 'CDN time to first byte'),
+  /** From a video player starting to its first frame, as players report it (§10.4). */
+  'player.first_frame_ms': byApi('timing', 'ms', 'Time to a video’s first frame'),
+  /** Plays that waited for data after their first frame, with how long they waited. */
+  'player.stall_ms': byApi('counter', 'ms', 'Videos stalled'),
+  /** Plays that couldn't play: a codec, a damaged file, a failed read. */
+  'player.failures': byApi('counter', 'count', 'Videos that couldn’t play'),
   'events.streams': byApi('gauge', 'count', 'Open event streams'),
   'auth.sign_ins': byApi('counter', 'count', 'Sign-ins'),
   'auth.failed_sign_ins': byApi('counter', 'count', 'Failed sign-ins'),

@@ -46,8 +46,64 @@ export function sendFile(
   void reply.header('content-length', String(end - start + 1))
   if (request.method === 'HEAD') return reply.send(nothing())
   counted(app, reply)
+  const stats = sendStats()
+  reply.raw.once('close', () => {
+    logSent(request, reply, file.version_id, start, end, stats)
+  })
   const pieces = readVersion(app, file, start, end, cancellation(reply.raw))
-  return reply.send(Readable.from(paced(reply.raw, pieces)))
+  return reply.send(Readable.from(paced(reply.raw, pieces, stats)))
+}
+
+/** How sending a response went: for its log line, which says which side was slow. */
+export interface SendStats {
+  startedAt: number
+  bytes: number
+  /** From the start to the first piece handed to the socket; `null` before. */
+  firstPieceMs: number | null
+  /** Time waiting for the source: the reader, from the cache, staging or Discord. */
+  sourceMs: number
+  /** Time waiting for the client to take what was sent: the socket to drain. */
+  clientMs: number
+}
+
+function sendStats(): SendStats {
+  return { startedAt: performance.now(), bytes: 0, firstPieceMs: null, sourceMs: 0, clientMs: 0 }
+}
+
+/**
+ * A line per file read once its response closes (DESIGN.md §16): the range,
+ * what was sent and how fast, the time to its first byte, and how long it
+ * waited for the reader against the client, so a slow play shows which side
+ * held it back. `finished` is false for a read the client cancelled, as a
+ * player does on seeking.
+ */
+function logSent(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  versionId: string,
+  start: number,
+  end: number,
+  stats: SendStats,
+): void {
+  const totalMs = performance.now() - stats.startedAt
+  const round = (ms: number) => Math.round(ms)
+  request.log.info(
+    {
+      sent: {
+        versionId,
+        from: start,
+        to: end,
+        bytes: stats.bytes,
+        finished: reply.raw.writableFinished,
+        firstByteMs: stats.firstPieceMs === null ? null : round(stats.firstPieceMs),
+        totalMs: round(totalMs),
+        waitedForSourceMs: round(stats.sourceMs),
+        waitedForClientMs: round(stats.clientMs),
+        mbitPerSecond: totalMs > 0 ? Math.round((stats.bytes * 8) / totalMs / 100) / 10 : null,
+      },
+    },
+    'file sent',
+  )
 }
 
 /** An archive's query: the downloader's time zone (IANA), for its times. */
@@ -102,11 +158,31 @@ function nothing(): Readable {
 export async function* paced(
   response: Writable,
   source: AsyncIterable<Uint8Array>,
+  stats?: SendStats,
 ): AsyncGenerator<Uint8Array> {
-  for await (const piece of source) {
-    yield piece
-    if (response.destroyed) return
-    if (response.writableNeedDrain && !(await drained(response))) return
+  const pieces = source[Symbol.asyncIterator]()
+  try {
+    for (;;) {
+      let at = performance.now()
+      const next = await pieces.next()
+      if (stats) stats.sourceMs += performance.now() - at
+      if (next.done) return
+      if (stats) {
+        stats.bytes += next.value.length
+        stats.firstPieceMs ??= performance.now() - stats.startedAt
+      }
+      yield next.value
+      if (response.destroyed) return
+      if (response.writableNeedDrain) {
+        at = performance.now()
+        const drainedNow = await drained(response)
+        if (stats) stats.clientMs += performance.now() - at
+        if (!drainedNow) return
+      }
+    }
+  } finally {
+    // As `for await` would: the source's own clean-up runs when this stops early.
+    await pieces.return?.()
   }
 }
 

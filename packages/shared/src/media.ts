@@ -222,6 +222,43 @@ export const playbackSchema = z.object({
 
 export type Playback = z.infer<typeof playbackSchema>
 
+const reportMs = z
+  .number()
+  .int()
+  .min(0)
+  .max(24 * 60 * 60 * 1000)
+const reportCount = z.number().int().min(0).max(1_000_000_000)
+
+/**
+ * `POST /files/:id/playback-report`: how a play went, as the player saw it,
+ * sent when it ends (§10.4, §16). The API logs it and graphs its times.
+ */
+export const playbackReportSchema = z.object({
+  versionId: z.uuid(),
+  /** It showed a frame, it couldn't play, or the viewer left before either. */
+  outcome: z.enum(['played', 'failed', 'left']),
+  /** From the player starting to its first frame. */
+  firstFrameMs: reportMs.nullable(),
+  /** From the player starting to this report: how long the viewer stayed. */
+  openMs: reportMs,
+  /** Waits for data after the first frame (not seeks), and their time in all. */
+  stalls: reportCount,
+  stallMs: reportMs,
+  /** Frames shown and dropped, as the browser counts them. */
+  frames: reportCount,
+  droppedFrames: reportCount,
+  /** How fast the video arrived while the player waited for it, in bits a second, estimated. */
+  arrivalBitsPerSecond: z.number().min(0).max(1e12).nullable(),
+  /** What the browser said of decoding this video (Media Capabilities), if it was asked. */
+  decoding: z
+    .object({ supported: z.boolean(), smooth: z.boolean(), powerEfficient: z.boolean() })
+    .nullable(),
+  /** Why it couldn't play: the browser's error, or the codec in the way. */
+  problem: z.string().max(300).nullable(),
+})
+
+export type PlaybackReport = z.infer<typeof playbackReportSchema>
+
 /** A week: longer than any video, so a larger position is a client's mistake. */
 const MAX_POSITION_MS = 7 * 24 * 60 * 60 * 1000
 

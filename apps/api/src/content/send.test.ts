@@ -111,6 +111,33 @@ describe('pacing a download by its client (§6.2)', () => {
     expect(state.ended).toBe(true)
   })
 
+  it('counts what it sent, and how long it waited for the client against the source', async () => {
+    const { pieces } = counted()
+    const { response, sent, send } = slowResponse()
+    const stats = {
+      startedAt: performance.now(),
+      bytes: 0,
+      firstPieceMs: null,
+      sourceMs: 0,
+      clientMs: 0,
+    }
+    Readable.from(paced(response, pieces, stats)).pipe(response)
+    for (let count = 1; count <= 3; count += 1) {
+      await vi.waitFor(() => {
+        expect(sent).toHaveLength(count)
+      })
+      // The client keeps each piece a while before taking the next.
+      await new Promise((resolve) => setTimeout(resolve, 30))
+      await send()
+    }
+    await finished(response)
+    expect(stats.bytes).toBe(48)
+    expect(stats.firstPieceMs).not.toBeNull()
+    // The client took its time; the source answered at once.
+    expect(stats.clientMs).toBeGreaterThan(50)
+    expect(stats.sourceMs).toBeLessThan(stats.clientMs)
+  })
+
   it('ends the source when the response closes before it has sent a piece', async () => {
     const { state, pieces } = counted()
     const { response } = slowResponse()

@@ -141,6 +141,19 @@ export function describeVideo(stream: MediaStream): string {
   return parts.join(' · ')
 }
 
+/** A picture in the fewest words: “4K · 60 fps · AV1 · HDR”, for a warning. */
+export function describeBriefly(stream: MediaStream): string {
+  const parts: string[] = []
+  if (stream.width && stream.height) {
+    const lines = Math.min(stream.width, stream.height)
+    parts.push(lines >= 2160 ? '4K' : lines >= 1440 ? '1440p' : `${String(lines)}p`)
+  }
+  if (stream.frameRate) parts.push(`${String(Math.round(stream.frameRate))} fps`)
+  parts.push(codecLabel(stream.codec))
+  if (stream.hdr || stream.dolbyVision !== null) parts.push('HDR')
+  return parts.join(' · ')
+}
+
 /** A sound stream in a few words: “E-AC-3 5.1 · English”. */
 export function describeAudio(stream: MediaStream): string {
   const parts = [codecLabel(stream.codec)]

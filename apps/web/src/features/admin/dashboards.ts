@@ -335,6 +335,32 @@ export const MONITORING_SECTIONS: DashboardSection[] = [
     ],
   },
   {
+    title: 'Playing',
+    description: 'Videos as their players saw them: each player reports how its play went.',
+    charts: [
+      {
+        title: 'Time to first frame',
+        description:
+          'From a player starting to its first frame: Discord, the API and the viewer’s connection and device together.',
+        format: 'ms',
+        lines: [
+          { label: 'Median', color: 1, series: 'player.first_frame_ms:p50' },
+          { label: '95th percentile', color: 2, series: 'player.first_frame_ms:p95' },
+        ],
+      },
+      {
+        title: 'Stalls and failures',
+        description:
+          'Per minute: plays that stopped to load after their first frame, and plays that couldn’t start.',
+        format: 'perMinute',
+        lines: [
+          { label: 'Stalled plays', color: 2, series: 'player.stall_ms:events' },
+          { label: 'Couldn’t play', color: 'critical', series: 'player.failures:rate' },
+        ],
+      },
+    ],
+  },
+  {
     title: 'Storage',
     description: 'What is in Discord, and what waits to go in or out.',
     charts: [
