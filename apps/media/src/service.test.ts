@@ -35,7 +35,9 @@ const ids = new Map<string, string>()
 /** Every request the stand-in API had: `GET /path`. */
 const requests: string[] = []
 
-const tokenFor = (versionId: string) => `token-for-${versionId}`
+/** A token in the API's form (`<expiry>.<HMAC>`), different for each version. */
+const tokenFor = (versionId: string) =>
+  `4102444800000.${Buffer.from(versionId.replaceAll('-', ''), 'hex').toString('base64url').padEnd(43, 'A')}`
 
 beforeAll(async () => {
   // Built from docker/media.Dockerfile, cached after the first time.
@@ -174,7 +176,7 @@ describe('the media service (§6.7)', () => {
   })
 
   it('says the API couldn’t be read, to be asked again, rather than calling the file bad', async () => {
-    const response = await probe('film.mkv', 'a-token-for-another-file')
+    const response = await probe('film.mkv', tokenFor(randomUUID()))
     expect(response.status).toBe(502)
     expect(await response.json()).toMatchObject({ error: { code: 'source_unavailable' } })
   })
@@ -186,6 +188,22 @@ describe('the media service (§6.7)', () => {
       body: JSON.stringify({ versionId: 'not-a-version', token: '' }),
     })
     expect(response.status).toBe(400)
+  })
+
+  it('takes only a token in the API’s form, so no header reaches ffmpeg’s request', async () => {
+    requests.length = 0
+    const versionId = ids.get('film.mkv') ?? ''
+    const response = await fetch(`${mediaUrl}/probe`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        versionId,
+        token: `${tokenFor(versionId)}
+Range: bytes=0-0`,
+      }),
+    })
+    expect(response.status).toBe(400)
+    expect(requests).toEqual([])
   })
 })
 

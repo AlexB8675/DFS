@@ -144,8 +144,15 @@ if lost.
 - **Logs:** `docker compose logs -f api` (or `bot`, `media`, `caddy`, `postgres`).
   They rotate at 10 MB, five files per service.
 - **Disk:** `df -h /` and `docker system df`. Staging is capped at
-  `STAGING_MAX_BYTES` and the cache at `CACHE_MAX_BYTES`; old images go with
-  `docker image prune`.
+  `STAGING_MAX_BYTES` and the cache at `CACHE_MAX_BYTES`; DFS's old images go
+  with `docker image prune --filter label=com.docker.compose.project=dfs`,
+  which leaves the server's other images alone.
+- **Security updates:** a deploy reuses the base images and layers it has, so
+  Node, Debian and its ffmpeg, Caddy and Postgres stay as first fetched.
+  `docker/deploy.sh --refresh` fetches the newest of each (Postgres 18's
+  latest minor release) and builds every image anew, then deletes the ones it
+  replaced: a few minutes more. Run it monthly, and when one of them announces
+  a security fix; ffmpeg matters most, since it reads what anyone uploads.
 - **Database by hand:** `docker compose exec postgres psql -U dfs dfs`.
 - **Backups** of the database and the journal come with M4. Until then, the
   master key's copy off the server is what matters most, with a dump now and

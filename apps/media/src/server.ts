@@ -15,8 +15,12 @@ const PROBES_AT_ONCE = 2
 
 const probeBody = z.object({
   versionId: z.uuid(),
-  /** The API's token for this version alone (`/internal/media/:versionId`). */
-  token: z.string().min(1).max(512),
+  /**
+   * The API's token for this version alone (`/internal/media/:versionId`),
+   * in its exact form (`<expiry>.<HMAC>`): it goes into ffmpeg's request
+   * headers, so nothing else may.
+   */
+  token: z.string().regex(/^\d{1,16}\.[\w-]{43}$/),
 })
 
 export interface MediaServerOptions {

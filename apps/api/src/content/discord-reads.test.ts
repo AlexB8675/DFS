@@ -118,7 +118,7 @@ describe('reading from Discord', () => {
     const session = await uploadFile(client, folder.id, `${name}.bin`, bytes)
     const store = app.blobStore as DiscordBlobStore
     await settleBlobs({ db: app.db, staging: app.staging, store, sizes: app.config.sizes })
-    return session
+    return { ...session, folderId: folder.id }
   }
 
   it('stops fetching for a download cancelled before its first byte, as a seek is', async () => {
@@ -189,6 +189,20 @@ describe('reading from Discord', () => {
     }
     await setTimeout(200)
     expect(discord.cdnRequests).toBe(3)
+  })
+
+  it('answers HEAD with the length, reading nothing from Discord', async () => {
+    const { chunkSize } = app.config.sizes
+    const session = await storedFile('Headed', 2)
+    discord.cdnRequests = 0
+    const file = await client.fetch('HEAD', `/files/${session.nodeId}/content`)
+    expect(file.status).toBe(200)
+    expect(file.headers.get('content-length')).toBe(String(2 * chunkSize))
+    const folder = await client.fetch('HEAD', `/folders/${session.folderId}/archive`)
+    expect(folder.status).toBe(200)
+    expect(Number(folder.headers.get('content-length'))).toBeGreaterThan(2 * chunkSize)
+    await setTimeout(200)
+    expect(discord.cdnRequests).toBe(0)
   })
 
   it('reads a frame where it is now when its pack was compacted away mid-download', async () => {

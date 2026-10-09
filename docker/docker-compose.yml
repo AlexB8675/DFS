@@ -121,7 +121,8 @@ services:
       - cache:/data/cache
     # Discord, out: its CDN, for reading files back, and its API with the
     # internet, for the checks (§16). Caddy, in, over the internal network.
-    networks: [internal, egress]
+    # The media service, both ways, over a network of their own.
+    networks: [internal, egress, media]
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -139,7 +140,8 @@ services:
       start_period: 20s
 
   # ffmpeg, which parses what anyone with an account uploads (§6.7): no
-  # secrets, no way out, nothing to write but /tmp, and little of the VPS.
+  # secrets, no way out, nothing to write but /tmp, little of the VPS, and
+  # nothing to reach but the API, on a network of their own.
   media:
     build:
       context: ..
@@ -158,7 +160,7 @@ services:
     cpus: 1
     mem_limit: 512m
     pids_limit: 256
-    networks: [internal]
+    networks: [media]
     healthcheck:
       test:
         - CMD
@@ -207,6 +209,10 @@ networks:
         - subnet: 10.73.0.0/24
   # The API and the bot, out to Discord.
   egress: {}
+  # The API and the media service alone, with no route out: ffmpeg reaches
+  # neither Postgres, the bot nor Caddy.
+  media:
+    internal: true
   # Caddy: the ports it publishes, and Let's Encrypt.
   edge: {}
 

@@ -44,6 +44,7 @@ export function sendFile(
   if (range)
     reply.code(206).header('content-range', `bytes ${String(start)}-${String(end)}/${String(size)}`)
   void reply.header('content-length', String(end - start + 1))
+  if (request.method === 'HEAD') return reply.send(nothing())
   const pieces = readVersion(app, file, start, end, cancellation(reply.raw))
   return reply.send(Readable.from(paced(reply.raw, pieces)))
 }
@@ -61,13 +62,26 @@ export function sendZip(
   entries: ZipEntry[],
   timeZone?: string,
 ): FastifyReply {
-  return reply
+  void reply
     .header('content-type', 'application/zip')
     .header('content-disposition', attachment(fileName))
     .header('content-length', String(zipLength(entries)))
     .header('cache-control', 'private, no-store')
     .header('x-content-type-options', 'nosniff')
-    .send(Readable.from(paced(reply.raw, writeZip(entries, { timeZone: zipTimeZone(timeZone) }))))
+  if (reply.request.method === 'HEAD') return reply.send(nothing())
+  return reply.send(
+    Readable.from(paced(reply.raw, writeZip(entries, { timeZone: zipTimeZone(timeZone) }))),
+  )
+}
+
+/**
+ * The body of an answer to `HEAD`: none, read from nowhere. Fastify answers
+ * `HEAD` by draining the stream it is given, which for a file would read it
+ * from Discord for nobody; an empty one keeps the headers, its length among
+ * them.
+ */
+function nothing(): Readable {
+  return Readable.from([])
 }
 
 /**
