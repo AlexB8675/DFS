@@ -328,7 +328,7 @@ export const MONITORING_SECTIONS: DashboardSection[] = [
       {
         title: 'Sending held back by storage',
         description:
-          'Of the time file reads waited after their first byte, the share spent on storage rather than on the viewer taking what was sent: high means DFS, not the connection, holds viewers back.',
+          'Of the time file reads waited after their first byte, the share spent on storage rather than on the viewer taking what was sent (a player with enough loaded takes nothing for a while): high means DFS holds viewers back.',
         format: 'percent',
         lines: [
           {
