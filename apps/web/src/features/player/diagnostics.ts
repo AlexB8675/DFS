@@ -405,8 +405,10 @@ const DROPPING_SHARE = 0.2
 
 /** A warning above the picture: why the video may be silent, slow or stuttering. */
 export interface PlaybackNotice {
-  key: 'sound' | 'decoding' | 'slow' | 'dropping'
+  key: 'sound' | 'decoding' | 'software' | 'slow' | 'dropping'
   text: string
+  /** Worth knowing rather than wrong: shown a while once it plays, then faded. */
+  fades?: boolean
 }
 
 /** The warnings a play deserves now, from what the browser and the play itself say. */
@@ -425,11 +427,21 @@ export function playbackNotices(input: {
   if (silentCodec) {
     notices.push({ key: 'sound', text: `No sound here: this browser can’t play ${silentCodec}.` })
   }
-  if (decoding?.supported && !decoding.smooth && picture) {
-    notices.push({
-      key: 'decoding',
-      text: `This device may not keep up with ${describeBriefly(picture)}: it may stutter or be slow to start.`,
-    })
+  if (decoding?.supported && picture) {
+    const software = decoding.powerEfficient ? '' : ', which it decodes in software'
+    if (!decoding.smooth) {
+      notices.push({
+        key: 'decoding',
+        text: `This device may not keep up with ${describeBriefly(picture)}${software}: it may stutter or be slow to start.`,
+      })
+    } else if (!decoding.powerEfficient) {
+      // Usually no hardware decoder for it: the processor does the work.
+      notices.push({
+        key: 'software',
+        text: `This device decodes ${describeBriefly(picture)} in software, not in hardware: it may play less smoothly, warm up and drain its battery.`,
+        fades: true,
+      })
+    }
   }
   const arrival = signals.arrivalBitsPerSecond
   if (

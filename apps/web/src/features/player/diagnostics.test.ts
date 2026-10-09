@@ -96,8 +96,34 @@ describe('the player’s warnings', () => {
     expect(
       notices({ decoding: { supported: true, smooth: false, powerEfficient: false } }),
     ).toEqual([
-      'This device may not keep up with 4K · 60 fps · AV1 · HDR: it may stutter or be slow to start.',
+      'This device may not keep up with 4K · 60 fps · AV1 · HDR, which it decodes in software: it may stutter or be slow to start.',
     ])
+    expect(notices({ decoding: { supported: true, smooth: false, powerEfficient: true } })).toEqual(
+      [
+        'This device may not keep up with 4K · 60 fps · AV1 · HDR: it may stutter or be slow to start.',
+      ],
+    )
+  })
+
+  it('says when the device decodes in software, in a warning that fades', () => {
+    const shown = playbackNotices({
+      silentCodec: null,
+      decoding: { supported: true, smooth: true, powerEfficient: false },
+      picture: AV1,
+      bitRate: INFO.bitRate,
+      signals: QUIET,
+    })
+    expect(shown).toEqual([
+      {
+        key: 'software',
+        text: 'This device decodes 4K · 60 fps · AV1 · HDR in software, not in hardware: it may play less smoothly, warm up and drain its battery.',
+        fades: true,
+      },
+    ])
+    // Nothing to say of a codec it can't decode at all: the player says it can't play.
+    expect(
+      notices({ decoding: { supported: false, smooth: false, powerEfficient: false } }),
+    ).toEqual([])
   })
 
   it('says when the video arrives slower than it plays, after waiting a few seconds', () => {

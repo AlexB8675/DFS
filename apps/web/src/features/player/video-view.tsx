@@ -95,10 +95,13 @@ const DOUBLE_TAP_MS = 300
 const SKIP_TAP_SECONDS = 10
 /** A swipe is this many pixels across, and more across than down. */
 const SWIPE_PX = 60
+/** A warning that fades goes this long after the video starts playing. */
+const NOTICE_FADE_MS = 10_000
 /** Each warning's icon. */
 const NOTICE_ICONS: Record<PlaybackNotice['key'], ReactNode> = {
   sound: <VolumeX />,
   decoding: <Cpu />,
+  software: <Cpu />,
   slow: <Snail />,
   dropping: <Film />,
 }
@@ -141,8 +144,9 @@ export default function VideoView({
   const [problem, setProblem] = useState<Problem | null>(null)
   /** The element showed no picture: Chrome plays the sound of a video it can't decode. */
   const [blank, setBlank] = useState(false)
-  /** Warnings dismissed in this video. */
+  /** Warnings dismissed in this video, and those fading out. */
   const [dismissed, setDismissed] = useState<ReadonlySet<string>>(new Set())
+  const [fading, setFading] = useState<ReadonlySet<string>>(new Set())
   /** Asked to play, and not playing yet nor refused: a spinner, not a play button. */
   const [starting, setStarting] = useState(true)
 
@@ -221,6 +225,20 @@ export default function VideoView({
     signals,
   })
   const shownNotices = stopped ? [] : notices.filter((notice) => !dismissed.has(notice.key))
+  // Those that fade go a while after it plays: a video held for Play keeps them until then.
+  const toFade = shownNotices
+    .filter((notice) => notice.fades && !fading.has(notice.key))
+    .map((notice) => notice.key)
+    .join(' ')
+  useEffect(() => {
+    if (!toFade || state.paused) return
+    const timer = window.setTimeout(() => {
+      setFading((before) => new Set([...before, ...toFade.split(' ')]))
+    }, NOTICE_FADE_MS)
+    return () => {
+      window.clearTimeout(timer)
+    }
+  }, [toFade, state.paused])
 
   const chapters = useMemo<Chapter[]>(
     () =>
@@ -733,7 +751,14 @@ export default function VideoView({
             <div
               key={notice.key}
               role="status"
-              className="flex max-w-md items-center gap-2 rounded-lg bg-black/75 py-1.5 pr-1.5 pl-3 text-sm text-white shadow-lg [&>svg]:size-4 [&>svg]:shrink-0"
+              className={cn(
+                'flex max-w-md items-center gap-2 rounded-lg bg-black/75 py-1.5 pr-1.5 pl-3 text-sm text-white shadow-lg [&>svg]:size-4 [&>svg]:shrink-0',
+                fading.has(notice.key) &&
+                  'pointer-events-none animate-out duration-500 fade-out-0 fill-mode-forwards',
+              )}
+              onAnimationEnd={() => {
+                if (fading.has(notice.key)) setDismissed(new Set([...dismissed, notice.key]))
+              }}
             >
               {NOTICE_ICONS[notice.key]}
               <span>{notice.text}</span>
