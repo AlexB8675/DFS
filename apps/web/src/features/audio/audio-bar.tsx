@@ -92,14 +92,15 @@ export function AudioBar() {
 /** The track's time and length, whether it plays: from the element once it holds the track. */
 function usePlayState(track: QueuedTrack) {
   const loaded = useAudioStore((state) => state.loaded === track.key)
+  const stopped = useAudioStore((state) => state.problem?.key === track.key)
   const state = useMediaState(loaded ? audio : null)
   const known = loaded && Number.isFinite(state.duration) && state.duration > 0
   return {
     // Before the first Play after a reload, where it was.
     time: loaded ? state.currentTime : savedPosition(track.key),
     duration: known ? state.duration : (track.durationMs ?? 0) / 1000,
-    playing: loaded && !state.paused && !state.ended,
-    waiting: loaded && state.waiting && !state.paused,
+    playing: loaded && !stopped && !state.paused && !state.ended,
+    waiting: loaded && !stopped && state.waiting && !state.paused,
   }
 }
 
@@ -190,7 +191,11 @@ function FullView({ track }: { track: QueuedTrack }) {
         useAudioStore.setState({ panel: isOpen ? 'full' : null })
       }}
     >
-      <SheetContent side="bottom" showCloseButton={false} className="h-dvh gap-0 p-0 md:hidden">
+      <SheetContent
+        side="bottom"
+        showCloseButton={false}
+        className="gap-0 p-0 data-[side=bottom]:h-dvh md:hidden"
+      >
         <SheetTitle className="sr-only">Now playing</SheetTitle>
         <SheetDescription className="sr-only">
           The track playing, its controls and the queue

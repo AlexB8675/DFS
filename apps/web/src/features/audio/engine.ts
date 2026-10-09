@@ -361,11 +361,12 @@ async function explainError(): Promise<void> {
     return
   }
   const media = await queryClient.query(mediaQuery(place)).catch(() => null)
+  // It failed to play: unless the browser says it decodes the sound, the codec is why.
   const sound = media?.info ? playability(media.info, browserCanPlayType).audio : null
   report({
     key: track.key,
     message:
-      sound?.decodes === false
+      sound && sound.decodes !== true
         ? `This browser can’t play ${codecLabel(sound.stream.codec)}.`
         : 'This browser can’t play this file.',
     offer: 'download',
