@@ -2,6 +2,8 @@ import type { DriveNode } from '@dfs/shared'
 import {
   Download,
   Eye,
+  ListPlus,
+  Play,
   FileArchive,
   FileUp,
   FolderInput,
@@ -14,6 +16,7 @@ import {
   Trash2,
   type LucideIcon,
 } from 'lucide-react'
+import { isAudio } from '@/features/audio/open-audio'
 import { isPreviewable } from '@/lib/preview-kind'
 import { useNodeActions } from './use-node-actions'
 
@@ -74,7 +77,17 @@ export function useNodeMenu(
   const single = targets.length === 1 ? targets[0] : undefined
   const menu: MenuAction[] = []
 
-  if (single?.kind === 'folder' || (single && isPreviewable(single))) {
+  if (single && isAudio(single)) {
+    menu.push({
+      key: 'play',
+      label: 'Play',
+      icon: Play,
+      shortcut: 'Enter',
+      onSelect: () => {
+        actions.play(single)
+      },
+    })
+  } else if (single?.kind === 'folder' || (single && isPreviewable(single))) {
     menu.push({
       key: 'open',
       label: single.kind === 'folder' ? 'Open' : 'Preview',
@@ -82,6 +95,27 @@ export function useNodeMenu(
       shortcut: 'Enter',
       onSelect: () => {
         actions.open(single)
+      },
+    })
+  }
+  // Audio in the bar (§10.4): a folder plays everything below it.
+  if (single && (single.kind === 'folder' || isAudio(single))) {
+    if (single.kind === 'folder') {
+      menu.push({
+        key: 'play',
+        label: 'Play',
+        icon: Play,
+        onSelect: () => {
+          actions.play(single)
+        },
+      })
+    }
+    menu.push({
+      key: 'queue',
+      label: 'Add to queue',
+      icon: ListPlus,
+      onSelect: () => {
+        actions.addToQueue(single)
       },
     })
   }

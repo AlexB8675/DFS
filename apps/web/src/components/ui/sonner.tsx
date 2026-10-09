@@ -18,6 +18,9 @@ const Toaster = ({ ...props }: ToasterProps) => {
       theme={theme}
       // Clickable over a modal dialog, which turns off pointer events outside it.
       className="toaster group pointer-events-auto"
+      // Above the audio bar, while it shows.
+      offset={{ bottom: 'calc(var(--audio-bar, 0px) + 24px)' }}
+      mobileOffset={{ bottom: 'calc(var(--audio-bar, 0px) + 16px)' }}
       icons={{
         success: <CircleCheckIcon className="size-4" />,
         info: <InfoIcon className="size-4" />,

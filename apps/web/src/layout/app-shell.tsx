@@ -1,6 +1,9 @@
 import { useState, type CSSProperties } from 'react'
 import { Outlet } from 'react-router'
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet'
+import { AudioBar } from '@/features/audio/audio-bar'
+import { useAudioOwner } from '@/features/audio/use-audio-owner'
+import { useCurrentUser } from '@/features/auth/session'
 import { DragLayer } from '@/features/drag/drag-layer'
 import { DriveDialogs } from '@/features/drive/dialogs/drive-dialogs'
 import { useLiveEvents } from '@/features/live-events/use-live-events'
@@ -16,6 +19,7 @@ export function AppShell() {
   const sidebarWidth = usePreferences((state) => state.sidebarWidth)
   const [navigationOpen, setNavigationOpen] = useState(false)
   useLiveEvents()
+  useAudioOwner(useCurrentUser().id)
 
   const closeNavigation = () => {
     setNavigationOpen(false)
@@ -48,6 +52,7 @@ export function AppShell() {
           <Outlet />
         </main>
       </div>
+      <AudioBar />
       <UploadPanel />
       <UploadConflictDialog />
       <DriveDialogs />

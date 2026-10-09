@@ -7,12 +7,16 @@ import {
   Info,
   Link2Off,
   Lock,
+  Play,
   TriangleAlert,
 } from 'lucide-react'
 import { Fragment, useActionState, useEffect, useRef, useState, type ReactNode } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router'
 import { toast } from 'sonner'
 import { AppLogo } from '@/components/app-logo'
+import { AudioBar } from '@/features/audio/audio-bar'
+import { playTracks } from '@/features/audio/engine'
+import { audioQuery, isAudio, openAudio } from '@/features/audio/open-audio'
 import { ListSkeleton } from '@/components/list-skeleton'
 import { NodeIcon } from '@/components/node-icon'
 import { Button } from '@/components/ui/button'
@@ -88,6 +92,7 @@ export function SharePage() {
       </header>
       {/* Named for View Transitions, like the app's content pane. */}
       <main className="flex min-h-0 flex-1 flex-col [view-transition-name:page]">{content}</main>
+      <AudioBar />
     </div>
   )
 }
@@ -286,7 +291,21 @@ function SharedFile({ token, share, file }: { token: string; share: OpenShare; f
           {formatBytes(file.sizeBytes)} · modified {formatDate(file.updatedAt)}
         </p>
       </div>
-      {downloadButton(true)}
+      <div className="flex flex-wrap justify-center gap-2">
+        {isAudio(file) && (
+          <Button
+            size="lg"
+            variant="outline"
+            className="px-6"
+            onClick={() => {
+              openAudio({ ...file, parentId: null }, token)
+            }}
+          >
+            <Play /> Play
+          </Button>
+        )}
+        {downloadButton(true)}
+      </div>
       <ShareFacts share={share} />
     </Centered>
   )
@@ -351,6 +370,8 @@ function SharedFolder({ token, share }: { token: string; share: OpenShare }) {
   const path = listing.data?.pages[0]?.path ?? [{ id: share.root.id, name: share.root.name }]
   const current = path.at(-1) ?? share.root
   const isRoot = folderId === null
+  // Its audio, everything below it, ready to play at a click (§10.4).
+  const audio = useQuery(audioQuery(current.id, token, true)).data
 
   const folderUrl = (id: string) =>
     id === share.root.id ? `/s/${token}` : `/s/${token}?folder=${id}`
@@ -396,6 +417,16 @@ function SharedFolder({ token, share }: { token: string; share: OpenShare }) {
           </ol>
           <ShareFacts share={share} className="px-1.5" />
         </nav>
+        {audio && audio.items.length > 0 && (
+          <Button
+            variant="outline"
+            onClick={() => {
+              playTracks(audio.items)
+            }}
+          >
+            <Play /> Play {isRoot ? 'all' : 'folder'}
+          </Button>
+        )}
         <Button variant="outline" onClick={downloadFolder}>
           <FileArchive /> Download {isRoot ? 'all' : 'folder'}
         </Button>
@@ -434,11 +465,15 @@ function SharedFolder({ token, share }: { token: string; share: OpenShare }) {
               node={node}
               url={folderUrl(node.id)}
               onPreview={
-                isPreviewable(node)
+                isAudio(node)
                   ? () => {
-                      preview.open(node.id)
+                      openAudio(node, token)
                     }
-                  : undefined
+                  : isPreviewable(node)
+                    ? () => {
+                        preview.open(node.id)
+                      }
+                    : undefined
               }
             />
           )}

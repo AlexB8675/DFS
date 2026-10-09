@@ -23,6 +23,8 @@ interface SliderProps {
   marks?: readonly number[]
   /** An arrow key's move, from 0 to 1: the seek bar's 5 s, the volume's 5%. */
   step: number
+  /** White over a picture; the theme's colours in the audio bar. */
+  tone?: 'picture' | 'theme'
   className?: string
 }
 
@@ -36,8 +38,10 @@ export function Slider({
   under,
   marks = [],
   step,
+  tone = 'picture',
   className,
 }: SliderProps) {
+  const theme = tone === 'theme'
   const track = useRef<HTMLDivElement>(null)
   const [dragging, setDragging] = useState(false)
 
@@ -108,13 +112,14 @@ export function Slider({
       <div
         ref={track}
         className={cn(
-          'relative h-1 w-full overflow-hidden rounded-full bg-white/25 transition-[height] group-hover/slider:h-1.5',
+          'relative h-1 w-full overflow-hidden rounded-full transition-[height] group-hover/slider:h-1.5',
+          theme ? 'bg-foreground/15' : 'bg-white/25',
           dragging && 'h-1.5',
         )}
       >
         {under}
         <div
-          className="absolute inset-y-0 left-0 bg-white"
+          className={cn('absolute inset-y-0 left-0', theme ? 'bg-foreground' : 'bg-white')}
           style={{ width: `${String(value * 100)}%` }}
         />
         {marks.map((mark) => (
@@ -127,7 +132,8 @@ export function Slider({
       </div>
       <div
         className={cn(
-          'pointer-events-none absolute size-3 -translate-x-1/2 rounded-full bg-white shadow transition-transform',
+          'pointer-events-none absolute size-3 -translate-x-1/2 rounded-full shadow transition-transform',
+          theme ? 'bg-foreground' : 'bg-white',
           dragging
             ? 'scale-125'
             : 'scale-0 group-hover/slider:scale-100 group-focus-visible/slider:scale-100',

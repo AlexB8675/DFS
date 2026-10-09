@@ -9,6 +9,7 @@ import {
 import { queryOptions, useSuspenseQuery } from '@tanstack/react-query'
 import { redirect, type LoaderFunctionArgs } from 'react-router'
 import { queryClient } from '@/app/query-client'
+import { forgetDriveTracks } from '@/features/audio/engine'
 import { apiGet, apiSend, isUnauthorized, setCsrfToken } from '@/lib/api/client'
 
 export const sessionQuery = queryOptions({
@@ -118,6 +119,8 @@ export async function signOut(): Promise<void> {
   } finally {
     setCsrfToken(null)
     queryClient.clear()
+    // The audio bar keeps a link's tracks, never this user's files.
+    forgetDriveTracks()
     // A full load drops every bit of in-memory state from the old session.
     window.location.assign('/login')
   }

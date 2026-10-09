@@ -56,7 +56,7 @@ const IDLE: MediaState = {
   pictureInPicture: false,
 }
 
-function read(media: HTMLVideoElement, waiting: boolean): MediaState {
+function read(media: HTMLMediaElement, waiting: boolean): MediaState {
   const buffered: [number, number][] = []
   for (let i = 0; i < media.buffered.length; i += 1) {
     buffered.push([media.buffered.start(i), media.buffered.end(i)])
@@ -80,7 +80,7 @@ interface Store {
   get: () => MediaState
 }
 
-function storeOf(media: HTMLVideoElement, smooth: boolean): Store {
+function storeOf(media: HTMLMediaElement, smooth: boolean): Store {
   let waiting = false
   let state: MediaState | null = null
   return {
@@ -112,7 +112,7 @@ function storeOf(media: HTMLVideoElement, smooth: boolean): Store {
 const idle: Store = { subscribe: () => () => undefined, get: () => IDLE }
 
 /** The element's state; `smooth` follows its time on every frame while it plays. */
-export function useMediaState(media: HTMLVideoElement | null, smooth = false): MediaState {
+export function useMediaState(media: HTMLMediaElement | null, smooth = false): MediaState {
   const store = useMemo(() => (media ? storeOf(media, smooth) : idle), [media, smooth])
   return useSyncExternalStore(store.subscribe, store.get)
 }

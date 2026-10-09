@@ -17,7 +17,8 @@ const EVERY_MS = 10_000
 
 interface ResumeOptions {
   place: FilePlace
-  video: HTMLVideoElement | null
+  /** A video, or the audio bar's element. */
+  video: HTMLMediaElement | null
   versionId: string | null
   /** Where the viewer stopped as /playback said, for knowing whether there is one to clear. */
   savedMs: number | null

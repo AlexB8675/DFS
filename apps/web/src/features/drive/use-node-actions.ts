@@ -1,5 +1,12 @@
 import type { DriveNode } from '@dfs/shared'
 import { toast } from 'sonner'
+import {
+  isAudio,
+  openAudio,
+  playFolder,
+  queueAudio,
+  queueFolder,
+} from '@/features/audio/open-audio'
 import { useCurrentUser } from '@/features/auth/session'
 import { countShareLinks } from '@/features/shares/api'
 import { usePreview } from '@/features/preview/use-preview'
@@ -141,11 +148,24 @@ export function useNodeActions() {
   }
 
   return {
-    /** Folders open in place, files the viewer can show in it (§10.3), and others download. */
+    /**
+     * Folders open in place, audio plays in the bar (§10.4), files the viewer
+     * can show open in it (§10.3), and others download.
+     */
     open: (node: DriveNode) => {
       if (node.kind === 'folder') navigate(folderUrl(node.id, rootFolderId), 'forward')
+      else if (isAudio(node)) openAudio(node)
       else if (isPreviewable(node)) preview.open(node.id)
       else void download([node])
+    },
+    /** In the audio bar: an audio file with its folder's queued, or everything below a folder. */
+    play: (node: DriveNode) => {
+      if (node.kind === 'folder') void playFolder(node.id)
+      else openAudio(node)
+    },
+    addToQueue: (node: DriveNode) => {
+      if (node.kind === 'folder') void queueFolder(node.id)
+      else queueAudio(node)
     },
     /** Opens the folder that contains `node`, with `node` selected. */
     reveal: (node: DriveNode) => {

@@ -20,6 +20,7 @@ import {
   EmptyTitle,
 } from '@/components/ui/empty'
 import { Spinner } from '@/components/ui/spinner'
+import { pauseAudio } from '@/features/audio/engine'
 import type { ViewHandle } from '@/features/preview/view-handle'
 import { ApiError, errorMessage } from '@/lib/api/client'
 import { isEditable } from '@/lib/editable'
@@ -327,6 +328,11 @@ export default function VideoView({
   useEffect(() => {
     if (!active) videoRef.current?.pause()
   }, [active])
+
+  // A video opened pauses the audio bar (§10.4).
+  useEffect(() => {
+    pauseAudio()
+  }, [])
 
   const seek = useCallback((seconds: number) => {
     const element = videoRef.current

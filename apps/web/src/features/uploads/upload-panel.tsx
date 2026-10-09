@@ -50,7 +50,7 @@ export function UploadPanel() {
   return (
     <section
       aria-label="Uploads"
-      className="fixed right-4 bottom-4 z-40 w-[min(24rem,calc(100vw-2rem))] origin-bottom-right animate-in overflow-hidden rounded-xl border bg-popover text-popover-foreground shadow-xl fade-in-0 zoom-in-90 slide-in-from-bottom-4 motion-spring"
+      className="fixed right-4 bottom-[calc(var(--audio-bar,0px)+1rem)] z-40 w-[min(24rem,calc(100vw-2rem))] origin-bottom-right animate-in overflow-hidden rounded-xl border bg-popover text-popover-foreground shadow-xl fade-in-0 zoom-in-90 slide-in-from-bottom-4 motion-spring"
     >
       <header className="flex items-center gap-0.5 py-2 pr-2 pl-4">
         <div className="min-w-0 flex-1" aria-live="polite">
