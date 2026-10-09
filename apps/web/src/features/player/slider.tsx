@@ -19,6 +19,8 @@ interface SliderProps {
   onHover?: (value: number | null) => void
   /** Drawn under the played part: what has loaded, say. */
   under?: ReactNode
+  /** Gaps in the bar, from 0 to 1: where chapters start. */
+  marks?: readonly number[]
   className?: string
 }
 
@@ -30,6 +32,7 @@ export function Slider({
   onCommit,
   onHover,
   under,
+  marks = [],
   className,
 }: SliderProps) {
   const track = useRef<HTMLDivElement>(null)
@@ -90,6 +93,13 @@ export function Slider({
           className="absolute inset-y-0 left-0 bg-white"
           style={{ width: `${String(value * 100)}%` }}
         />
+        {marks.map((mark) => (
+          <div
+            key={mark}
+            className="absolute inset-y-0 w-0.5 -translate-x-1/2 bg-black/80"
+            style={{ left: `${String(mark * 100)}%` }}
+          />
+        ))}
       </div>
       <div
         className={cn(

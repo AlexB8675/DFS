@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
   type PointerEvent,
@@ -26,20 +27,32 @@ import { cn } from '@/lib/utils'
 import { contentUrl, mediaQuery, playbackQuery } from './api'
 import { browserCanPlayType, codecLabel, playability } from './codecs'
 import { chooseAudioTrack } from './audio-tracks'
-import { Controls } from './controls'
+import { Controls, type Chapter } from './controls'
 import { playerAction, stepSpeed, type PlayerAction } from './keys'
 import { usePlayerPreferences } from './preferences'
+import {
+  defaultSubtitle,
+  subtitleOptions,
+  toggledSubtitle,
+  type SubtitleOption,
+} from './subtitle-options'
+import { SubtitleOverlay } from './subtitle-overlay'
+import { formatPlayTime } from './time'
 import { useMediaState } from './use-media-state'
+import { RESUME_FROM_MS, useResume } from './use-resume'
 
 // The video player (DESIGN.md §10.4): direct play of the version the API
-// names, with controls of its own over the picture. It starts at once,
-// without waiting for the media info, which, when it comes, says whether
-// this browser decodes the picture and the sound, and why a file can't play.
+// names, from where the user stopped, with controls of its own over the
+// picture. It starts at once, without waiting for the media info, which,
+// when it comes, says whether this browser decodes the picture and the
+// sound, and brings the chapters and the subtitles inside the file.
 
 interface VideoViewProps {
   name: string
   /** Where the file's bytes are, as an API path (`/files/:id/content`). */
   contentPath: string
+  /** `false` while the viewer closes: it stops at once. */
+  active: boolean
   ref?: Ref<ViewHandle>
   onDownload: () => void
   /** A swipe on a touch screen: 1 for the next file, -1 for the previous. */
@@ -71,6 +84,8 @@ const DOUBLE_TAP_MS = 300
 const SKIP_TAP_SECONDS = 10
 /** A swipe is this many pixels across, and more across than down. */
 const SWIPE_PX = 60
+/** How long “Resumed at …” stays. */
+const RESUMED_NOTE_MS = 8000
 
 interface Gesture {
   start: { x: number; y: number; type: string } | null
@@ -80,17 +95,31 @@ interface Gesture {
   tapTimer: number
 }
 
-export default function VideoView({ name, contentPath, ref, onDownload, onSwipe }: VideoViewProps) {
+export default function VideoView({
+  name,
+  contentPath,
+  active,
+  ref,
+  onDownload,
+  onSwipe,
+}: VideoViewProps) {
   const base = contentPath.replace(/\/content$/, '')
   const queryClient = useQueryClient()
   const playback = useQuery(playbackQuery(base))
   const media = useQuery(mediaQuery(base))
   const setVolumePreference = usePlayerPreferences((state) => state.setVolume)
+  const subtitlePreference = usePlayerPreferences((state) => state.subtitles)
+  const setSubtitlePreference = usePlayerPreferences((state) => state.setSubtitles)
 
-  // The version /playback named, played until the viewer moves on.
+  // The version /playback named, from where the user stopped, played until the viewer moves on.
   const [source, setSource] = useState<Source | null>(null)
+  /** Where it picked up, for “Resumed at …”, until that goes. */
+  const [resumedAt, setResumedAt] = useState<number | null>(null)
   if (source === null && playback.data) {
-    setSource({ versionId: playback.data.versionId, startAt: 0, attempt: 0 })
+    const { versionId, positionMs } = playback.data
+    const startAt = positionMs !== null && positionMs >= RESUME_FROM_MS ? positionMs / 1000 : 0
+    setSource({ versionId, startAt, attempt: 0 })
+    if (startAt > 0) setResumedAt(startAt)
   }
   const [problem, setProblem] = useState<Problem | null>(null)
   /** The element showed no picture: Chrome plays the sound of a video it can't decode. */
@@ -149,6 +178,98 @@ export default function VideoView({ name, contentPath, ref, onDownload, onSwipe 
   const stopped = shown !== null
   const visible = awake || state.paused || menuOpen
 
+  const chapters = useMemo<Chapter[]>(
+    () =>
+      info?.chapters.map((chapter, i) => ({
+        start: chapter.startMs / 1000,
+        title: chapter.title ?? `Chapter ${String(i + 1)}`,
+      })) ?? [],
+    [info],
+  )
+
+  // Subtitles: beside the file at once, inside it once the media info comes.
+  const options = useMemo<SubtitleOption[]>(
+    () =>
+      source
+        ? subtitleOptions(base, source.versionId, playback.data?.subtitleFiles ?? [], info)
+        : [],
+    [base, info, playback.data?.subtitleFiles, source],
+  )
+  /** The viewer's own choice in this video; until then, the default. */
+  const [choice, setChoice] = useState<{ key: string | null } | null>(null)
+  const chosen = choice ? choice.key : defaultSubtitle(options, subtitlePreference)
+  const tracks = useRef(new Map<string, HTMLTrackElement>())
+  const [track, setTrack] = useState<{
+    key: string
+    text: TextTrack
+    status: 'loading' | 'ready' | 'failed'
+  } | null>(null)
+
+  const chooseSubtitles = useCallback(
+    (key: string | null) => {
+      setChoice({ key })
+      const option = options.find((found) => found.key === key)
+      if (!option) setSubtitlePreference({ ...subtitlePreference, on: false })
+      else if (!option.forced) setSubtitlePreference({ on: true, language: option.language })
+    },
+    [options, setSubtitlePreference, subtitlePreference],
+  )
+
+  // The chosen track loads, hidden, for the player to draw; the others stay off.
+  useEffect(() => {
+    if (!video) return
+    let element: HTMLTrackElement | null = null
+    for (const [key, candidate] of tracks.current) {
+      candidate.track.mode = key === chosen ? 'hidden' : 'disabled'
+      if (key === chosen) element = candidate
+    }
+    // None: what was drawn is another key's, and goes.
+    if (!element || chosen === null) return
+    const shown = element
+    const statusOf = () =>
+      shown.readyState === HTMLTrackElement.LOADED
+        ? 'ready'
+        : shown.readyState === HTMLTrackElement.ERROR
+          ? 'failed'
+          : 'loading'
+    const update = () => {
+      setTrack({ key: chosen, text: shown.track, status: statusOf() })
+    }
+    // An iPhone's own full screen draws subtitles itself.
+    const native = (showing: boolean) => () => {
+      shown.track.mode = showing ? 'showing' : 'hidden'
+    }
+    const begin = native(true)
+    const end = native(false)
+    shown.addEventListener('load', update)
+    shown.addEventListener('error', update)
+    video.addEventListener('webkitbeginfullscreen', begin)
+    video.addEventListener('webkitendfullscreen', end)
+    update()
+    return () => {
+      shown.removeEventListener('load', update)
+      shown.removeEventListener('error', update)
+      video.removeEventListener('webkitbeginfullscreen', begin)
+      video.removeEventListener('webkitendfullscreen', end)
+    }
+  }, [chosen, options, video])
+
+  const resume = useResume({
+    base,
+    video,
+    versionId: source?.versionId ?? null,
+    savedMs: playback.data?.positionMs ?? null,
+  })
+  useEffect(() => {
+    if (resumedAt === null) return
+    const timer = window.setTimeout(() => {
+      setResumedAt(null)
+    }, RESUMED_NOTE_MS)
+    return () => {
+      window.clearTimeout(timer)
+    }
+  }, [resumedAt])
+
   const wake = useCallback(() => {
     setAwake(true)
     window.clearTimeout(hideTimer.current)
@@ -171,6 +292,10 @@ export default function VideoView({ name, contentPath, ref, onDownload, onSwipe 
       window.clearTimeout(timers.gesture.tapTimer)
     }
   }, [])
+
+  useEffect(() => {
+    if (!active) videoRef.current?.pause()
+  }, [active])
 
   const seek = useCallback((seconds: number) => {
     const element = videoRef.current
@@ -241,6 +366,7 @@ export default function VideoView({ name, contentPath, ref, onDownload, onSwipe 
           toggleFullscreen()
           break
         case 'subtitles':
+          chooseSubtitles(toggledSubtitle(options, chosen, subtitlePreference))
           break
         case 'speed':
           element.playbackRate = stepSpeed(element.playbackRate, action.step)
@@ -251,7 +377,17 @@ export default function VideoView({ name, contentPath, ref, onDownload, onSwipe 
       }
       wake()
     },
-    [seek, setVolume, toggleFullscreen, togglePlay, wake],
+    [
+      chooseSubtitles,
+      chosen,
+      options,
+      seek,
+      setVolume,
+      subtitlePreference,
+      toggleFullscreen,
+      togglePlay,
+      wake,
+    ],
   )
 
   useImperativeHandle(
@@ -410,7 +546,7 @@ export default function VideoView({ name, contentPath, ref, onDownload, onSwipe 
     <div
       ref={attachRoot}
       className={cn(
-        'relative size-full overflow-hidden bg-black select-none',
+        '@container relative size-full overflow-hidden bg-black select-none',
         !visible && !shown && 'cursor-none',
       )}
       onPointerMove={(event) => {
@@ -453,7 +589,25 @@ export default function VideoView({ name, contentPath, ref, onDownload, onSwipe 
               onError={() => {
                 void handleError()
               }}
-            />
+            >
+              {options.map((option) => (
+                <track
+                  key={option.key}
+                  ref={(element) => {
+                    if (!element) return
+                    tracks.current.set(option.key, element)
+                    return () => {
+                      tracks.current.delete(option.key)
+                    }
+                  }}
+                  kind="subtitles"
+                  src={option.src}
+                  label={option.label}
+                  srcLang={option.language ?? undefined}
+                />
+              ))}
+            </video>
+            <SubtitleOverlay track={track?.key === chosen ? track.text : null} raised={visible} />
             <div
               className="absolute inset-0 touch-pan-y"
               onPointerDown={handlePointerDown}
@@ -483,6 +637,28 @@ export default function VideoView({ name, contentPath, ref, onDownload, onSwipe 
         >
           {ripple.side < 0 ? '−' : '+'}
           {SKIP_TAP_SECONDS} s
+        </div>
+      )}
+      {resumedAt !== null && !shown && (
+        <div className="absolute bottom-24 left-3 sm:left-4">
+          <div
+            role="status"
+            className="flex items-center gap-1 rounded-lg bg-black/75 py-1 pr-1 pl-3 text-sm text-white shadow-lg"
+          >
+            <span>Resumed at {formatPlayTime(resumedAt)}</span>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-white hover:bg-white/15 hover:text-white"
+              onClick={() => {
+                seek(0)
+                resume.startOver()
+                setResumedAt(null)
+              }}
+            >
+              <RotateCcw /> Start over
+            </Button>
+          </div>
         </div>
       )}
       {silentCodec && !silenceSeen && !shown && (
@@ -530,6 +706,13 @@ export default function VideoView({ name, contentPath, ref, onDownload, onSwipe 
           onMenu={(open) => {
             setMenuOpen(open)
             if (!open) wake()
+          }}
+          chapters={chapters}
+          subtitles={{
+            options,
+            chosen,
+            status: track?.key === chosen ? track.status : chosen === null ? null : 'loading',
+            onChoose: chooseSubtitles,
           }}
         />
       )}

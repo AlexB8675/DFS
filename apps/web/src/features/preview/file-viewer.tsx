@@ -174,6 +174,7 @@ export function FileViewer({
               view={view}
               previous={previous}
               next={next}
+              active={open}
               onDownload={onDownload}
             />
             {previous && (

@@ -1,4 +1,6 @@
 import {
+  Captions,
+  ListVideo,
   Maximize,
   Minimize,
   Pause,
@@ -14,6 +16,7 @@ import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
@@ -24,11 +27,27 @@ import { cn } from '@/lib/utils'
 import { audioTracksOf, type AudioTrack } from './audio-tracks'
 import { SPEEDS } from './keys'
 import { Slider } from './slider'
+import type { SubtitleOption } from './subtitle-options'
 import { formatPlayTime } from './time'
 import { useMediaState } from './use-media-state'
 
 // The video player's controls (DESIGN.md §10.4): the seek bar over a row of
 // buttons, at the bottom of the picture.
+
+export interface Chapter {
+  /** In seconds. */
+  start: number
+  title: string
+}
+
+/** The subtitles offered, the one shown, and how loading it went. */
+export interface SubtitleChoice {
+  options: readonly SubtitleOption[]
+  chosen: string | null
+  /** The chosen track's loading, from its `<track>`. */
+  status: 'loading' | 'ready' | 'failed' | null
+  onChoose: (key: string | null) => void
+}
 
 interface ControlsProps {
   video: HTMLVideoElement
@@ -50,8 +69,8 @@ interface ControlsProps {
   onTogglePictureInPicture: () => void
   /** A menu opened or closed: the controls stay while one is open. */
   onMenu: (open: boolean) => void
-  /** Things of their own between the time and the settings: subtitles, chapters. */
-  children?: ReactNode
+  chapters: readonly Chapter[]
+  subtitles: SubtitleChoice
 }
 
 /** Buttons keep the focus where it was, so the player's keys go on working after a click. */
@@ -75,7 +94,8 @@ export function Controls({
   onToggleFullscreen,
   onTogglePictureInPicture,
   onMenu,
-  children,
+  chapters,
+  subtitles,
 }: ControlsProps) {
   const state = useMediaState(video, visible)
   /** Where the seek bar is dragged to, ahead of the video. */
@@ -87,6 +107,44 @@ export function Controls({
   const tracks = audioTracksOf(video)
   const quiet = state.muted || state.volume === 0
   const VolumeIcon = quiet ? VolumeX : state.volume < 0.5 ? Volume1 : Volume2
+  const chapterAt = (seconds: number) => chapters.findLast((chapter) => chapter.start <= seconds)
+  const current = chapterAt(time)
+  const menu = (props: {
+    label: string
+    icon: ReactNode
+    pressed?: boolean
+    children: ReactNode
+  }) => (
+    <DropdownMenu modal={false} onOpenChange={onMenu}>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label={props.label.replace(/ \(.\)$/, '')}
+          title={props.label}
+          aria-pressed={props.pressed}
+          className={cn(
+            'text-white hover:bg-white/15 hover:text-white',
+            props.pressed && 'bg-white/15',
+          )}
+          onMouseDown={keepFocus}
+        >
+          {props.icon}
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        container={container}
+        side="top"
+        align="end"
+        className="max-h-80 w-56"
+        onCloseAutoFocus={(event) => {
+          event.preventDefault()
+        }}
+      >
+        {props.children}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
 
   return (
     <div
@@ -108,6 +166,9 @@ export function Controls({
             className="pointer-events-none absolute bottom-6 -translate-x-1/2 rounded bg-black/80 px-1.5 py-0.5 text-xs tabular-nums"
             style={{ left: `clamp(1.5rem, ${String(hover * 100)}%, calc(100% - 1.5rem))` }}
           >
+            {chapterAt(hover * duration)?.title && (
+              <span className="mr-1.5 font-medium">{chapterAt(hover * duration)?.title}</span>
+            )}
             {formatPlayTime(hover * duration, duration)}
           </div>
         )}
@@ -123,6 +184,13 @@ export function Controls({
             onSeek(value * duration)
           }}
           onHover={setHover}
+          marks={
+            duration > 0
+              ? chapters
+                  .filter((chapter) => chapter.start > 0 && chapter.start < duration)
+                  .map((chapter) => chapter.start / duration)
+              : []
+          }
           under={
             duration > 0 &&
             state.buffered.map(([start, end]) => (
@@ -164,52 +232,94 @@ export function Controls({
         <span className="ml-2 text-xs whitespace-nowrap tabular-nums sm:text-sm">
           {formatPlayTime(time, duration)} / {formatPlayTime(duration)}
         </span>
+        {current?.title && (
+          <span className="ml-2 min-w-0 truncate text-sm text-white/80 max-sm:hidden">
+            · {current.title}
+          </span>
+        )}
         <div className="min-w-0 flex-1" />
-        {children}
-        <DropdownMenu modal={false} onOpenChange={onMenu}>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label="Settings"
-              title="Settings"
-              className="text-white hover:bg-white/15 hover:text-white"
-              onMouseDown={keepFocus}
-            >
-              <Settings />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent
-            container={container}
-            side="top"
-            align="end"
-            className="w-48"
-            onCloseAutoFocus={(event) => {
-              event.preventDefault()
-            }}
-          >
-            <DropdownMenuLabel>Speed</DropdownMenuLabel>
-            <DropdownMenuRadioGroup
-              value={String(state.rate)}
-              onValueChange={(value) => {
-                onRate(Number(value))
-              }}
-            >
-              {SPEEDS.map((speed) => (
-                <DropdownMenuRadioItem key={speed} value={String(speed)}>
-                  {speed === 1 ? 'Normal' : `${String(speed)}×`}
-                </DropdownMenuRadioItem>
-              ))}
-            </DropdownMenuRadioGroup>
-            {tracks && tracks.length > 1 && (
+        {chapters.length > 0 &&
+          menu({
+            label: 'Chapters',
+            icon: <ListVideo />,
+            children: (
               <>
-                <DropdownMenuSeparator />
-                <DropdownMenuLabel>Sound</DropdownMenuLabel>
-                <AudioTracks tracks={tracks} onChoose={onAudioTrack} />
+                <DropdownMenuLabel>Chapters</DropdownMenuLabel>
+                {chapters.map((chapter) => (
+                  <DropdownMenuItem
+                    key={chapter.start}
+                    className={cn(chapter === current && 'font-medium')}
+                    onSelect={() => {
+                      onSeek(chapter.start)
+                    }}
+                  >
+                    <span className="min-w-0 flex-1 truncate">{chapter.title}</span>
+                    <span className="text-xs text-muted-foreground tabular-nums">
+                      {formatPlayTime(chapter.start, duration)}
+                    </span>
+                  </DropdownMenuItem>
+                ))}
               </>
-            )}
-          </DropdownMenuContent>
-        </DropdownMenu>
+            ),
+          })}
+        {subtitles.options.length > 0 &&
+          menu({
+            label: 'Subtitles (c)',
+            icon: <Captions />,
+            pressed: subtitles.chosen !== null,
+            children: (
+              <>
+                <DropdownMenuLabel>Subtitles</DropdownMenuLabel>
+                <DropdownMenuRadioGroup
+                  value={subtitles.chosen ?? ''}
+                  onValueChange={(key) => {
+                    subtitles.onChoose(key || null)
+                  }}
+                >
+                  <DropdownMenuRadioItem value="">Off</DropdownMenuRadioItem>
+                  {subtitles.options.map((option) => (
+                    <DropdownMenuRadioItem key={option.key} value={option.key}>
+                      <span className="min-w-0 flex-1 truncate">{option.label}</span>
+                      {option.key === subtitles.chosen && subtitles.status === 'loading' && (
+                        <span className="text-xs text-muted-foreground">Loading…</span>
+                      )}
+                      {option.key === subtitles.chosen && subtitles.status === 'failed' && (
+                        <span className="text-xs text-destructive">Can’t be read</span>
+                      )}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </>
+            ),
+          })}
+        {menu({
+          label: 'Settings',
+          icon: <Settings />,
+          children: (
+            <>
+              <DropdownMenuLabel>Speed</DropdownMenuLabel>
+              <DropdownMenuRadioGroup
+                value={String(state.rate)}
+                onValueChange={(value) => {
+                  onRate(Number(value))
+                }}
+              >
+                {SPEEDS.map((speed) => (
+                  <DropdownMenuRadioItem key={speed} value={String(speed)}>
+                    {speed === 1 ? 'Normal' : `${String(speed)}×`}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+              {tracks && tracks.length > 1 && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel>Sound</DropdownMenuLabel>
+                  <AudioTracks tracks={tracks} onChoose={onAudioTrack} />
+                </>
+              )}
+            </>
+          ),
+        })}
         {canPictureInPicture && (
           <ControlButton
             label={state.pictureInPicture ? 'Leave picture-in-picture' : 'Picture-in-picture'}

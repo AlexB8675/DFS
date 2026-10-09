@@ -33,6 +33,8 @@ interface PreviewBodyProps {
   /** The files around it, for an image's swipes. */
   previous: (() => void) | null
   next: (() => void) | null
+  /** `false` while the viewer closes: a video stops at once rather than when it has faded. */
+  active?: boolean
   onDownload: () => void
 }
 
@@ -48,6 +50,7 @@ export function PreviewBody({
   view,
   previous,
   next,
+  active = true,
   onDownload,
 }: PreviewBodyProps) {
   const [failedId, setFailedId] = useState<string | null>(null)
@@ -92,6 +95,7 @@ export function PreviewBody({
           ref={view}
           name={file.name}
           contentPath={contentPath}
+          active={active}
           onDownload={onDownload}
           onSwipe={(direction) => {
             ;(direction === 1 ? next : previous)?.()
