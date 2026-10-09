@@ -59,9 +59,22 @@ describe('DiscordBlobStore (DESIGN.md §4, §6.1, §6.2)', () => {
     expect(first.url?.expiresAt.getTime()).toBeGreaterThan(Date.now() + 23 * 60 * 60_000)
 
     expect(await store.read(first, 100, 50)).toEqual(data.subarray(100, 150))
+    expect(await streamed(first, 100, 50)).toEqual(data.subarray(100, 150))
+    // A body cut short fails a stream, rather than ending it.
+    discord.cutNextBodyAt = 20
+    await expect(streamed(first, 100, 50)).rejects.toMatchObject({ retryable: true })
     discord.ignoreRange = true
     expect(await store.read(first, 590, 10)).toEqual(data.subarray(590))
+    // A CDN that sends the whole file has the bytes before the offset skipped.
+    expect(await streamed(first, 100, 50)).toEqual(data.subarray(100, 150))
+    expect(await streamed(first, 590, 10)).toEqual(data.subarray(590))
   })
+
+  async function streamed(blob: StoredBlob, offset: number, length: number): Promise<Uint8Array> {
+    const pieces: Uint8Array[] = []
+    for await (const piece of store.stream(blob, offset, length)) pieces.push(piece)
+    return new Uint8Array(Buffer.concat(pieces))
+  }
 
   it('posts a blob once when a retry follows a lost answer', async () => {
     discord.loseNextAnswer = true

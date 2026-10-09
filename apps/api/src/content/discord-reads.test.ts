@@ -339,6 +339,29 @@ describe('reading from Discord', () => {
     }
   })
 
+  it('reads the same bytes from a CDN that ignores Range and sends whole files', async () => {
+    const session = await storedFile('Whole', 1)
+    const folder = await createFolder(client, (await workspace(client)).id, 'Whole small')
+    const content = 'small and packed, '.repeat(100)
+    const small = await uploadFile(client, folder.id, 'small.txt', text(content))
+    const store = app.blobStore as DiscordBlobStore
+    await settleBlobs({ db: app.db, staging: app.staging, store, sizes: app.config.sizes })
+    await app.frameCache?.clear()
+    discord.ignoreRange = true
+    try {
+      const middle = await client.fetch('GET', `/files/${session.nodeId}/content`, {
+        headers: { Range: 'bytes=300000-300099' },
+      })
+      expect(Buffer.from(await middle.arrayBuffer())).toEqual(
+        Buffer.from(contentOf(1).subarray(300_000, 300_100)),
+      )
+      const packed = await client.fetch('GET', `/files/${small.nodeId}/content`)
+      expect(await packed.text()).toBe(content)
+    } finally {
+      discord.ignoreRange = false
+    }
+  })
+
   it('answers HEAD with the length, reading nothing from Discord', async () => {
     const { chunkSize } = app.config.sizes
     const session = await storedFile('Headed', 2)
