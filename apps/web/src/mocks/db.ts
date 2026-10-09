@@ -50,7 +50,7 @@ import {
 } from '@dfs/shared'
 import { previewKind } from '@/lib/preview-kind'
 import { SAMPLE_SUBTITLES, sampleMediaInfo } from './media'
-import { sampleImage, samplePdf, sampleText } from './samples'
+import { sampleImage, samplePdf, sampleText, sampleVideo } from './samples'
 import { createSeed } from './seed'
 import { createZip, type ZipEntry } from './zip'
 
@@ -1556,6 +1556,8 @@ function mockContent(
 ): Pick<MockFileContent, 'mimeType' | 'body'> {
   const kind =
     fileCategory(node.name, mimeType) === 'image' ? 'image' : previewKind(node.name, mimeType)
+  const video = kind === 'video' ? sampleVideo() : null
+  if (video) return { mimeType: 'video/mp4', body: video }
   const sample =
     kind === 'image'
       ? sampleImage(node.id, node.name)

@@ -1,7 +1,10 @@
 import { splitExtension } from '@dfs/shared'
+import sampleVideoUrl from './sample-video.mp4?url'
 
-// What the demo's files hold, made up per file, so previews (§10.3) have
-// something to show: the mock keeps no bytes but those uploaded to it.
+// What the demo's files hold, made up per file, so previews (§10.3) and the
+// player (§10.4) have something to show: the mock keeps no bytes but those
+// uploaded to it, and one sample video (make-sample-video.sh), loaded when
+// the mock starts.
 
 export interface SampleFile {
   mimeType: string
@@ -93,6 +96,19 @@ const logs = new Map<string, string>()
 /** Logs are made as large as they say, up to this: enough to pass the viewer's 5 MiB. */
 const LOG_LIMIT = 8 * 1024 * 1024
 
+let sampleVideoBytes: Uint8Array | null = null
+
+/** Fetches the sample video, for every video in the demo; in the browser only. */
+export async function loadSampleVideo(): Promise<void> {
+  const response = await fetch(sampleVideoUrl)
+  if (response.ok) sampleVideoBytes = new Uint8Array(await response.arrayBuffer())
+}
+
+/** What every video in the demo plays: 12 s of a test picture and a beep. */
+export function sampleVideo(): Uint8Array | null {
+  return sampleVideoBytes
+}
+
 /**
  * Text, by the file's kind: a Markdown page with GitHub's extras (and raw
  * HTML, which must not run), JSON with a number too large for a double,
@@ -122,9 +138,29 @@ export function sampleText(id: string, name: string, sizeBytes: number): SampleF
       return { mimeType: 'text/css', body: css() }
     case '.html':
       return { mimeType: 'text/html', body: html(name) }
+    case '.srt':
+      return { mimeType: 'application/x-subrip', body: srt() }
     default:
       return { mimeType: 'text/plain', body: prose(random, name) }
   }
+}
+
+/** Subtitles for the sample video, in Italian, with italics. */
+function srt(): string {
+  return [
+    '1',
+    '00:00:01,000 --> 00:00:04,000',
+    'Questi sottotitoli sono in un file accanto al video.',
+    '',
+    '2',
+    '00:00:05,000 --> 00:00:08,500',
+    '<i>Convertiti in WebVTT dal server.</i>',
+    '',
+    '3',
+    '00:00:09,000 --> 00:00:11,500',
+    'Scegli la lingua dal menu, o premi C.',
+    '',
+  ].join('\r\n')
 }
 
 function markdown(name: string): string {

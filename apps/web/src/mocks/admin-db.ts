@@ -345,6 +345,7 @@ export class AdminMockDb extends MockDb {
         // As the API's checks see them (§16): the median answer of the last minute.
         { name: 'Discord', status: 'ok', detail: `${Math.round(jitter(80, 120))} ms` },
         { name: 'Internet', status: 'ok', detail: `${Math.round(jitter(10, 20))} ms` },
+        { name: 'Media', status: 'ok', detail: 'ffmpeg 7.1.5' },
       ],
       queue: {
         pendingJobs: syncing.length,

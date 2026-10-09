@@ -40,6 +40,11 @@ export class MediaExaminer {
   readonly #examining = new Map<string, Promise<Examined>>()
   /** Extractions of subtitles under way, by version, likewise. */
   readonly #extracting = new Map<string, Promise<void>>()
+  /**
+   * Extractions after uploads, one after another: one reads a whole file,
+   * so it doesn't hold a place examinations need.
+   */
+  #afterUploadExtractions: Promise<void> = Promise.resolve()
   readonly #queued: string[] = []
   #running = 0
 
@@ -125,8 +130,8 @@ export class MediaExaminer {
       if (!versionId) return
       this.#running += 1
       this.examine(versionId)
-        .then(async ({ info }) => {
-          if (info?.streams.some(isTextSubtitles)) await this.extract(versionId, info)
+        .then(({ info }) => {
+          if (info?.streams.some(isTextSubtitles)) this.#extractAfterUpload(versionId, info)
         })
         .catch((error: unknown) => {
           this.#log.info(
@@ -139,6 +144,17 @@ export class MediaExaminer {
           this.#next()
         })
     }
+  }
+
+  #extractAfterUpload(versionId: string, info: MediaInfo): void {
+    this.#afterUploadExtractions = this.#afterUploadExtractions
+      .then(() => this.extract(versionId, info))
+      .catch((error: unknown) => {
+        this.#log.info(
+          { err: error, versionId },
+          'could not extract an uploaded file’s subtitles; they will be when chosen',
+        )
+      })
   }
 
   async #extract(versionId: string, info: MediaInfo): Promise<void> {

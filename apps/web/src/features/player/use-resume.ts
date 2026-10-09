@@ -25,15 +25,18 @@ interface ResumeOptions {
 export function useResume({ base, video, versionId, savedMs }: ResumeOptions): {
   startOver: () => void
 } {
-  /** What the server holds now, as far as this player knows. */
-  const saved = useRef<number | null>(savedMs)
+  /**
+   * What the server holds now, as far as this player knows: what
+   * /playback said, until this player saves or clears it.
+   */
+  const saved = useRef<number | null | undefined>(undefined)
 
   useEffect(() => {
     if (!video || !versionId) return
-    // Before it has played, its time says nothing yet: leaving then keeps what was saved.
-    let started = false
+    if (saved.current === undefined) saved.current = savedMs
     const save = (keepalive = false) => {
-      if (!started) return
+      // Before it has played, its time says nothing yet: leaving then keeps what was saved.
+      if (video.played.length === 0) return
       const ms = Math.round(video.currentTime * 1000)
       const duration = video.duration
       const finished =
@@ -45,16 +48,13 @@ export function useResume({ base, video, versionId, savedMs }: ResumeOptions): {
         void apiFetch(`${base}/position`, { method: 'DELETE', keepalive }).catch(() => undefined)
         return
       }
-      if (saved.current !== null && Math.abs(saved.current - ms) < 1000) return
+      if (typeof saved.current === 'number' && Math.abs(saved.current - ms) < 1000) return
       saved.current = ms
       void apiFetch(`${base}/position`, {
         method: 'PUT',
         json: { versionId, positionMs: ms },
         keepalive,
       }).catch(() => undefined)
-    }
-    const onPlaying = () => {
-      started = true
     }
     const onStop = () => {
       save()
@@ -68,21 +68,19 @@ export function useResume({ base, video, versionId, savedMs }: ResumeOptions): {
     const timer = window.setInterval(() => {
       if (!video.paused) save()
     }, EVERY_MS)
-    video.addEventListener('playing', onPlaying)
     video.addEventListener('pause', onStop)
     video.addEventListener('ended', onStop)
     document.addEventListener('visibilitychange', onHidden)
     window.addEventListener('pagehide', onPageHide)
     return () => {
       window.clearInterval(timer)
-      video.removeEventListener('playing', onPlaying)
       video.removeEventListener('pause', onStop)
       video.removeEventListener('ended', onStop)
       document.removeEventListener('visibilitychange', onHidden)
       window.removeEventListener('pagehide', onPageHide)
       save(true)
     }
-  }, [base, video, versionId])
+  }, [base, savedMs, video, versionId])
 
   return {
     startOver: () => {

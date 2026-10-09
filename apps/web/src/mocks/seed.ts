@@ -266,6 +266,8 @@ export function createSeed(version: number): MockState {
   // ── Videos: every sync state ──────────────────────────────────────────────
   const videos = folder(root, 'Videos')
   const wedding = file(videos, 'Wedding highlights.mp4', 4.2 * GB, { age: 200 * DAY })
+  // Beside it, with its name: the player offers them (§10.4).
+  file(videos, 'Wedding highlights.it.srt', 2 * KB, { age: 200 * DAY })
   file(videos, 'Family dinner.mp4', 1.1 * GB, { age: 33 * DAY })
   file(videos, 'Drone footage – coast.mkv', 11.8 * GB, { age: 40 * MINUTE, syncState: 'syncing' })
   file(videos, 'Old camcorder tape 1998.avi', 2.1 * GB, { age: 500 * DAY })

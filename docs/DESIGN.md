@@ -808,7 +808,7 @@ What a file holds, seen without downloading it (D33). First images, PDFs, text a
 - **Safety:** the server sends content as it always has, an attachment with `nosniff` (§7.5): images go through `<img>`, text is rendered as text, and PDFs are drawn by pdf.js. Nothing uploaded runs in the page.
 - **Caching:** the content route answers `304` to a browser that has the version (§6.2), so going back and forth between files moves no bytes again.
 - **Share page:** a file link's preview fills its page, under a bar with its name, the link's facts and Download; a folder link opens its files in the same viewer as the drive, with Download and Details but no Share. Previews ask with `?preview=1`, which never counts toward the download limit (§7.5); only Download does. A file the viewer can't show keeps the page as it was, with Download.
-- **Mock:** the demo's images, PDFs and text files have sample content, so previews work in it too.
+- **Mock:** the demo's images, PDFs and text files have sample content, so previews work in it too; every video plays one 12-second sample (`apps/web/src/mocks/sample-video.mp4`, made by `make-sample-video.sh` in the media image), with made-up media info: chapters and subtitles inside, an MKV's sound in Dolby Digital and an AVI in MPEG-4 Part 2, so the player's notice and reasons show, and an Italian subtitle file beside one video.
 
 ### 10.4 Audio and video players
 

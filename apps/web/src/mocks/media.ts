@@ -2,7 +2,10 @@ import { splitExtension, type MediaInfo, type MediaKind, type MediaStream } from
 
 // Media info the mock makes up per file (§6.7), as the media service would
 // find it: a video is H.264 and AAC at 1080p with chapters and Italian
-// subtitles inside, and audio is an MP3 whose tags come from its name.
+// subtitles inside, as the sample every video plays; but an AVI is MPEG-4
+// Part 2, which browsers can't play, and an MKV's sound Dolby Digital,
+// which most can't, so the player's reasons show too. Audio is an MP3 whose
+// tags come from its name.
 
 const STREAM: Omit<MediaStream, 'index' | 'type' | 'codec' | 'codecString'> = {
   profile: null,
@@ -70,6 +73,7 @@ export function sampleMediaInfo(kind: MediaKind, name: string): MediaInfo {
       hasCover: false,
     }
   }
+  const extension = splitExtension(name).extension.toLowerCase()
   return {
     kind,
     container: 'mov,mp4,m4a,3gp,3g2,mj2',
@@ -87,6 +91,11 @@ export function sampleMediaInfo(kind: MediaKind, name: string): MediaInfo {
         height: 1080,
         frameRate: 30,
         bitDepth: 8,
+        ...(extension === '.avi' && {
+          codec: 'mpeg4',
+          codecString: 'mp4v.20.9',
+          profile: 'Simple Profile',
+        }),
       },
       {
         ...STREAM,
@@ -99,6 +108,13 @@ export function sampleMediaInfo(kind: MediaKind, name: string): MediaInfo {
         channelLayout: 'stereo',
         sampleRate: 48_000,
         language: 'eng',
+        ...(extension === '.mkv' && {
+          codec: 'ac3',
+          codecString: 'ac-3',
+          profile: null,
+          channels: 6,
+          channelLayout: '5.1(side)',
+        }),
       },
       {
         ...STREAM,

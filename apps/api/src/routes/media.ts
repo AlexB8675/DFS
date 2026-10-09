@@ -105,15 +105,20 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
       const node = await mediaNode(app.db, auth.user.id, id)
       const file = await downloadableFile(app.db, node.id)
       if (file.version_id !== versionId) throw versionChanged()
-      reply.header('content-type', 'text/vtt; charset=utf-8')
-      if (/^\d+$/.test(track)) {
-        // Inside the version, which never changes: kept by the browser as long as it likes.
-        const vtt = await streamSubtitles(app, file, Number(track))
-        return reply.header('cache-control', 'private, max-age=31536000, immutable').send(vtt)
-      }
-      // Beside it, which may change.
-      const vtt = await subtitleFileAsWebVtt(app, node, track)
-      return reply.header('cache-control', 'private, no-cache').send(vtt)
+      const inside = /^\d+$/.test(track)
+      const vtt = inside
+        ? await streamSubtitles(app, file, Number(track))
+        : await subtitleFileAsWebVtt(app, node, track)
+      return (
+        reply
+          .header('content-type', 'text/vtt; charset=utf-8')
+          // Inside the version, which never changes, the browser keeps them; beside it, they may change.
+          .header(
+            'cache-control',
+            inside ? 'private, max-age=31536000, immutable' : 'private, no-cache',
+          )
+          .send(vtt)
+      )
     },
   )
 
