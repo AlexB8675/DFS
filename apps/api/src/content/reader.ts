@@ -339,6 +339,12 @@ function wanted(
  * plays, a round trip to Discord sooner.
  */
 export const WARM_END_BYTES = 4 * 1024 * 1024
+/**
+ * The segments at the very end fetched first, on a request of their own:
+ * the last megabyte holds a shorter video's whole index, which in one request
+ * with the rest would come last.
+ */
+const INDEX_SEGMENTS = 4
 /** A fetch of a video's end given up after this long: nobody waits for it. */
 const WARM_TIMEOUT_MS = 30_000
 /** Videos' ends fetched at once per API at most; more are left to their players. */
@@ -397,7 +403,12 @@ export async function warmEnd(
         : NOTHING_TO_GIVE_BACK
       if (!giveBack) continue
       const fetch: SegmentFetch = { app, versionId, key, chunk, layout, signal }
-      const sources = [...planSegments(fetch, first, last, false).values()]
+      const split =
+        chunk.idx === version.chunk_count - 1 ? Math.max(first, last - INDEX_SEGMENTS + 1) : first
+      const sources = [
+        ...planSegments(fetch, split, last, false).values(),
+        ...(split > first ? planSegments(fetch, first, split - 1, false).values() : []),
+      ]
       const done = Promise.allSettled(
         sources.flatMap((source) => (source.kind === 'fetch' ? [source.plaintext] : [])),
       ).then(giveBack)

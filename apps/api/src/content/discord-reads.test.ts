@@ -522,17 +522,23 @@ describe('reading from Discord', () => {
 
     discord.cdnRanges.length = 0
     await client.call('GET', `/files/${session.nodeId}/playback`, playbackSchema)
-    // The last 4 MiB: the end of the second chunk, and the third whole.
+    // The last 4 MiB: the end of the second chunk, and the third, its last
+    // megabyte on a request of its own.
     await vi.waitFor(() => {
-      expect(discord.cdnRanges).toHaveLength(2)
+      expect(discord.cdnRanges).toHaveLength(3)
     })
+    const lastChunk = bytes.length - 2 * chunkSize
+    const layout = new ChunkFrameLayout(lastChunk)
+    expect(discord.cdnRanges).toContain(
+      `bytes=${String(layout.segmentStart(layout.segments - 4))}-${String(chunkFrameLength(lastChunk) - 1)}`,
+    )
     // Fetched, and kept once written.
     await setTimeout(300)
     await app.frameCache?.idle()
     // Opened again: it is kept, so nothing more is fetched.
     await client.call('GET', `/files/${session.nodeId}/playback`, playbackSchema)
     await setTimeout(200)
-    expect(discord.cdnRanges).toHaveLength(2)
+    expect(discord.cdnRanges).toHaveLength(3)
 
     // The browser's look at the end for the index comes from the cache.
     discord.cdnRanges.length = 0
