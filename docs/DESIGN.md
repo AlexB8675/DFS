@@ -122,7 +122,7 @@ The deployment is a **single Fedora VPS** (D6). The browser still has to reach t
 
 ```mermaid
 flowchart LR
-    I(("Internet")) -->|"80/443 (TCP+UDP)"| E["caddy"]
+    I(("Internet")) -->|"80/443 (TCP)"| E["caddy"]
     subgraph dfs_internal["Docker network: dfs_internal (internal: true)"]
         A["api :3000"]
         B["bot :3001 (internal RPC)"]

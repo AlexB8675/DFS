@@ -39,7 +39,12 @@ declare module 'fastify' {
     pool: pg.Pool
     db: Database
     /** Per-instance request limits (DESIGN.md §7.5). */
-    limits: { signIn: RateLimiter; shareUnlock: RateLimiter; passwordResets: RateLimiter }
+    limits: {
+      signIn: RateLimiter
+      shareUnlock: RateLimiter
+      passwordResets: RateLimiter
+      connectionTests: RateLimiter
+    }
     /** Frames received but not yet stored (§6.1), and whether there is room for more. */
     staging: Staging
     stagingLimit: StagingLimit
@@ -157,6 +162,8 @@ export async function buildApp({
     signIn: new RateLimiter(30, 10 * 60_000),
     shareUnlock: new RateLimiter(10, 10 * 60_000),
     passwordResets: new RateLimiter(5, 15 * 60_000),
+    // Connection tests per user (§10.4): each is up to 32 MiB of the VPS's bandwidth.
+    connectionTests: new RateLimiter(10, 10 * 60_000),
   })
   app.decorate('staging', new Staging(config.stagingDir))
   app.decorate('stagingLimit', new StagingLimit(db, config.stagingMaxBytes))

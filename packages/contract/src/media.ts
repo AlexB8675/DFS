@@ -165,6 +165,16 @@ export function mediaTests({
           `/connection-test?bytes=${String(MAX_CONNECTION_TEST_BYTES + 1)}`,
         ),
       ).toMatchObject({ status: 400 })
+      // One at a time: another while one runs is refused.
+      const running = await client.fetch(
+        'GET',
+        `/connection-test?bytes=${String(MAX_CONNECTION_TEST_BYTES)}`,
+      )
+      expect(await client.error('GET', '/connection-test?bytes=1000')).toEqual({
+        status: 429,
+        code: 'rate_limited',
+      })
+      await running.body?.cancel()
     })
 
     it('takes a player’s report of how a play went, within bounds', async () => {

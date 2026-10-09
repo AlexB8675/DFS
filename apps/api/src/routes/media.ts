@@ -41,6 +41,8 @@ const byId = z.object({ id: z.uuid() })
 
 export function mediaRoutes(app: FastifyInstance, _options: object, done: () => void): void {
   const routes = app.withTypeProvider<ZodTypeProvider>()
+  /** Users whose connection test is running. */
+  const testing = new Set<string>()
 
   routes.get(
     '/files/:id/media',
@@ -119,7 +121,17 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
       },
     },
     (request, reply) => {
-      requireAuth(request.auth)
+      const auth = requireAuth(request.auth)
+      const userId = auth.user.id
+      // Bandwidth for nothing but measuring: one test at a time, a few in ten minutes.
+      const wait = app.limits.connectionTests.waitMs(userId)
+      if (testing.has(userId) || wait > 0) {
+        throw new ApiError(429, 'rate_limited', 'A connection test is running, or ran just now.', {
+          'retry-after': String(Math.max(1, Math.ceil(wait / 1000))),
+        })
+      }
+      app.limits.connectionTests.hit(userId)
+      testing.add(userId)
       const { bytes } = request.query
       const stats = {
         startedAt: performance.now(),
@@ -129,6 +141,7 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
         clientMs: 0,
       }
       reply.raw.once('close', () => {
+        testing.delete(userId)
         const ms = performance.now() - stats.startedAt
         request.log.info(
           {
@@ -159,7 +172,10 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
       const auth = requireAuth(request.auth)
       const node = await mediaNode(app.db, auth.user.id, request.params.id)
       const report = request.body
-      const kept = await keptExamination(app.db, report.versionId)
+      // Only a version of this file: any other's formats stay out of the log.
+      const kept = (await isVersionOf(app.db, node.id, report.versionId))
+        ? await keptExamination(app.db, report.versionId)
+        : null
       request.log.info(
         {
           play: {
@@ -244,6 +260,13 @@ function summary(info: MediaInfo): string {
     : 'no video'
   const rate = info.bitRate ? `, ${String(Math.round(info.bitRate / 100_000) / 10)} Mbit/s` : ''
   return `${info.container}: ${picture}${audio ? `, ${audio.codec}` : ''}${rate}`
+}
+
+/** Whether the version is one of the file's, kept or not. */
+async function isVersionOf(db: Executor, nodeId: string, versionId: string): Promise<boolean> {
+  const { rows } = await db.execute(sql`
+    SELECT 1 FROM file_versions WHERE id = ${versionId} AND node_id = ${nodeId}`)
+  return rows.length > 0
 }
 
 /** One of the user's audio or video files, or a 404 or `422 not_media`. */

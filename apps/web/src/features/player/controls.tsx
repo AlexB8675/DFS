@@ -175,6 +175,7 @@ export function Controls({
         <Slider
           label="Seek"
           value={fraction}
+          step={duration > 0 ? 5 / duration : 0.01}
           valueText={`${formatPlayTime(time, duration)} of ${formatPlayTime(duration)}`}
           onChange={(value) => {
             setDragTo(value * duration)
@@ -223,6 +224,7 @@ export function Controls({
         <Slider
           label="Volume"
           value={quiet ? 0 : state.volume}
+          step={0.05}
           valueText={`${String(Math.round((quiet ? 0 : state.volume) * 100))}%`}
           onChange={(value) => {
             onVolume(value, value === 0)

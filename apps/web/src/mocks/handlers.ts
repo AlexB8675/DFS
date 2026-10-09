@@ -46,6 +46,8 @@ export const db = new AdminMockDb()
 
 /** A realistic delay before each answer; the contract suite turns it off for speed. */
 let responseDelay = true
+/** A connection test is running: the API allows one at a time (§10.4). */
+let connectionTesting = false
 
 export function setResponseDelay(enabled: boolean): void {
   responseDelay = enabled
@@ -317,6 +319,18 @@ export const handlers = [
         .min(1)
         .max(MAX_CONNECTION_TEST_BYTES)
         .parse(new URL(request.url).searchParams.get('bytes'))
+      // One at a time, as the API has it: the bytes go out at once here, so for a moment.
+      if (connectionTesting) {
+        throw new MockApiError(
+          429,
+          'rate_limited',
+          'A connection test is running, or ran just now.',
+        )
+      }
+      connectionTesting = true
+      setTimeout(() => {
+        connectionTesting = false
+      }, 500)
       return new HttpResponse(new Uint8Array(bytes), {
         headers: { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store' },
       })

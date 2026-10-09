@@ -2,8 +2,8 @@ import { useRef, useState, type PointerEvent, type ReactNode } from 'react'
 import { cn } from '@/lib/utils'
 
 // The player's sliders, the seek bar and the volume: dragged with any
-// pointer, and given values by the player's keys rather than their own, so
-// a key does the same wherever the focus is (§10.4).
+// pointer, and moved by the arrow keys, Page Up and Down, Home and End while
+// focused, which the player's own keys then leave alone (§10.4).
 
 interface SliderProps {
   /** From 0 to 1. */
@@ -21,6 +21,8 @@ interface SliderProps {
   under?: ReactNode
   /** Gaps in the bar, from 0 to 1: where chapters start. */
   marks?: readonly number[]
+  /** An arrow key's move, from 0 to 1: the seek bar's 5 s, the volume's 5%. */
+  step: number
   className?: string
 }
 
@@ -33,6 +35,7 @@ export function Slider({
   onHover,
   under,
   marks = [],
+  step,
   className,
 }: SliderProps) {
   const track = useRef<HTMLDivElement>(null)
@@ -57,6 +60,27 @@ export function Slider({
         'group/slider relative flex h-5 cursor-pointer touch-none items-center',
         className,
       )}
+      onKeyDown={(event) => {
+        // Shift+← and → move between files, as everywhere in the viewer.
+        if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
+        const moves: Record<string, number> = {
+          ArrowLeft: -step,
+          ArrowDown: -step,
+          ArrowRight: step,
+          ArrowUp: step,
+          PageDown: -10 * step,
+          PageUp: 10 * step,
+          Home: -1,
+          End: 1,
+        }
+        const move = moves[event.key]
+        if (move === undefined) return
+        event.preventDefault()
+        event.stopPropagation()
+        const next = Math.min(1, Math.max(0, value + move))
+        onChange(next)
+        onCommit?.(next)
+      }}
       onPointerDown={(event) => {
         if (event.button !== 0) return
         event.currentTarget.setPointerCapture(event.pointerId)
