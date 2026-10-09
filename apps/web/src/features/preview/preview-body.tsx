@@ -6,9 +6,11 @@ import { ImageView } from './image-view'
 import { NoPreview } from './no-preview'
 import type { ViewHandle } from './view-handle'
 
-// Text, with its editor, loads with the first text file opened; pdf.js with the first PDF.
+// Text, with its editor, loads with the first text file opened; pdf.js with
+// the first PDF; the player with the first video.
 const TextView = lazy(() => import('./text-view'))
 const PdfView = lazy(() => import('./pdf-view'))
+const VideoView = lazy(() => import('@/features/player/video-view'))
 
 /** A file as the viewer shows it: from the drive, or from a share link. */
 export interface ViewedFile {
@@ -35,8 +37,8 @@ interface PreviewBodyProps {
 }
 
 /**
- * A file as the viewer shows it (§10.3): an image, a PDF or text, or why it
- * can't be shown. The viewer puts it under its header; a file link's page
+ * A file as the viewer shows it (§10.3, §10.4): an image, a PDF, text or a
+ * video, or why it can't be shown. The viewer puts it under its header; a file link's page
  * shows it under the link's.
  */
 export function PreviewBody({
@@ -79,6 +81,22 @@ export function PreviewBody({
     return (
       <Suspense fallback={<Loading />}>
         <PdfView key={file.id} ref={view} contentPath={contentPath} onDownload={onDownload} />
+      </Suspense>
+    )
+  }
+  if (kind === 'video') {
+    return (
+      <Suspense fallback={<Loading />}>
+        <VideoView
+          key={file.id}
+          ref={view}
+          name={file.name}
+          contentPath={contentPath}
+          onDownload={onDownload}
+          onSwipe={(direction) => {
+            ;(direction === 1 ? next : previous)?.()
+          }}
+        />
       </Suspense>
     )
   }

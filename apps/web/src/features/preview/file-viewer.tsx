@@ -4,8 +4,10 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
 import { NodeIcon } from '@/components/node-icon'
 import { SyncStatus } from '@/components/sync-status'
+import { MediaDetails } from '@/features/player/media-details'
 import { fileCategory, fileCategoryLabel } from '@/lib/file-types'
 import { formatBytes, formatFullDate } from '@/lib/format'
+import { previewKind } from '@/lib/preview-kind'
 import { cn } from '@/lib/utils'
 import { handlePreviewKey } from './keys'
 import { PreviewBody, type ViewedFile } from './preview-body'
@@ -184,7 +186,16 @@ export function FileViewer({
                 <ChevronRight />
               </StepButton>
             )}
-            {detailsOpen && file && <Details file={file} />}
+            {detailsOpen && file && (
+              <Details
+                file={file}
+                media={
+                  contentPath && previewKind(file.name, file.mimeType) === 'video' ? (
+                    <MediaDetails contentPath={contentPath} />
+                  ) : null
+                }
+              />
+            )}
           </div>
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>
@@ -219,7 +230,8 @@ function StepButton({
   )
 }
 
-function Details({ file }: { file: ViewedFile }) {
+/** The file's facts; a video's formats too (`media`). */
+function Details({ file, media }: { file: ViewedFile; media: ReactNode }) {
   const rows: [string, ReactNode][] = [
     ['Size', formatBytes(file.sizeBytes)],
     ['Type', file.mimeType ?? fileCategoryLabel(fileCategory(file.name, file.mimeType))],
@@ -247,6 +259,7 @@ function Details({ file }: { file: ViewedFile }) {
             <dd className="min-w-0 truncate">{value}</dd>
           </div>
         ))}
+        {media}
       </dl>
     </section>
   )

@@ -1,5 +1,9 @@
+import type { KeyboardEvent } from 'react'
+
 /** What the viewer's keys ask of the view showing a file; each does what it can. */
 export interface ViewHandle {
+  /** A key for the view itself (a video's); `true` if it took it. */
+  handleKey?: (event: KeyboardEvent) => boolean
   zoomIn?: () => void
   zoomOut?: () => void
   /** Back to fitting the screen. */

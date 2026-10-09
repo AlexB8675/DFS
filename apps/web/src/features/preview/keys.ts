@@ -3,8 +3,9 @@ import { isEditable } from '@/lib/editable'
 import type { ViewHandle } from './view-handle'
 
 /**
- * The keys of a file on screen: ← and → for the files around it, + − 0 to
- * zoom, Ctrl+F to search its text. Keys typed into a field are the field's.
+ * The keys of a file on screen: ← and → (or Shift+← and Shift+→, which a
+ * video leaves them) for the files around it, + − 0 to zoom, Ctrl+F to
+ * search its text, and a video's own. Keys typed into a field are the field's.
  */
 export function handlePreviewKey(
   event: KeyboardEvent,
@@ -13,6 +14,10 @@ export function handlePreviewKey(
   next: (() => void) | null,
 ): void {
   if (event.altKey || isEditable(event.target)) return
+  if (view?.handleKey?.(event)) {
+    event.preventDefault()
+    return
+  }
   const command = event.ctrlKey || event.metaKey
   if (command && event.key === 'f' && view?.find) {
     event.preventDefault()

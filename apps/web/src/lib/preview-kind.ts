@@ -1,9 +1,11 @@
-import { splitExtension, type DriveNode, type SyncState } from '@dfs/shared'
+import { MEDIA_EXTENSION_KINDS, splitExtension, type DriveNode, type SyncState } from '@dfs/shared'
 
-// Which viewer shows a file (DESIGN.md §10.3): only files the browser can
-// draw open in one; the rest download, as before previews.
+// Which viewer shows a file (DESIGN.md §10.3, §10.4): only files the browser
+// can draw or play open in one; the rest download, as before previews. Every
+// video opens, since only the player can tell whether this browser plays it,
+// and says why when it can't.
 
-export type PreviewKind = 'image' | 'pdf' | 'text'
+export type PreviewKind = 'image' | 'pdf' | 'text' | 'video'
 
 /** How a text file is shown: Markdown formatted, JSON pretty-printed, the rest as it is. */
 export type TextFormat = 'markdown' | 'json' | 'plain'
@@ -140,8 +142,11 @@ export function previewKind(
   }
   if (type === 'application/pdf' || type === 'application/x-pdf') return 'pdf'
   if (type && isTextType(type)) return 'text'
+  // Windows calls TypeScript `video/mp2t`: an MPEG-TS recording goes by its name.
+  if (type?.startsWith('video/') && type !== 'video/mp2t') return 'video'
   if (extension === '.pdf') return 'pdf'
   if (imageByName) return 'image'
+  if (MEDIA_EXTENSION_KINDS[extension] === 'video') return 'video'
   if (TEXT_EXTENSIONS.has(extension) || TEXT_NAMES.has(name.toLowerCase())) return 'text'
   return null
 }

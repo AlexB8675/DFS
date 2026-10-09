@@ -89,7 +89,17 @@ describe('previewKind (§10.3)', () => {
   it('goes by the name when a browser gives code a wrong type', () => {
     // Windows calls TypeScript an MPEG transport stream.
     expect(previewKind('router.ts', 'video/mp2t', chrome)).toBe('text')
-    expect(previewKind('clip.mp4', 'video/mp4', chrome)).toBeNull()
+    // A recording goes by its name.
+    expect(previewKind('recording.m2ts', 'video/mp2t', chrome)).toBe('video')
+  })
+
+  it('plays every video, by type or by name, and leaves audio to download for now', () => {
+    expect(previewKind('clip.mp4', 'video/mp4', chrome)).toBe('video')
+    expect(previewKind('film', 'video/x-matroska', chrome)).toBe('video')
+    // Browsers leave MKV's type out.
+    expect(previewKind('Film.MKV', null, chrome)).toBe('video')
+    expect(previewKind('old.avi', 'application/octet-stream', chrome)).toBe('video')
+    expect(previewKind('song.mp3', 'audio/mpeg', chrome)).toBeNull()
   })
 
   it('shows PDFs, by type or by name', () => {
