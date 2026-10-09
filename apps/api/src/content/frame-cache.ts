@@ -69,6 +69,7 @@ export class FrameCache {
   readonly #loading = new Map<string, Loading>()
   /** Segments kept on their own, by their frame's key: so a whole frame kept can drop them. */
   readonly #segmentsOf = new Map<string, Set<string>>()
+  #segmentCount = 0
   readonly #ready: Promise<void>
   /** Since start, for measuring. */
   readonly stats = { hits: 0, misses: 0 }
@@ -99,9 +100,9 @@ export class FrameCache {
     return this.#bytes
   }
 
-  /** Frames on disk. */
+  /** Whole frames on disk, leaving out segments kept on their own. */
   get frames(): number {
-    return this.#entries.size
+    return this.#entries.size - this.#segmentCount
   }
 
   /**
@@ -114,6 +115,8 @@ export class FrameCache {
     const freed = this.#bytes
     const keys = [...this.#entries.keys()]
     this.#entries.clear()
+    this.#segmentsOf.clear()
+    this.#segmentCount = 0
     this.#bytes = 0
     // A file a download has open on Windows stays until the next start finds it.
     for (const key of keys) await rm(this.#file(key), { force: true }).catch(() => undefined)
@@ -364,6 +367,7 @@ export class FrameCache {
       segments = new Set()
       this.#segmentsOf.set(frame, segments)
     }
+    if (!segments.has(key)) this.#segmentCount += 1
     segments.add(key)
   }
 
@@ -371,7 +375,7 @@ export class FrameCache {
     const frame = frameOfSegment(key)
     if (!frame) return
     const segments = this.#segmentsOf.get(frame)
-    segments?.delete(key)
+    if (segments?.delete(key)) this.#segmentCount -= 1
     if (segments?.size === 0) this.#segmentsOf.delete(frame)
   }
 

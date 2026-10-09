@@ -173,6 +173,45 @@ describe('FrameCache (DESIGN.md §6.2)', () => {
   })
 })
 
+describe('segments kept on their own (§6.2)', () => {
+  it('keeps segments apart from whole frames, and lets a whole frame replace them', async () => {
+    const cache = open(10_000)
+    await cache.ready()
+    const { bytes, hash } = await frame(7, 300)
+    cache.putSegment(hash, 0, bytes.subarray(0, 100))
+    cache.putSegment(hash, 1, bytes.subarray(100, 200))
+    await cache.idle()
+    expect(cache.has(hash)).toBe(false)
+    expect(cache.hasSegment(hash, 1)).toBe(true)
+    expect(await cache.segment(hash, 1)).toEqual(bytes.subarray(100, 200))
+    expect(cache.frames).toBe(0)
+    cache.put(hash, bytes)
+    await cache.idle()
+    expect(cache.has(hash)).toBe(true)
+    expect(cache.hasSegment(hash, 0)).toBe(false)
+    expect(cache.frames).toBe(1)
+    expect(await files()).toEqual([`${Buffer.from(hash).toString('hex')}.frame`])
+  })
+
+  it('forgets every segment when cleared, and finds them again after a restart', async () => {
+    const cache = open(10_000)
+    await cache.ready()
+    const { bytes, hash } = await frame(8, 200)
+    cache.putSegment(hash, 0, bytes.subarray(0, 100))
+    await cache.idle()
+    const reopened = open(10_000)
+    await reopened.ready()
+    expect(reopened.hasSegment(hash, 0)).toBe(true)
+    expect(reopened.frames).toBe(0)
+    await reopened.clear()
+    expect(reopened.hasSegment(hash, 0)).toBe(false)
+    // A whole frame put after a clear finds no stale segments to drop.
+    reopened.put(hash, bytes)
+    await reopened.idle()
+    expect(reopened.frames).toBe(1)
+  })
+})
+
 describe('FrameCache.clear', () => {
   it('lets every frame go, and caches what is read after', async () => {
     const cache = open(10_000)
