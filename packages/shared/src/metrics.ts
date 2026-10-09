@@ -57,6 +57,8 @@ export const METRICS = {
   'check.discord.failures': byApi('counter', 'count', 'Failed checks of Discord'),
   'check.internet.failures': byApi('counter', 'count', 'Failed checks of the internet'),
   'downloads.bytes': byApi('counter', 'bytes', 'Sent to browsers'),
+  /** Files and ZIPs being sent to browsers: the most at once since the last sample. */
+  'downloads.active': byApi('gauge', 'count', 'Downloads under way (peak)'),
   'uploads.bytes': byApi('counter', 'bytes', 'Received from browsers'),
   'cache.hits': byApi('counter', 'count', 'Frame cache hits'),
   'cache.misses': byApi('counter', 'count', 'Frame cache misses'),
@@ -66,6 +68,12 @@ export const METRICS = {
   'cdn.failures': byApi('counter', 'count', 'Failed CDN reads'),
   /** The CDN answered 429: every read of the API waited as it asked (§6.2). */
   'cdn.429': byApi('counter', 'count', 'CDN asked to slow down (429)'),
+  /** Reads that waited for the CDN to allow requests again, with the milliseconds waited. */
+  'cdn.waits': byApi('counter', 'ms', 'Waits for the CDN'),
+  /** Reads from the CDN under way: the most at once since the last sample. */
+  'cdn.in_flight': byApi('gauge', 'count', 'CDN reads under way (peak)'),
+  /** From sending a request to the CDN to its answer's headers: Discord's own time. */
+  'cdn.first_byte_ms': byApi('timing', 'ms', 'CDN time to first byte'),
   'events.streams': byApi('gauge', 'count', 'Open event streams'),
   'auth.sign_ins': byApi('counter', 'count', 'Sign-ins'),
   'auth.failed_sign_ins': byApi('counter', 'count', 'Failed sign-ins'),

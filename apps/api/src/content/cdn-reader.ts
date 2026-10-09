@@ -9,6 +9,7 @@ import {
   type CdnUrl,
   type StoredBlob,
 } from '@dfs/storage'
+import { UnderWay } from '../under-way.ts'
 
 // Reading stored blobs from Discord's CDN (DESIGN.md §6.2). Only the bot holds
 // the token, so it signs the URLs (`POST /internal/urls/refresh`) and saves
@@ -25,6 +26,10 @@ export class CdnBlobReader implements BlobReader {
   readonly #metrics: Metrics | undefined
   /** The whole API waits together when the CDN asks it to slow down. */
   readonly #gate: CdnGate
+  /** Reads from the CDN under way, for the graphs. */
+  readonly underWay = new UnderWay()
+  /** The CDN's own fetch, timed to its answer. */
+  readonly #cdnFetch: typeof fetch
   /** Signing in flight, by blob, so readers of the same pack share one request. */
   readonly #signing = new Map<number, Promise<CdnUrl | null>>()
 
@@ -38,7 +43,17 @@ export class CdnBlobReader implements BlobReader {
     this.#secret = options.secret
     this.#fetch = options.fetch ?? fetch
     this.#metrics = options.metrics
-    this.#gate = new CdnGate({ onSlowDown: () => this.#metrics?.record('cdn.429') })
+    this.#gate = new CdnGate({
+      onSlowDown: () => this.#metrics?.record('cdn.429'),
+      onWait: (ms) => this.#metrics?.record('cdn.waits', ms),
+    })
+    const plain = this.#fetch
+    this.#cdnFetch = async (input, init) => {
+      const sent = performance.now()
+      const response = await plain(input, init)
+      this.#metrics?.time('cdn.first_byte_ms', performance.now() - sent)
+      return response
+    }
   }
 
   async read(
@@ -47,9 +62,10 @@ export class CdnBlobReader implements BlobReader {
     length: number,
     signal?: AbortSignal,
   ): Promise<Uint8Array> {
+    const leave = this.underWay.enter()
     try {
       const data = await readBlobFromCdn(
-        this.#fetch,
+        this.#cdnFetch,
         blob,
         offset,
         length,
@@ -66,6 +82,8 @@ export class CdnBlobReader implements BlobReader {
       // A read its reader gave up on didn't fail.
       if (!signal?.aborted) this.#metrics?.record('cdn.failures')
       throw error
+    } finally {
+      leave()
     }
   }
 
@@ -77,9 +95,10 @@ export class CdnBlobReader implements BlobReader {
     signal?: AbortSignal,
   ): AsyncGenerator<Uint8Array> {
     let bytes = 0
+    const leave = this.underWay.enter()
     try {
       for await (const piece of streamBlobFromCdn(
-        this.#fetch,
+        this.#cdnFetch,
         blob,
         offset,
         length,
@@ -98,6 +117,8 @@ export class CdnBlobReader implements BlobReader {
       // A read its reader gave up on didn't fail.
       if (!signal?.aborted) this.#metrics?.record('cdn.failures')
       throw error
+    } finally {
+      leave()
     }
   }
 

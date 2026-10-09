@@ -45,6 +45,7 @@ export function sendFile(
     reply.code(206).header('content-range', `bytes ${String(start)}-${String(end)}/${String(size)}`)
   void reply.header('content-length', String(end - start + 1))
   if (request.method === 'HEAD') return reply.send(nothing())
+  counted(app, reply)
   const pieces = readVersion(app, file, start, end, cancellation(reply.raw))
   return reply.send(Readable.from(paced(reply.raw, pieces)))
 }
@@ -69,9 +70,15 @@ export function sendZip(
     .header('cache-control', 'private, no-store')
     .header('x-content-type-options', 'nosniff')
   if (reply.request.method === 'HEAD') return reply.send(nothing())
+  counted(reply.server, reply)
   return reply.send(
     Readable.from(paced(reply.raw, writeZip(entries, { timeZone: zipTimeZone(timeZone) }))),
   )
+}
+
+/** Counts the download as under way until its response closes, for the graphs (§16). */
+function counted(app: FastifyInstance, reply: FastifyReply): void {
+  reply.raw.once('close', app.downloads.enter())
 }
 
 /**

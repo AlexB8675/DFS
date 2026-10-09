@@ -27,9 +27,13 @@ export class CdnGate {
   #until = 0
   #strikes = 0
   readonly #onSlowDown: ((pauseMs: number) => void) | undefined
+  readonly #onWait: ((waitMs: number) => void) | undefined
 
-  constructor(options: { onSlowDown?: (pauseMs: number) => void } = {}) {
+  constructor(
+    options: { onSlowDown?: (pauseMs: number) => void; onWait?: (waitMs: number) => void } = {},
+  ) {
     this.#onSlowDown = options.onSlowDown
+    this.#onWait = options.onWait
   }
 
   /** How long requests have still to wait. */
@@ -40,7 +44,9 @@ export class CdnGate {
   /** Waits while the gate is closed; one given up on (`signal`) leaves at once. */
   async open(signal?: AbortSignal): Promise<void> {
     const wait = this.closedForMs
-    if (wait > 0) await setTimeout(wait, undefined, { signal })
+    if (wait <= 0) return
+    this.#onWait?.(wait)
+    await setTimeout(wait, undefined, { signal })
   }
 
   /** The CDN answered 429: close the gate for everyone, as long as it asked. */

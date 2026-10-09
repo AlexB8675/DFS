@@ -277,7 +277,8 @@ export const MONITORING_SECTIONS: DashboardSection[] = [
     charts: [
       {
         title: 'Cache hit rate',
-        description: 'Frames found in the cache, of all frames read from Discord storage.',
+        description:
+          'Frames and segments found in the cache, or in another reader’s fetch, of all those read from Discord storage.',
         format: 'percent',
         lines: [
           {
@@ -295,6 +296,26 @@ export const MONITORING_SECTIONS: DashboardSection[] = [
         lines: [{ label: 'Read', color: 3, series: 'cdn.reads:rate' }],
       },
       {
+        title: 'CDN reads under way',
+        description:
+          'The most reads from Discord’s CDN at once, against the downloads they serve: many readers share the VPS’s link to Discord.',
+        format: 'count',
+        lines: [
+          { label: 'CDN reads', color: 3, series: 'cdn.in_flight:max' },
+          { label: 'Downloads', color: 1, series: 'downloads.active:max' },
+        ],
+      },
+      {
+        title: 'CDN time to first byte',
+        description:
+          'How long Discord’s CDN takes to answer a read: longer for files it hasn’t served lately.',
+        format: 'ms',
+        lines: [
+          { label: 'Median', color: 1, series: 'cdn.first_byte_ms:p50' },
+          { label: '95th percentile', color: 2, series: 'cdn.first_byte_ms:p95' },
+        ],
+      },
+      {
         title: 'Frame cache size',
         description: 'Frames kept on the API’s disk.',
         format: 'bytes',
@@ -303,11 +324,12 @@ export const MONITORING_SECTIONS: DashboardSection[] = [
       {
         title: 'Failed CDN reads',
         description:
-          'Per minute: reads from the CDN that failed, and times it asked to slow down (429), which reads wait out.',
+          'Per minute: reads from the CDN that failed, times it asked to slow down (429), and reads that waited it out.',
         format: 'perMinute',
         lines: [
           { label: 'Failed reads', color: 'critical', series: 'cdn.failures:rate' },
           { label: '429 answers', color: 2, series: 'cdn.429:rate' },
+          { label: 'Waits', color: 1, series: 'cdn.waits:events' },
         ],
       },
     ],

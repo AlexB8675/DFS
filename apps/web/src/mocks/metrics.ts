@@ -30,6 +30,9 @@ const LEVELS: Partial<Record<MetricName, number>> = {
   'cdn.reads': 2 * MB,
   'cdn.failures': 0.005,
   'cdn.429': 0.001,
+  'cdn.waits': 0.001,
+  'cdn.in_flight': 3,
+  'downloads.active': 4,
   'events.streams': 6,
   'auth.sign_ins': 0.004,
   'auth.failed_sign_ins': 0.001,
@@ -67,6 +70,7 @@ const MEDIANS: Partial<Record<MetricName, number>> = {
   'http.ms': 9,
   'check.discord.ms': 95,
   'check.internet.ms': 14,
+  'cdn.first_byte_ms': 120,
 }
 
 /** Average amount per event, for reading counters as `events`. */
@@ -76,6 +80,7 @@ const AMOUNTS: Partial<Record<MetricName, number>> = {
   'cdn.reads': 4 * MB,
   'discord.posted': 9 * MB,
   'discord.waits': 250,
+  'cdn.waits': 2000,
 }
 
 /** Gauges that grow over time, ending at today's level. */

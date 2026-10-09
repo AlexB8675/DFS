@@ -51,6 +51,7 @@ describe('CdnBlobReader (DESIGN.md §6.2)', () => {
   it('waits out a 429 from the CDN, reads on, and counts it', async () => {
     const metrics = new Metrics()
     const record = vi.spyOn(metrics, 'record')
+    const time = vi.spyOn(metrics, 'time')
     let calls = 0
     const reader = new CdnBlobReader({
       botUrl: 'http://bot.test',
@@ -74,7 +75,12 @@ describe('CdnBlobReader (DESIGN.md §6.2)', () => {
     }
     expect(await reader.read({ ...blob(1), url }, 0, 4)).toEqual(new Uint8Array([1, 2, 3, 4]))
     expect(record).toHaveBeenCalledWith('cdn.429')
+    expect(record).toHaveBeenCalledWith('cdn.waits', expect.any(Number))
     expect(record).not.toHaveBeenCalledWith('cdn.failures')
+    // Both requests timed to their answers; none under way now.
+    expect(time.mock.calls.filter(([name]) => name === 'cdn.first_byte_ms')).toHaveLength(2)
+    expect(reader.underWay.now).toBe(0)
+    expect(reader.underWay.sample()).toBe(1)
   })
 
   it('stops a read its reader gave up on, and counts no failure', async () => {

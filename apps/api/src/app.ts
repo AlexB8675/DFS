@@ -30,6 +30,7 @@ import { shareRoutes } from './routes/shares.ts'
 import { uploadStreamRoutes } from './routes/upload-stream.ts'
 import { uploadRoutes } from './routes/uploads.ts'
 import { StagingLimit } from './staging.ts'
+import { UnderWay } from './under-way.ts'
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -62,6 +63,8 @@ declare module 'fastify' {
     journalFlusher: JournalFlusher
     /** Examines audio and video through the media service (§6.7); `null` without one. */
     media: MediaExaminer | null
+    /** Files and ZIPs being sent, for the graphs (§16). */
+    downloads: UnderWay
   }
 }
 
@@ -165,6 +168,11 @@ export async function buildApp({
         })
   app.decorate('frameCache', frameCache)
   if (frameCache) metrics.gauge('cache.bytes', () => frameCache.bytes)
+  if (reader instanceof CdnBlobReader)
+    metrics.gauge('cdn.in_flight', () => reader.underWay.sample())
+  const downloads = new UnderWay()
+  app.decorate('downloads', downloads)
+  metrics.gauge('downloads.active', () => downloads.sample())
   app.decorate('readBudget', new MemoryBudget(READ_AHEAD_BYTES))
   app.decorate(
     'media',

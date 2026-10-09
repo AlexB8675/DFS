@@ -238,9 +238,14 @@ describe('reading from Discord', () => {
       )
       // Nothing is read ahead until the client has taken a whole chunk.
       expect(discord.cdnRequests).toBe(1)
+      expect(app.downloads.now).toBe(1)
       discord.releaseCdn()
       const rest = await receive(body, 2 * app.config.sizes.chunkSize, 10_000)
       expect(Buffer.concat([...first, ...rest]).equals(Buffer.from(contentOf(2)))).toBe(true)
+      // Counted as under way until its response closed.
+      await vi.waitFor(() => {
+        expect(app.downloads.now).toBe(0)
+      })
     } finally {
       discord.releaseCdn()
     }
