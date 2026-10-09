@@ -28,6 +28,8 @@ export function playbackQuery(place: FilePlace) {
     },
     staleTime: 0,
     refetchOnWindowFocus: false,
+    // A file gone or a link ended stays so: only the server's own trouble is asked again.
+    retry: (failures, error) => failures < 2 && !(error instanceof ApiError && error.status < 500),
     meta: linkMeta(place),
   })
 }

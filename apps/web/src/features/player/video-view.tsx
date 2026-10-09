@@ -21,7 +21,7 @@ import {
 } from '@/components/ui/empty'
 import { Spinner } from '@/components/ui/spinner'
 import type { ViewHandle } from '@/features/preview/view-handle'
-import { errorMessage } from '@/lib/api/client'
+import { ApiError, errorMessage } from '@/lib/api/client'
 import { isEditable } from '@/lib/editable'
 import type { FilePlace } from '@/lib/file-place'
 import { cn } from '@/lib/utils'
@@ -483,7 +483,10 @@ export default function VideoView({
     }
   }, [name, seek, video])
 
-  /** A failed play: the file replaced meanwhile (the element can't tell a 412), or why not. */
+  /**
+   * A failed play: the file replaced meanwhile (the element can't tell a
+   * 412), gone (trashed, or its link ended), or why not.
+   */
   async function handleError() {
     const element = videoRef.current
     const error = element?.error ?? null
@@ -492,8 +495,10 @@ export default function VideoView({
     const startAt = element?.currentTime ?? playing.startAt
     const fresh = await queryClient
       .query({ ...playbackQuery(place), staleTime: 0 })
-      .catch(() => null)
-    if (fresh && fresh.versionId !== playing.versionId) {
+      .catch((reason: unknown) => (reason instanceof ApiError ? reason : null))
+    // Gone, or its link ended: /playback's answer says so, in place of the player.
+    if (fresh instanceof ApiError && fresh.status < 500) return
+    if (fresh && !(fresh instanceof ApiError) && fresh.versionId !== playing.versionId) {
       setSource({ ...playing, startAt })
       setProblem({ kind: 'replaced', versionId: fresh.versionId })
       return
@@ -574,7 +579,7 @@ export default function VideoView({
       <Trouble
         title="This video can’t be played"
         description={errorMessage(playback.error)}
-        onDownload={onDownload}
+        onDownload={isGone(playback.error) ? undefined : onDownload}
       />
     )
   }
@@ -889,7 +894,8 @@ function Trouble({
   description: string
   /** The browser's own words, for those who want them. */
   detail?: string
-  onDownload: () => void
+  /** Absent when there is nothing to download any more. */
+  onDownload?: () => void
   children?: ReactNode
 }) {
   return (
@@ -899,14 +905,23 @@ function Trouble({
         <EmptyDescription>{description}</EmptyDescription>
         {detail && <p className="font-mono text-xs text-muted-foreground">{detail}</p>}
       </EmptyHeader>
-      <EmptyContent className="flex-row justify-center">
-        {children}
-        <Button variant={children ? 'outline' : 'default'} onClick={onDownload}>
-          <Download /> Download
-        </Button>
-      </EmptyContent>
+      {(children ?? onDownload) && (
+        <EmptyContent className="flex-row justify-center">
+          {children}
+          {onDownload && (
+            <Button variant={children ? 'outline' : 'default'} onClick={onDownload}>
+              <Download /> Download
+            </Button>
+          )}
+        </EmptyContent>
+      )}
     </Empty>
   )
+}
+
+/** The file can't be had any more: trashed or deleted, or its link ended or locked meanwhile. */
+function isGone(error: Error): boolean {
+  return error instanceof ApiError && [403, 404, 410].includes(error.status)
 }
 
 /** An iPhone's full screen, for a video element alone. */
