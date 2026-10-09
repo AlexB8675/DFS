@@ -309,11 +309,31 @@ function wanted(
 }
 
 /**
- * Streams the segments of a stored chunk that a range covers from the CDN,
- * each checked by its own tag and emitted as soon as it has arrived. When
- * the range is the whole chunk, the whole frame is read, checked against
- * its SHA-256 and kept in the frame cache too. If the frame moves meanwhile
- * (§6.6), the rest is read where it is now, from the next segment on.
+ * Segments read past the end of a small range, into the cache, so the reads
+ * that follow it (a PDF's next pages, ffmpeg's next look) find them there.
+ * A range that runs to the end of its chunk, as a player's does, gets none:
+ * a seek cancelled at once fetches only what it asked for.
+ */
+const READ_AROUND_SEGMENTS = 4
+
+/**
+ * Segments being fetched, as checked plaintext, by frame and index, so
+ * readers of the same one share the fetch. In memory only: the cache keeps
+ * ciphertext.
+ */
+const segmentsUnderWay = new WeakMap<FastifyInstance, Map<string, Promise<Uint8Array>>>()
+
+/** Where a segment a reader wants comes from: the cache's ciphertext, or a fetch's plaintext. */
+type SegmentSource =
+  | { kind: 'cache'; ciphertext: Promise<Uint8Array | null> }
+  | { kind: 'fetch' | 'shared'; plaintext: Promise<Uint8Array> }
+
+/**
+ * Reads the segments of a stored chunk that a range covers, each checked by
+ * its own tag and emitted as soon as it has arrived: kept ones from the
+ * cache, ones another reader is fetching from that fetch, and the rest from
+ * the CDN, consecutive ones in one request. A chunk read whole is also
+ * checked against its SHA-256 and kept whole.
  */
 async function streamSegments(
   app: FastifyInstance,
@@ -323,29 +343,210 @@ async function streamSegments(
   layout: ChunkFrameLayout,
   range: ChunkRange,
 ): Promise<void> {
-  const store = app.blobStore
-  if (!store.stream) throw new ContentError('This store can’t stream.')
   const context = chunkContext(versionId, chunk.idx)
   const first = layout.segmentOf(range.from)
   const last = layout.segmentOf(range.to)
-  // The whole frame, header and all, is kept for the cache.
-  const frame =
-    first === 0 && last === layout.segments - 1 ? Buffer.allocUnsafe(chunk.frame_size) : null
-  const end = layout.segmentStart(last) + layout.segmentLength(last)
+  const fetch: SegmentFetch = { app, versionId, key, chunk, layout, signal: range.signal }
+  const sources = planSegments(fetch, first, last, false)
+  for (let index = first; index <= last; index += 1) {
+    let plaintext: Uint8Array | null = null
+    // Once more if a kept copy fails its tag or was evicted, or another
+    // reader's fetch was given up on: then this reader fetches it itself.
+    for (let attempt = 0; plaintext === null; attempt += 1) {
+      const source = sources.get(index)
+      if (!source) throw new ContentError(`Segment ${String(index)} wasn't planned.`)
+      try {
+        if (source.kind === 'cache') {
+          const ciphertext = await source.ciphertext
+          if (ciphertext) plaintext = await openSegment(key, layout, index, ciphertext, context)
+        } else {
+          plaintext = await source.plaintext
+        }
+        // Served from the cache, or by another reader's fetch: no request of its own.
+        if (plaintext) app.frameCache?.counted(source.kind !== 'fetch')
+      } catch (error) {
+        if (range.signal?.aborted || source.kind === 'fetch' || attempt > 0) throw error
+        if (source.kind === 'cache') app.frameCache?.forgetSegment(chunk.frame_sha256, index)
+      }
+      if (plaintext === null) {
+        if (attempt > 0) throw new ContentError(`Segment ${String(index)} couldn't be read.`)
+        for (const [replanned, next] of planSegments(fetch, index, last, true)) {
+          sources.set(replanned, next)
+        }
+      }
+    }
+    range.emit(wanted(layout, index, plaintext, range))
+  }
+}
+
+interface SegmentFetch {
+  app: FastifyInstance
+  versionId: string
+  key: AesKey
+  chunk: ChunkLocation
+  layout: ChunkFrameLayout
+  signal: AbortSignal | undefined
+}
+
+/**
+ * Where segments `from` to `last` come from, starting the fetches needed.
+ * With `fresh`, segment `from` is fetched whatever the cache or another
+ * reader says of it.
+ */
+function planSegments(
+  fetch: SegmentFetch,
+  from: number,
+  last: number,
+  fresh: boolean,
+): Map<number, SegmentSource> {
+  const { app, chunk, layout } = fetch
+  const cache = app.frameCache
+  const underWay = segmentsUnderWay.get(app)
+  const sources = new Map<number, SegmentSource>()
+  const keyOf = (index: number) =>
+    `${Buffer.from(chunk.frame_sha256).toString('hex')}-${String(index)}`
+  const found = (index: number): SegmentSource | null => {
+    if (fresh && index === from) return null
+    if (cache?.hasSegment(chunk.frame_sha256, index)) {
+      return { kind: 'cache', ciphertext: cache.segment(chunk.frame_sha256, index) }
+    }
+    const shared = underWay?.get(keyOf(index))
+    return shared ? { kind: 'shared', plaintext: shared } : null
+  }
+  // The whole chunk is fetched whole, kept segments or not, so it is kept
+  // as one frame in their place; unless another reader is fetching some of
+  // it, which is shared instead.
+  const wholeChunk = !fresh && from === 0 && last === layout.segments - 1
+  if (
+    wholeChunk &&
+    !Array.from({ length: layout.segments }, (_, i) => i).some((i) => underWay?.has(keyOf(i)))
+  ) {
+    startRun(fetch, 0, last, sources)
+    return sources
+  }
+  let run: number | null = null
+  for (let index = from; index <= last; index += 1) {
+    const source = found(index)
+    if (!source) {
+      run ??= index
+      continue
+    }
+    if (run !== null) startRun(fetch, run, index - 1, sources)
+    run = null
+    sources.set(index, source)
+  }
+  if (run !== null) {
+    // A small range's run goes on past its end, into the cache, while what
+    // follows is neither kept nor being fetched.
+    let end = last
+    if (last < layout.segments - 1) {
+      const until = Math.min(layout.segments - 1, run + READ_AROUND_SEGMENTS - 1)
+      while (end < until && !found(end + 1)) end += 1
+    }
+    startRun(fetch, run, end, sources)
+  }
+  return sources
+}
+
+/**
+ * Fetches segments `from` to `to` in one request, each shared as checked
+ * plaintext while under way. The segments of a run that covers the whole
+ * frame are kept as that frame; the others each on their own.
+ */
+function startRun(
+  fetch: SegmentFetch,
+  from: number,
+  to: number,
+  sources: Map<number, SegmentSource>,
+): void {
+  const { app, chunk, layout } = fetch
+  const hex = Buffer.from(chunk.frame_sha256).toString('hex')
+  let underWay = segmentsUnderWay.get(app)
+  if (!underWay) {
+    underWay = new Map()
+    segmentsUnderWay.set(app, underWay)
+  }
+  const registry = underWay
+  const whole = from === 0 && to === layout.segments - 1
+  const pending = new Map<number, PromiseWithResolvers<Uint8Array>>()
+  for (let index = from; index <= to; index += 1) {
+    const deferred = Promise.withResolvers<Uint8Array>()
+    // Segments read around a range have no reader waiting.
+    void deferred.promise.catch(() => undefined)
+    pending.set(index, deferred)
+    sources.set(index, { kind: 'fetch', plaintext: deferred.promise })
+    registry.set(`${hex}-${String(index)}`, deferred.promise)
+  }
+  const settle = (index: number) => {
+    const deferred = pending.get(index)
+    pending.delete(index)
+    const key = `${hex}-${String(index)}`
+    if (deferred && registry.get(key) === deferred.promise) registry.delete(key)
+    return deferred
+  }
+  void fetchRun(fetch, from, to, whole, (index, plaintext, ciphertext) => {
+    // Kept before it is let go of, so readers who look next find it.
+    if (!whole) app.frameCache?.putSegment(chunk.frame_sha256, index, ciphertext)
+    const deferred = whole ? pending.get(index) : settle(index)
+    deferred?.resolve(plaintext)
+  }).then(
+    (frame) => {
+      if (frame && app.frameCache) {
+        if (Buffer.from(frame.hash).equals(chunk.frame_sha256)) {
+          app.frameCache.put(chunk.frame_sha256, frame.bytes)
+        } else {
+          // Every segment passed its tag, so what was sent is right; the
+          // stored frame differs from its hash all the same.
+          app.log.warn(
+            { versionId: fetch.versionId, chunk: chunk.idx },
+            'a frame read whole doesn’t match its hash',
+          )
+        }
+      }
+      for (const index of [...pending.keys()]) settle(index)
+    },
+    (error: unknown) => {
+      // Unregistered first, so a reader who looks again doesn't find it.
+      const failed = [...pending.keys()].map((index) => settle(index))
+      for (const deferred of failed) deferred?.reject(error)
+    },
+  )
+}
+
+/**
+ * Streams segments `from` to `to` of a stored frame from the CDN, checking
+ * each and handing it on with its ciphertext as soon as it has arrived. With
+ * `whole`, the header is read too, and the whole frame is returned with its
+ * SHA-256. If the frame moves meanwhile (§6.6), the rest is read where it is
+ * now, from the next segment on.
+ */
+async function fetchRun(
+  fetch: SegmentFetch,
+  from: number,
+  to: number,
+  whole: boolean,
+  emit: (index: number, plaintext: Uint8Array, ciphertext: Uint8Array) => void,
+): Promise<{ bytes: Uint8Array; hash: Uint8Array } | null> {
+  const { app, versionId, key, chunk, layout, signal } = fetch
+  const store = app.blobStore
+  if (!store.stream) throw new ContentError('This store can’t stream.')
+  const context = chunkContext(versionId, chunk.idx)
+  const frame = whole ? Buffer.allocUnsafe(chunk.frame_size) : null
+  const end = layout.segmentStart(to) + layout.segmentLength(to)
   let location = chunk
-  let next = first
+  let next = from
   for (;;) {
-    const from = frame && next === 0 ? 0 : layout.segmentStart(next)
-    let position = from
+    const start = frame && next === 0 ? 0 : layout.segmentStart(next)
+    let position = start
     let pending = Buffer.alloc(0)
     // The header, read with a whole frame: kept for the cache, not opened.
-    let header = from === 0 ? layout.segmentStart(0) : 0
+    let header = start === 0 ? layout.segmentStart(0) : 0
     try {
       for await (const piece of store.stream(
         blobOf(location),
-        (location.blob_offset ?? 0) + from,
-        end - from,
-        range.signal,
+        (location.blob_offset ?? 0) + start,
+        end - start,
+        signal,
       )) {
         frame?.set(piece, position)
         position += piece.length
@@ -355,35 +556,26 @@ async function streamSegments(
           header -= skipped
           pending = pending.subarray(skipped)
         }
-        while (next <= last && pending.length >= layout.segmentLength(next)) {
-          const bytes = pending.subarray(0, layout.segmentLength(next))
+        while (next <= to && pending.length >= layout.segmentLength(next)) {
+          const ciphertext = pending.subarray(0, layout.segmentLength(next))
           pending = pending.subarray(layout.segmentLength(next))
-          range.emit(
-            wanted(layout, next, await openSegment(key, layout, next, bytes, context), range),
-          )
+          emit(next, await openSegment(key, layout, next, ciphertext, context), ciphertext)
           next += 1
         }
       }
-      if (next <= last)
+      if (next <= to) {
         throw new ContentError(`Chunk ${String(chunk.idx)} of ${versionId} was cut short.`)
+      }
       break
     } catch (error) {
       // Given up on, or failed where it was: only a frame that moved is read again.
-      if (range.signal?.aborted || error instanceof FrameError) throw error
+      if (signal?.aborted || error instanceof FrameError) throw error
       const moved = await movedLocation(app, versionId, location)
       if (moved?.blob_state !== 'stored' || moved.blob_offset === null) throw error
       location = moved
     }
   }
-  if (frame && app.frameCache) {
-    if (Buffer.from(await sha256(frame)).equals(chunk.frame_sha256)) {
-      app.frameCache.put(chunk.frame_sha256, frame)
-    } else {
-      // Every segment passed its tag, so what was sent is right; the stored
-      // frame differs from its hash all the same, which the scrubber will see.
-      app.log.warn({ versionId, chunk: chunk.idx }, 'a frame read whole doesn’t match its hash')
-    }
-  }
+  return frame ? { bytes: frame, hash: await sha256(frame) } : null
 }
 
 function blobOf(chunk: ChunkLocation): StoredBlob {

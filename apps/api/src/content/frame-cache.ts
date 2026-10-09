@@ -10,6 +10,12 @@ import type { FastifyBaseLogger } from 'fastify'
 // ciphertext, so the cache is as safe as the CDN. It is keyed by each frame's
 // SHA-256: frames never change, so an entry stays right even when compaction
 // moves its frame to another pack. Least recently used frames go first.
+//
+// Segments of format 2 frames (§7.3) are kept on their own too, when only
+// part of a frame was read: a PDF's pages or ffmpeg's reads come back to the
+// same few, and each would otherwise be another request to Discord. Their
+// own tags check them when they are opened, so the cache doesn't. A whole
+// frame kept replaces its segments.
 
 /** Frames waiting to reach the disk; past this, new ones aren't cached. */
 const MAX_WRITING_BYTES = 64 * 1024 * 1024
@@ -61,6 +67,8 @@ export class FrameCache {
   readonly #writes = new Set<Promise<void>>()
   /** Fetches under way, so readers of the same frame share one. */
   readonly #loading = new Map<string, Loading>()
+  /** Segments kept on their own, by their frame's key: so a whole frame kept can drop them. */
+  readonly #segmentsOf = new Map<string, Set<string>>()
   readonly #ready: Promise<void>
   /** Since start, for measuring. */
   readonly stats = { hits: 0, misses: 0 }
@@ -189,21 +197,65 @@ export class FrameCache {
     }
   }
 
-  /** Keeps a frame whose SHA-256 has been checked. Skipped when too much waits for the disk. */
+  /**
+   * Keeps a frame whose SHA-256 has been checked, in place of any segments of
+   * it kept on their own. Skipped when too much waits for the disk.
+   */
   put(frameSha256: Uint8Array, frame: Uint8Array): void {
     const key = Buffer.from(frameSha256).toString('hex')
     if (this.#entries.has(key) || this.#writing.has(key)) return
-    if (frame.length > this.#maxBytes || this.#writingBytes + frame.length > MAX_WRITING_BYTES) {
-      return
+    if (!this.#keep(key, frame)) return
+    for (const segment of this.#segmentsOf.get(key) ?? []) this.#forget(segment)
+  }
+
+  /** Whether a segment of a frame is kept on its own, as far as the cache knows. */
+  hasSegment(frameSha256: Uint8Array, index: number): boolean {
+    const key = segmentKey(frameSha256, index)
+    return this.#entries.has(key) || this.#writing.has(key)
+  }
+
+  /** A segment kept on its own, unchecked: `null` if it is gone (evicted since), which is a miss. */
+  segment(frameSha256: Uint8Array, index: number): Promise<Uint8Array | null> {
+    return this.#read(segmentKey(frameSha256, index))
+  }
+
+  /** Keeps a segment of a frame read in part. Skipped when too much waits for the disk. */
+  putSegment(frameSha256: Uint8Array, index: number, bytes: Uint8Array): void {
+    const key = segmentKey(frameSha256, index)
+    if (this.#entries.has(key) || this.#writing.has(key)) return
+    this.#keep(key, bytes)
+  }
+
+  /** Lets a segment go that failed its tag: it is fetched again. */
+  forgetSegment(frameSha256: Uint8Array, index: number): void {
+    this.#forget(segmentKey(frameSha256, index))
+  }
+
+  /** Counts a read served from the cache, or one fetched instead, in the stats and metrics. */
+  counted(hit: boolean): void {
+    if (hit) {
+      this.stats.hits += 1
+      this.#metrics?.record('cache.hits')
+    } else {
+      this.stats.misses += 1
+      this.#metrics?.record('cache.misses')
     }
-    this.#writing.set(key, frame)
-    this.#writingBytes += frame.length
-    const write = this.#write(key, frame).finally(() => {
+  }
+
+  /** Writes `bytes` under `key` in the background; `false` if too much waits for the disk. */
+  #keep(key: string, bytes: Uint8Array): boolean {
+    if (bytes.length > this.#maxBytes || this.#writingBytes + bytes.length > MAX_WRITING_BYTES) {
+      return false
+    }
+    this.#writing.set(key, bytes)
+    this.#writingBytes += bytes.length
+    const write = this.#write(key, bytes).finally(() => {
       this.#writing.delete(key)
-      this.#writingBytes -= frame.length
+      this.#writingBytes -= bytes.length
       this.#writes.delete(write)
     })
     this.#writes.add(write)
+    return true
   }
 
   async #read(key: string): Promise<Uint8Array | null> {
@@ -244,6 +296,7 @@ export class FrameCache {
     if (!this.#entries.has(key)) {
       this.#entries.set(key, frame.length)
       this.#bytes += frame.length
+      this.#track(key)
     }
     await this.#evict()
   }
@@ -253,6 +306,7 @@ export class FrameCache {
       if (this.#bytes <= this.#maxBytes) return
       this.#entries.delete(key)
       this.#bytes -= size
+      this.#untrack(key)
       // On Windows, a file another request has open can't go yet: a later
       // start finds it again.
       await rm(this.#file(key), { force: true }).catch(() => undefined)
@@ -264,6 +318,7 @@ export class FrameCache {
     if (size === undefined) return
     this.#entries.delete(key)
     this.#bytes -= size
+    this.#untrack(key)
     void rm(this.#file(key), { force: true }).catch(() => undefined)
   }
 
@@ -295,11 +350,43 @@ export class FrameCache {
     for (const { key, size } of found) {
       this.#entries.set(key, size)
       this.#bytes += size
+      this.#track(key)
     }
     await this.#evict()
+  }
+
+  /** Notes a segment's key under its frame's. */
+  #track(key: string): void {
+    const frame = frameOfSegment(key)
+    if (!frame) return
+    let segments = this.#segmentsOf.get(frame)
+    if (!segments) {
+      segments = new Set()
+      this.#segmentsOf.set(frame, segments)
+    }
+    segments.add(key)
+  }
+
+  #untrack(key: string): void {
+    const frame = frameOfSegment(key)
+    if (!frame) return
+    const segments = this.#segmentsOf.get(frame)
+    segments?.delete(key)
+    if (segments?.size === 0) this.#segmentsOf.delete(frame)
   }
 
   #file(key: string): string {
     return path.join(this.#dir, key.slice(0, 2), `${key}.frame`)
   }
+}
+
+/** A segment's key: its frame's, and its index. */
+function segmentKey(frameSha256: Uint8Array, index: number): string {
+  return `${Buffer.from(frameSha256).toString('hex')}-${String(index)}`
+}
+
+/** The frame a segment's key belongs to; `null` for a whole frame's key. */
+function frameOfSegment(key: string): string | null {
+  const dash = key.indexOf('-')
+  return dash < 0 ? null : key.slice(0, dash)
 }

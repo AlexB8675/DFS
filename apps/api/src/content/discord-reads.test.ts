@@ -4,9 +4,11 @@ import { ApiClient, createFolder, text, uploadFile, workspace } from '@dfs/contr
 import { storageChannels } from '@dfs/db'
 import { sql } from 'drizzle-orm'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
-import { ChunkFrameLayout } from '@dfs/crypto'
+import { ChunkFrameLayout, chunkFrameLength } from '@dfs/crypto'
 import { DiscordBlobStore } from '@dfs/storage'
 import { FakeDiscord } from '@dfs/storage/testing'
+import { readdir, readFile, writeFile } from 'node:fs/promises'
+import path from 'node:path'
 import { setTimeout } from 'node:timers/promises'
 import type { FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest'
@@ -244,21 +246,125 @@ describe('reading from Discord', () => {
     }
   })
 
-  it('asks the CDN for only the segments a range covers', async () => {
-    const { chunkSize } = app.config.sizes
-    const session = await storedFile('Sought', 1)
-    discord.cdnRanges.length = 0
-    const response = await client.fetch('GET', `/files/${session.nodeId}/content`, {
-      headers: { Range: 'bytes=300000-300099' },
+  /** Bytes `from` to `to` of a file, as the browser gets them. */
+  async function bytesOf(nodeId: string, from: number, to: number): Promise<Buffer> {
+    const response = await client.fetch('GET', `/files/${nodeId}/content`, {
+      headers: { Range: `bytes=${String(from)}-${String(to)}` },
     })
-    expect(Buffer.from(await response.arrayBuffer())).toEqual(
-      Buffer.from(contentOf(1).subarray(300_000, 300_100)),
-    )
+    return Buffer.from(await response.arrayBuffer())
+  }
+
+  it('reads a small range with the next segments, so the reads that follow find them kept', async () => {
+    const { chunkSize } = app.config.sizes
     const layout = new ChunkFrameLayout(chunkSize)
-    const start = layout.segmentStart(1)
+    const session = await storedFile('Sought', 1)
+    const content = Buffer.from(contentOf(1))
+    discord.cdnRanges.length = 0
+    expect(await bytesOf(session.nodeId, 300_000, 300_099)).toEqual(
+      content.subarray(300_000, 300_100),
+    )
+    // Its segment, 1, and the three after it, in one request.
     expect(discord.cdnRanges).toEqual([
-      `bytes=${String(start)}-${String(start + layout.segmentLength(1) - 1)}`,
+      `bytes=${String(layout.segmentStart(1))}-${String(layout.segmentStart(4) + layout.segmentLength(4) - 1)}`,
     ])
+    await app.frameCache?.idle()
+    const hits = app.frameCache?.stats.hits ?? 0
+    // A PDF's next pages, and the same one again: from the cache.
+    for (const at of [600_000, 1_000_000, 300_000]) {
+      expect(await bytesOf(session.nodeId, at, at + 99)).toEqual(content.subarray(at, at + 100))
+    }
+    expect(discord.cdnRanges).toHaveLength(1)
+    expect((app.frameCache?.stats.hits ?? 0) - hits).toBe(3)
+  })
+
+  it('reads nothing past its chunk for a range to the end, as a player asks', async () => {
+    const { chunkSize } = app.config.sizes
+    const layout = new ChunkFrameLayout(chunkSize)
+    const session = await storedFile('Played', 2)
+    discord.cdnRanges.length = 0
+    const from = Math.floor(chunkSize / 2)
+    const response = await client.fetch('GET', `/files/${session.nodeId}/content`, {
+      headers: { Range: `bytes=${String(from)}-` },
+    })
+    const body = response.body?.getReader()
+    if (!body) throw new Error('No body.')
+    await receive(body, 100_000)
+    await body.cancel()
+    await setTimeout(200)
+    // From the seek's segment to the end of the first chunk, and no further.
+    expect(discord.cdnRanges).toEqual([
+      `bytes=${String(layout.segmentStart(layout.segmentOf(from)))}-${String(chunkFrameLength(chunkSize) - 1)}`,
+    ])
+  })
+
+  it('shares a segment two readers want at once, fetching it once', async () => {
+    const session = await storedFile('Shared', 1)
+    const content = Buffer.from(contentOf(1))
+    discord.cdnRequests = 0
+    // The first reader's request is held, so the second asks while it is under way.
+    discord.holdNextBodyAt = 1000
+    try {
+      const first = bytesOf(session.nodeId, 300_000, 300_099)
+      await vi.waitFor(() => {
+        expect(discord.cdnRequests).toBe(1)
+      })
+      const second = bytesOf(session.nodeId, 300_200, 300_299)
+      await setTimeout(100)
+      discord.releaseCdn()
+      expect(await first).toEqual(content.subarray(300_000, 300_100))
+      expect(await second).toEqual(content.subarray(300_200, 300_300))
+      expect(discord.cdnRequests).toBe(1)
+    } finally {
+      discord.releaseCdn()
+    }
+  })
+
+  it('fetches again a kept segment that fails its tag', async () => {
+    const session = await storedFile('Spoiled', 1)
+    const content = Buffer.from(contentOf(1))
+    expect(await bytesOf(session.nodeId, 300_000, 300_099)).toEqual(
+      content.subarray(300_000, 300_100),
+    )
+    await app.frameCache?.idle()
+    // Spoil the kept segment on disk.
+    const [chunk] = (
+      await app.db.execute<{ frame_sha256: Buffer }>(sql`
+        SELECT frame_sha256 FROM chunks WHERE version_id = ${session.versionId}`)
+    ).rows
+    if (!chunk) throw new Error('No chunk.')
+    const hex = chunk.frame_sha256.toString('hex')
+    const file = path.join(app.config.cacheDir, hex.slice(0, 2), `${hex}-1.frame`)
+    const kept = await readFile(file)
+    kept[100] = (kept[100] ?? 0) ^ 1
+    await writeFile(file, kept)
+    discord.cdnRequests = 0
+    expect(await bytesOf(session.nodeId, 300_000, 300_099)).toEqual(
+      content.subarray(300_000, 300_100),
+    )
+    expect(discord.cdnRequests).toBe(1)
+  })
+
+  it('keeps a frame read whole in place of its segments', async () => {
+    const session = await storedFile('Replaced', 1)
+    const content = Buffer.from(contentOf(1))
+    await bytesOf(session.nodeId, 300_000, 300_099)
+    await app.frameCache?.idle()
+    const [chunk] = (
+      await app.db.execute<{ frame_sha256: Buffer }>(sql`
+        SELECT frame_sha256 FROM chunks WHERE version_id = ${session.versionId}`)
+    ).rows
+    if (!chunk) throw new Error('No chunk.')
+    const hex = chunk.frame_sha256.toString('hex')
+    const shard = path.join(app.config.cacheDir, hex.slice(0, 2))
+    expect((await readdir(shard)).filter((name) => name.startsWith(`${hex}-`))).toHaveLength(4)
+    const whole = await client.fetch('GET', `/files/${session.nodeId}/content`)
+    expect(Buffer.from(await whole.arrayBuffer()).equals(content)).toBe(true)
+    await app.frameCache?.idle()
+    await vi.waitFor(async () => {
+      expect((await readdir(shard)).filter((name) => name.startsWith(hex))).toEqual([
+        `${hex}.frame`,
+      ])
+    })
   })
 
   it('fails a range the CDN cuts short, rather than sending it as whole', async () => {
