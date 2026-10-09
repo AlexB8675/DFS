@@ -1,8 +1,8 @@
 import { splitExtension, type MediaInfo, type MediaKind, type MediaStream } from '@dfs/shared'
 
 // Media info the mock makes up per file (§6.7), as the media service would
-// find it: a video is H.264 and AAC at 1080p with chapters, and audio is an
-// MP3 whose tags come from its name.
+// find it: a video is H.264 and AAC at 1080p with chapters and Italian
+// subtitles inside, and audio is an MP3 whose tags come from its name.
 
 const STREAM: Omit<MediaStream, 'index' | 'type' | 'codec' | 'codecString'> = {
   profile: null,
@@ -32,6 +32,18 @@ const NO_TAGS: MediaInfo['tags'] = {
   disc: null,
   year: null,
 }
+
+/** The subtitles inside the demo's videos, as the media service extracts them. */
+export const SAMPLE_SUBTITLES = [
+  'WEBVTT',
+  '',
+  '00:00:01.000 --> 00:00:04.000',
+  'Questi sottotitoli sono dentro il file.',
+  '',
+  '00:00:05.000 --> 00:00:09.000',
+  '<i>Estratti una volta, e conservati.</i>',
+  '',
+].join('\n')
 
 /** What examining a file of this kind finds, made up. */
 export function sampleMediaInfo(kind: MediaKind, name: string): MediaInfo {
@@ -87,6 +99,15 @@ export function sampleMediaInfo(kind: MediaKind, name: string): MediaInfo {
         channelLayout: 'stereo',
         sampleRate: 48_000,
         language: 'eng',
+      },
+      {
+        ...STREAM,
+        index: 2,
+        type: 'subtitle',
+        codec: 'subrip',
+        codecString: null,
+        language: 'ita',
+        default: false,
       },
     ],
     chapters: [

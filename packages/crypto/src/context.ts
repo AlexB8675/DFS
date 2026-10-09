@@ -1,7 +1,13 @@
 // The typed contexts frames are bound to (DESIGN.md §7.3). A leading type
 // byte keeps one kind of object from passing as another.
 
-const TYPE = { chunk: 0x01, thumbnail: 0x02, journalBatch: 0x03, backupManifest: 0x04 } as const
+const TYPE = {
+  chunk: 0x01,
+  thumbnail: 0x02,
+  journalBatch: 0x03,
+  backupManifest: 0x04,
+  subtitles: 0x05,
+} as const
 
 /** A file chunk: `0x01 | version_id (16) | chunk index (4, BE)`. */
 export function chunkContext(versionId: string, index: number): Uint8Array {
@@ -9,6 +15,16 @@ export function chunkContext(versionId: string, index: number): Uint8Array {
   context[0] = TYPE.chunk
   context.set(uuidBytes(versionId), 1)
   new DataView(context.buffer).setUint32(17, index)
+  return context
+}
+
+/**
+ * Subtitles extracted from a file, kept in the database (§6.7):
+ * `0x05 | version_id (16) | stream index (4, BE)`.
+ */
+export function subtitlesContext(versionId: string, streamIndex: number): Uint8Array {
+  const context = chunkContext(versionId, streamIndex)
+  context[0] = TYPE.subtitles
   return context
 }
 

@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import path from 'node:path'
-import { probeResultSchema, type MediaInfo } from '@dfs/shared'
+import { probeResultSchema, subtitleTracksResultSchema, type MediaInfo } from '@dfs/shared'
 import { GenericContainer, TestContainers, Wait, type StartedTestContainer } from 'testcontainers'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
@@ -17,6 +17,7 @@ const IMAGE = 'dfs-media:test'
 const FIXTURES = [
   'film.mkv',
   'phone.mp4',
+  'talk.mp4',
   'old.avi',
   'song.mp3',
   'track.flac',
@@ -136,6 +137,7 @@ describe('the media service (§6.7)', () => {
       ['video', 'hvc1.2.4.L60.B0'],
       ['audio', 'ac-3'],
       ['subtitle', null],
+      ['subtitle', null],
     ])
     expect(film.streams[0]?.hdr).toBe('pq')
     expect(film.chapters).toHaveLength(2)
@@ -204,6 +206,59 @@ Range: bytes=0-0`,
     })
     expect(response.status).toBe(400)
     expect(requests).toEqual([])
+  })
+})
+
+async function subtitles(name: string, streams: number[]) {
+  const versionId = ids.get(name) ?? randomUUID()
+  return fetch(`${mediaUrl}/subtitles`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ versionId, token: tokenFor(versionId), streams }),
+  })
+}
+
+describe('extracting subtitles (§6.7)', () => {
+  it('turns every text stream asked for into WebVTT in one read of the file', async () => {
+    requests.length = 0
+    const response = await subtitles('film.mkv', [2, 3])
+    expect(response.status).toBe(200)
+    const result = subtitleTracksResultSchema.parse(await response.json())
+    if (!result.ok) throw new Error(`No subtitles: ${result.reason}`)
+    const [srt, ass] = result.tracks
+    expect(srt).toMatchObject({ index: 2, problem: null })
+    // Times count from where the file starts, as a player's do: here 5 ms in.
+    expect(srt?.vtt).toMatch(/^WEBVTT\n[\s\S]*00:00\.00\d --> 00:01\.00\d\nHello/)
+    // ASS styling goes; the words stay.
+    expect(ass).toMatchObject({ index: 3, problem: null })
+    expect(ass?.vtt).toMatch(/00:00\.50\d --> 00:01\.50\d\n.*Ciao.* a tutti/)
+    expect(new Set(requests)).toEqual(new Set([`GET /internal/media/${ids.get('film.mkv') ?? ''}`]))
+  })
+
+  it('reads an MP4’s mov_text, which browsers but Safari don’t show', async () => {
+    const result = subtitleTracksResultSchema.parse(await (await subtitles('talk.mp4', [2])).json())
+    expect(result.ok && result.tracks[0]?.vtt).toMatch(/Hello/)
+  })
+
+  it('says a stream it can’t make WebVTT of is a problem with the file, for good', async () => {
+    // The video stream, which isn't subtitles.
+    const result = subtitleTracksResultSchema.parse(await (await subtitles('talk.mp4', [0])).json())
+    expect(result.ok).toBe(false)
+  })
+
+  it('refuses a request without streams, or with a token not in the API’s form', async () => {
+    const versionId = ids.get('film.mkv') ?? ''
+    for (const body of [
+      { versionId, token: tokenFor(versionId), streams: [] },
+      { versionId, token: `${tokenFor(versionId)}\r\nRange: bytes=0-0`, streams: [2] },
+    ]) {
+      const response = await fetch(`${mediaUrl}/subtitles`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      expect(response.status).toBe(400)
+    }
   })
 })
 

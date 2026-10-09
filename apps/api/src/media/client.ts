@@ -1,4 +1,9 @@
-import { probeResultSchema, type ProbeResult } from '@dfs/shared'
+import {
+  probeResultSchema,
+  subtitleTracksResultSchema,
+  type ProbeResult,
+  type SubtitleTracksResult,
+} from '@dfs/shared'
 import { z } from 'zod'
 
 // The API's side of the media service (DESIGN.md §6.7). The service parses
@@ -7,6 +12,8 @@ import { z } from 'zod'
 
 /** ffprobe gets 60 s, and may wait its turn behind another. */
 const PROBE_TIMEOUT_MS = 150_000
+/** Extracting reads the whole file (15 minutes at most), and may wait its turn behind another. */
+const SUBTITLES_TIMEOUT_MS = 40 * 60_000
 const HEALTH_TIMEOUT_MS = 2000
 
 /** The media service didn't answer, or couldn't read the file from the API: ask again later. */
@@ -46,6 +53,30 @@ export class MediaClient {
       )
     }
     const answer = probeResultSchema.safeParse(await response.json().catch(() => null))
+    if (!answer.success) {
+      throw new MediaUnavailableError('The media service gave an answer out of bounds.')
+    }
+    return answer.data
+  }
+
+  /** Has the service extract text subtitle streams as WebVTT, all in one read of the file. */
+  async subtitles(
+    versionId: string,
+    token: string,
+    streams: readonly number[],
+  ): Promise<SubtitleTracksResult> {
+    const response = await this.#ask('/subtitles', SUBTITLES_TIMEOUT_MS, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ versionId, token, streams }),
+    })
+    if (!response.ok) {
+      await response.body?.cancel()
+      throw new MediaUnavailableError(
+        `The media service answered ${String(response.status)} to extracting subtitles.`,
+      )
+    }
+    const answer = subtitleTracksResultSchema.safeParse(await response.json().catch(() => null))
     if (!answer.success) {
       throw new MediaUnavailableError('The media service gave an answer out of bounds.')
     }

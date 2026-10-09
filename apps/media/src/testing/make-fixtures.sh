@@ -25,6 +25,18 @@ END=2000
 title=Ending
 EOF
 printf '1\n00:00:00,000 --> 00:00:01,000\nHello\n' > subtitles.srt
+cat > subtitles.ass <<'EOF'
+[Script Info]
+ScriptType: v4.00+
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,1,0,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.50,0:00:01.50,Default,,0,0,0,,{\i1}Ciao{\i0} a tutti
+EOF
 
 # A phone's video: MP4 with H.264 and AAC, held upright, so its picture is
 # to be turned a quarter clockwise (ffmpeg keeps the turn only on a copy).
@@ -34,15 +46,23 @@ ff -f lavfi -i testsrc2=size=320x240:rate=25 \
 ff -display_rotation -90 -i upright.mp4 -c copy phone.mp4
 rm upright.mp4
 
-# A film: MKV with 10-bit HEVC in HDR (PQ), AC-3 in 5.1, a subtitle and chapters.
+# A film: MKV with 10-bit HEVC in HDR (PQ), AC-3 in 5.1, subtitles in SRT
+# and in ASS, and chapters (`-shortest` would drop the ASS line).
 ff -f lavfi -i testsrc2=size=320x240:rate=24 \
-  -f lavfi -i "sine=frequency=220:sample_rate=48000" -i subtitles.srt -i chapters.txt -t 2 \
-  -map 0:v -map 1:a -map 2:s -map_metadata 3 -map_chapters 3 \
+  -f lavfi -i "sine=frequency=220:sample_rate=48000" -i subtitles.srt -i chapters.txt \
+  -i subtitles.ass -t 2 \
+  -map 0:v -map 1:a -map 2:s -map 4:s -map_metadata 3 -map_chapters 3 \
   -c:v libx265 -preset ultrafast -pix_fmt yuv420p10le \
   -x265-params log-level=error:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc \
-  -c:a ac3 -ac 6 -c:s srt \
+  -c:a ac3 -ac 6 -c:s:0 srt -c:s:1 ass \
   -metadata:s:a:0 language=eng -metadata:s:s:0 language=ita -metadata:s:s:0 title=Italiano \
-  -disposition:s:0 forced -shortest film.mkv
+  -disposition:s:0 forced -metadata:s:s:1 language=ita film.mkv
+
+# A talk: MP4 with its subtitles as mov_text, which only Safari shows by itself.
+ff -f lavfi -i testsrc2=size=160x120:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 \
+  -i subtitles.srt -t 2 -map 0:v -map 1:a -map 2:s \
+  -c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac -b:a 64k -c:s mov_text \
+  -metadata:s:s:0 language=eng -shortest talk.mp4
 
 # An old download: AVI with MPEG-4 Part 2 and MP3, which no browser plays.
 ff -f lavfi -i testsrc2=size=320x240:rate=25 -f lavfi -i sine=frequency=330:sample_rate=44100 \
@@ -68,5 +88,5 @@ cp cover.png picture.png
 printf '#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\nfile:///etc/passwd\n#EXTINF:2,\nhttp://127.0.0.1:1/elsewhere\n#EXT-X-ENDLIST\n' > playlist.m3u8
 printf "ffconcat version 1.0\nfile 'file:/etc/passwd'\n" > list.ffconcat
 
-rm cover.png chapters.txt subtitles.srt
+rm cover.png chapters.txt subtitles.srt subtitles.ass
 ls

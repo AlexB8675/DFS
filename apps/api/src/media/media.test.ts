@@ -2,7 +2,14 @@ import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { ApiClient, createFolder, text, uploadFile, workspace } from '@dfs/contract'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
-import { fileMediaSchema, systemHealthSchema, type MediaInfo, type ProbeResult } from '@dfs/shared'
+import {
+  fileMediaSchema,
+  systemHealthSchema,
+  type MediaInfo,
+  type MediaStream,
+  type ProbeResult,
+  type SubtitleTracksResult,
+} from '@dfs/shared'
 import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest'
@@ -25,8 +32,11 @@ let standIn: http.Server
 let folderId: string
 
 /** What the stand-in answers next, and what it was asked and read. */
-let answer: 'media' | 'not media' | 'down' = 'media'
+let answer: 'media' | 'film' | 'not media' | 'down' = 'media'
 const probes: { versionId: string; readStatus: number; firstBytes: string }[] = []
+/** Subtitle streams the stand-in can't read, and every extraction it was asked for. */
+let unreadable: number[] = []
+const extractions: { versionId: string; streams: number[]; readStatus: number }[] = []
 
 const SONG: MediaInfo = {
   kind: 'audio',
@@ -70,6 +80,43 @@ const SONG: MediaInfo = {
   hasCover: false,
 }
 
+const subtitleStream = (index: number, codec: string, language: string): MediaStream => ({
+  index,
+  type: 'subtitle',
+  codec,
+  codecString: null,
+  profile: null,
+  width: null,
+  height: null,
+  frameRate: null,
+  bitDepth: null,
+  hdr: null,
+  dolbyVision: null,
+  rotation: null,
+  channels: null,
+  channelLayout: null,
+  sampleRate: null,
+  language,
+  title: null,
+  default: false,
+  forced: false,
+})
+
+/** A film with subtitles inside: SRT and ASS, which are text, and PGS, which is pictures. */
+const FILM: MediaInfo = {
+  ...SONG,
+  kind: 'video',
+  container: 'matroska,webm',
+  streams: [
+    subtitleStream(2, 'subrip', 'ita'),
+    subtitleStream(3, 'ass', 'eng'),
+    subtitleStream(4, 'hdmv_pgs_subtitle', 'eng'),
+  ],
+}
+
+/** What the stand-in makes of a subtitle stream. */
+const vttOf = (index: number) => `WEBVTT\n\n00:00.000 --> 00:01.000\nStream ${String(index)}\n`
+
 beforeAll(async () => {
   standIn = http.createServer((request, response) => {
     let body = ''
@@ -87,10 +134,33 @@ beforeAll(async () => {
           )
           return
         }
-        const { versionId, token } = JSON.parse(body) as { versionId: string; token: string }
+        const { versionId, token, streams } = JSON.parse(body) as {
+          versionId: string
+          token: string
+          streams?: number[]
+        }
         const read = await fetch(`${apiUrl}/internal/media/${versionId}`, {
           headers: { authorization: `Bearer ${token}`, range: 'bytes=0-3' },
         })
+        if (request.url === '/subtitles') {
+          await read.body?.cancel()
+          extractions.push({ versionId, streams: streams ?? [], readStatus: read.status })
+          if (answer === 'down') {
+            response.writeHead(502).end()
+            return
+          }
+          const result: SubtitleTracksResult = {
+            ok: true,
+            tracks: (streams ?? []).map((index) =>
+              unreadable.includes(index)
+                ? { index, vtt: null, problem: 'These subtitles are too large.' }
+                : { index, vtt: vttOf(index), problem: null },
+            ),
+          }
+          response.writeHead(200, { 'content-type': 'application/json' })
+          response.end(JSON.stringify(result))
+          return
+        }
         const firstBytes = read.ok ? Buffer.from(await read.arrayBuffer()).toString() : ''
         probes.push({ versionId, readStatus: read.status, firstBytes })
         if (answer === 'down') {
@@ -98,8 +168,8 @@ beforeAll(async () => {
           return
         }
         const result: ProbeResult =
-          answer === 'media'
-            ? { ok: true, info: SONG }
+          answer === 'media' || answer === 'film'
+            ? { ok: true, info: answer === 'film' ? FILM : SONG }
             : { ok: false, reason: 'It holds no audio or video.' }
         response.writeHead(200, { 'content-type': 'application/json' })
         response.end(JSON.stringify(result))
@@ -130,6 +200,8 @@ afterAll(async () => {
 beforeEach(() => {
   answer = 'media'
   probes.length = 0
+  unreadable = []
+  extractions.length = 0
 })
 
 async function media(nodeId: string) {
@@ -216,6 +288,104 @@ describe('examining audio and video (§6.7)', () => {
     expect(await kept(first.versionId)).toBeNull()
   })
 })
+
+describe('subtitles inside a file (§6.7)', () => {
+  const subtitles = (film: { nodeId: string; versionId: string }, track: number) =>
+    client.fetch(
+      'GET',
+      `/files/${film.nodeId}/media/${film.versionId}/subtitles/${String(track)}.vtt`,
+    )
+
+  async function keptRows(versionId: string) {
+    const { rows } = await app.db.execute<{
+      stream_index: number
+      sealed: Buffer | null
+      problem: string | null
+    }>(sql`
+      SELECT stream_index, sealed, problem FROM media_subtitles
+      WHERE version_id = ${versionId} ORDER BY stream_index`)
+    return rows
+  }
+
+  it('extracts the text ones right after the upload, in one read, and keeps them sealed', async () => {
+    answer = 'film'
+    unreadable = [3]
+    const film = await uploadFile(client, folderId, 'film.mkv', text('Matroska'))
+    await vi.waitFor(async () => {
+      expect(await keptRows(film.versionId)).toHaveLength(2)
+    })
+    // Pictures (PGS) aren't asked for.
+    expect(extractions).toEqual([{ versionId: film.versionId, streams: [2, 3], readStatus: 206 }])
+    const [italian, english] = await keptRows(film.versionId)
+    // Sealed: the words aren't in the database as they are.
+    expect(italian?.sealed?.includes(Buffer.from('Stream 2'))).toBe(false)
+    expect(english).toMatchObject({ sealed: null, problem: 'These subtitles are too large.' })
+
+    const response = await subtitles(film, 2)
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-type')).toBe('text/vtt; charset=utf-8')
+    expect(response.headers.get('cache-control')).toBe('private, max-age=31536000, immutable')
+    expect(await response.text()).toBe(vttOf(2))
+    expect(await client.error('GET', subtitlesPath(film, 3))).toEqual({
+      status: 422,
+      code: 'unreadable_subtitles',
+    })
+    for (const track of [4, 1, 9]) {
+      expect(await client.error('GET', subtitlesPath(film, track))).toEqual({
+        status: 404,
+        code: 'not_found',
+      })
+    }
+    // All of it was kept: nothing extracted again.
+    expect(extractions).toHaveLength(1)
+  })
+
+  it('extracts them when first chosen if they weren’t, and serves them without the media service once kept', async () => {
+    answer = 'film'
+    const film = await uploadFile(client, folderId, 'later.mkv', text('Matroska'))
+    await vi.waitFor(async () => {
+      expect(await keptRows(film.versionId)).toHaveLength(2)
+    })
+    // As if uploaded before subtitles were extracted.
+    await app.db.execute(sql`DELETE FROM media_subtitles WHERE version_id = ${film.versionId}`)
+    answer = 'down'
+    expect(await client.error('GET', subtitlesPath(film, 3))).toEqual({
+      status: 503,
+      code: 'media_unavailable',
+    })
+    answer = 'film'
+    expect(await (await subtitles(film, 3)).text()).toBe(vttOf(3))
+    expect(extractions.map((extraction) => extraction.streams)).toEqual([
+      [2, 3],
+      [2, 3],
+      [2, 3],
+    ])
+
+    // The same master key, which opens what is sealed.
+    const setup = await testConfig({
+      DATABASE_URL: database.url,
+      MASTER_KEY_FILE: app.config.masterKeyFile,
+    })
+    const bare = await buildApp({ config: setup.config, logger: false })
+    try {
+      const other = new ApiClient(
+        await bare.listen({ port: 0, host: '127.0.0.1' }),
+        setup.config.publicBaseUrl,
+      )
+      await other.signIn('owner', 'the-owner-password')
+      const response = await other.fetch('GET', subtitlesPath(film, 2))
+      expect(await response.text()).toBe(vttOf(2))
+    } finally {
+      await bare.close()
+      await setup.cleanup()
+    }
+  })
+})
+
+/** The route of a stream's subtitles. */
+function subtitlesPath(film: { nodeId: string; versionId: string }, track: number): string {
+  return `/files/${film.nodeId}/media/${film.versionId}/subtitles/${String(track)}.vtt`
+}
 
 describe('where users stopped (§10.4)', () => {
   it('goes with its version once a new one replaces it', async () => {

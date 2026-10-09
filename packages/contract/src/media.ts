@@ -1,4 +1,4 @@
-import { fileMediaSchema, playbackSchema } from '@dfs/shared'
+import { fileMediaSchema, isTextSubtitles, playbackSchema } from '@dfs/shared'
 import type { ApiClient } from './client.ts'
 import type { SuiteContext } from './context.ts'
 import { createFolder, text, uploadFile, workspace } from './files.ts'
@@ -111,6 +111,27 @@ export function mediaTests({
 
       await uploadFile(client, folder.id, 'Talk.mp4', text('a new version'))
       expect(await client.error('GET', path)).toEqual({ status: 412, code: 'version_changed' })
+    })
+
+    it('serves a text subtitle stream inside a video as WebVTT, and no other stream', async () => {
+      const client = await owner()
+      const root = await workspace(client)
+      const video = await uploadFile(client, root.id, 'Inside.mkv', text('matroska'))
+      const media = await client.call('GET', `/files/${video.nodeId}/media`, fileMediaSchema)
+      const inside = media.info?.streams.find((stream) => isTextSubtitles(stream))
+      const audio = media.info?.streams.find((stream) => stream.type === 'audio')
+      if (!inside || !audio) throw new Error('The video has no subtitles or sound inside.')
+      const path = (index: number) =>
+        `/files/${video.nodeId}/media/${video.versionId}/subtitles/${String(index)}.vtt`
+
+      const response = await client.fetch('GET', path(inside.index))
+      expect(response.status).toBe(200)
+      expect(response.headers.get('content-type')).toBe('text/vtt; charset=utf-8')
+      expect(await response.text()).toMatch(/^WEBVTT\n/)
+      expect(await client.error('GET', path(audio.index))).toEqual({
+        status: 404,
+        code: 'not_found',
+      })
     })
 
     it('keeps where a user stopped, for them alone and that version', async () => {

@@ -1,16 +1,26 @@
 import type { MasterKeys } from '@dfs/crypto'
 import { mediaInfo, type Executor } from '@dfs/db'
-import { mediaInfoSchema, mediaKind, type MediaInfo } from '@dfs/shared'
+import {
+  isTextSubtitles,
+  MAX_SUBTITLE_STREAMS,
+  mediaInfoSchema,
+  mediaKind,
+  type MediaInfo,
+  type SubtitleTrack,
+} from '@dfs/shared'
 import { eq } from 'drizzle-orm'
 import type { FastifyBaseLogger } from 'fastify'
 import { MediaUnavailableError, type MediaClient } from './client.ts'
+import { keepSubtitles, keptStreams, keptSubtitles, type KeptSubtitles } from './subtitles.ts'
 import { mediaToken } from './token.ts'
 
 // Examining audio and video (DESIGN.md §6.7): once per version, right after
 // its upload completes, while its frames are still in staging and cost
 // nothing from Discord, or else when first played. What the media service
 // finds is kept, including that a file holds nothing ffmpeg reads; a service
-// that didn't answer is asked again next time.
+// that didn't answer is asked again next time. Text subtitles inside the file
+// are extracted then too, since an MKV's are spread through all of it, or
+// else when first chosen.
 
 /** What examining a version found: its media info, or why there is none. */
 export interface Examined {
@@ -24,17 +34,19 @@ const AFTER_UPLOAD_AT_ONCE = 2
 export class MediaExaminer {
   readonly client: MediaClient
   readonly #db: Executor
-  readonly #keys: Pick<MasterKeys, 'sign'>
+  readonly #keys: MasterKeys
   readonly #log: FastifyBaseLogger
   /** Examinations under way, by version, so those who ask at once share one. */
   readonly #examining = new Map<string, Promise<Examined>>()
+  /** Extractions of subtitles under way, by version, likewise. */
+  readonly #extracting = new Map<string, Promise<void>>()
   readonly #queued: string[] = []
   #running = 0
 
   constructor(options: {
     client: MediaClient
     db: Executor
-    keys: Pick<MasterKeys, 'sign'>
+    keys: MasterKeys
     log: FastifyBaseLogger
   }) {
     this.client = options.client
@@ -69,9 +81,37 @@ export class MediaExaminer {
   }
 
   /**
+   * A text subtitle stream of the version as WebVTT, or why not: kept, or
+   * extracted now with its others. Throws a `MediaUnavailableError` if the
+   * media service can't say now.
+   */
+  async subtitles(versionId: string, info: MediaInfo, streamIndex: number): Promise<KeptSubtitles> {
+    const kept = await keptSubtitles(this.#db, this.#keys, versionId, streamIndex)
+    if (kept) return kept
+    await this.extract(versionId, info)
+    return (
+      (await keptSubtitles(this.#db, this.#keys, versionId, streamIndex)) ?? {
+        problem: 'These subtitles can’t be read.',
+      }
+    )
+  }
+
+  /** Extracts the version's text subtitle streams not kept yet, once however many ask. */
+  extract(versionId: string, info: MediaInfo): Promise<void> {
+    let extracting = this.#extracting.get(versionId)
+    if (!extracting) {
+      extracting = this.#extract(versionId, info).finally(() => {
+        this.#extracting.delete(versionId)
+      })
+      this.#extracting.set(versionId, extracting)
+    }
+    return extracting
+  }
+
+  /**
    * After an upload completes: examines the version in the background if
-   * it is audio or video, a few at a time. Best effort: one that fails is
-   * examined when first played.
+   * it is audio or video, a few at a time, and extracts its subtitles.
+   * Best effort: one that fails is examined when first played.
    */
   afterUpload(file: { versionId: string; name: string; mimeType: string | null; size: number }) {
     if (file.size === 0 || !mediaKind(file.name, file.mimeType)) return
@@ -85,6 +125,9 @@ export class MediaExaminer {
       if (!versionId) return
       this.#running += 1
       this.examine(versionId)
+        .then(async ({ info }) => {
+          if (info?.streams.some(isTextSubtitles)) await this.extract(versionId, info)
+        })
         .catch((error: unknown) => {
           this.#log.info(
             { err: error, versionId },
@@ -96,6 +139,29 @@ export class MediaExaminer {
           this.#next()
         })
     }
+  }
+
+  async #extract(versionId: string, info: MediaInfo): Promise<void> {
+    const kept = await keptStreams(this.#db, versionId)
+    const streams = info.streams
+      .filter((stream) => isTextSubtitles(stream) && !kept.has(stream.index))
+      .map((stream) => stream.index)
+      .slice(0, MAX_SUBTITLE_STREAMS)
+    if (!streams.length) return
+    const token = await mediaToken(this.#keys, versionId)
+    const result = await this.client.subtitles(versionId, token, streams)
+    // Only the streams asked for; one the service left out couldn't be read.
+    const tracks: SubtitleTrack[] = streams.map((index) => {
+      const track = result.ok ? result.tracks.find((found) => found.index === index) : undefined
+      return (
+        track ?? {
+          index,
+          vtt: null,
+          problem: result.ok ? 'These subtitles can’t be read.' : result.reason,
+        }
+      )
+    })
+    await keepSubtitles(this.#db, this.#keys, versionId, tracks)
   }
 
   async #examine(versionId: string): Promise<Examined> {

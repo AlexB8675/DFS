@@ -2,6 +2,7 @@ import {
   decodeSubtitles,
   fileCategory,
   formatBytes,
+  isTextSubtitles,
   MAX_SUBTITLE_FILE_BYTES,
   mediaKind,
   nameKey,
@@ -48,7 +49,7 @@ import {
   type User,
 } from '@dfs/shared'
 import { previewKind } from '@/lib/preview-kind'
-import { sampleMediaInfo } from './media'
+import { SAMPLE_SUBTITLES, sampleMediaInfo } from './media'
 import { sampleImage, samplePdf, sampleText } from './samples'
 import { createSeed } from './seed'
 import { createZip, type ZipEntry } from './zip'
@@ -546,10 +547,21 @@ export class MockDb {
     this.save()
   }
 
-  /** `GET /files/:id/media/:versionId/subtitles/:track`: a subtitle file beside the video, as WebVTT. */
+  /**
+   * `GET /files/:id/media/:versionId/subtitles/:track`: a text stream inside
+   * the video, or a subtitle file beside it, as WebVTT.
+   */
   subtitles(id: string, versionId: string, track: string): string {
-    const { node } = this.mediaNode(id)
+    const { node, kind } = this.mediaNode(id)
     if (versionId !== versionIdOf(node)) throw versionChanged()
+    const index = /^(\d+)\.vtt$/.exec(track)?.[1]
+    if (index !== undefined) {
+      const stream = sampleMediaInfo(kind, node.name).streams.find(
+        (found) => found.index === Number(index),
+      )
+      if (stream && isTextSubtitles(stream)) return SAMPLE_SUBTITLES
+      throw new MockApiError(404, 'not_found', 'There are no such subtitles.')
+    }
     const fileId = track.replace(/\.vtt$/i, '').toLowerCase()
     const beside = this.subtitleFilesBeside(node).find((file) => file.id === fileId)
     const subtitle = beside && this.state.nodes[beside.id]

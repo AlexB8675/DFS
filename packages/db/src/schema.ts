@@ -564,6 +564,31 @@ export const mediaInfo = pgTable(
 )
 
 /**
+ * Text subtitles extracted from inside a file as WebVTT (§6.7): right after
+ * its upload, while it is in staging, or when first chosen. Each is sealed
+ * as a journal object is (its own data key, bound to its version and
+ * stream), since a stolen dump must hold no content (§7.4); or why it
+ * couldn't be (`problem`), so it isn't extracted again. Derived, so not
+ * journaled; it goes with its version.
+ */
+export const mediaSubtitles = pgTable(
+  'media_subtitles',
+  {
+    versionId: uuid('version_id')
+      .notNull()
+      .references(() => fileVersions.id, { onDelete: 'cascade' }),
+    streamIndex: integer('stream_index').notNull(),
+    sealed: bytea('sealed'),
+    problem: text('problem'),
+    extractedAt: timestamptz('extracted_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: 'media_subtitles_pkey', columns: [t.versionId, t.streamIndex] }),
+    check('media_subtitles_found', sql`(${t.sealed} IS NULL) <> (${t.problem} IS NULL)`),
+  ],
+)
+
+/**
  * Where each user stopped a video, or a long audio file, so it follows them
  * to another device (§10.4). Kept for the version they played: a new version
  * leaves it unused, and it goes once that version is pruned. Not journaled.

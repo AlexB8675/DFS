@@ -164,6 +164,37 @@ export const TEXT_SUBTITLE_CODECS: ReadonlySet<string> = new Set([
   'text',
 ])
 
+/** A subtitle stream as WebVTT larger than this is a crafted file's: a film's are a few hundred KB. */
+export const MAX_SUBTITLE_TRACK_BYTES = 2 * 1024 * 1024
+
+/** Subtitle streams the media service extracts in one pass, at most. */
+export const MAX_SUBTITLE_STREAMS = 32
+
+/** A subtitle stream inside a file, as WebVTT, or why it couldn't be. */
+export const subtitleTrackSchema = z.object({
+  index: z.number().int().min(0).max(10_000),
+  vtt: z.string().max(MAX_SUBTITLE_TRACK_BYTES).nullable(),
+  problem: z.string().max(300).nullable(),
+})
+
+export type SubtitleTrack = z.infer<typeof subtitleTrackSchema>
+
+/**
+ * The media service's answer to extracting subtitles: each stream asked
+ * for, or that ffmpeg couldn't read the file, which isn't asked again.
+ */
+export const subtitleTracksResultSchema = z.discriminatedUnion('ok', [
+  z.object({ ok: z.literal(true), tracks: z.array(subtitleTrackSchema).max(MAX_SUBTITLE_STREAMS) }),
+  z.object({ ok: z.literal(false), reason: z.string().max(300) }),
+])
+
+export type SubtitleTracksResult = z.infer<typeof subtitleTracksResultSchema>
+
+/** Whether a stream is subtitles the media service can extract as text. */
+export function isTextSubtitles(stream: Pick<MediaStream, 'type' | 'codec'>): boolean {
+  return stream.type === 'subtitle' && TEXT_SUBTITLE_CODECS.has(stream.codec)
+}
+
 /** A subtitle file beside a video (`Film.it.srt`), with what its name says (§6.7). */
 export const subtitleFileSchema = z.object({
   /** The subtitle file's own ID. */

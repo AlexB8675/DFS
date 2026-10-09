@@ -1,5 +1,11 @@
 import type { Executor } from '@dfs/db'
-import { fileMediaSchema, mediaKind, playbackSchema, savePositionSchema } from '@dfs/shared'
+import {
+  fileMediaSchema,
+  isTextSubtitles,
+  mediaKind,
+  playbackSchema,
+  savePositionSchema,
+} from '@dfs/shared'
 import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import type { ZodTypeProvider } from 'fastify-type-provider-zod'
@@ -15,6 +21,7 @@ import {
   subtitleFileAsWebVtt,
   subtitleFilesBeside,
 } from '../media/playback.ts'
+import { keptSubtitles } from '../media/subtitles.ts'
 import { mediaTokenValid } from '../media/token.ts'
 import { visibleNode, type NodeRow } from '../nodes/read.ts'
 import { downloadableFile, versionChanged } from './content.ts'
@@ -76,7 +83,8 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
     return reply.code(204).send()
   })
 
-  // Subtitles as WebVTT (§6.7): a subtitle file beside the video, by its ID.
+  // Subtitles as WebVTT (§6.7): a stream inside the file by its number, or a
+  // subtitle file beside it by its ID.
   routes.get(
     '/files/:id/media/:versionId/subtitles/:track',
     {
@@ -86,25 +94,26 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
           versionId: z.uuid(),
           track: z
             .string()
-            .regex(/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}\.vtt$/i),
+            .regex(/^(?:\d{1,5}|[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12})\.vtt$/i),
         }),
       },
     },
     async (request, reply) => {
       const auth = requireAuth(request.auth)
-      const { id, versionId, track } = request.params
+      const { id, versionId } = request.params
+      const track = request.params.track.slice(0, -'.vtt'.length).toLowerCase()
       const node = await mediaNode(app.db, auth.user.id, id)
       const file = await downloadableFile(app.db, node.id)
       if (file.version_id !== versionId) throw versionChanged()
-      const vtt = await subtitleFileAsWebVtt(
-        app,
-        node,
-        track.slice(0, -'.vtt'.length).toLowerCase(),
-      )
-      return reply
-        .header('content-type', 'text/vtt; charset=utf-8')
-        .header('cache-control', 'private, no-cache')
-        .send(vtt)
+      reply.header('content-type', 'text/vtt; charset=utf-8')
+      if (/^\d+$/.test(track)) {
+        // Inside the version, which never changes: kept by the browser as long as it likes.
+        const vtt = await streamSubtitles(app, file, Number(track))
+        return reply.header('cache-control', 'private, max-age=31536000, immutable').send(vtt)
+      }
+      // Beside it, which may change.
+      const vtt = await subtitleFileAsWebVtt(app, node, track)
+      return reply.header('cache-control', 'private, no-cache').send(vtt)
     },
   )
 
@@ -178,6 +187,46 @@ async function examined(
       'The media service isn’t answering. Try again in a moment.',
     )
   }
+}
+
+/**
+ * A text subtitle stream inside the version, as WebVTT: kept, or extracted
+ * now, which may read the whole file. Served even while the media service is
+ * away, once kept.
+ */
+async function streamSubtitles(
+  app: FastifyInstance,
+  file: Pick<DownloadableFile, 'version_id' | 'size_bytes'>,
+  streamIndex: number,
+): Promise<string> {
+  const { info } = await examined(app, file)
+  const stream = info?.streams.find((found) => found.index === streamIndex)
+  if (!info || !stream || !isTextSubtitles(stream)) {
+    throw new ApiError(404, 'not_found', 'There are no such subtitles.')
+  }
+  let kept = await keptSubtitles(app.db, app.keys, file.version_id, streamIndex)
+  if (!kept) {
+    if (!app.media) throw mediaUnavailable('there is no media service')
+    try {
+      kept = await app.media.subtitles(file.version_id, info, streamIndex)
+    } catch (error) {
+      if (!(error instanceof MediaUnavailableError)) throw error
+      app.log.warn({ err: error, versionId: file.version_id }, 'could not extract subtitles')
+      throw mediaUnavailable('the media service isn’t answering')
+    }
+  }
+  if ('problem' in kept) {
+    throw new ApiError(422, 'unreadable_subtitles', 'These subtitles can’t be read.')
+  }
+  return kept.vtt
+}
+
+function mediaUnavailable(why: string): ApiError {
+  return new ApiError(
+    503,
+    'media_unavailable',
+    `These subtitles can’t be read now: ${why}. Try again in a moment.`,
+  )
 }
 
 /** A version that can be read, by its ID: uploaded, and not failed or purged. */

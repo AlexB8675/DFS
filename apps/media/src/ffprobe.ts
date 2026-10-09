@@ -1,5 +1,4 @@
-import { spawn } from 'node:child_process'
-import { setPriority } from 'node:os'
+import { firstLine, run } from './process.ts'
 
 // Running ffprobe (DESIGN.md §6.7). It parses files anyone with an account
 // uploads, so it may open only what it is given, over HTTP from the API, and
@@ -41,13 +40,11 @@ export const ALLOWED_PROTOCOLS = ['http', 'tcp'] as const
 
 /** An answer larger than this is a crafted file's: it is cut off. */
 const MAX_OUTPUT_BYTES = 4 * 1024 * 1024
-const MAX_ERROR_BYTES = 64 * 1024
 const PROBE_TIMEOUT_MS = 60_000
 /** ffmpeg's time for one read from the API, in microseconds. */
 const READ_TIMEOUT_US = 30_000_000
-/** As low as a process can go, so the VPS's other work comes first. */
-const LOWEST_PRIORITY = 19
 
+/** ffmpeg or ffprobe failed: on the file, or (`sourceFailed`) on reading it from the API. */
 export class ProbeError extends Error {
   /** The API couldn't be read, so the file may be fine: worth asking again. */
   readonly sourceFailed: boolean
@@ -70,6 +67,16 @@ export function probeArguments(url: string, token: string): string[] {
     '-show_format',
     '-show_streams',
     '-show_chapters',
+    ...inputArguments(url, token),
+  ]
+}
+
+/**
+ * How ffmpeg and ffprobe open a version: from the API alone, over HTTP, as
+ * one of the containers DFS plays, with the token sent as a header.
+ */
+export function inputArguments(url: string, token: string): string[] {
+  return [
     '-protocol_whitelist',
     ALLOWED_PROTOCOLS.join(','),
     '-format_whitelist',
@@ -78,6 +85,7 @@ export function probeArguments(url: string, token: string): string[] {
     String(READ_TIMEOUT_US),
     '-headers',
     `Authorization: Bearer ${token}\r\n`,
+    '-i',
     url,
   ]
 }
@@ -91,20 +99,21 @@ export async function runProbe(
   token: string,
   options: { command?: string; timeoutMs?: number } = {},
 ): Promise<unknown> {
-  const ran = await run(
-    options.command ?? 'ffprobe',
-    probeArguments(url, token),
-    options.timeoutMs ?? PROBE_TIMEOUT_MS,
-  )
+  const ran = await run(options.command ?? 'ffprobe', probeArguments(url, token), {
+    timeoutMs: options.timeoutMs ?? PROBE_TIMEOUT_MS,
+    maxBytes: MAX_OUTPUT_BYTES,
+    killPastMax: true,
+  })
   // Slow reads from Discord can take this long: not the file's fault.
   if (ran.timedOut) throw new ProbeError('ffprobe took too long.', true)
-  if (ran.tooLarge) throw new ProbeError('ffprobe’s answer was too large.', false)
+  const [stdout] = ran.outputs
+  if (stdout === null) throw new ProbeError('ffprobe’s answer was too large.', false)
   if (ran.code !== 0) {
     const message = firstLine(ran.stderr) || `ffprobe exited with ${String(ran.code)}`
     throw new ProbeError(message, readFailed(ran.stderr))
   }
   try {
-    return JSON.parse(ran.stdout) as unknown
+    return JSON.parse(stdout?.toString('utf8') ?? '') as unknown
   } catch {
     throw new ProbeError('ffprobe gave an answer that isn’t JSON.', false)
   }
@@ -112,75 +121,13 @@ export async function runProbe(
 
 /** The first line of `ffprobe -version`: which ffmpeg this is. */
 export async function ffmpegVersion(command = 'ffprobe'): Promise<string> {
-  const ran = await run(command, ['-version'], 10_000)
-  return firstLine(ran.stdout)
+  const ran = await run(command, ['-version'], { timeoutMs: 10_000, maxBytes: 64 * 1024 })
+  return firstLine(ran.outputs[0]?.toString('utf8') ?? '')
 }
 
 /** The API refused or didn't answer, rather than the file being unreadable. */
-function readFailed(stderr: string): boolean {
+export function readFailed(stderr: string): boolean {
   return /Server returned [45]\d\d|Connection refused|Connection timed out|timed out|Network is unreachable|No route to host|I\/O error/i.test(
     stderr,
   )
-}
-
-function firstLine(text: string): string {
-  return text.trim().split('\n')[0]?.trim().slice(0, 300) ?? ''
-}
-
-interface Ran {
-  stdout: string
-  stderr: string
-  code: number | null
-  timedOut: boolean
-  tooLarge: boolean
-}
-
-function run(command: string, args: string[], timeoutMs: number): Promise<Ran> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })
-    if (child.pid !== undefined) {
-      try {
-        setPriority(child.pid, LOWEST_PRIORITY)
-      } catch {
-        // Not allowed here: it runs at the priority it has.
-      }
-    }
-    const out: Buffer[] = []
-    const err: Buffer[] = []
-    let outBytes = 0
-    let errBytes = 0
-    let timedOut = false
-    let tooLarge = false
-    child.stdout.on('data', (data: Buffer) => {
-      outBytes += data.length
-      if (outBytes > MAX_OUTPUT_BYTES) {
-        tooLarge = true
-        child.kill('SIGKILL')
-        return
-      }
-      out.push(data)
-    })
-    child.stderr.on('data', (data: Buffer) => {
-      errBytes += data.length
-      if (errBytes <= MAX_ERROR_BYTES) err.push(data)
-    })
-    const timer = setTimeout(() => {
-      timedOut = true
-      child.kill('SIGKILL')
-    }, timeoutMs)
-    child.on('error', (error) => {
-      clearTimeout(timer)
-      reject(error)
-    })
-    child.on('close', (code) => {
-      clearTimeout(timer)
-      resolve({
-        stdout: tooLarge ? '' : Buffer.concat(out).toString('utf8'),
-        stderr: Buffer.concat(err).toString('utf8'),
-        code,
-        timedOut,
-        tooLarge,
-      })
-    })
-  })
 }
