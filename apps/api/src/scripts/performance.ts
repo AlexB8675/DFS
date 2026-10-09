@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { monitorEventLoopDelay } from 'node:perf_hooks'
-import { chunkContext, generateDek, importAesKey, sealFrame, sha256 } from '@dfs/crypto'
+import { chunkContext, generateDek, importAesKey, sealChunkFrame, sha256 } from '@dfs/crypto'
 import { Staging } from '@dfs/storage'
 import { stageFrame } from '../uploads/stage-frame.ts'
 
@@ -20,7 +20,7 @@ try {
     const bytes = new Uint8Array(size).fill(7)
     for (const concurrency of [1, 4, 8]) {
       for (const mode of ['encrypt', 'serial', 'overlap', 'bounded'] as const) {
-        await sealFrame(key, bytes, context)
+        await sealChunkFrame(key, bytes, context)
         global.gc?.()
         const delay = monitorEventLoopDelay({ resolution: 10 })
         delay.enable()
@@ -41,7 +41,7 @@ try {
                   await staging.remove(file)
                   continue
                 }
-                const frame = await sealFrame(key, bytes, context)
+                const frame = await sealChunkFrame(key, bytes, context)
                 if (mode === 'encrypt') continue
                 const file = staging.framePath(versionId, index)
                 if (mode === 'serial') {

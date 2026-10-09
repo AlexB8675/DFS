@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ConfigError, loadConfig, type LoadOptions } from './config.ts'
-import { GiB, MiB, parseByteSize } from './sizes.ts'
+import { frameOverheadBytes, GiB, MiB, parseByteSize } from './sizes.ts'
 
 const root = path.resolve('/repo')
 const api: LoadOptions = { service: 'api', rootDir: root }
@@ -39,8 +39,9 @@ describe('loadConfig', () => {
     const { sizes } = loadConfig({}, api)
     expect(sizes.blobMaxBytes).toBe(20 * MiB - 64 * 1024)
     expect(sizes.chunkSize).toBe(20 * MiB - 128 * 1024)
-    // A solo blob: one chunk plus the 38-byte frame overhead.
-    expect(sizes.chunkSize + 38).toBe(20_840_486)
+    // A solo blob: one chunk in its frame, a 14-byte header and 80 segments
+    // of 256 KiB with 28 bytes each.
+    expect(sizes.chunkSize + frameOverheadBytes(sizes.chunkSize)).toBe(20_842_702)
     expect(sizes.packTargetBytes).toBe(sizes.blobMaxBytes - 256 * 1024)
   })
 
@@ -177,7 +178,7 @@ describe('loadConfig', () => {
 
   it('refuses pack sizes that can never fit an attachment', () => {
     expect(problems({ PACK_THRESHOLD_BYTES: '20 MiB', PACK_TARGET_BYTES: '20 MiB' })).toEqual([
-      expect.stringMatching(/^PACK_THRESHOLD_BYTES: must be at most 20905946 bytes/),
+      expect.stringMatching(/^PACK_THRESHOLD_BYTES: too large for its frame to fit in a pack/),
       expect.stringMatching(/^PACK_TARGET_BYTES: must be at most BLOB_MAX_BYTES/),
     ])
   })

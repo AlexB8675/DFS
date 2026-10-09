@@ -131,7 +131,9 @@ pages' version check off. Migrations run on their own before the API and the
 bot start again. To go back, deploy the earlier commit (`git checkout
 <commit>`, then `docker/deploy.sh`): older code runs on a newer database only
 when the migrations since added things. 0019 (`0c14ae7`) and 0020 (`361410b`)
-dropped columns and states, so code from before them can't.
+dropped columns and states, so code from before them can't. Nor can code from
+before chunks were sealed in segments (frame format 2, DESIGN D37): it can't
+read any file uploaded after it.
 
 The first deploy with the media service (DESIGN §6.7) builds its image too,
 `dfs-media`: about 1 GB, most of it ffmpeg's libraries, and a few minutes on

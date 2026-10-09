@@ -223,6 +223,36 @@ describe('readVersion', () => {
     await expect(readVersion(app, version, 0, 11).next()).rejects.toBeInstanceOf(ContentError)
   })
 
+  it('reads a stored format 1 frame whole, even from a store that can stream', async () => {
+    const { app, version, plaintext, frames, locations, execute } = await fixture()
+    locations.forEach((chunk, index) => {
+      Object.assign(chunk, {
+        staged_path: null,
+        blob_id: index + 1,
+        blob_offset: 0,
+        blob_state: 'stored',
+      })
+    })
+    execute.mockResolvedValue({
+      rows: locations,
+      rowCount: locations.length,
+      command: 'SELECT',
+      fields: [],
+      oid: 0,
+    })
+    const stream = vi.fn()
+    Object.assign(app, {
+      blobStore: {
+        read: (blob: { id: number }) => Promise.resolve(frames[blob.id - 1] ?? new Uint8Array()),
+        stream,
+      },
+    })
+    const parts: Uint8Array[] = []
+    for await (const part of readVersion(app, version, 1, 10)) parts.push(part)
+    expect(Buffer.concat(parts)).toEqual(Buffer.from(plaintext.subarray(1, 11)))
+    expect(stream).not.toHaveBeenCalled()
+  })
+
   it('serves cached frames when the bot can’t sign their URLs', async () => {
     const { app, version, plaintext, frames, locations, execute } = await fixture()
     const dir = await mkdtemp(path.join(tmpdir(), 'dfs-reader-cache-'))

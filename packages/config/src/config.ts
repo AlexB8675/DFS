@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { z } from 'zod'
-import { deriveSizes, FRAME_OVERHEAD_BYTES, GiB, MiB, parseByteSize } from './sizes.ts'
+import { deriveSizes, frameOverheadBytes, GiB, MiB, parseByteSize } from './sizes.ts'
 
 // Settings from the environment (DESIGN.md §15), parsed once at startup.
 // Development and tests get defaults that match docker-compose.dev.yml and
@@ -288,9 +288,10 @@ export function loadConfig(env: Record<string, string | undefined>, options: Loa
   if (derived.chunkSize <= 0) {
     problems.push('DISCORD_ATTACHMENT_LIMIT: too small to hold a chunk')
   }
-  if (raw.PACK_THRESHOLD_BYTES + FRAME_OVERHEAD_BYTES > derived.blobMaxBytes) {
+  const packFrameBytes = raw.PACK_THRESHOLD_BYTES + frameOverheadBytes(raw.PACK_THRESHOLD_BYTES)
+  if (packFrameBytes > derived.blobMaxBytes) {
     problems.push(
-      `PACK_THRESHOLD_BYTES: must be at most ${String(derived.blobMaxBytes - FRAME_OVERHEAD_BYTES)} bytes, so every small file's frame fits in a pack`,
+      `PACK_THRESHOLD_BYTES: too large for its frame to fit in a pack (${String(packFrameBytes)} bytes, over ${String(derived.blobMaxBytes)})`,
     )
   }
   if (packTargetBytes > derived.blobMaxBytes) {

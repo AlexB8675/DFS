@@ -102,6 +102,115 @@ export async function readBlobFromCdn(
 }
 
 /**
+ * `readBlobFromCdn`'s bytes as they arrive (§6.2). The URL is signed again
+ * if the CDN refuses it before any byte, as there. Fewer bytes than asked
+ * for fail the stream, so a range cut short is never taken for a whole one.
+ */
+export async function* streamBlobFromCdn(
+  fetcher: typeof fetch,
+  blob: StoredBlob,
+  offset: number,
+  length: number,
+  sign: (blob: StoredBlob) => Promise<CdnUrl | null>,
+  signal?: AbortSignal,
+): AsyncGenerator<Uint8Array, void, undefined> {
+  const known = isFresh(blob.url) ? blob.url : null
+  const timeout = AbortSignal.timeout(CDN_TIMEOUT_MS)
+  const combined = signal ? AbortSignal.any([signal, timeout]) : timeout
+  const open = async (url: CdnUrl | null): Promise<Response | null> => {
+    if (!url) return null
+    try {
+      return await openCdnRange(fetcher, url.url, offset, length, combined, signal)
+    } catch (error) {
+      if (error instanceof CdnRefusedError) return null
+      throw error
+    }
+  }
+  // A URL from the database may have been revoked; a newly signed one wasn't.
+  const response =
+    (await open(known ?? (await sign(blob)))) ?? (known ? await open(await sign(blob)) : null)
+  if (!response) {
+    throw new BlobStoreError(`Blob ${String(blob.id)} is gone from Discord.`, { retryable: false })
+  }
+  const body = response.body?.getReader()
+  if (!body) throw new BlobStoreError('The Discord CDN sent no body.', { retryable: true })
+  // A CDN that sent the whole file has the bytes before `offset` skipped.
+  let skip = response.status === 200 ? offset : 0
+  let left = length
+  try {
+    while (left > 0) {
+      let next: Awaited<ReturnType<typeof body.read>>
+      try {
+        next = await body.read()
+      } catch (error) {
+        if (signal?.aborted) throw signal.reason
+        throw new BlobStoreError('Reading from the Discord CDN failed.', {
+          retryable: true,
+          cause: error,
+        })
+      }
+      if (next.done) {
+        throw new BlobStoreError('The Discord CDN sent fewer bytes than asked for.', {
+          retryable: true,
+        })
+      }
+      let piece = next.value as Uint8Array
+      if (skip > 0) {
+        const skipped = Math.min(skip, piece.length)
+        skip -= skipped
+        piece = piece.subarray(skipped)
+      }
+      if (piece.length === 0) continue
+      if (piece.length > left) piece = piece.subarray(0, left)
+      left -= piece.length
+      yield piece
+    }
+  } finally {
+    // Stopped early, or done: let the rest of the response go.
+    void body.cancel().catch(() => undefined)
+  }
+}
+
+/** Starts a Range request and checks its answer before any of its body is used. */
+async function openCdnRange(
+  fetcher: typeof fetch,
+  url: string,
+  offset: number,
+  length: number,
+  combined: AbortSignal,
+  signal: AbortSignal | undefined,
+): Promise<Response> {
+  let response: Response
+  try {
+    response = await fetcher(url, {
+      headers: { Range: `bytes=${String(offset)}-${String(offset + length - 1)}` },
+      signal: combined,
+    })
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason
+    throw new BlobStoreError('Reading from the Discord CDN failed.', {
+      retryable: true,
+      cause: error,
+    })
+  }
+  if (response.status === 206) {
+    const range = /^bytes (\d+)-/.exec(response.headers.get('content-range') ?? '')
+    if (range && Number(range[1]) === offset) return response
+    await response.body?.cancel()
+    throw new BlobStoreError('The Discord CDN sent a different range than asked for.', {
+      retryable: true,
+    })
+  }
+  if (response.status === 200) return response
+  await response.body?.cancel()
+  if (response.status === 403 || response.status === 404) throw new CdnRefusedError(response.status)
+  throw new BlobStoreError(`The Discord CDN answered ${String(response.status)}.`, {
+    retryable: response.status === 429 || response.status >= 500,
+    retryAfterMs: retryAfterMs(response.headers.get('retry-after')),
+  })
+}
+
+/**
  * Reads `length` bytes at `offset` with an HTTP Range request, so a frame
  * out of a 20 MiB pack moves only its own bytes. If the CDN ignores the
  * range and sends the whole file, the frame is cut out of it. Once `signal`

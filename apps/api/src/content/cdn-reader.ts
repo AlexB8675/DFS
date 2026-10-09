@@ -3,6 +3,7 @@ import { refreshedUrlsSchema } from '@dfs/shared'
 import {
   BlobStoreError,
   readBlobFromCdn,
+  streamBlobFromCdn,
   type BlobReader,
   type CdnUrl,
   type StoredBlob,
@@ -56,6 +57,37 @@ export class CdnBlobReader implements BlobReader {
       )
       this.#metrics?.record('cdn.reads', data.length)
       return data
+    } catch (error) {
+      // A read its reader gave up on didn't fail.
+      if (!signal?.aborted) this.#metrics?.record('cdn.failures')
+      throw error
+    }
+  }
+
+  /** `read`'s bytes as they arrive, counted the same way once done. */
+  async *stream(
+    blob: StoredBlob,
+    offset: number,
+    length: number,
+    signal?: AbortSignal,
+  ): AsyncGenerator<Uint8Array> {
+    let bytes = 0
+    try {
+      for await (const piece of streamBlobFromCdn(
+        this.#fetch,
+        blob,
+        offset,
+        length,
+        async (unsigned) => {
+          const urls = await this.signUrls([unsigned])
+          return urls.get(unsigned.id) ?? null
+        },
+        signal,
+      )) {
+        bytes += piece.length
+        yield piece
+      }
+      this.#metrics?.record('cdn.reads', bytes)
     } catch (error) {
       // A read its reader gave up on didn't fail.
       if (!signal?.aborted) this.#metrics?.record('cdn.failures')

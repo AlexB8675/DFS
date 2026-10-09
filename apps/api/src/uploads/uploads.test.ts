@@ -6,6 +6,7 @@ import { nameKey, type CreateUploadInput } from '@dfs/shared'
 import { eq, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import pg from 'pg'
+import { chunkFrameLength } from '@dfs/crypto'
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest'
 import { buildApp } from '../app.ts'
 import type { Auth } from '../auth/sessions.ts'
@@ -20,6 +21,9 @@ import {
   keepUploadsAlive,
   receivePart,
 } from './uploads.ts'
+
+/** The frame of the 3-byte parts these tests send. */
+const PART_FRAME = chunkFrameLength(3)
 
 let database: TestDatabase
 let app: FastifyInstance
@@ -91,14 +95,11 @@ async function readPart(versionId: string, size: number): Promise<Buffer> {
     SELECT id AS version_id, size_bytes::float8 AS size_bytes, chunk_size, chunk_count,
       wrapped_dek, key_id FROM file_versions WHERE id = ${versionId}`)
   if (!version) throw new Error('Missing test version.')
-  const stream = readVersion(app, version, 0, size - 1)
-  try {
-    const part = await stream.next()
-    if (part.done) throw new Error('No bytes read.')
-    return Buffer.from(part.value.buffer, part.value.byteOffset, part.value.byteLength)
-  } finally {
-    await stream.return(undefined)
-  }
+  // A segment at a time (§7.3).
+  const pieces: Uint8Array[] = []
+  for await (const piece of readVersion(app, version, 0, size - 1)) pieces.push(piece)
+  if (pieces.length === 0) throw new Error('No bytes read.')
+  return Buffer.concat(pieces)
 }
 
 describe('receiving parts', () => {
@@ -113,7 +114,7 @@ describe('receiving parts', () => {
       await write(path, frame)
     })
     const hash = vi.spyOn(crypto.subtle, 'digest').mockImplementation((algorithm, data) => {
-      if (data.byteLength === 41) hashing.resolve(undefined)
+      if (data.byteLength === PART_FRAME) hashing.resolve(undefined)
       return digest(algorithm, data)
     })
     const transaction = vi.spyOn(app.db, 'transaction')
@@ -155,7 +156,7 @@ describe('receiving parts', () => {
       await write(path, frame)
     })
     const hash = vi.spyOn(crypto.subtle, 'digest').mockImplementation((algorithm, data) => {
-      if (data.byteLength !== 41) return digest(algorithm, data)
+      if (data.byteLength !== PART_FRAME) return digest(algorithm, data)
       hashing.resolve(undefined)
       return Promise.reject(error)
     })
@@ -199,7 +200,7 @@ describe('receiving parts', () => {
     const error = new Error('Disk full.')
     const write = vi.spyOn(app.staging, 'write').mockRejectedValueOnce(error)
     const hash = vi.spyOn(crypto.subtle, 'digest').mockImplementation(async (algorithm, data) => {
-      if (data.byteLength === 41) {
+      if (data.byteLength === PART_FRAME) {
         hashing.resolve(undefined)
         await release.promise
       }

@@ -1,7 +1,8 @@
-import { sealFrame, sha256, type AesKey } from '@dfs/crypto'
+import { sealChunkFrame, sha256, type AesKey } from '@dfs/crypto'
 import type { Staging } from '@dfs/storage'
 
-// Hashing and fsync share the native thread pool. Overlap under light load;
+// Chunks are sealed in format 2 (§7.3): segments, so reads can check part of
+// one. Hashing and fsync share the native thread pool. Overlap under light load;
 // additional writers stay sequential so busy uploads do not flood that pool.
 const writers = new WeakMap<Staging, number>()
 
@@ -16,7 +17,7 @@ export async function stageFrame(
   const active = (writers.get(staging) ?? 0) + 1
   writers.set(staging, active)
   try {
-    const frame = await sealFrame(key, body, context)
+    const frame = await sealChunkFrame(key, body, context)
     if ((writers.get(staging) ?? 0) > 1) {
       await staging.write(file, frame)
       return { frame, hash: await sha256(frame) }

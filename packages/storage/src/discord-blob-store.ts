@@ -9,7 +9,14 @@ import {
   type PutResult,
   type StoredBlob,
 } from './blob-store.ts'
-import { attachmentUrl, blobFilename, cdnUrl, readBlobFromCdn, refreshCdnUrls } from './cdn.ts'
+import {
+  attachmentUrl,
+  blobFilename,
+  cdnUrl,
+  readBlobFromCdn,
+  refreshCdnUrls,
+  streamBlobFromCdn,
+} from './cdn.ts'
 import { blobMessage, deleteMessage } from './discord-messages.ts'
 import { discordProblem, type DiscordRest } from './discord.ts'
 
@@ -146,6 +153,25 @@ export class DiscordBlobStore implements BlobStore {
     signal?: AbortSignal,
   ): Promise<Uint8Array> {
     return readBlobFromCdn(
+      this.#fetch,
+      blob,
+      offset,
+      length,
+      async (unsigned) => {
+        const urls = await this.signUrls([unsigned])
+        return urls.get(unsigned.id) ?? null
+      },
+      signal,
+    )
+  }
+
+  stream(
+    blob: StoredBlob,
+    offset: number,
+    length: number,
+    signal?: AbortSignal,
+  ): AsyncIterable<Uint8Array> {
+    return streamBlobFromCdn(
       this.#fetch,
       blob,
       offset,

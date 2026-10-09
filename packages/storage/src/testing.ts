@@ -53,6 +53,12 @@ export class FakeDiscord implements DiscordRest {
    */
   holdCdnFrom = Infinity
   cdnAborted = 0
+  /** The `Range` of every CDN request, or `''` for none. */
+  readonly cdnRanges: string[] = []
+  /** The next body the CDN sends stops after this many bytes until `releaseCdn`. */
+  holdNextBodyAt: number | null = null
+  /** The next body the CDN sends ends after this many bytes, as a cut connection does. */
+  cutNextBodyAt: number | null = null
   /** Stores the next message, then fails as if its answer were lost. */
   loseNextAnswer = false
   /** Keeps one byte less of the next attachment. */
@@ -66,7 +72,7 @@ export class FakeDiscord implements DiscordRest {
   readonly #served = new Set<string>()
   /** Attachments of deleted messages, by unsigned URL. */
   readonly #deleted = new Set<string>()
-  #held = Promise.withResolvers<undefined>()
+  #held = Promise.withResolvers<boolean>()
   #sequence = 0n
 
   addChannel(
@@ -116,10 +122,13 @@ export class FakeDiscord implements DiscordRest {
     this.#signed.clear()
   }
 
-  /** Lets the CDN answer what it holds (`holdCdnFrom`). */
-  releaseCdn(): void {
-    this.#held.resolve(undefined)
-    this.#held = Promise.withResolvers<undefined>()
+  /**
+   * Lets the CDN answer what it holds (`holdCdnFrom`), and send the rest of
+   * a body it held (`holdNextBodyAt`), or, with `fail`, break that body off.
+   */
+  releaseCdn(fail = false): void {
+    this.#held.resolve(fail)
+    this.#held = Promise.withResolvers<boolean>()
   }
 
   get = (route: DiscordRoute, options?: RequestData): Promise<unknown> => {
@@ -251,18 +260,46 @@ export class FakeDiscord implements DiscordRest {
       return Promise.resolve(new Response('This content is no longer available.', { status: 404 }))
     }
     this.#served.add(url.href)
-    const range = /^bytes=(\d+)-(\d+)$/.exec(new Headers(init?.headers).get('range') ?? '')
-    if (!range || this.ignoreRange) return Promise.resolve(new Response(data.slice()))
+    const asked = new Headers(init?.headers).get('range') ?? ''
+    this.cdnRanges.push(asked)
+    const range = /^bytes=(\d+)-(\d+)$/.exec(asked)
+    if (!range || this.ignoreRange) return Promise.resolve(new Response(this.#body(data.slice())))
     const start = Number(range[1])
     const end = Math.min(Number(range[2]), data.length - 1)
     return Promise.resolve(
-      new Response(data.slice(start, end + 1), {
+      new Response(this.#body(data.slice(start, end + 1)), {
         status: 206,
         headers: {
           'Content-Range': `bytes ${String(start)}-${String(end)}/${String(data.length)}`,
         },
       }),
     )
+  }
+
+  /** A body as the CDN sends it: whole, or held or cut as the next one is to be. */
+  #body(bytes: Uint8Array): Uint8Array | ReadableStream<Uint8Array> {
+    const hold = this.holdNextBodyAt
+    const cut = this.cutNextBodyAt
+    this.holdNextBodyAt = null
+    this.cutNextBodyAt = null
+    if (hold === null && cut === null) return bytes
+    const held = this.#held.promise
+    return new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const sent = bytes.subarray(0, Math.min(bytes.length, hold ?? cut ?? bytes.length))
+        if (sent.length > 0) controller.enqueue(sent)
+        if (cut !== null) {
+          controller.close()
+          return
+        }
+        if (await held) {
+          controller.error(new Error('FakeDiscord: the connection was reset'))
+          return
+        }
+        controller.enqueue(bytes.subarray(sent.length))
+        controller.close()
+      },
+    })
   }
 
   #postMessage(channelId: string, options: RequestData | undefined): Promise<unknown> {

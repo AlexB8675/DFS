@@ -6,8 +6,14 @@ export const MiB = 1024 * KiB
 export const GiB = 1024 * MiB
 export const TiB = 1024 * GiB
 
-/** Header and GCM tag of one DFS1 frame (§7.3). */
-export const FRAME_OVERHEAD_BYTES = 38
+/**
+ * Bytes a chunk's frame adds to its plaintext (format 2, §7.3): its header,
+ * and each 256 KiB segment's nonce and tag. As @dfs/crypto's
+ * `chunkFrameLength` says, which a test in apps/api checks.
+ */
+export function frameOverheadBytes(plaintextBytes: number): number {
+  return 14 + 28 * Math.max(1, Math.ceil(plaintextBytes / (256 * KiB)))
+}
 /** Every attachment stays this far under Discord's limit. */
 const ATTACHMENT_HEADROOM = 64 * KiB
 /** Chunks are a multiple of this, so byte offsets map to chunks cheaply. */
@@ -42,7 +48,9 @@ export interface DerivedSizes {
 
 export function deriveSizes(attachmentLimit: number): DerivedSizes {
   const blobMaxBytes = attachmentLimit - ATTACHMENT_HEADROOM
+  // The overhead of a frame as large as a blob, at least what a chunk's is.
   const chunkSize =
-    Math.floor((blobMaxBytes - FRAME_OVERHEAD_BYTES) / CHUNK_ALIGNMENT) * CHUNK_ALIGNMENT
+    Math.floor((blobMaxBytes - frameOverheadBytes(blobMaxBytes)) / CHUNK_ALIGNMENT) *
+    CHUNK_ALIGNMENT
   return { blobMaxBytes, chunkSize, defaultPackTargetBytes: blobMaxBytes - PACK_TARGET_HEADROOM }
 }

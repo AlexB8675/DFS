@@ -4,7 +4,18 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { chunkContext, journalBatchContext, uuidBytes } from './context.ts'
-import { FRAME_OVERHEAD, FrameError, openFrame, readFrameHeader, sealFrame } from './frame.ts'
+import {
+  chunkFrameLayout,
+  chunkFrameLength,
+  FRAME_OVERHEAD,
+  FrameError,
+  openFrame,
+  openSegment,
+  readFrameHeader,
+  sealChunkFrame,
+  sealFrame,
+  SEGMENT_BYTES,
+} from './frame.ts'
 import { fromSha256Hex, sha256, toHex } from './hash.ts'
 import { generateDek, importAesKey, MasterKeys, type AesKey } from './keys.ts'
 import { openObject, sealObject } from './object.ts'
@@ -113,6 +124,157 @@ describe('frames (DESIGN §7.3)', () => {
       expect(backing[4]).toBe(0x5a)
       expect(backing[frame.length + 5]).toBe(0x5a)
     }
+  })
+})
+
+describe('format 2 chunk frames (DESIGN §7.3, D37)', () => {
+  let key: AesKey
+  const context = chunkContext(versionId, 4)
+
+  beforeAll(async () => {
+    key = await importAesKey(generateDek())
+  })
+
+  function bytes(size: number): Uint8Array {
+    return Uint8Array.from({ length: size }, (_, index) => (index * 7 + 3) % 251)
+  }
+
+  it('seals a chunk in 256 KiB segments and opens it whole, at every edge of a segment', async () => {
+    expect(SEGMENT_BYTES).toBe(256 * 1024)
+    for (const size of [
+      0,
+      1,
+      SEGMENT_BYTES - 1,
+      SEGMENT_BYTES,
+      SEGMENT_BYTES + 1,
+      3 * SEGMENT_BYTES + 5,
+    ]) {
+      const plaintext = bytes(size)
+      const frame = await sealChunkFrame(key, plaintext, context)
+      const segments = Math.max(1, Math.ceil(size / SEGMENT_BYTES))
+      expect(frame.length).toBe(14 + size + 28 * segments)
+      expect(chunkFrameLength(size)).toBe(frame.length)
+      expect(readFrameHeader(frame)).toEqual({
+        flags: 0,
+        ciphertextLength: size,
+        frameLength: frame.length,
+      })
+      expect(await openFrame(key, frame, context)).toEqual(plaintext)
+      expect(chunkFrameLayout(size, frame.length)?.segments).toBe(segments)
+    }
+  })
+
+  it('opens any segment alone, from the layout its sizes give', async () => {
+    const plaintext = bytes(3 * SEGMENT_BYTES + 5)
+    const frame = await sealChunkFrame(key, plaintext, context)
+    const layout = chunkFrameLayout(plaintext.length, frame.length)
+    if (!layout) throw new Error('Not a format 2 layout.')
+    for (let index = 0; index < layout.segments; index += 1) {
+      const start = layout.segmentStart(index)
+      const segment = frame.subarray(start, start + layout.segmentLength(index))
+      const from = layout.plaintextStart(index)
+      expect(await openSegment(key, layout, index, segment, context)).toEqual(
+        plaintext.subarray(from, from + layout.plaintextSize(index)),
+      )
+    }
+    expect(layout.segmentOf(0)).toBe(0)
+    expect(layout.segmentOf(SEGMENT_BYTES)).toBe(1)
+    expect(layout.segmentOf(plaintext.length - 1)).toBe(3)
+  })
+
+  it('tells format 1 from format 2 by their sizes, and refuses sizes that fit neither', () => {
+    expect(chunkFrameLayout(1000, 1038)).toBeNull()
+    expect(chunkFrameLayout(1000, chunkFrameLength(1000))).not.toBeNull()
+    expect(() => chunkFrameLayout(1000, 1040)).toThrow(FrameError)
+  })
+
+  it('fails a changed byte anywhere, in the segment it is in', async () => {
+    const plaintext = bytes(2 * SEGMENT_BYTES + 9)
+    const frame = await sealChunkFrame(key, plaintext, context)
+    const layout = chunkFrameLayout(plaintext.length, frame.length)
+    if (!layout) throw new Error('Not a format 2 layout.')
+    for (const at of [0, 5, 13, 14, 20, 30, layout.segmentStart(1) + 100, frame.length - 1]) {
+      const changed = Uint8Array.from(frame)
+      changed[at] = (changed[at] ?? 0) ^ 1
+      await expect(openFrame(key, changed, context)).rejects.toThrow(FrameError)
+    }
+    // A segment's own check catches it, with the rest untouched.
+    const changed = Uint8Array.from(frame)
+    const second = layout.segmentStart(1)
+    changed[second + 50] = (changed[second + 50] ?? 0) ^ 1
+    const segment = (index: number, of: Uint8Array) =>
+      of.subarray(
+        layout.segmentStart(index),
+        layout.segmentStart(index) + layout.segmentLength(index),
+      )
+    await expect(openSegment(key, layout, 1, segment(1, changed), context)).rejects.toThrow(
+      FrameError,
+    )
+    expect(await openSegment(key, layout, 0, segment(0, changed), context)).toEqual(
+      plaintext.subarray(0, SEGMENT_BYTES),
+    )
+  })
+
+  it('fails segments swapped, dropped, or taken from another chunk', async () => {
+    const plaintext = bytes(3 * SEGMENT_BYTES)
+    const frame = await sealChunkFrame(key, plaintext, context)
+    const layout = chunkFrameLayout(plaintext.length, frame.length)
+    if (!layout) throw new Error('Not a format 2 layout.')
+    const segment = (index: number) =>
+      frame.subarray(
+        layout.segmentStart(index),
+        layout.segmentStart(index) + layout.segmentLength(index),
+      )
+    // Swapped: each is checked as the segment it stands in for.
+    await expect(openSegment(key, layout, 0, segment(1), context)).rejects.toThrow(FrameError)
+    const swapped = Uint8Array.from(frame)
+    swapped.set(segment(1), layout.segmentStart(0))
+    swapped.set(segment(0), layout.segmentStart(1))
+    await expect(openFrame(key, swapped, context)).rejects.toThrow(FrameError)
+    // Dropped: the last segment cut off, the header told of two.
+    const header = Buffer.from(frame.subarray(0, 14))
+    header.writeUInt32BE(2 * SEGMENT_BYTES, 6)
+    const cut = Buffer.concat([header, frame.subarray(14, layout.segmentStart(2))])
+    expect(readFrameHeader(cut).frameLength).toBe(cut.length)
+    await expect(openFrame(key, cut, context)).rejects.toThrow(FrameError)
+    // From another chunk, or another version.
+    await expect(openFrame(key, frame, chunkContext(versionId, 5))).rejects.toThrow(FrameError)
+    await expect(openFrame(key, frame, chunkContext(otherVersionId, 4))).rejects.toThrow(FrameError)
+    await expect(
+      openSegment(key, layout, 0, segment(0), chunkContext(versionId, 5)),
+    ).rejects.toThrow(FrameError)
+  })
+
+  it('refuses another segment size, and a segment of the wrong length', async () => {
+    const frame = await sealChunkFrame(key, bytes(10), context)
+    const other = Buffer.from(frame)
+    other.writeUInt32BE(SEGMENT_BYTES * 2, 10)
+    expect(() => readFrameHeader(other)).toThrow(FrameError)
+    const layout = chunkFrameLayout(10, frame.length)
+    if (!layout) throw new Error('Not a format 2 layout.')
+    await expect(
+      openSegment(key, layout, 0, frame.subarray(14, frame.length - 1), context),
+    ).rejects.toThrow('wrong size')
+  })
+
+  it('pins the format: a segment opens with native AES-GCM', async () => {
+    const raw = generateDek()
+    const native = await importAesKey(raw)
+    const plaintext = bytes(SEGMENT_BYTES + 3)
+    const frame = await sealChunkFrame(native, plaintext, context)
+    const header = frame.subarray(0, 14)
+    expect(Buffer.from(header.subarray(0, 5)).toString('latin1')).toBe('DFS1')
+    // The second, and last, segment: nonce, 3 bytes, tag.
+    const start = 14 + SEGMENT_BYTES + 28
+    const aad = Buffer.concat([header, Buffer.from([0, 0, 0, 1, 1]), context])
+    const decipher = createDecipheriv('aes-256-gcm', raw, frame.subarray(start, start + 12))
+    decipher.setAAD(aad)
+    decipher.setAuthTag(frame.subarray(frame.length - 16))
+    expect(
+      new Uint8Array(
+        Buffer.concat([decipher.update(frame.subarray(start + 12, -16)), decipher.final()]),
+      ),
+    ).toEqual(plaintext.subarray(SEGMENT_BYTES))
   })
 })
 

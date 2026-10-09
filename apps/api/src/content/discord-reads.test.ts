@@ -4,6 +4,7 @@ import { ApiClient, createFolder, text, uploadFile, workspace } from '@dfs/contr
 import { storageChannels } from '@dfs/db'
 import { sql } from 'drizzle-orm'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
+import { ChunkFrameLayout } from '@dfs/crypto'
 import { DiscordBlobStore } from '@dfs/storage'
 import { FakeDiscord } from '@dfs/storage/testing'
 import { setTimeout } from 'node:timers/promises'
@@ -189,6 +190,153 @@ describe('reading from Discord', () => {
     }
     await setTimeout(200)
     expect(discord.cdnRequests).toBe(3)
+  })
+
+  /** The bytes of a stored file of `chunks` chunks, for checking what comes back. */
+  function contentOf(chunks: number): Uint8Array {
+    return new Uint8Array(chunks * app.config.sizes.chunkSize).map((_, i) => i % 241)
+  }
+
+  /** Reads `response`'s body until it holds `bytes`, or fails after `ms`. */
+  async function receive(
+    body: ReadableStreamDefaultReader<Uint8Array>,
+    bytes: number,
+    ms = 3000,
+  ): Promise<Uint8Array[]> {
+    const received: Uint8Array[] = []
+    let total = 0
+    const deadline = Date.now() + ms
+    while (total < bytes) {
+      const next = await Promise.race([
+        body.read(),
+        setTimeout(Math.max(0, deadline - Date.now())).then(() => null),
+      ])
+      if (next === null) throw new Error(`Only ${String(total)} of ${String(bytes)} bytes came.`)
+      if (next.done) break
+      received.push(next.value)
+      total += next.value.length
+    }
+    return received
+  }
+
+  it('streams a cold chunk: its first segment comes before the rest has arrived', async () => {
+    const session = await storedFile('Streamed', 2)
+    discord.cdnRequests = 0
+    // The first frame is held after its header and first segment.
+    discord.holdNextBodyAt = 14 + 256 * 1024 + 28
+    try {
+      const response = await client.fetch('GET', `/files/${session.nodeId}/content`, {
+        headers: { Range: 'bytes=0-' },
+      })
+      const body = response.body?.getReader()
+      if (!body) throw new Error('No body.')
+      const first = await receive(body, 256 * 1024)
+      expect(Buffer.concat(first).subarray(0, 256 * 1024)).toEqual(
+        Buffer.from(contentOf(2).subarray(0, 256 * 1024)),
+      )
+      // Nothing is read ahead until the client has taken a whole chunk.
+      expect(discord.cdnRequests).toBe(1)
+      discord.releaseCdn()
+      const rest = await receive(body, 2 * app.config.sizes.chunkSize, 10_000)
+      expect(Buffer.concat([...first, ...rest]).equals(Buffer.from(contentOf(2)))).toBe(true)
+    } finally {
+      discord.releaseCdn()
+    }
+  })
+
+  it('asks the CDN for only the segments a range covers', async () => {
+    const { chunkSize } = app.config.sizes
+    const session = await storedFile('Sought', 1)
+    discord.cdnRanges.length = 0
+    const response = await client.fetch('GET', `/files/${session.nodeId}/content`, {
+      headers: { Range: 'bytes=300000-300099' },
+    })
+    expect(Buffer.from(await response.arrayBuffer())).toEqual(
+      Buffer.from(contentOf(1).subarray(300_000, 300_100)),
+    )
+    const layout = new ChunkFrameLayout(chunkSize)
+    const start = layout.segmentStart(1)
+    expect(discord.cdnRanges).toEqual([
+      `bytes=${String(start)}-${String(start + layout.segmentLength(1) - 1)}`,
+    ])
+  })
+
+  it('fails a range the CDN cuts short, rather than sending it as whole', async () => {
+    const session = await storedFile('Cut', 1)
+    // Before any segment is whole: nothing is sent.
+    discord.cutNextBodyAt = 100_000
+    const early = await client.fetch('GET', `/files/${session.nodeId}/content`, {
+      headers: { Range: 'bytes=0-999' },
+    })
+    expect(early.status).toBeGreaterThanOrEqual(500)
+    await early.body?.cancel()
+    // After one: the download breaks off, short of its length.
+    await app.frameCache?.clear()
+    discord.cutNextBodyAt = 300_000
+    const late = await client.fetch('GET', `/files/${session.nodeId}/content`)
+    expect(late.status).toBe(200)
+    await expect(late.arrayBuffer()).rejects.toThrow()
+  })
+
+  it('resumes a frame that moves mid-stream at its next segment, sending none twice', async () => {
+    const session = await storedFile('Moving', 1)
+    const store = app.blobStore as DiscordBlobStore
+    discord.holdNextBodyAt = 14 + 256 * 1024 + 28 + 1000
+    try {
+      const response = await client.fetch('GET', `/files/${session.nodeId}/content`)
+      const body = response.body?.getReader()
+      if (!body) throw new Error('No body.')
+      const first = await receive(body, 256 * 1024)
+
+      // Moved as compaction moves it: posted again, the chunk pointed there,
+      // the old message deleted.
+      const { rows } = await app.db.execute<{
+        id: number
+        channel: string
+        message: string
+        size: number
+      }>(sql`
+        SELECT blob.id::float8 AS id, channel.discord_channel_id AS channel,
+          blob.message_id AS message, blob.size_bytes AS size
+        FROM chunks chunk JOIN blobs blob ON blob.id = chunk.blob_id
+        JOIN storage_channels channel ON channel.id = blob.channel_id
+        WHERE chunk.version_id = ${session.versionId}`)
+      const old = rows[0]
+      if (!old) throw new Error('No blob.')
+      const attachment = discord.messages.find((message) => message.id === old.message)
+        ?.attachments[0]?.url
+      const data = attachment ? discord.cdn.get(attachment) : undefined
+      if (!data) throw new Error('The blob isn’t in Discord.')
+      const { rows: created } = await app.db.execute<{ id: number }>(sql`
+        INSERT INTO blobs (kind, state, size_bytes, live_bytes, frame_count)
+        VALUES ('solo', 'building', ${old.size}, 0, 1) RETURNING id::float8 AS id`)
+      const moved = created[0]?.id ?? 0
+      const { location } = await store.put({ id: moved, kind: 'solo', frameCount: 1 }, () =>
+        Promise.resolve(data),
+      )
+      await app.db.execute(sql`
+        UPDATE blobs SET state = 'stored', stored_at = now(), live_bytes = ${old.size},
+          channel_id = ${location.channelId}, message_id = ${location.messageId},
+          attachment_id = ${location.attachmentId}
+        WHERE id = ${moved}`)
+      await app.db.execute(sql`UPDATE chunks SET blob_id = ${moved} WHERE blob_id = ${old.id}`)
+      await app.db.execute(
+        sql`UPDATE blobs SET state = 'deleted', live_bytes = 0 WHERE id = ${old.id}`,
+      )
+      await discord.delete(`/channels/${old.channel}/messages/${old.message}`)
+
+      discord.cdnRanges.length = 0
+      // The old read breaks off; the rest comes from the new place.
+      discord.releaseCdn(true)
+      const rest = await receive(body, app.config.sizes.chunkSize, 10_000)
+      expect(Buffer.concat([...first, ...rest]).equals(Buffer.from(contentOf(1)))).toBe(true)
+      const layout = new ChunkFrameLayout(app.config.sizes.chunkSize)
+      expect(discord.cdnRanges).toEqual([
+        `bytes=${String(layout.segmentStart(1))}-${String(app.config.sizes.chunkSize + 14 + layout.segments * 28 - 1)}`,
+      ])
+    } finally {
+      discord.releaseCdn()
+    }
   })
 
   it('answers HEAD with the length, reading nothing from Discord', async () => {

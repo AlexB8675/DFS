@@ -48,6 +48,17 @@ export interface BlobReader {
     signal?: AbortSignal,
   ) => Promise<Uint8Array>
   /**
+   * The same bytes as they arrive, for a store read through a CDN, so a
+   * reader can check and pass on part of a frame before the rest (§6.2).
+   * Fewer bytes than asked for fail it; they never just end it.
+   */
+  stream?: (
+    blob: StoredBlob,
+    offset: number,
+    length: number,
+    signal?: AbortSignal,
+  ) => AsyncIterable<Uint8Array>
+  /**
    * Fresh signed URLs, by blob ID, for a store read through a CDN, so a
    * reader can sign a whole batch at once. A blob that is gone gets none.
    */
