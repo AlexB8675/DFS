@@ -1,3 +1,4 @@
+import type { PlayProblemKind } from '@dfs/shared'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Cpu, Download, Film, Play, RotateCcw, Snail, VolumeX, X } from 'lucide-react'
 import {
@@ -208,7 +209,7 @@ export default function VideoView({
     {
       bitRate: info?.bitRate ?? null,
       decoding,
-      problem: shown && problemText(shown),
+      problem: shown && { text: problemText(shown), kind: problemKind(shown) },
     },
     active,
   )
@@ -800,6 +801,21 @@ function problemText(problem: Problem): string {
       return 'a read failed while playing'
     case 'replaced':
       return 'replaced while playing'
+  }
+}
+
+/** What kind of failure it is, for the graphs (§16). */
+function problemKind(problem: Problem): PlayProblemKind {
+  switch (problem.kind) {
+    case 'codec':
+      return 'codec'
+    case 'unsupported':
+    case 'decode':
+      return 'file'
+    case 'network':
+      return 'read'
+    case 'replaced':
+      return 'other'
   }
 }
 

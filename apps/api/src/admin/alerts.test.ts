@@ -18,6 +18,10 @@ const calm: AlertFigures = {
     cdnSlowDowns: 0,
     postFailures: 0,
     deadlocks: 0,
+    mediaFailures: 1,
+    downloadFailures: 0,
+    playReadFailures: 1,
+    firstBytes: { reads: 400, p95Ms: 900 },
   },
   network: { discordDown: false, internetDown: false },
   journal: { behindSeconds: 45, lastError: null },
@@ -60,10 +64,15 @@ describe('health alerts (DESIGN.md §16)', () => {
         cdnSlowDowns: 5,
         postFailures: 5,
         deadlocks: 2,
+        mediaFailures: 5,
+        downloadFailures: 3,
+        playReadFailures: 3,
+        firstBytes: { reads: 20, p95Ms: 5000 },
       },
     })
     expect(alerts.map((alert) => [alert.code, alert.level])).toEqual([
       ['bot_down', 'critical'],
+      ['media_failing', 'warning'],
       ['staging_full', 'warning'],
       ['db_connections', 'warning'],
       ['uploads_failed', 'warning'],
@@ -75,6 +84,9 @@ describe('health alerts (DESIGN.md §16)', () => {
       ['posts_failing', 'warning'],
       ['rate_limited', 'warning'],
       ['cdn_failing', 'warning'],
+      ['downloads_failing', 'warning'],
+      ['plays_failing', 'warning'],
+      ['downloads_slow', 'warning'],
       ['cdn_slowed', 'warning'],
       ['server_errors', 'warning'],
     ])
@@ -128,6 +140,27 @@ describe('health alerts (DESIGN.md §16)', () => {
       }),
     ])
     expect(healthAlerts({ ...calm, media: 'degraded' })).toEqual([])
+  })
+
+  it('says when the media service fails what it is asked, unless it is down already', () => {
+    const failing = { ...calm.lastHour, mediaFailures: 7 }
+    const [alert] = healthAlerts({ ...calm, lastHour: failing })
+    expect(alert).toMatchObject({ code: 'media_failing', level: 'warning' })
+    expect(alert?.detail).toContain('7 requests')
+    expect(healthAlerts({ ...calm, media: 'down', lastHour: failing }).map((a) => a.code)).toEqual([
+      'media_down',
+    ])
+  })
+
+  it('says files are slow to start only over enough reads', () => {
+    const slow = (reads: number, p95Ms: number | null) =>
+      healthAlerts({ ...calm, lastHour: { ...calm.lastHour, firstBytes: { reads, p95Ms } } })
+    expect(slow(19, 9000)).toEqual([])
+    expect(slow(20, 4900)).toEqual([])
+    expect(slow(20, null)).toEqual([])
+    const [alert] = slow(50, 6250)
+    expect(alert).toMatchObject({ code: 'downloads_slow', level: 'warning' })
+    expect(alert?.detail).toContain('6.3 s or more')
   })
 
   it('makes a nearly full staging critical', () => {

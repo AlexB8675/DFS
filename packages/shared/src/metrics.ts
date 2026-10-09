@@ -59,6 +59,19 @@ export const METRICS = {
   'downloads.bytes': byApi('counter', 'bytes', 'Sent to browsers'),
   /** Files and ZIPs being sent to browsers: the most at once since the last sample. */
   'downloads.active': byApi('gauge', 'count', 'Downloads under way (peak)'),
+  /**
+   * From a file read's start to its first byte handed to the connection
+   * (§6.2): the lookup, the cache, staging or Discord, and decrypting.
+   */
+  'downloads.first_byte_ms': byApi('timing', 'ms', 'Time to first byte of a file sent'),
+  /**
+   * What each file read waited on after its first byte, in milliseconds:
+   * storage (the cache, staging or Discord), or the client taking what was sent.
+   */
+  'downloads.storage_wait_ms': byApi('counter', 'ms', 'Sending waited for storage'),
+  'downloads.client_wait_ms': byApi('counter', 'ms', 'Sending waited for the client'),
+  /** File reads that failed while sending, not those their client cancelled. */
+  'downloads.failures': byApi('counter', 'count', 'Failed file reads'),
   'uploads.bytes': byApi('counter', 'bytes', 'Received from browsers'),
   'cache.hits': byApi('counter', 'count', 'Frame cache hits'),
   'cache.misses': byApi('counter', 'count', 'Frame cache misses'),
@@ -82,8 +95,28 @@ export const METRICS = {
   'player.plays': byApi('counter', 'count', 'Videos played'),
   /** Plays that couldn't play: a codec, a damaged file, a failed read. */
   'player.failures': byApi('counter', 'count', 'Videos that couldn’t play'),
+  /** The same, by why (`PlayProblemKind`): one counter each, as metrics have no labels. */
+  'player.failures.codec': byApi('counter', 'count', 'Videos whose codec the browser can’t play'),
+  'player.failures.file': byApi('counter', 'count', 'Videos the browser can’t read'),
+  'player.failures.read': byApi('counter', 'count', 'Videos stopped by a failed read'),
+  'player.failures.other': byApi('counter', 'count', 'Videos that couldn’t play otherwise'),
+  /** From a video player starting to its playing: the first frame may come long before. */
+  'player.start_ms': byApi('timing', 'ms', 'Time to a video’s playing'),
+  /** Each seek of a play, timed as the play's seeks were on average, to its picture. */
+  'player.seek_ms': byApi('timing', 'ms', 'Time from a seek to its picture'),
   /** Plays left before their first frame, with nothing wrong that the player saw. */
   'player.left': byApi('counter', 'count', 'Videos left before their first frame'),
+  /**
+   * The media service's answers (§6.7), timed from the API's ask: examining
+   * a file, extracting its subtitles, copying out its cover.
+   */
+  'media.probe_ms': byApi('timing', 'ms', 'Time to examine a file'),
+  'media.subtitles_ms': byApi('timing', 'ms', 'Time to extract subtitles'),
+  'media.cover_ms': byApi('timing', 'ms', 'Time to copy out a cover'),
+  /** Asks the media service didn't answer, answered with an error, or out of bounds. */
+  'media.failures': byApi('counter', 'count', 'Failed media service requests'),
+  /** Files the media service examined and found no audio or video it reads. */
+  'media.unreadable': byApi('counter', 'count', 'Files the media service couldn’t read'),
   'events.streams': byApi('gauge', 'count', 'Open event streams'),
   'auth.sign_ins': byApi('counter', 'count', 'Sign-ins'),
   'auth.failed_sign_ins': byApi('counter', 'count', 'Failed sign-ins'),

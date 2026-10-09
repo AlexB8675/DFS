@@ -4,6 +4,7 @@ import {
   type MediaInfo,
   type MediaStream,
   type PlaybackReport,
+  type PlayProblemKind,
 } from '@dfs/shared'
 import { queryOptions } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
@@ -82,8 +83,8 @@ interface PlaybackFacts {
   /** What the video needs, in bits a second, from its media info. */
   bitRate: number | null
   decoding: Decoding | null
-  /** Why it can't play, when it can't. */
-  problem: string | null
+  /** Why it can't play, when it can't: in a few words, and as a kind for the graphs. */
+  problem: { text: string; kind: PlayProblemKind } | null
 }
 
 const SAMPLE_MS = 1000
@@ -297,7 +298,8 @@ export function usePlaybackStats(
         arrivalBitsPerSecond:
           starvedMs >= 2000 ? Math.round(((starvedBytes * 8) / starvedMs) * 1000) : null,
         decoding,
-        problem: (problem ?? error)?.slice(0, 300) ?? null,
+        problem: (problem?.text ?? error)?.slice(0, 300) ?? null,
+        problemKind: problem?.kind ?? (video.error ? errorKind(video.error) : null),
       }
       void apiFetch(`${base}/playback-report`, {
         method: 'POST',
@@ -368,6 +370,18 @@ export function waitingForData(
 
 /** `HTMLMediaElement.HAVE_FUTURE_DATA`, the standard's number, for code run without a DOM. */
 const HAVE_FUTURE_DATA = 3
+
+/** What kind of failure a media element's error is, when the player named none. */
+function errorKind(error: MediaError): PlayProblemKind {
+  if (error.code === MediaError.MEDIA_ERR_NETWORK) return 'read'
+  if (
+    error.code === MediaError.MEDIA_ERR_DECODE ||
+    error.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
+  ) {
+    return 'file'
+  }
+  return 'other'
+}
 
 /** Milliseconds within the report's bounds (a day). */
 function bounded(ms: number): number {

@@ -53,6 +53,7 @@ export function sendFile(
   reply.raw.once('close', () => {
     followed?.()
     logSent(request, reply, file.version_id, start, end, stats)
+    recordSent(app, stats)
   })
   const pieces = readVersion(app, file, start, end, cancellation(reply.raw))
   return reply.send(Readable.from(paced(reply.raw, pieces, stats)))
@@ -68,10 +69,26 @@ export interface SendStats {
   sourceMs: number
   /** Time waiting for the client to take what was sent: the socket to drain. */
   clientMs: number
+  /** The source failed while the response was open: not a client that left. */
+  failed?: boolean
 }
 
 function sendStats(): SendStats {
   return { startedAt: performance.now(), bytes: 0, firstPieceMs: null, sourceMs: 0, clientMs: 0 }
+}
+
+/**
+ * A file read on the graphs once its response closes (§16): its time to
+ * the first byte, what it waited on after it, storage or the client, and
+ * whether it failed.
+ */
+function recordSent(app: FastifyInstance, stats: SendStats): void {
+  if (stats.failed) app.metrics.record('downloads.failures')
+  if (stats.firstPieceMs === null) return
+  app.metrics.time('downloads.first_byte_ms', stats.firstPieceMs)
+  // The wait for the first piece is the first byte's, already timed.
+  app.metrics.record('downloads.storage_wait_ms', Math.max(0, stats.sourceMs - stats.firstPieceMs))
+  app.metrics.record('downloads.client_wait_ms', stats.clientMs)
 }
 
 /**
@@ -168,7 +185,14 @@ export async function* paced(
   try {
     for (;;) {
       let at = performance.now()
-      const next = await pieces.next()
+      let next: IteratorResult<Uint8Array>
+      try {
+        next = await pieces.next()
+      } catch (error) {
+        // A source given up on because its client left didn't fail.
+        if (stats && !response.destroyed) stats.failed = true
+        throw error
+      }
       if (stats) stats.sourceMs += performance.now() - at
       if (next.done) return
       if (stats) {

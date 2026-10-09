@@ -35,7 +35,16 @@ const LEVELS: Partial<Record<MetricName, number>> = {
   'player.plays': 0.05,
   'player.stall_ms': 0.01,
   'player.failures': 0.002,
+  'player.failures.codec': 0.0012,
+  'player.failures.file': 0.0004,
+  'player.failures.read': 0.0002,
+  'player.failures.other': 0.0002,
   'player.left': 0.008,
+  'downloads.storage_wait_ms': 140,
+  'downloads.client_wait_ms': 900,
+  'downloads.failures': 0.0005,
+  'media.failures': 0.0003,
+  'media.unreadable': 0.0002,
   'downloads.active': 4,
   'events.streams': 6,
   'auth.sign_ins': 0.004,
@@ -75,7 +84,13 @@ const MEDIANS: Partial<Record<MetricName, number>> = {
   'check.discord.ms': 95,
   'check.internet.ms': 14,
   'cdn.first_byte_ms': 120,
+  'downloads.first_byte_ms': 60,
   'player.first_frame_ms': 900,
+  'player.start_ms': 1300,
+  'player.seek_ms': 700,
+  'media.probe_ms': 450,
+  'media.cover_ms': 120,
+  'media.subtitles_ms': 9000,
 }
 
 /** Average amount per event, for reading counters as `events`. */
@@ -87,6 +102,8 @@ const AMOUNTS: Partial<Record<MetricName, number>> = {
   'discord.waits': 250,
   'cdn.waits': 2000,
   'player.stall_ms': 3000,
+  'downloads.storage_wait_ms': 300,
+  'downloads.client_wait_ms': 2000,
 }
 
 /** Gauges that grow over time, ending at today's level. */

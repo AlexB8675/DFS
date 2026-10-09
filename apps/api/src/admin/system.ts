@@ -1,6 +1,8 @@
 import {
   formatBytes,
   METRIC_STEPS,
+  TIMING_BOUNDS,
+  timingBucketName,
   type AuditEntry,
   type AuditQuery,
   type CreateChannelInput,
@@ -10,6 +12,7 @@ import {
 } from '@dfs/shared'
 import {
   appendJournal,
+  percentile,
   storageChannels,
   storageTotals,
   systemFigures,
@@ -29,6 +32,25 @@ import { FAILING_DELETE_ATTEMPTS, healthAlerts } from './alerts.ts'
 
 /** When this API instance started. */
 export const apiStartedAt = new Date()
+
+/** The timing the overview's slow-start alert reads, and the indexes of its buckets. */
+const FIRST_BYTE = 'downloads.first_byte_ms'
+const TIMING_BUCKETS = Array.from({ length: TIMING_BOUNDS.length + 1 }, (_, index) => index)
+
+/** How many file reads were timed to their first byte, and the 95th percentile of their times. */
+function firstByteFigures(rows: { name: string; count: number; max: number }[]): {
+  reads: number
+  p95Ms: number | null
+} {
+  const byName = new Map(rows.map((row) => [row.name, row]))
+  const counts = TIMING_BUCKETS.map(
+    (index) => byName.get(timingBucketName(FIRST_BYTE, index))?.count ?? 0,
+  )
+  return {
+    reads: byName.get(FIRST_BYTE)?.count ?? 0,
+    p95Ms: percentile(counts, 0.95, byName.get(FIRST_BYTE)?.max ?? null),
+  }
+}
 
 /** How long the overview's storage totals are shared: they change slowly, and cost a scan. */
 const TOTALS_FOR_MS = 30_000
@@ -58,7 +80,7 @@ function recentTotals(app: FastifyInstance, now = Date.now()): Promise<StorageTo
  * and storage.
  */
 export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> {
-  const [bot, media, figures, recent, troubles, database] = await Promise.all([
+  const [bot, media, figures, recent, firstBytes, troubles, database] = await Promise.all([
     botHealth(app),
     mediaHealth(app),
     systemFigures(app.db, () => recentTotals(app)),
@@ -75,6 +97,9 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
       cdn_slow_downs: number
       post_failures: number
       deadlocks: number
+      media_failures: number
+      download_failures: number
+      play_read_failures: number
     }>(sql`
       SELECT
         coalesce(sum(sum) FILTER (WHERE name = 'discord.posted'
@@ -89,11 +114,27 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
         coalesce(sum(sum) FILTER (WHERE name = 'cdn.429'), 0)::float8 AS cdn_slow_downs,
         coalesce(sum(sum) FILTER (WHERE name = 'discord.post_failures'), 0)::float8
           AS post_failures,
-        coalesce(sum(sum) FILTER (WHERE name = 'pg.deadlocks'), 0)::float8 AS deadlocks
+        coalesce(sum(sum) FILTER (WHERE name = 'pg.deadlocks'), 0)::float8 AS deadlocks,
+        coalesce(sum(sum) FILTER (WHERE name = 'media.failures'), 0)::float8 AS media_failures,
+        coalesce(sum(sum) FILTER (WHERE name = 'downloads.failures'), 0)::float8
+          AS download_failures,
+        coalesce(sum(sum) FILTER (WHERE name = 'player.failures.read'), 0)::float8
+          AS play_read_failures
       FROM metrics
       WHERE step = ${METRIC_STEPS.minute} AND at >= now() - interval '1 hour'
         AND name IN ('discord.posted', 'cache.hits', 'cache.misses', 'discord.429',
-          'http.server_errors', 'cdn.failures', 'cdn.429', 'discord.post_failures', 'pg.deadlocks')`),
+          'http.server_errors', 'cdn.failures', 'cdn.429', 'discord.post_failures', 'pg.deadlocks',
+          'media.failures', 'downloads.failures', 'player.failures.read')`),
+    // The last hour's times to a file's first byte, by bucket, for their 95th percentile.
+    app.db.execute<{ name: string; count: number; max: number }>(sql`
+      SELECT name, sum(count)::float8 AS count, max(max)::float8 AS max
+      FROM metrics
+      WHERE step = ${METRIC_STEPS.minute} AND at >= now() - interval '1 hour'
+        AND name IN (${sql.join(
+          [FIRST_BYTE, ...TIMING_BUCKETS.map((index) => timingBucketName(FIRST_BYTE, index))],
+          sql`, `,
+        )})
+      GROUP BY name`),
     // Blobs that keep failing to delete, through the index of the GC's queue,
     // and how far the journal is behind.
     app.db.execute<{
@@ -163,6 +204,10 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
         cdnSlowDowns: latest?.cdn_slow_downs ?? 0,
         postFailures: latest?.post_failures ?? 0,
         deadlocks: latest?.deadlocks ?? 0,
+        mediaFailures: latest?.media_failures ?? 0,
+        downloadFailures: latest?.download_failures ?? 0,
+        playReadFailures: latest?.play_read_failures ?? 0,
+        firstBytes: firstByteFigures(firstBytes.rows),
       },
       network: {
         discordDown: !local && discordCheck.down,

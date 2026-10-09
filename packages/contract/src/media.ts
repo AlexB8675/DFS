@@ -212,6 +212,12 @@ export function mediaTests({
       expect(await client.error('POST', path, { json: { ...report, stalls: -1 } })).toMatchObject({
         status: 400,
       })
+      // A play that couldn't play says why, as a kind for the graphs.
+      const failed = { ...report, outcome: 'failed', firstFrameMs: null, problem: 'a read failed' }
+      await client.send('POST', path, { json: { ...failed, problemKind: 'read' } })
+      expect(
+        await client.error('POST', path, { json: { ...failed, problemKind: 'network' } }),
+      ).toMatchObject({ status: 400 })
       const notes = await uploadFile(client, root.id, 'notes.txt', text('notes'))
       expect(
         await client.error('POST', `/files/${notes.nodeId}/playback-report`, { json: report }),

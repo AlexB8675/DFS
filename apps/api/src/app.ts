@@ -205,7 +205,7 @@ export async function buildApp({
     'media',
     config.mediaInternalUrl
       ? new MediaExaminer({
-          client: new MediaClient(config.mediaInternalUrl, mediaFetch),
+          client: new MediaClient(config.mediaInternalUrl, mediaFetch, metrics),
           db,
           keys: app.keys,
           log: app.log,

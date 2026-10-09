@@ -241,6 +241,14 @@ const reportMs = z
 const reportCount = z.number().int().min(0).max(1_000_000_000)
 
 /**
+ * Why a play couldn't play, for the graphs (§16): the browser can't decode
+ * its codec, can't read the file (unsupported or damaged), a read failed
+ * while it played, or something else (it was replaced, say).
+ */
+export const playProblemKindSchema = z.enum(['codec', 'file', 'read', 'other'])
+export type PlayProblemKind = z.infer<typeof playProblemKindSchema>
+
+/**
  * `POST /files/:id/playback-report`: how a play went, as the player saw it,
  * sent when it ends (§10.4, §16). The API logs it and graphs its times.
  */
@@ -271,6 +279,8 @@ export const playbackReportSchema = z.object({
     .nullable(),
   /** Why it couldn't play: the browser's error, or the codec in the way. */
   problem: z.string().max(300).nullable(),
+  /** The same, as a kind; a page loaded before it was asked sends none, counted as `other`. */
+  problemKind: playProblemKindSchema.nullable().optional(),
 })
 
 export type PlaybackReport = z.infer<typeof playbackReportSchema>

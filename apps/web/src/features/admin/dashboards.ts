@@ -316,6 +316,30 @@ export const MONITORING_SECTIONS: DashboardSection[] = [
         ],
       },
       {
+        title: 'Time to first byte',
+        description:
+          'From a file read’s start to its first byte leaving the API: the cache, staging or Discord, and decrypting.',
+        format: 'ms',
+        lines: [
+          { label: 'Median', color: 1, series: 'downloads.first_byte_ms:p50' },
+          { label: '95th percentile', color: 2, series: 'downloads.first_byte_ms:p95' },
+        ],
+      },
+      {
+        title: 'Sending held back by storage',
+        description:
+          'Of the time file reads waited after their first byte, the share spent on storage rather than on the viewer taking what was sent: high means DFS, not the connection, holds viewers back.',
+        format: 'percent',
+        lines: [
+          {
+            label: 'Waiting for storage',
+            color: 'warning',
+            share: 'downloads.storage_wait_ms:rate',
+            of: ['downloads.storage_wait_ms:rate', 'downloads.client_wait_ms:rate'],
+          },
+        ],
+      },
+      {
         title: 'Frame cache size',
         description: 'Frames kept on the API’s disk.',
         format: 'bytes',
@@ -332,6 +356,13 @@ export const MONITORING_SECTIONS: DashboardSection[] = [
           { label: 'Waits', color: 1, series: 'cdn.waits:events' },
         ],
       },
+      {
+        title: 'Failed file reads',
+        description:
+          'Per minute: file reads that broke off while sending, cutting a download or a play short (not those their viewer cancelled).',
+        format: 'perMinute',
+        lines: [{ label: 'Broke off', color: 'critical', series: 'downloads.failures:rate' }],
+      },
     ],
   },
   {
@@ -346,6 +377,7 @@ export const MONITORING_SECTIONS: DashboardSection[] = [
         lines: [
           { label: 'Median', color: 1, series: 'player.first_frame_ms:p50' },
           { label: '95th percentile', color: 2, series: 'player.first_frame_ms:p95' },
+          { label: 'Playing, median', color: 3, series: 'player.start_ms:p50' },
         ],
       },
       {
@@ -360,10 +392,71 @@ export const MONITORING_SECTIONS: DashboardSection[] = [
         ],
       },
       {
+        title: 'Why plays failed',
+        description:
+          'Per minute: a codec the browser can’t play, a file it can’t read (unsupported or damaged), a read that failed while playing, or else.',
+        format: 'perMinute',
+        lines: [
+          { label: 'Codec', color: 1, series: 'player.failures.codec:rate' },
+          { label: 'File', color: 2, series: 'player.failures.file:rate' },
+          { label: 'Failed read', color: 'critical', series: 'player.failures.read:rate' },
+          { label: 'Other', color: 3, series: 'player.failures.other:rate' },
+        ],
+      },
+      {
+        title: 'Seeks',
+        description:
+          'From a seek to its picture, each timed as its play’s seeks were on average: the server’s first byte and the bytes to the next keyframe.',
+        format: 'ms',
+        lines: [
+          { label: 'Median', color: 1, series: 'player.seek_ms:p50' },
+          { label: '95th percentile', color: 2, series: 'player.seek_ms:p95' },
+        ],
+      },
+      {
         title: 'Stalls',
         description: 'Per minute: plays that stopped to load after their first frame.',
         format: 'perMinute',
         lines: [{ label: 'Stalled plays', color: 1, series: 'player.stall_ms:events' }],
+      },
+    ],
+  },
+  {
+    title: 'Media service',
+    description:
+      'ffmpeg’s work for the players, as the API asked for it: examining files, extracting subtitles, copying out covers.',
+    charts: [
+      {
+        title: 'Answer time',
+        description:
+          'From the API’s ask to the media service’s answer: examining reads a file’s start and index, extracting subtitles all of it.',
+        format: 'ms',
+        lines: [
+          { label: 'Examining, median', color: 1, series: 'media.probe_ms:p50' },
+          { label: 'Examining, 95th percentile', color: 2, series: 'media.probe_ms:p95' },
+          { label: 'Covers, median', color: 3, series: 'media.cover_ms:p50' },
+          { label: 'Subtitles, median', color: 4, series: 'media.subtitles_ms:p50' },
+        ],
+      },
+      {
+        title: 'Requests',
+        description: 'Per minute: files examined, covers copied out, and subtitles extracted.',
+        format: 'perMinute',
+        lines: [
+          { label: 'Examined', color: 1, series: 'media.probe_ms:events' },
+          { label: 'Covers', color: 3, series: 'media.cover_ms:events' },
+          { label: 'Subtitles', color: 4, series: 'media.subtitles_ms:events' },
+        ],
+      },
+      {
+        title: 'Failures',
+        description:
+          'Per minute: asks the media service didn’t answer or failed, and files it examined and couldn’t read as audio or video.',
+        format: 'perMinute',
+        lines: [
+          { label: 'Failed requests', color: 'critical', series: 'media.failures:rate' },
+          { label: 'Files it couldn’t read', color: 1, series: 'media.unreadable:rate' },
+        ],
       },
     ],
   },

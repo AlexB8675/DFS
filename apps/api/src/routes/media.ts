@@ -15,6 +15,7 @@ import {
   type MediaInfo,
   type MetricName,
   type PlaybackReport,
+  type PlayProblemKind,
 } from '@dfs/shared'
 import { sql } from 'drizzle-orm'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
@@ -459,11 +460,23 @@ async function* randomPieces(total: number): AsyncGenerator<Uint8Array> {
   }
 }
 
-/** A play on the graphs (§16): how it ended, and its times. */
+/** A play's seeks timed at most: a report counts them by the thousand. */
+const MAX_SEEKS_TIMED = 100
+
+/** A play on the graphs (§16): how it ended, why if it couldn't play, and its times. */
 function recordPlay(app: FastifyInstance, report: PlaybackReport): void {
   app.metrics.record(PLAY_OUTCOMES[report.outcome])
+  if (report.outcome === 'failed') {
+    app.metrics.record(PLAY_FAILURES[report.problemKind ?? 'other'])
+  }
   if (report.firstFrameMs !== null) app.metrics.time('player.first_frame_ms', report.firstFrameMs)
+  if (report.startMs !== null) app.metrics.time('player.start_ms', report.startMs)
   if (report.stalls > 0) app.metrics.record('player.stall_ms', report.stallMs)
+  // A report sums its seeks' waits: each is timed as their average.
+  const seekMs = report.seeks > 0 ? report.seekWaitMs / report.seeks : 0
+  for (let seek = 0; seek < Math.min(report.seeks, MAX_SEEKS_TIMED); seek += 1) {
+    app.metrics.time('player.seek_ms', seekMs)
+  }
 }
 
 /** Each way a play ends, as its counter. */
@@ -472,6 +485,14 @@ const PLAY_OUTCOMES = {
   failed: 'player.failures',
   left: 'player.left',
 } as const satisfies Record<PlaybackReport['outcome'], MetricName>
+
+/** Each reason a play couldn't play, as its counter. */
+const PLAY_FAILURES = {
+  codec: 'player.failures.codec',
+  file: 'player.failures.file',
+  read: 'player.failures.read',
+  other: 'player.failures.other',
+} as const satisfies Record<PlayProblemKind, MetricName>
 
 /** A video in a few words, for a play's log line: `av1 3840x2160 59.94fps pq, 24.3 Mbit/s`. */
 function summary(info: MediaInfo): string {

@@ -20,6 +20,15 @@ const LIMITS = {
   cdnSlowDowns: 5,
   postFailures: 5,
   deadlocks: 1,
+  /** The media service failing asks while it answers its health checks. */
+  mediaFailures: 5,
+  /** File reads that broke off while sending, as the API saw them. */
+  downloadFailures: 3,
+  /** Plays stopped by a failed read, as their players reported them. */
+  playReadFailures: 3,
+  /** The slowest 5% of file reads this slow to their first byte, of at least this many. */
+  slowFirstByteMs: 5000,
+  slowFirstByteReads: 20,
   /** Shares of `max_connections` in use. */
   connectionsWarning: 0.8,
   connectionsCritical: 0.95,
@@ -55,6 +64,11 @@ export interface AlertFigures {
     cdnSlowDowns: number
     postFailures: number
     deadlocks: number
+    mediaFailures: number
+    downloadFailures: number
+    playReadFailures: number
+    /** File reads timed to their first byte, and the 95th percentile of those times. */
+    firstBytes: { reads: number; p95Ms: number | null }
   }
   /**
    * The API's checks (§16): down once its last three got no answer. Discord
@@ -118,6 +132,13 @@ export function healthAlerts(figures: AlertFigures): SystemAlert[] {
       title: 'The media service isn’t answering',
       detail:
         'Videos play as they are until it is back: a file not examined yet shows no formats or chapters, and subtitles inside it can’t be read.',
+    })
+  } else if (lastHour.mediaFailures >= LIMITS.mediaFailures) {
+    alerts.push({
+      code: 'media_failing',
+      level: 'warning',
+      title: 'The media service is failing',
+      detail: `${plural(lastHour.mediaFailures, 'request')} to it failed in the last hour: files weren’t examined, or subtitles or covers inside them couldn’t be read.`,
     })
   }
   const staging = figures.stagingMaxBytes > 0 ? figures.stagedBytes / figures.stagingMaxBytes : 0
@@ -219,6 +240,36 @@ export function healthAlerts(figures: AlertFigures): SystemAlert[] {
       detail: `${plural(lastHour.cdnFailures, 'read')} from the CDN failed in the last hour.`,
     })
   }
+  if (lastHour.downloadFailures >= LIMITS.downloadFailures) {
+    alerts.push({
+      code: 'downloads_failing',
+      level: 'warning',
+      title: 'Sending files is failing',
+      detail: `${plural(lastHour.downloadFailures, 'file read')} broke off in the last hour, cutting downloads and plays short; the API’s log says why.`,
+    })
+  }
+  // Reported by players, which anyone with a link can send: a warning at most.
+  if (lastHour.playReadFailures >= LIMITS.playReadFailures) {
+    alerts.push({
+      code: 'plays_failing',
+      level: 'warning',
+      title: 'Videos stop on failed reads',
+      detail: `${plural(lastHour.playReadFailures, 'play')} stopped in the last hour on a read that failed, as their players reported: the server, Discord, or the viewers’ connections.`,
+    })
+  }
+  const { firstBytes } = lastHour
+  if (
+    firstBytes.reads >= LIMITS.slowFirstByteReads &&
+    firstBytes.p95Ms !== null &&
+    firstBytes.p95Ms >= LIMITS.slowFirstByteMs
+  ) {
+    alerts.push({
+      code: 'downloads_slow',
+      level: 'warning',
+      title: 'Files are slow to start',
+      detail: `In the last hour, 1 file read in 20 took ${seconds(firstBytes.p95Ms)} or more to its first byte. Monitoring → Reading back shows whether Discord is slow.`,
+    })
+  }
   if (lastHour.cdnSlowDowns >= LIMITS.cdnSlowDowns) {
     alerts.push({
       code: 'cdn_slowed',
@@ -254,6 +305,10 @@ export function healthAlerts(figures: AlertFigures): SystemAlert[] {
 function plural(count: number, noun: string): string {
   const many = noun.endsWith('y') ? `${noun.slice(0, -1)}ies` : `${noun}s`
   return `${count.toLocaleString('en')} ${count === 1 ? noun : many}`
+}
+
+function seconds(ms: number): string {
+  return `${(Math.round(ms / 100) / 10).toLocaleString('en')} s`
 }
 
 function minutes(seconds: number): string {

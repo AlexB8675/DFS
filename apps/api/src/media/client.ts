@@ -1,7 +1,9 @@
+import type { Metrics } from '@dfs/db'
 import {
   MAX_COVER_BYTES,
   probeResultSchema,
   subtitleTracksResultSchema,
+  type MetricName,
   type ProbeResult,
   type SubtitleTracksResult,
 } from '@dfs/shared'
@@ -9,7 +11,8 @@ import { z } from 'zod'
 
 // The API's side of the media service (DESIGN.md §6.7). The service parses
 // what anyone uploads, so its answers are checked against bounded schemas
-// before they are used or kept.
+// before they are used or kept. They are timed for the graphs here, and the
+// asks it fails counted (§16): the service has no database of its own.
 
 /** ffprobe gets 60 s, and may wait its turn behind another. */
 const PROBE_TIMEOUT_MS = 150_000
@@ -36,75 +39,99 @@ const healthSchema = z.object({
 export class MediaClient {
   readonly url: string
   readonly #fetch: typeof fetch
+  readonly #metrics: Metrics | undefined
 
-  constructor(url: string, fetchImpl: typeof fetch = fetch) {
+  constructor(url: string, fetchImpl: typeof fetch = fetch, metrics?: Metrics) {
     this.url = url
     this.#fetch = fetchImpl
+    this.#metrics = metrics
   }
 
   /** Has the service examine a version, which it reads from the API with `token`. */
   async probe(versionId: string, token: string): Promise<ProbeResult> {
-    const response = await this.#ask('/probe', PROBE_TIMEOUT_MS, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ versionId, token }),
+    const result = await this.#timed('media.probe_ms', async () => {
+      const response = await this.#ask('/probe', PROBE_TIMEOUT_MS, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ versionId, token }),
+      })
+      if (!response.ok) {
+        await response.body?.cancel()
+        throw new MediaUnavailableError(
+          `The media service answered ${String(response.status)} to examining a file.`,
+        )
+      }
+      const answer = probeResultSchema.safeParse(await response.json().catch(() => null))
+      if (!answer.success) {
+        throw new MediaUnavailableError('The media service gave an answer out of bounds.')
+      }
+      return answer.data
     })
-    if (!response.ok) {
-      await response.body?.cancel()
-      throw new MediaUnavailableError(
-        `The media service answered ${String(response.status)} to examining a file.`,
-      )
-    }
-    const answer = probeResultSchema.safeParse(await response.json().catch(() => null))
-    if (!answer.success) {
-      throw new MediaUnavailableError('The media service gave an answer out of bounds.')
-    }
-    return answer.data
+    if (!result.ok) this.#metrics?.record('media.unreadable')
+    return result
   }
 
   /** Has the service extract text subtitle streams as WebVTT, all in one read of the file. */
-  async subtitles(
+  subtitles(
     versionId: string,
     token: string,
     streams: readonly number[],
   ): Promise<SubtitleTracksResult> {
-    const response = await this.#ask('/subtitles', SUBTITLES_TIMEOUT_MS, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ versionId, token, streams }),
+    return this.#timed('media.subtitles_ms', async () => {
+      const response = await this.#ask('/subtitles', SUBTITLES_TIMEOUT_MS, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ versionId, token, streams }),
+      })
+      if (!response.ok) {
+        await response.body?.cancel()
+        throw new MediaUnavailableError(
+          `The media service answered ${String(response.status)} to extracting subtitles.`,
+        )
+      }
+      const answer = subtitleTracksResultSchema.safeParse(await response.json().catch(() => null))
+      if (!answer.success) {
+        throw new MediaUnavailableError('The media service gave an answer out of bounds.')
+      }
+      return answer.data
     })
-    if (!response.ok) {
-      await response.body?.cancel()
-      throw new MediaUnavailableError(
-        `The media service answered ${String(response.status)} to extracting subtitles.`,
-      )
-    }
-    const answer = subtitleTracksResultSchema.safeParse(await response.json().catch(() => null))
-    if (!answer.success) {
-      throw new MediaUnavailableError('The media service gave an answer out of bounds.')
-    }
-    return answer.data
   }
 
   /** Has the service copy out the picture in an audio file's tags: its bytes, or `null` without one. */
-  async cover(versionId: string, token: string): Promise<Buffer | null> {
-    const response = await this.#ask('/cover', COVER_TIMEOUT_MS, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ versionId, token }),
+  cover(versionId: string, token: string): Promise<Buffer | null> {
+    return this.#timed('media.cover_ms', async () => {
+      const response = await this.#ask('/cover', COVER_TIMEOUT_MS, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ versionId, token }),
+      })
+      // No picture is an answer, not a failure.
+      if (response.status === 404) {
+        await response.body?.cancel()
+        return null
+      }
+      if (!response.ok) {
+        await response.body?.cancel()
+        throw new MediaUnavailableError(
+          `The media service answered ${String(response.status)} to a cover.`,
+        )
+      }
+      const bytes = Buffer.from(await response.arrayBuffer())
+      return bytes.length > MAX_COVER_BYTES ? null : bytes
     })
-    if (response.status === 404) {
-      await response.body?.cancel()
-      return null
+  }
+
+  /** `ask`'s answer, timed as `name`; one that fails counts as a failed request. */
+  async #timed<T>(name: MetricName, ask: () => Promise<T>): Promise<T> {
+    const started = performance.now()
+    try {
+      const answer = await ask()
+      this.#metrics?.time(name, performance.now() - started)
+      return answer
+    } catch (error) {
+      this.#metrics?.record('media.failures')
+      throw error
     }
-    if (!response.ok) {
-      await response.body?.cancel()
-      throw new MediaUnavailableError(
-        `The media service answered ${String(response.status)} to a cover.`,
-      )
-    }
-    const bytes = Buffer.from(await response.arrayBuffer())
-    return bytes.length > MAX_COVER_BYTES ? null : bytes
   }
 
   async health(): Promise<z.infer<typeof healthSchema>> {
