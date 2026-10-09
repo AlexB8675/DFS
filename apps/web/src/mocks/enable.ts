@@ -4,15 +4,15 @@ export async function enableMocking(): Promise<void> {
   // `import.meta.env.DEV` with `false` here, so the bundler drops the imports
   // below and no mock code ships in production.
   if (!import.meta.env.DEV || import.meta.env.VITE_API_MOCKS === 'off') return
-  const [{ worker }, { keepMockingActive }, { loadSampleVideo }] = await Promise.all([
+  const [{ worker }, { keepMockingActive }, { loadSampleMedia }] = await Promise.all([
     import('./browser'),
     import('./keep-active'),
     import('./samples'),
   ])
   await Promise.all([
     worker.start({ onUnhandledFrame: 'bypass', quiet: true }),
-    // Without it, videos say they can't play: the demo still works.
-    loadSampleVideo().catch(() => undefined),
+    // Without them, videos and audio say they can't play: the demo still works.
+    loadSampleMedia(),
   ])
   keepMockingActive()
 }

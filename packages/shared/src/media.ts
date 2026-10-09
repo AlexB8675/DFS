@@ -49,10 +49,21 @@ const MEDIA_EXTENSIONS: Record<string, MediaKind> = {
  * left to its MIME type: more often TypeScript than an MPEG-TS recording.
  */
 export function mediaKind(name: string, mimeType: string | null): MediaKind | null {
+  // Playlists name other files, which no player opens through them (§6.7).
+  if (mimeType && PLAYLIST_TYPES.has(mimeType.toLowerCase())) return null
   if (mimeType?.startsWith('video/')) return 'video'
   if (mimeType?.startsWith('audio/')) return 'audio'
   return MEDIA_EXTENSIONS[splitExtension(name).extension.toLowerCase()] ?? null
 }
+
+/** Playlists, typed as audio by browsers and Windows: M3U, HLS's M3U8 and PLS. */
+const PLAYLIST_TYPES = new Set([
+  'audio/x-mpegurl',
+  'audio/mpegurl',
+  'application/vnd.apple.mpegurl',
+  'application/x-mpegurl',
+  'audio/x-scpls',
+])
 
 /** The extensions `mediaKind` knows, for `fileCategory`. */
 export const MEDIA_EXTENSION_KINDS: Readonly<Record<string, MediaKind>> = MEDIA_EXTENSIONS

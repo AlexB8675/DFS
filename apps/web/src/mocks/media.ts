@@ -4,8 +4,9 @@ import { splitExtension, type MediaInfo, type MediaKind, type MediaStream } from
 // find it: a video is H.264 and AAC at 1080p with chapters and Italian
 // subtitles inside, as the sample every video plays; but an AVI is MPEG-4
 // Part 2, which browsers can't play, and an MKV's sound Dolby Digital,
-// which most can't, so the player's reasons show too. Audio is an MP3 whose
-// tags come from its name.
+// which most can't, so the player's reasons show too. Audio is the sample
+// MP3 every audio file plays, with a cover, its title and track number from
+// its name (`03 - Northbound.flac`) and its album from its folder's.
 
 const STREAM: Omit<MediaStream, 'index' | 'type' | 'codec' | 'codecString'> = {
   profile: null,
@@ -48,22 +49,20 @@ export const SAMPLE_SUBTITLES = [
   '',
 ].join('\n')
 
-/** The cover in the demo's audio files: a small PNG, as the media service would copy it out. */
-export const SAMPLE_COVER = Uint8Array.from(
-  atob(
-    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==',
-  ),
-  (char) => char.charCodeAt(0),
-)
-
-/** What examining a file of this kind finds, made up. */
-export function sampleMediaInfo(kind: MediaKind, name: string): MediaInfo {
+/** What examining a file of this kind finds, made up; an audio file's album is its folder's name. */
+export function sampleMediaInfo(
+  kind: MediaKind,
+  name: string,
+  folder: string | null = null,
+): MediaInfo {
   if (kind === 'audio') {
+    const { base } = splitExtension(name)
+    const numbered = /^(\d{1,3})\s*[-.]?\s+(.+)$/.exec(base)
     return {
       kind,
       container: 'mp3',
-      durationMs: 214_000,
-      bitRate: 320_000,
+      durationMs: 10_000,
+      bitRate: 32_000,
       streams: [
         {
           ...STREAM,
@@ -77,8 +76,14 @@ export function sampleMediaInfo(kind: MediaKind, name: string): MediaInfo {
         },
       ],
       chapters: [],
-      tags: { ...NO_TAGS, title: splitExtension(name).base, artist: 'Demo Artist', track: 1 },
-      hasCover: false,
+      tags: {
+        ...NO_TAGS,
+        title: numbered?.[2] ?? base,
+        artist: 'Demo Artist',
+        album: folder,
+        track: numbered?.[1] ? Number(numbered[1]) : null,
+      },
+      hasCover: true,
     }
   }
   const extension = splitExtension(name).extension.toLowerCase()

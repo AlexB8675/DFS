@@ -1,4 +1,6 @@
 import { splitExtension } from '@dfs/shared'
+import sampleAudioUrl from './sample-audio.mp3?url'
+import sampleCoverUrl from './sample-cover.jpg?url'
 import sampleVideoUrl from './sample-video.mp4?url'
 
 // What the demo's files hold, made up per file, so previews (§10.3) and the
@@ -97,16 +99,39 @@ const logs = new Map<string, string>()
 const LOG_LIMIT = 8 * 1024 * 1024
 
 let sampleVideoBytes: Uint8Array | null = null
+let sampleAudioBytes: Uint8Array | null = null
+let sampleCoverBytes: Uint8Array | null = null
 
-/** Fetches the sample video, for every video in the demo; in the browser only. */
-export async function loadSampleVideo(): Promise<void> {
-  const response = await fetch(sampleVideoUrl)
-  if (response.ok) sampleVideoBytes = new Uint8Array(await response.arrayBuffer())
+/**
+ * Fetches what the demo's videos and audio play, and its audio's cover; in
+ * the browser only. Each that fails leaves its files saying they can't play.
+ */
+export async function loadSampleMedia(): Promise<void> {
+  const load = async (url: string) => {
+    const response = await fetch(url)
+    return response.ok ? new Uint8Array(await response.arrayBuffer()) : null
+  }
+  const [video, audio, cover] = await Promise.all(
+    [sampleVideoUrl, sampleAudioUrl, sampleCoverUrl].map((url) => load(url).catch(() => null)),
+  )
+  sampleVideoBytes = video ?? null
+  sampleAudioBytes = audio ?? null
+  sampleCoverBytes = cover ?? null
 }
 
 /** What every video in the demo plays: 12 s of a test picture and a beep. */
 export function sampleVideo(): Uint8Array | null {
   return sampleVideoBytes
+}
+
+/** What every audio file in the demo plays: 10 s of a chord (`make-sample-audio.sh`). */
+export function sampleAudio(): Uint8Array | null {
+  return sampleAudioBytes
+}
+
+/** The cover of every audio file in the demo, a JPEG. */
+export function sampleCover(): Uint8Array | null {
+  return sampleCoverBytes
 }
 
 /**

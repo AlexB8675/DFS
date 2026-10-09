@@ -28,6 +28,7 @@ import {
   type ExistingFile,
   type FileMedia,
   type LoginInput,
+  type MediaInfo,
   type NodeKind,
   type NodePath,
   type Page,
@@ -56,8 +57,15 @@ import {
   type User,
 } from '@dfs/shared'
 import { previewKind } from '@/lib/preview-kind'
-import { SAMPLE_COVER, SAMPLE_SUBTITLES, sampleMediaInfo } from './media'
-import { sampleImage, samplePdf, sampleText, sampleVideo } from './samples'
+import { SAMPLE_SUBTITLES, sampleMediaInfo } from './media'
+import {
+  sampleAudio,
+  sampleCover,
+  sampleImage,
+  samplePdf,
+  sampleText,
+  sampleVideo,
+} from './samples'
 import { createSeed } from './seed'
 import { createZip, type ZipEntry } from './zip'
 
@@ -539,7 +547,18 @@ export class MockDb {
   media(place: MockPlace): FileMedia {
     const { node, kind, versionId, sizeBytes } = this.playedFile(place)
     if (sizeBytes === 0) return { versionId, info: null, problem: 'It’s empty.' }
-    return { versionId, info: sampleMediaInfo(kind, node.name), problem: null }
+    return { versionId, info: this.infoOf(node, kind), problem: null }
+  }
+
+  /**
+   * What examining a file finds, made up: the sample's, with its cover, for
+   * a demo file, which plays the sample; no cover for one uploaded, whose
+   * bytes are its own.
+   */
+  private infoOf(node: MockNode, kind: 'video' | 'audio'): MediaInfo {
+    const folder = node.parentId === null ? null : (this.state.nodes[node.parentId]?.name ?? null)
+    const info = sampleMediaInfo(kind, node.name, folder)
+    return this.fileBytes.has(node.id) ? { ...info, hasCover: false } : info
   }
 
   /**
@@ -605,9 +624,7 @@ export class MockDb {
     if (versionId !== played.versionId) throw versionChanged()
     const index = /^(\d+)\.vtt$/.exec(track)?.[1]
     if (index !== undefined) {
-      const stream = sampleMediaInfo(kind, node.name).streams.find(
-        (found) => found.index === Number(index),
-      )
+      const stream = this.infoOf(node, kind).streams.find((found) => found.index === Number(index))
       if (stream && isTextSubtitles(stream)) return SAMPLE_SUBTITLES
       throw new MockApiError(404, 'not_found', 'There are no such subtitles.')
     }
@@ -629,9 +646,9 @@ export class MockDb {
   cover(place: MockPlace, versionId: string): { body: Uint8Array; type: string } {
     const played = this.playedFile(place)
     if (versionId !== played.versionId) throw versionChanged()
-    if (played.sizeBytes > 0 && sampleMediaInfo(played.kind, played.node.name).hasCover) {
-      return { body: SAMPLE_COVER.slice(), type: 'image/png' }
-    }
+    const inside = played.sizeBytes > 0 && this.infoOf(played.node, played.kind).hasCover
+    const sample = inside ? sampleCover() : null
+    if (sample) return { body: sample, type: 'image/jpeg' }
     const parentId = played.node.parentId
     const beside = played.besideOffered && parentId !== null ? this.coverBeside(parentId) : null
     if (!beside) throw new MockApiError(404, 'not_found', 'This file has no cover.')
@@ -667,7 +684,7 @@ export class MockDb {
         if (child.kind === 'folder') {
           if (deep) walk(child, [...path, child.name])
         } else if (mediaKind(child.name, child.mimeType) === 'audio' && isReady(child)) {
-          const { tags } = sampleMediaInfo('audio', child.name)
+          const { tags } = this.infoOf(child, 'audio')
           found.push({ node: child, name: child.name, path, disc: tags.disc, track: tags.track })
         }
       }
@@ -682,7 +699,7 @@ export class MockDb {
 
   /** A queued file as the media info made up for it says; an empty one has none. */
   private audioTrack(node: MockNode): AudioTrack {
-    const info = node.sizeBytes > 0 ? sampleMediaInfo('audio', node.name) : null
+    const info = node.sizeBytes > 0 ? this.infoOf(node, 'audio') : null
     return {
       id: node.id,
       name: node.name,
@@ -1727,6 +1744,8 @@ function mockContent(
     fileCategory(node.name, mimeType) === 'image' ? 'image' : previewKind(node.name, mimeType)
   const video = kind === 'video' ? sampleVideo() : null
   if (video) return { mimeType: 'video/mp4', body: video }
+  const audio = mediaKind(node.name, mimeType) === 'audio' ? sampleAudio() : null
+  if (audio) return { mimeType: 'audio/mpeg', body: audio }
   const sample =
     kind === 'image'
       ? sampleImage(node.id, node.name)
