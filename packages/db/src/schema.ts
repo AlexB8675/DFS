@@ -373,8 +373,15 @@ export const shareLinks = pgTable(
      * link no longer works.
      */
     versionId: uuid('version_id').references(() => fileVersions.id, { onDelete: 'set null' }),
-    /** SHA-256 of the link's token; the token itself is shown once (§7.5). */
+    /** SHA-256 of the link's token, which finds the link a request names (§7.5). */
     tokenHash: bytea('token_hash').notNull(),
+    /**
+     * The token itself, sealed as a journal object is, under a data key of
+     * its own bound to the link, so its owner can copy the link again while a
+     * stolen dump holds no working link (§7.4). `null` for links made before
+     * tokens were kept (migration 0026), which can't be shown again.
+     */
+    tokenSealed: bytea('token_sealed'),
     createdAt: timestamptz('created_at').notNull().defaultNow(),
     expiresAt: timestamptz('expires_at'),
     /** argon2id. */

@@ -138,7 +138,7 @@ export function shareTests({ describe, it, expect, owner, target }: SuiteContext
       ).toEqual({ status: 409, code: 'not_ready' })
     })
 
-    it('shows a new link once, and lists it without it', async () => {
+    it('keeps a link to copy again: listed and changed, it is the same, and it opens', async () => {
       const client = await owner()
       const root = await workspace(client)
       const created = await share(client, root.id)
@@ -147,7 +147,17 @@ export function shareTests({ describe, it, expect, owner, target }: SuiteContext
 
       const { items } = await client.call('GET', '/shares', shareLinkPageSchema)
       const listed = items.find((item) => item.id === created.id)
-      expect(listed).toMatchObject({ url: null, downloadCount: 0 })
+      expect(listed).toMatchObject({ url: created.url, downloadCount: 0 })
+      const changed = await client.call('PATCH', `/shares/${created.id}`, shareLinkSchema, {
+        json: { maxDownloads: 5 },
+      })
+      expect(changed.url).toBe(created.url)
+
+      const { token, client: stranger } = visitor(listed?.url ?? null)
+      expect(await stranger.call('GET', `/s/${token}`, publicShareSchema)).toMatchObject({
+        locked: false,
+        root: { id: root.id },
+      })
     })
 
     it('opens a shared folder without signing in, and never reaches outside it', async () => {

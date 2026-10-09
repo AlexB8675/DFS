@@ -350,7 +350,10 @@ export const shareLinkSchema = z.object({
   nodeId: id,
   nodeName: z.string(),
   nodeKind: nodeKindSchema,
-  /** Full public URL. Only returned when the link is created, since only the token hash is stored (§7.5). */
+  /**
+   * Full public URL, for its owner to copy again whenever they like (§7.5).
+   * `null` for a link made before tokens were kept, which can't be shown again.
+   */
   url: z.url().nullable(),
   createdAt: timestamp,
   expiresAt: timestamp.nullable(),

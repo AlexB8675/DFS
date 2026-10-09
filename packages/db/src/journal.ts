@@ -72,14 +72,19 @@ export function nodeRecords(nodes: readonly NodeRow[]): JournalRecord[] {
 }
 
 /**
- * Share links' states for recovery, the token's hash in hex. The download
- * count is a usage counter, like a user's used bytes, so it is left out: a
- * rebuilt link counts afresh. A link goes with its item's `node.purge`.
+ * Share links' states for recovery, the token's hash and its sealed copy in
+ * hex. The download count is a usage counter, like a user's used bytes, so it
+ * is left out: a rebuilt link counts afresh. A link goes with its item's
+ * `node.purge`.
  */
 export function shareRecords(shares: readonly ShareRow[]): JournalRecord[] {
-  return shares.map(({ downloadCount: _count, tokenHash, ...state }) => ({
+  return shares.map(({ downloadCount: _count, tokenHash, tokenSealed, ...state }) => ({
     kind: 'share.upsert',
-    record: { ...state, tokenHash: tokenHash.toString('hex') },
+    record: {
+      ...state,
+      tokenHash: tokenHash.toString('hex'),
+      tokenSealed: tokenSealed?.toString('hex') ?? null,
+    },
   }))
 }
 

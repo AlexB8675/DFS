@@ -1,4 +1,4 @@
-import { users, type JournalRecord } from '@dfs/db'
+import { shareLinks, users, type JournalRecord } from '@dfs/db'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
 import { eq, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
@@ -9,7 +9,8 @@ import type { Auth } from '../auth/sessions.ts'
 import { createFolder } from '../nodes/write.ts'
 import { testConfig } from '../testing/config.ts'
 import { seedUser } from '../testing/seed.ts'
-import { createShare, deleteShare, updateShare } from './shares.ts'
+import { listShares as listAll } from '../admin/access.ts'
+import { createShare, deleteShare, listShares, updateShare } from './shares.ts'
 
 let database: TestDatabase
 let app: FastifyInstance
@@ -71,6 +72,10 @@ describe('share links in the journal (§8)', () => {
       { kind: 'audit.added', record: { action: 'share.created', nodeId: folder.id } },
     ])
     expect(created[0]?.record.tokenHash).toMatch(/^[0-9a-f]{64}$/)
+    // The token goes sealed, never as it is.
+    const token = share.url?.split('/s/')[1] ?? ''
+    expect(created[0]?.record.tokenSealed).toMatch(/^[0-9a-f]+$/)
+    expect(JSON.stringify(created)).not.toContain(token)
     expect(created[0]?.record.passwordHash).toEqual(expect.any(String))
     expect(created[0]?.record).not.toHaveProperty('downloadCount')
 
@@ -87,6 +92,40 @@ describe('share links in the journal (§8)', () => {
       { kind: 'share.deleted', record: { id: share.id } },
       expect.objectContaining({ kind: 'audit.added' }),
     ])
+  })
+
+  it('keeps a link to show its owner again, sealed, and never to an admin', async () => {
+    if (!auth.user.rootNodeId) throw new Error('Missing root folder.')
+    const folder = await createFolder(app, auth, auth.user.rootNodeId, 'Kept')
+    const share = await createShare(app, auth, {
+      nodeId: folder.id,
+      expiresAt: null,
+      password: null,
+      maxDownloads: null,
+    })
+    const token = share.url?.split('/s/')[1] ?? ''
+    expect(token).toMatch(/^[\w-]{22}$/)
+    const [row] = await app.db.select().from(shareLinks).where(eq(shareLinks.id, share.id))
+    expect(row?.tokenSealed?.includes(Buffer.from(token))).toBe(false)
+    expect((await listShares(app, auth)).items.find((item) => item.id === share.id)?.url).toBe(
+      share.url,
+    )
+    // An admin's list of every link never carries it.
+    const listed = JSON.stringify(
+      await listAll(app, {
+        cursor: undefined,
+        limit: 50,
+        active: false,
+        ownerId: undefined,
+        q: undefined,
+      }),
+    )
+    expect(listed).toContain(share.id)
+    expect(listed).not.toContain(token)
+
+    // A link made before tokens were kept can't be shown again.
+    await app.db.update(shareLinks).set({ tokenSealed: null }).where(eq(shareLinks.id, share.id))
+    expect((await listShares(app, auth)).items.find((item) => item.id === share.id)?.url).toBeNull()
   })
 
   it('journals an audit entry written on its own', async () => {

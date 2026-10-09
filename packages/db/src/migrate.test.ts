@@ -37,7 +37,7 @@ describe('migrations', () => {
       })
       // One instance ID, made once (DESIGN §4).
       expect(counts).toEqual({
-        applied: 26,
+        applied: 27,
         tables: 20,
         instance: [expect.stringMatching(/^[0-9a-f]{12}$/)],
       })
@@ -299,10 +299,11 @@ describe('schema rules (DESIGN §5.1)', () => {
           ),
         ),
       }))
-    // 0016 came before links had versions (0018), and while they kept revokedAt (0019).
+    // 0016 came before links had versions (0018), while they kept revokedAt (0019), and
+    // before their tokens were kept (0026).
     const [record, ...rest] = [...shareRecords([share]), ...auditRecords([entry])]
     if (!record) throw new Error('no record')
-    const { versionId: _versionId, ...linkState } = record.record
+    const { versionId: _versionId, tokenSealed: _tokenSealed, ...linkState } = record.record
     expect(normal(rows)).toEqual(
       normal([{ ...record, record: { ...linkState, revokedAt: null } }, ...rest]),
     )

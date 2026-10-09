@@ -488,14 +488,16 @@ describe('mock API database', () => {
       })
     })
 
-    it('locks the link again when its password changes, and never lists tokens', () => {
+    it('locks the link again when its password changes, and lists it to copy again', () => {
       db.unlockShare('demo-lisbon', 'lisbon')
       const link = db.shares().items.find((share) => share.hasPassword)
       if (!link) throw new Error('No password-protected link')
       db.updateShare(link.id, { password: 'new-secret' })
 
       expect(db.publicShare('demo-lisbon')).toEqual({ locked: true })
-      expect(JSON.stringify(db.shares())).not.toContain('demo-lisbon')
+      // Its owner copies the link again (§7.5); its password never leaves the server.
+      expect(link.url).toMatch(/\/s\/demo-lisbon$/)
+      expect(JSON.stringify(db.shares())).not.toContain('new-secret')
     })
   })
 })

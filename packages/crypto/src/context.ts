@@ -7,6 +7,7 @@ const TYPE = {
   journalBatch: 0x03,
   backupManifest: 0x04,
   subtitles: 0x05,
+  shareToken: 0x06,
 } as const
 
 /** A file chunk: `0x01 | version_id (16) | chunk index (4, BE)`. */
@@ -25,6 +26,17 @@ export function chunkContext(versionId: string, index: number): Uint8Array {
 export function subtitlesContext(versionId: string, streamIndex: number): Uint8Array {
   const context = chunkContext(versionId, streamIndex)
   context[0] = TYPE.subtitles
+  return context
+}
+
+/**
+ * A share link's token, kept so its owner can copy the link again (§7.5):
+ * `0x06 | share_id (16)`.
+ */
+export function shareTokenContext(shareId: string): Uint8Array {
+  const context = new Uint8Array(1 + 16)
+  context[0] = TYPE.shareToken
+  context.set(uuidBytes(shareId), 1)
   return context
 }
 

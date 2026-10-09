@@ -167,8 +167,9 @@ export async function writeRecovered(db: Database, input: WriteInput): Promise<v
     await insert(
       tx,
       'share_links',
-      [...state.shares.values()].map(({ tokenHash, ...share }) =>
-        snake({ ...share, tokenHash: hex(tokenHash) }),
+      // Sealed tokens go back as they were journaled: sealed again, they would differ.
+      [...state.shares.values()].map(({ tokenHash, tokenSealed, ...share }) =>
+        snake({ ...share, tokenHash: hex(tokenHash), tokenSealed: hex(tokenSealed) }),
       ),
     )
     await insert(

@@ -1,7 +1,7 @@
 import type { DriveNode, ShareLink } from '@dfs/shared'
-import { Check, Copy, ExternalLink, ShieldAlert } from 'lucide-react'
+import { useQuery } from '@tanstack/react-query'
+import { ExternalLink } from 'lucide-react'
 import { useActionState, useState } from 'react'
-import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -16,7 +16,15 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Spinner } from '@/components/ui/spinner'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
-import { EXPIRY_OPTIONS, expiryFromChoice, useCreateShare } from '@/features/shares/api'
+import {
+  EXPIRY_OPTIONS,
+  expiryFromChoice,
+  linkTerms,
+  sharesQuery,
+  shareStatus,
+  useCreateShare,
+} from '@/features/shares/api'
+import { LinkBox } from '@/features/shares/link-box'
 import { errorMessage } from '@/lib/api/client'
 import { formText } from '@/lib/form-data'
 
@@ -30,9 +38,16 @@ interface FormState {
   error: string | null
 }
 
-/** Creates a public share link (§7.5) and shows it once, since only its hash is stored. */
+/**
+ * Creates a public share link (§7.5), below the item's working links made
+ * before, to copy again: where someone who lost one looks first.
+ */
 export function ShareDialog({ node, onClose }: ShareDialogProps) {
   const createShare = useCreateShare()
+  const made = useQuery(sharesQuery).data?.items ?? []
+  const working = made.filter(
+    (link) => link.nodeId === node.id && link.url !== null && shareStatus(link) === 'active',
+  )
   const [expiry, setExpiry] = useState<string>('7')
   const [state, submit, pending] = useActionState(
     async (_previous: FormState, formData: FormData): Promise<FormState> => {
@@ -75,6 +90,20 @@ export function ShareDialog({ node, onClose }: ShareDialogProps) {
           <CreatedLink url={state.link.url} onDone={onClose} />
         ) : (
           <form action={submit} className="grid gap-4">
+            {working.length > 0 && (
+              <div className="grid gap-3 border-b pb-4">
+                <p className="text-sm font-medium">
+                  {working.length === 1 ? 'Its link' : 'Its links'}
+                </p>
+                {working.map((link) => (
+                  <div key={link.id} className="grid gap-1.5">
+                    <LinkBox url={link.url ?? ''} />
+                    <p className="text-xs text-muted-foreground">{linkTerms(link)}</p>
+                  </div>
+                ))}
+                <p className="text-sm font-medium">Or make a new one</p>
+              </div>
+            )}
             <div className="grid gap-2">
               <Label id="expiry-label">Link expires</Label>
               <ToggleGroup
@@ -137,37 +166,11 @@ export function ShareDialog({ node, onClose }: ShareDialogProps) {
 }
 
 function CreatedLink({ url, onDone }: { url: string; onDone: () => void }) {
-  const [copied, setCopied] = useState(false)
-
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(url)
-      setCopied(true)
-      toast.success('Link copied')
-    } catch {
-      toast.error('Could not copy. Select the link and copy it manually.')
-    }
-  }
-
   return (
     <div className="grid gap-4">
-      <div className="flex gap-2">
-        <Input
-          readOnly
-          value={url}
-          aria-label="Share link"
-          className="font-mono text-xs"
-          onFocus={(event) => {
-            event.currentTarget.select()
-          }}
-        />
-        <Button onClick={() => void copy()}>
-          {copied ? <Check /> : <Copy />} {copied ? 'Copied' : 'Copy'}
-        </Button>
-      </div>
-      <p className="flex gap-2 rounded-lg bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">
-        <ShieldAlert className="mt-0.5 size-4 shrink-0" aria-hidden />
-        Copy it now. DFS only keeps a fingerprint of the link, so it cannot show it again.
+      <LinkBox url={url} />
+      <p className="text-sm text-muted-foreground">
+        Shared links keeps it, to copy again whenever you like.
       </p>
       <DialogFooter>
         <Button variant="outline" asChild>

@@ -19,7 +19,8 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { errorMessage } from '@/lib/api/client'
 import { formatFullDate } from '@/lib/format'
 import { formText } from '@/lib/form-data'
-import { EXPIRY_OPTIONS, expiryFromChoice, useUpdateShare } from './api'
+import { EXPIRY_OPTIONS, expiryFromChoice, NOT_KEPT, useUpdateShare } from './api'
+import { LinkBox } from './link-box'
 
 interface FormState {
   error: string | null
@@ -80,6 +81,12 @@ export function EditShareDialog({ link, onClose }: { link: ShareLink; onClose: (
               The link itself stays the same; people who have it keep using it.
             </DialogDescription>
           </DialogHeader>
+
+          {link.url ? (
+            <LinkBox url={link.url} />
+          ) : (
+            <p className="text-sm text-muted-foreground">{NOT_KEPT}</p>
+          )}
 
           <div className="grid gap-2">
             <Label id="edit-expiry-label">Expires</Label>

@@ -1211,7 +1211,7 @@ export class MockDb {
     const items = [...this.state.shares]
       .filter((share) => this.state.nodes[share.nodeId]?.ownerId === this.state.userId)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-      .map((share) => this.shareDto(share, null))
+      .map((share) => this.shareDto(share))
     return { items, nextCursor: null }
   }
 
@@ -1271,7 +1271,7 @@ export class MockDb {
     }
     this.state.shares.push(share)
     this.save()
-    return this.shareDto(share, `${window.location.origin}/s/${share.token}`)
+    return this.shareDto(share)
   }
 
   updateShare(id: string, changes: UpdateShareInput): ShareLink {
@@ -1292,7 +1292,7 @@ export class MockDb {
       this.unlockedShares.delete(share.token)
     }
     this.save()
-    return this.shareDto(share, null)
+    return this.shareDto(share)
   }
 
   /** `DELETE /shares/:id`: turning a link off deletes it. */
@@ -1652,15 +1652,15 @@ export class MockDb {
     }
   }
 
-  private shareDto(share: MockShare, url: string | null): ShareLink {
+  /** A link as its owner sees it, to copy again (§7.5); its password never leaves the server. */
+  private shareDto(share: MockShare): ShareLink {
     const node = this.state.nodes[share.nodeId]
-    // The token and password never leave the server.
-    const { token: _token, password: _password, versionNo: _version, ...fields } = share
+    const { token, password: _password, versionNo: _version, ...fields } = share
     return {
       ...fields,
       nodeName: node?.name ?? 'Deleted item',
       nodeKind: node?.kind ?? 'file',
-      url,
+      url: `${window.location.origin}/s/${token}`,
       version: this.shareVersion(share),
     }
   }

@@ -1,6 +1,6 @@
 import type { ShareLink } from '@dfs/shared'
 import { useQuery } from '@tanstack/react-query'
-import { Link2, Lock, Pencil, Unlink } from 'lucide-react'
+import { Copy, Link2, Lock, Pencil, Unlink } from 'lucide-react'
 import { useState } from 'react'
 import { toast } from 'sonner'
 import { NodeIcon } from '@/components/node-icon'
@@ -22,7 +22,14 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { ListSkeleton } from '@/components/list-skeleton'
 import { errorMessage } from '@/lib/api/client'
 import { formatDate, formatFullDate } from '@/lib/format'
-import { shareStatus, sharesQuery, useDeleteShare, type ShareStatus } from './api'
+import {
+  copyLink,
+  NOT_KEPT,
+  shareStatus,
+  sharesQuery,
+  useDeleteShare,
+  type ShareStatus,
+} from './api'
 import { EditShareDialog } from './edit-share-dialog'
 
 const STATUS_BADGES: Record<
@@ -59,7 +66,7 @@ export function SharesPage() {
       <title>Shared links – DFS</title>
       <PageHeader
         title="Shared links"
-        description="Links you created. To share something new, right-click it and choose Share link."
+        description="Links you created, to copy again whenever you like. To share something new, right-click it and choose Share link."
       />
 
       {shares.isPending ? (
@@ -88,7 +95,7 @@ export function SharesPage() {
                 <th className="hidden w-28 py-2 pl-4 text-right font-medium sm:table-cell">
                   Downloads
                 </th>
-                <th className="w-24 py-2 pr-5">
+                <th className="w-32 py-2 pr-5">
                   <span className="sr-only">Actions</span>
                 </th>
               </tr>
@@ -141,6 +148,25 @@ export function SharesPage() {
                       {link.maxDownloads !== null && ` / ${link.maxDownloads}`}
                     </td>
                     <td className="py-2.5 pr-5 text-right">
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            aria-label={`Copy link to “${link.nodeName}”`}
+                            className={link.url ? undefined : 'text-muted-foreground/50'}
+                            onClick={() => {
+                              if (link.url) void copyLink(link.url)
+                              else toast.info(NOT_KEPT)
+                            }}
+                          >
+                            <Copy />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          {link.url ? 'Copy link' : 'Can’t be shown again'}
+                        </TooltipContent>
+                      </Tooltip>
                       {status !== 'version-deleted' && (
                         <Tooltip>
                           <TooltipTrigger asChild>

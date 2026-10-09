@@ -8,8 +8,10 @@ import {
   type UpdateShareInput,
 } from '@dfs/shared'
 import { queryOptions, useMutation } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import { queryClient } from '@/app/query-client'
 import { apiGet, apiSend } from '@/lib/api/client'
+import { formatFullDate } from '@/lib/format'
 
 export const sharesQuery = queryOptions({
   queryKey: ['shares'],
@@ -62,6 +64,34 @@ export function useDeleteShare() {
     mutationFn: (id: string) => apiSend('DELETE', `/shares/${id}`),
     onSettled: refreshShares,
   })
+}
+
+/** Copies a link to the clipboard, saying so; `false` if the browser refused. */
+export async function copyLink(url: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(url)
+    toast.success('Link copied')
+    return true
+  } catch {
+    toast.error('Could not copy. Select the link and copy it manually.')
+    return false
+  }
+}
+
+/** A link made before DFS kept links has no address to show again (§7.5). */
+export const NOT_KEPT =
+  'This link was made before DFS kept links, so it can’t be shown again. To share the item, make a new one.'
+
+/** What a link allows, in a few words: its expiry, password and downloads. */
+export function linkTerms(share: ShareLink): string {
+  return [
+    share.expiresAt ? `Until ${formatFullDate(share.expiresAt)}` : 'Never expires',
+    share.hasPassword && 'password',
+    share.maxDownloads !== null &&
+      `${String(share.downloadCount)} of ${String(share.maxDownloads)} downloads`,
+  ]
+    .filter(Boolean)
+    .join(' · ')
 }
 
 export type ShareStatus = 'active' | 'expired' | 'used-up' | 'version-deleted'
