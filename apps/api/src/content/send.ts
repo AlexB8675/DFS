@@ -21,6 +21,8 @@ export function sendFile(
   request: FastifyRequest,
   reply: FastifyReply,
   file: DownloadableFile,
+  /** The user reading it, whose player may ask how fast it goes (§10.4). */
+  readerId?: string,
 ): FastifyReply {
   void reply.header('etag', `"${file.version_id}"`).header('cache-control', 'private, no-cache')
   // Before the range: a browser that has the version needs none of it.
@@ -47,7 +49,9 @@ export function sendFile(
   if (request.method === 'HEAD') return reply.send(nothing())
   counted(app, reply)
   const stats = sendStats()
+  const followed = readerId ? app.deliveries.follow(readerId, file.version_id, stats) : null
   reply.raw.once('close', () => {
+    followed?.()
     logSent(request, reply, file.version_id, start, end, stats)
   })
   const pieces = readVersion(app, file, start, end, cancellation(reply.raw))

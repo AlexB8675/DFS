@@ -12,6 +12,7 @@ import { RateLimiter } from './auth/rate-limit.ts'
 import { Checks } from './checks.ts'
 import { JournalFlusher } from './journal.ts'
 import { CdnBlobReader } from './content/cdn-reader.ts'
+import { Deliveries } from './content/deliveries.ts'
 import { FrameCache, MemoryBudget } from './content/frame-cache.ts'
 import { registerErrorHandling } from './errors.ts'
 import { EventHub } from './events/hub.ts'
@@ -65,6 +66,8 @@ declare module 'fastify' {
     media: MediaExaminer | null
     /** Files and ZIPs being sent, for the graphs (§16). */
     downloads: UnderWay
+    /** How fast each user's reads of each version go, for their players (§10.4). */
+    deliveries: Deliveries
   }
 }
 
@@ -91,6 +94,8 @@ const UNTIMED_ROUTES = new Set([
   '/internal/media/:versionId',
   // Quick once a file is examined; the first ask waits for ffprobe.
   '/api/files/:id/media',
+  // As long as the device's connection takes.
+  '/api/connection-test',
   // Subtitles inside a file may be extracted on the first ask, reading it whole.
   '/api/files/:id/media/:versionId/subtitles/:track',
 ])
@@ -177,6 +182,7 @@ export async function buildApp({
     metrics.gauge('cdn.in_flight', () => reader.underWay.sample())
   const downloads = new UnderWay()
   app.decorate('downloads', downloads)
+  app.decorate('deliveries', new Deliveries())
   metrics.gauge('downloads.active', () => downloads.sample())
   app.decorate('readBudget', new MemoryBudget(READ_AHEAD_BYTES))
   app.decorate(

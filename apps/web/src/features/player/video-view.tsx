@@ -194,11 +194,17 @@ export default function VideoView({
 
   // Why it may be slow, as far as the player can tell, and the play's report when it ends.
   const decoding = useQuery(decodingQuery(base, source?.versionId ?? null, info)).data ?? null
-  const signals = usePlaybackStats(video, base, source?.versionId ?? null, {
-    bitRate: info?.bitRate ?? null,
-    decoding,
-    problem: shown && problemText(shown),
-  })
+  const signals = usePlaybackStats(
+    video,
+    base,
+    source?.versionId ?? null,
+    {
+      bitRate: info?.bitRate ?? null,
+      decoding,
+      problem: shown && problemText(shown),
+    },
+    active,
+  )
   const notices = playbackNotices({
     silentCodec,
     decoding,

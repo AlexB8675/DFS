@@ -2,6 +2,7 @@ import { isTextSubtitles, type MediaStream } from '@dfs/shared'
 import { useQuery } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import { mediaQuery } from './api'
+import { ConnectionTest } from './connection-test'
 import { decodingQuery, type Decoding } from './diagnostics'
 import {
   browserCanPlayType,
@@ -58,6 +59,9 @@ export function MediaDetails({ contentPath }: { contentPath: string }) {
       )}
       {info.chapters.length > 0 && <Row label="Chapters">{info.chapters.length}</Row>}
       {decoding && <Row label="Decoding">{describeDecoding(decoding)}</Row>}
+      <Row label="Connection">
+        <ConnectionTest />
+      </Row>
       <Row label="Plays here">
         {video?.decodes === false
           ? `No: this browser can’t play ${codecLabel(video.stream.codec)} video`

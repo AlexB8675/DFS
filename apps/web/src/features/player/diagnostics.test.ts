@@ -50,7 +50,12 @@ const INFO: MediaInfo = {
   hasCover: false,
 }
 
-const QUIET: PlaybackSignals = { waitingForMs: 0, arrivalBitsPerSecond: null, droppedShare: null }
+const QUIET: PlaybackSignals = {
+  waitingForMs: 0,
+  arrivalBitsPerSecond: null,
+  waitingOn: null,
+  droppedShare: null,
+}
 
 function notices(overrides: Partial<Parameters<typeof playbackNotices>[0]>) {
   return playbackNotices({
@@ -94,9 +99,13 @@ describe('the player’s warnings', () => {
   })
 
   it('says when the video arrives slower than it plays, after waiting a few seconds', () => {
-    const slow = { waitingForMs: 5000, arrivalBitsPerSecond: 2_700_000, droppedShare: null }
+    const slow: PlaybackSignals = { ...QUIET, waitingForMs: 5000, arrivalBitsPerSecond: 2_700_000 }
     expect(notices({ signals: slow })).toEqual([
       'Loading slowly: the video arrives at 2.7 Mbit/s and needs 24.3 Mbit/s, so it stops to load.',
+    ])
+    // With the side the server waited on.
+    expect(notices({ signals: { ...slow, waitingOn: 'connection' } })).toEqual([
+      'Loading slowly: the video arrives at 2.7 Mbit/s and needs 24.3 Mbit/s, so it stops to load. The server has it ready and waits on this device’s connection.',
     ])
     // Not yet: a moment's wait is normal.
     expect(notices({ signals: { ...slow, waitingForMs: 2000 } })).toEqual([])

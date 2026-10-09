@@ -239,11 +239,16 @@ export const playbackReportSchema = z.object({
   outcome: z.enum(['played', 'failed', 'left']),
   /** From the player starting to its first frame. */
   firstFrameMs: reportMs.nullable(),
+  /** From the player starting to its playing: the first frame may come long before. */
+  startMs: reportMs.nullable(),
   /** From the player starting to this report: how long the viewer stayed. */
   openMs: reportMs,
   /** Waits for data after the first frame (not seeks), and their time in all. */
   stalls: reportCount,
   stallMs: reportMs,
+  /** Seeks, and the time in all from each to its picture. */
+  seeks: reportCount,
+  seekWaitMs: reportMs,
   /** Frames shown and dropped, as the browser counts them. */
   frames: reportCount,
   droppedFrames: reportCount,
@@ -258,6 +263,24 @@ export const playbackReportSchema = z.object({
 })
 
 export type PlaybackReport = z.infer<typeof playbackReportSchema>
+
+/**
+ * `GET /files/:id/media/:versionId/delivery`: the user's reads of the version
+ * so far, summed and cumulative, so a player works out how fast its video
+ * arrives, and whether the server waits for storage or for the connection,
+ * from the differences between two asks (§10.4).
+ */
+export const deliverySchema = z.object({
+  bytes: z.number().int().min(0),
+  waitedForSourceMs: z.number().int().min(0),
+  waitedForClientMs: z.number().int().min(0),
+  running: z.number().int().min(0),
+})
+
+export type Delivery = z.infer<typeof deliverySchema>
+
+/** `GET /connection-test?bytes=`: at most this much, so a test can't become a load. */
+export const MAX_CONNECTION_TEST_BYTES = 32 * 1024 * 1024
 
 /** A week: longer than any video, so a larger position is a client's mistake. */
 const MAX_POSITION_MS = 7 * 24 * 60 * 60 * 1000

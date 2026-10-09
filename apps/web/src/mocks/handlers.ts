@@ -19,6 +19,7 @@ import {
   moveNodesSchema,
   nodeIdsSchema,
   nodeKindSchema,
+  MAX_CONNECTION_TEST_BYTES,
   playbackReportSchema,
   resetPasswordSchema,
   savePositionSchema,
@@ -290,12 +291,36 @@ export const handlers = [
 
   // ── Content ────────────────────────────────────────────────────────────────
   http.get<Id>('/api/files/:id/content', ({ request, params }) =>
-    respond(request, () =>
-      fileResponse(
-        request,
-        db.fileContent(params.id, new URL(request.url).searchParams.get('version')),
-      ),
-    ),
+    respond(request, async () => {
+      const version = new URL(request.url).searchParams.get('version')
+      const response = fileResponse(request, db.fileContent(params.id, version))
+      // A player's reads, counted for its warning (§10.4): sent at once, so no waits.
+      if (version) {
+        db.recordDelivery(version, (await response.clone().arrayBuffer()).byteLength)
+      }
+      return response
+    }),
+  ),
+  http.get<Id & { versionId: string }>(
+    '/api/files/:id/media/:versionId/delivery',
+    ({ request, params }) =>
+      respond(request, () => {
+        db.media(params.id)
+        return db.delivery(params.versionId)
+      }),
+  ),
+  http.get('/api/connection-test', ({ request }) =>
+    respond(request, () => {
+      const bytes = z.coerce
+        .number()
+        .int()
+        .min(1)
+        .max(MAX_CONNECTION_TEST_BYTES)
+        .parse(new URL(request.url).searchParams.get('bytes'))
+      return new HttpResponse(new Uint8Array(bytes), {
+        headers: { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store' },
+      })
+    }),
   ),
 
   // ── Audio and video (§6.7, §10.4) ──────────────────────────────────────────

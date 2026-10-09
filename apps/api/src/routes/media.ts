@@ -1,7 +1,11 @@
+import { randomBytes } from 'node:crypto'
+import { Readable } from 'node:stream'
 import type { Executor } from '@dfs/db'
 import {
   fileMediaSchema,
+  deliverySchema,
   isTextSubtitles,
+  MAX_CONNECTION_TEST_BYTES,
   mediaKind,
   playbackReportSchema,
   playbackSchema,
@@ -14,7 +18,7 @@ import type { FastifyInstance } from 'fastify'
 import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
 import { requireAuth } from '../auth/access.ts'
-import { sendFile, type DownloadableFile } from '../content/send.ts'
+import { paced, sendFile, type DownloadableFile } from '../content/send.ts'
 import { ApiError } from '../errors.ts'
 import { keptExamination, MediaUnavailableError, type Examined } from '../media/examine.ts'
 import {
@@ -86,6 +90,67 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
     return reply.code(204).send()
   })
 
+  // How fast this user's reads of the version go: for the player's warning (§10.4).
+  routes.get(
+    '/files/:id/media/:versionId/delivery',
+    {
+      schema: {
+        params: z.object({ id: z.uuid(), versionId: z.uuid() }),
+        response: { 200: deliverySchema },
+      },
+    },
+    async (request) => {
+      const auth = requireAuth(request.auth)
+      await mediaNode(app.db, auth.user.id, request.params.id)
+      return app.deliveries.totals(auth.user.id, request.params.versionId)
+    },
+  )
+
+  // Bytes from the VPS itself, not from Discord: how fast this device's
+  // connection to the server is, for telling a slow network from a slow file
+  // (§10.4). Random, so nothing on the way compresses them, and logged.
+  routes.get(
+    '/connection-test',
+    {
+      schema: {
+        querystring: z.object({
+          bytes: z.coerce.number().int().min(1).max(MAX_CONNECTION_TEST_BYTES),
+        }),
+      },
+    },
+    (request, reply) => {
+      requireAuth(request.auth)
+      const { bytes } = request.query
+      const stats = {
+        startedAt: performance.now(),
+        bytes: 0,
+        firstPieceMs: null,
+        sourceMs: 0,
+        clientMs: 0,
+      }
+      reply.raw.once('close', () => {
+        const ms = performance.now() - stats.startedAt
+        request.log.info(
+          {
+            connectionTest: {
+              bytes: stats.bytes,
+              finished: reply.raw.writableFinished,
+              totalMs: Math.round(ms),
+              mbitPerSecond: ms > 0 ? Math.round((stats.bytes * 8) / ms / 100) / 10 : null,
+              userAgent: request.headers['user-agent']?.slice(0, 300) ?? null,
+            },
+          },
+          'connection tested',
+        )
+      })
+      return reply
+        .header('content-type', 'application/octet-stream')
+        .header('content-length', String(bytes))
+        .header('cache-control', 'no-store')
+        .send(Readable.from(paced(reply.raw, randomPieces(bytes), stats)))
+    },
+  )
+
   // How a play went, as the player saw it (§10.4, §16): logged, with its times on the graphs.
   routes.post(
     '/files/:id/playback-report',
@@ -151,6 +216,16 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
   )
 
   done()
+}
+
+/** `total` random bytes, in pieces as large as a file's: a block made once, sent again and again. */
+async function* randomPieces(total: number): AsyncGenerator<Uint8Array> {
+  const block = randomBytes(256 * 1024)
+  for (let sent = 0; sent < total; sent += block.length) {
+    yield block.subarray(0, Math.min(block.length, total - sent))
+    // A turn of the event loop, as reading a file takes.
+    await Promise.resolve()
+  }
 }
 
 /** A play's times on the graphs (§16). */

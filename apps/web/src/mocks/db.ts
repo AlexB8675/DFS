@@ -17,6 +17,7 @@ import {
   type AuditEntry,
   type ChangePasswordInput,
   type CreateUploadInput,
+  type Delivery,
   type DriveNode,
   type ExistingFile,
   type FileMedia,
@@ -526,6 +527,24 @@ export class MockDb {
       versionId,
       positionMs: saved?.versionId === versionId ? saved.positionMs : null,
       subtitleFiles: this.subtitleFilesBeside(node),
+    }
+  }
+
+  /** Bytes sent of a version to the signed-in user's player, by `userId:versionId` (§10.4). */
+  private readonly deliveries = new Map<string, number>()
+
+  recordDelivery(versionId: string, bytes: number): void {
+    const key = `${this.state.userId}:${versionId}`
+    this.deliveries.set(key, (this.deliveries.get(key) ?? 0) + bytes)
+  }
+
+  /** `GET /files/:id/media/:versionId/delivery`: the mock sends at once, so it never waits. */
+  delivery(versionId: string): Delivery {
+    return {
+      bytes: this.deliveries.get(`${this.state.userId}:${versionId}`) ?? 0,
+      waitedForSourceMs: 0,
+      waitedForClientMs: 0,
+      running: 0,
     }
   }
 

@@ -1,4 +1,10 @@
-import { fileMediaSchema, isTextSubtitles, playbackSchema } from '@dfs/shared'
+import {
+  deliverySchema,
+  fileMediaSchema,
+  isTextSubtitles,
+  MAX_CONNECTION_TEST_BYTES,
+  playbackSchema,
+} from '@dfs/shared'
 import type { ApiClient } from './client.ts'
 import type { SuiteContext } from './context.ts'
 import { createFolder, text, uploadFile, workspace } from './files.ts'
@@ -134,6 +140,33 @@ export function mediaTests({
       })
     })
 
+    it('says how much of a version a user’s player has been sent', async () => {
+      const client = await owner()
+      const root = await workspace(client)
+      const video = await uploadFile(client, root.id, 'Delivered.mp4', text('twelve bytes'))
+      const path = `/files/${video.nodeId}/media/${video.versionId}/delivery`
+      expect((await client.call('GET', path, deliverySchema)).bytes).toBe(0)
+      const read = await client.fetch(
+        'GET',
+        `/files/${video.nodeId}/content?version=${video.versionId}`,
+      )
+      expect((await read.arrayBuffer()).byteLength).toBe(12)
+      expect((await client.call('GET', path, deliverySchema)).bytes).toBe(12)
+    })
+
+    it('sends bytes for testing the connection, within a limit', async () => {
+      const client = await owner()
+      const response = await client.fetch('GET', '/connection-test?bytes=300000')
+      expect(response.status).toBe(200)
+      expect((await response.arrayBuffer()).byteLength).toBe(300_000)
+      expect(
+        await client.error(
+          'GET',
+          `/connection-test?bytes=${String(MAX_CONNECTION_TEST_BYTES + 1)}`,
+        ),
+      ).toMatchObject({ status: 400 })
+    })
+
     it('takes a player’s report of how a play went, within bounds', async () => {
       const client = await owner()
       const root = await workspace(client)
@@ -142,9 +175,12 @@ export function mediaTests({
         versionId: video.versionId,
         outcome: 'played',
         firstFrameMs: 1850,
+        startMs: 2400,
         openMs: 64_000,
         stalls: 2,
         stallMs: 4100,
+        seeks: 3,
+        seekWaitMs: 9800,
         frames: 3000,
         droppedFrames: 12,
         arrivalBitsPerSecond: 2_700_000,
