@@ -29,6 +29,7 @@ const LEVELS: Partial<Record<MetricName, number>> = {
   'cache.bytes': 3.4 * GB,
   'cdn.reads': 2 * MB,
   'cdn.failures': 0.005,
+  'cdn.429': 0.001,
   'events.streams': 6,
   'auth.sign_ins': 0.004,
   'auth.failed_sign_ins': 0.001,

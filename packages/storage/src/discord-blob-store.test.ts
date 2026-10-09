@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { ChannelType } from 'discord-api-types/v10'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { BlobStoreError, type BlobToStore, type StoredBlob } from './blob-store.ts'
+import { CdnGate } from './cdn.ts'
 import { DiscordBlobStore, type StorageChannel } from './discord-blob-store.ts'
 import { FakeDiscord } from './testing.ts'
 
@@ -154,6 +155,51 @@ describe('DiscordBlobStore (DESIGN.md §4, §6.1, §6.2)', () => {
 
     const signed = await store.signUrls([blob, { ...blob, id: 12, attachmentId: '1' }])
     expect([...signed.keys()]).toEqual([11])
+  })
+
+  it('waits out a 429 from the CDN and reads on, every read waiting together', async () => {
+    const data = new Uint8Array(randomBytes(600))
+    const blob = await put(solo(11), data)
+    discord.slowDownNext = 1
+    discord.slowDownRetryAfter = '0.3'
+    const started = Date.now()
+    const [first, second] = await Promise.all([
+      store.read(blob, 0, 100),
+      // Sent while the gate is closed: it waits rather than adding a refusal.
+      new Promise((resolve) => setTimeout(resolve, 50)).then(() => store.read(blob, 100, 100)),
+    ])
+    expect(first).toEqual(data.subarray(0, 100))
+    expect(second).toEqual(data.subarray(100, 200))
+    expect(Date.now() - started).toBeGreaterThanOrEqual(280)
+    expect(discord.cdnRequests).toBe(3)
+
+    discord.slowDownNext = 1
+    discord.slowDownRetryAfter = '0.05'
+    expect(await streamed(blob, 590, 10)).toEqual(data.subarray(590))
+  })
+
+  it('gives up on a CDN that keeps asking, and never waits over a minute', async () => {
+    const blob = await put(solo(12), new Uint8Array(100))
+    discord.slowDownNext = 4
+    discord.slowDownRetryAfter = '0.01'
+    await expect(store.read(blob, 0, 10)).rejects.toMatchObject({ retryable: true })
+    const gate = new CdnGate()
+    gate.slowDown('3600')
+    expect(gate.closedForMs).toBeLessThanOrEqual(60_000)
+    // Without a Retry-After, the pause doubles: 1 s, then 2 s.
+    const doubling = new CdnGate()
+    doubling.slowDown(null)
+    doubling.slowDown(null)
+    expect(doubling.closedForMs).toBeGreaterThan(1500)
+  })
+
+  it('lets a read given up on leave a closed gate at once', async () => {
+    const gate = new CdnGate()
+    gate.slowDown('30')
+    const controller = new AbortController()
+    const waiting = gate.open(controller.signal)
+    controller.abort()
+    await expect(waiting).rejects.toMatchObject({ name: 'AbortError' })
   })
 
   it('says a blob is gone when the CDN no longer has it', async () => {

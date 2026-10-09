@@ -72,6 +72,7 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
       rate_limited: number
       server_errors: number
       cdn_failures: number
+      cdn_slow_downs: number
       post_failures: number
       deadlocks: number
     }>(sql`
@@ -85,13 +86,14 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
         coalesce(sum(sum) FILTER (WHERE name = 'discord.429'), 0)::float8 AS rate_limited,
         coalesce(sum(sum) FILTER (WHERE name = 'http.server_errors'), 0)::float8 AS server_errors,
         coalesce(sum(sum) FILTER (WHERE name = 'cdn.failures'), 0)::float8 AS cdn_failures,
+        coalesce(sum(sum) FILTER (WHERE name = 'cdn.429'), 0)::float8 AS cdn_slow_downs,
         coalesce(sum(sum) FILTER (WHERE name = 'discord.post_failures'), 0)::float8
           AS post_failures,
         coalesce(sum(sum) FILTER (WHERE name = 'pg.deadlocks'), 0)::float8 AS deadlocks
       FROM metrics
       WHERE step = ${METRIC_STEPS.minute} AND at >= now() - interval '1 hour'
         AND name IN ('discord.posted', 'cache.hits', 'cache.misses', 'discord.429',
-          'http.server_errors', 'cdn.failures', 'discord.post_failures', 'pg.deadlocks')`),
+          'http.server_errors', 'cdn.failures', 'cdn.429', 'discord.post_failures', 'pg.deadlocks')`),
     // Blobs that keep failing to delete, through the index of the GC's queue,
     // and how far the journal is behind.
     app.db.execute<{
@@ -157,6 +159,7 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
         rateLimited: latest?.rate_limited ?? 0,
         serverErrors: latest?.server_errors ?? 0,
         cdnFailures: latest?.cdn_failures ?? 0,
+        cdnSlowDowns: latest?.cdn_slow_downs ?? 0,
         postFailures: latest?.post_failures ?? 0,
         deadlocks: latest?.deadlocks ?? 0,
       },

@@ -64,6 +64,8 @@ export const METRICS = {
   /** One event per CDN request, with the bytes it brought. */
   'cdn.reads': byApi('counter', 'bytes', 'Read from the CDN'),
   'cdn.failures': byApi('counter', 'count', 'Failed CDN reads'),
+  /** The CDN answered 429: every read of the API waited as it asked (§6.2). */
+  'cdn.429': byApi('counter', 'count', 'CDN asked to slow down (429)'),
   'events.streams': byApi('gauge', 'count', 'Open event streams'),
   'auth.sign_ins': byApi('counter', 'count', 'Sign-ins'),
   'auth.failed_sign_ins': byApi('counter', 'count', 'Failed sign-ins'),

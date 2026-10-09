@@ -48,6 +48,35 @@ describe('CdnBlobReader (DESIGN.md §6.2)', () => {
     await expect(reader.read(blob(1), 0, 4)).rejects.toMatchObject({ retryable: true })
   })
 
+  it('waits out a 429 from the CDN, reads on, and counts it', async () => {
+    const metrics = new Metrics()
+    const record = vi.spyOn(metrics, 'record')
+    let calls = 0
+    const reader = new CdnBlobReader({
+      botUrl: 'http://bot.test',
+      secret: 'secret',
+      metrics,
+      fetch: () => {
+        calls += 1
+        return Promise.resolve(
+          calls === 1
+            ? new Response(null, { status: 429, headers: { 'Retry-After': '0.05' } })
+            : new Response(new Uint8Array([1, 2, 3, 4]), {
+                status: 206,
+                headers: { 'Content-Range': 'bytes 0-3/10' },
+              }),
+        )
+      },
+    })
+    const url = {
+      url: 'https://cdn.discordapp.com/attachments/1/2/1.bin?ex=1',
+      expiresAt: new Date(Date.now() + 60 * 60_000),
+    }
+    expect(await reader.read({ ...blob(1), url }, 0, 4)).toEqual(new Uint8Array([1, 2, 3, 4]))
+    expect(record).toHaveBeenCalledWith('cdn.429')
+    expect(record).not.toHaveBeenCalledWith('cdn.failures')
+  })
+
   it('stops a read its reader gave up on, and counts no failure', async () => {
     const metrics = new Metrics()
     const record = vi.spyOn(metrics, 'record')

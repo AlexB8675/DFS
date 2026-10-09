@@ -1,3 +1,4 @@
+import { setTimeout } from 'node:timers/promises'
 import { BlobStoreError, type CdnUrl, type StoredBlob } from './blob-store.ts'
 import type { DiscordRest } from './discord.ts'
 
@@ -10,6 +11,50 @@ const FRESH_FOR_MS = 60_000
 /** Discord signs at most this many URLs per request. */
 const REFRESH_BATCH = 50
 const CDN_TIMEOUT_MS = 60_000
+/** However long a 429 asks for, requests wait at most this, then try again. */
+const MAX_PAUSE_MS = 60_000
+/** A request the CDN refuses with 429 is sent again this many times. */
+const CDN_RETRIES = 3
+
+/**
+ * One process's way of minding Discord's CDN, whose limits are unpublished
+ * and count by address (§6.2). Once it answers 429, every request of the
+ * process waits as long as it asked, at most a minute, or, when it didn't
+ * say, a while that doubles with each 429 in a row; the refused request is
+ * then sent again. A request that goes through starts the doubling over.
+ */
+export class CdnGate {
+  #until = 0
+  #strikes = 0
+  readonly #onSlowDown: ((pauseMs: number) => void) | undefined
+
+  constructor(options: { onSlowDown?: (pauseMs: number) => void } = {}) {
+    this.#onSlowDown = options.onSlowDown
+  }
+
+  /** How long requests have still to wait. */
+  get closedForMs(): number {
+    return Math.max(0, this.#until - Date.now())
+  }
+
+  /** Waits while the gate is closed; one given up on (`signal`) leaves at once. */
+  async open(signal?: AbortSignal): Promise<void> {
+    const wait = this.closedForMs
+    if (wait > 0) await setTimeout(wait, undefined, { signal })
+  }
+
+  /** The CDN answered 429: close the gate for everyone, as long as it asked. */
+  slowDown(retryAfter: string | null): void {
+    const pause = Math.min(MAX_PAUSE_MS, retryAfterMs(retryAfter) ?? 1000 * 2 ** this.#strikes)
+    this.#strikes += 1
+    this.#until = Math.max(this.#until, Date.now() + pause)
+    this.#onSlowDown?.(pause)
+  }
+
+  passed(): void {
+    this.#strikes = 0
+  }
+}
 
 /** The CDN refused the URL: it expired, or the attachment is gone. */
 export class CdnRefusedError extends BlobStoreError {
@@ -77,19 +122,20 @@ export async function readBlobFromCdn(
   length: number,
   sign: (blob: StoredBlob) => Promise<CdnUrl | null>,
   signal?: AbortSignal,
+  gate?: CdnGate,
 ): Promise<Uint8Array> {
   const known = isFresh(blob.url) ? blob.url : null
   const url = known ?? (await sign(blob))
   try {
     if (!url) throw new CdnRefusedError(404)
-    return await readCdnRange(fetcher, url.url, offset, length, signal)
+    return await readCdnRange(fetcher, url.url, offset, length, signal, gate)
   } catch (error) {
     if (!(error instanceof CdnRefusedError)) throw error
     // A URL from the database may have been revoked; a newly signed one wasn't.
     const again = known ? await sign(blob) : null
     if (again) {
       try {
-        return await readCdnRange(fetcher, again.url, offset, length, signal)
+        return await readCdnRange(fetcher, again.url, offset, length, signal, gate)
       } catch (retry) {
         if (!(retry instanceof CdnRefusedError)) throw retry
       }
@@ -113,14 +159,13 @@ export async function* streamBlobFromCdn(
   length: number,
   sign: (blob: StoredBlob) => Promise<CdnUrl | null>,
   signal?: AbortSignal,
+  gate?: CdnGate,
 ): AsyncGenerator<Uint8Array, void, undefined> {
   const known = isFresh(blob.url) ? blob.url : null
-  const timeout = AbortSignal.timeout(CDN_TIMEOUT_MS)
-  const combined = signal ? AbortSignal.any([signal, timeout]) : timeout
   const open = async (url: CdnUrl | null): Promise<Response | null> => {
     if (!url) return null
     try {
-      return await openCdnRange(fetcher, url.url, offset, length, combined, signal)
+      return await openCdnRange(fetcher, url.url, offset, length, signal, gate)
     } catch (error) {
       if (error instanceof CdnRefusedError) return null
       throw error
@@ -171,28 +216,64 @@ export async function* streamBlobFromCdn(
   }
 }
 
+/**
+ * Sends a Range request through the gate: it waits while the gate is
+ * closed, and a 429 closes it for everyone and is sent again, a few times.
+ * The request's minute runs from when it is sent, not from when it began
+ * waiting.
+ */
+async function rangeRequest(
+  fetcher: typeof fetch,
+  url: string,
+  offset: number,
+  length: number,
+  signal: AbortSignal | undefined,
+  gate: CdnGate | undefined,
+): Promise<Response> {
+  for (let attempt = 0; ; attempt += 1) {
+    let response: Response
+    try {
+      if (gate && gate.closedForMs > 0) await gate.open(signal)
+      // Given up on while it waited: it isn't sent at all.
+      signal?.throwIfAborted()
+      const timeout = AbortSignal.timeout(CDN_TIMEOUT_MS)
+      response = await fetcher(url, {
+        headers: { Range: `bytes=${String(offset)}-${String(offset + length - 1)}` },
+        signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+      })
+    } catch (error) {
+      // Given up on by its reader: not the CDN's failure, and nothing to retry.
+      if (signal?.aborted) throw signal.reason
+      throw new BlobStoreError('Reading from the Discord CDN failed.', {
+        retryable: true,
+        cause: error,
+      })
+    }
+    if (response.status !== 429 || !gate) {
+      gate?.passed()
+      return response
+    }
+    await response.body?.cancel()
+    gate.slowDown(response.headers.get('retry-after'))
+    if (attempt >= CDN_RETRIES) {
+      throw new BlobStoreError('The Discord CDN asked to slow down, and kept asking.', {
+        retryable: true,
+        retryAfterMs: gate.closedForMs,
+      })
+    }
+  }
+}
+
 /** Starts a Range request and checks its answer before any of its body is used. */
 async function openCdnRange(
   fetcher: typeof fetch,
   url: string,
   offset: number,
   length: number,
-  combined: AbortSignal,
   signal: AbortSignal | undefined,
+  gate: CdnGate | undefined,
 ): Promise<Response> {
-  let response: Response
-  try {
-    response = await fetcher(url, {
-      headers: { Range: `bytes=${String(offset)}-${String(offset + length - 1)}` },
-      signal: combined,
-    })
-  } catch (error) {
-    if (signal?.aborted) throw signal.reason
-    throw new BlobStoreError('Reading from the Discord CDN failed.', {
-      retryable: true,
-      cause: error,
-    })
-  }
+  const response = await rangeRequest(fetcher, url, offset, length, signal, gate)
   if (response.status === 206) {
     const range = /^bytes (\d+)-/.exec(response.headers.get('content-range') ?? '')
     if (range && Number(range[1]) === offset) return response
@@ -222,15 +303,12 @@ export async function readCdnRange(
   offset: number,
   length: number,
   signal?: AbortSignal,
+  gate?: CdnGate,
 ): Promise<Uint8Array> {
   let response: Response
   let bytes: Uint8Array
-  const timeout = AbortSignal.timeout(CDN_TIMEOUT_MS)
   try {
-    response = await fetcher(url, {
-      headers: { Range: `bytes=${String(offset)}-${String(offset + length - 1)}` },
-      signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-    })
+    response = await rangeRequest(fetcher, url, offset, length, signal, gate)
     if (response.status !== 200 && response.status !== 206) {
       await response.body?.cancel()
       if (response.status === 403 || response.status === 404) {
@@ -271,7 +349,11 @@ function unsigned(url: string): string {
   return `${parsed.origin}${parsed.pathname}`
 }
 
+/** `Retry-After` in milliseconds: seconds (`1.5`) or a date; `null` without one. */
 function retryAfterMs(header: string | null): number | null {
+  if (!header) return null
   const seconds = Number(header)
-  return header && Number.isFinite(seconds) ? seconds * 1000 : null
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000)
+  const date = Date.parse(header)
+  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : null
 }

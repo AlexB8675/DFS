@@ -12,6 +12,7 @@ import {
 import {
   attachmentUrl,
   blobFilename,
+  CdnGate,
   cdnUrl,
   readBlobFromCdn,
   refreshCdnUrls,
@@ -67,6 +68,8 @@ export class DiscordBlobStore implements BlobStore {
   #instanceId: Promise<string> | null = null
   readonly #perChannel: number
   readonly #fetch: typeof fetch
+  /** The bot's reads wait together when the CDN asks it to slow down. */
+  readonly #gate = new CdnGate()
   #channels: { list: StorageChannel[]; loadedAt: number } | null = null
   readonly #inFlight = new Map<string, number>()
   /**
@@ -162,6 +165,7 @@ export class DiscordBlobStore implements BlobStore {
         return urls.get(unsigned.id) ?? null
       },
       signal,
+      this.#gate,
     )
   }
 
@@ -181,6 +185,7 @@ export class DiscordBlobStore implements BlobStore {
         return urls.get(unsigned.id) ?? null
       },
       signal,
+      this.#gate,
     )
   }
 

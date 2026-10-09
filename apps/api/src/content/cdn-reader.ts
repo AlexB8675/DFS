@@ -2,6 +2,7 @@ import type { Metrics } from '@dfs/db'
 import { refreshedUrlsSchema } from '@dfs/shared'
 import {
   BlobStoreError,
+  CdnGate,
   readBlobFromCdn,
   streamBlobFromCdn,
   type BlobReader,
@@ -22,6 +23,8 @@ export class CdnBlobReader implements BlobReader {
   readonly #secret: string
   readonly #fetch: typeof fetch
   readonly #metrics: Metrics | undefined
+  /** The whole API waits together when the CDN asks it to slow down. */
+  readonly #gate: CdnGate
   /** Signing in flight, by blob, so readers of the same pack share one request. */
   readonly #signing = new Map<number, Promise<CdnUrl | null>>()
 
@@ -35,6 +38,7 @@ export class CdnBlobReader implements BlobReader {
     this.#secret = options.secret
     this.#fetch = options.fetch ?? fetch
     this.#metrics = options.metrics
+    this.#gate = new CdnGate({ onSlowDown: () => this.#metrics?.record('cdn.429') })
   }
 
   async read(
@@ -54,6 +58,7 @@ export class CdnBlobReader implements BlobReader {
           return urls.get(unsigned.id) ?? null
         },
         signal,
+        this.#gate,
       )
       this.#metrics?.record('cdn.reads', data.length)
       return data
@@ -83,6 +88,7 @@ export class CdnBlobReader implements BlobReader {
           return urls.get(unsigned.id) ?? null
         },
         signal,
+        this.#gate,
       )) {
         bytes += piece.length
         yield piece

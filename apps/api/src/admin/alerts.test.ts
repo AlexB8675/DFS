@@ -10,7 +10,14 @@ const calm: AlertFigures = {
   failingDeletions: 0,
   passwordResets: 0,
   database: { connections: 12, maxConnections: 100, oldestTransactionSeconds: 2, longLockWaits: 0 },
-  lastHour: { rateLimited: 3, serverErrors: 0, cdnFailures: 0, postFailures: 0, deadlocks: 0 },
+  lastHour: {
+    rateLimited: 3,
+    serverErrors: 0,
+    cdnFailures: 0,
+    cdnSlowDowns: 0,
+    postFailures: 0,
+    deadlocks: 0,
+  },
   network: { discordDown: false, internetDown: false },
   journal: { behindSeconds: 45, lastError: null },
 }
@@ -49,6 +56,7 @@ describe('health alerts (DESIGN.md §16)', () => {
         rateLimited: 20,
         serverErrors: 5,
         cdnFailures: 10,
+        cdnSlowDowns: 5,
         postFailures: 5,
         deadlocks: 2,
       },
@@ -66,6 +74,7 @@ describe('health alerts (DESIGN.md §16)', () => {
       ['posts_failing', 'warning'],
       ['rate_limited', 'warning'],
       ['cdn_failing', 'warning'],
+      ['cdn_slowed', 'warning'],
       ['server_errors', 'warning'],
     ])
     expect(alerts.find((alert) => alert.code === 'sync_slow')?.detail).toBe(

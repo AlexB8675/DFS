@@ -16,6 +16,8 @@ const LIMITS = {
   rateLimited: 20,
   serverErrors: 5,
   cdnFailures: 10,
+  /** The CDN asked the API to slow down. Reads wait and go on, but it may be near a block. */
+  cdnSlowDowns: 5,
   postFailures: 5,
   deadlocks: 1,
   /** Shares of `max_connections` in use. */
@@ -48,6 +50,7 @@ export interface AlertFigures {
     rateLimited: number
     serverErrors: number
     cdnFailures: number
+    cdnSlowDowns: number
     postFailures: number
     deadlocks: number
   }
@@ -202,6 +205,14 @@ export function healthAlerts(figures: AlertFigures): SystemAlert[] {
       level: 'warning',
       title: 'Reading from Discord is failing',
       detail: `${plural(lastHour.cdnFailures, 'read')} from the CDN failed in the last hour.`,
+    })
+  }
+  if (lastHour.cdnSlowDowns >= LIMITS.cdnSlowDowns) {
+    alerts.push({
+      code: 'cdn_slowed',
+      level: 'warning',
+      title: 'Discord’s CDN asks DFS to slow down',
+      detail: `${plural(lastHour.cdnSlowDowns, 'time')} in the last hour: reads waited, then went on.`,
     })
   }
   if (lastHour.serverErrors >= LIMITS.serverErrors) {

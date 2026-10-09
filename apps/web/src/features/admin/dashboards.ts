@@ -302,9 +302,13 @@ export const MONITORING_SECTIONS: DashboardSection[] = [
       },
       {
         title: 'Failed CDN reads',
-        description: 'Per minute: reads from the CDN that failed.',
+        description:
+          'Per minute: reads from the CDN that failed, and times it asked to slow down (429), which reads wait out.',
         format: 'perMinute',
-        lines: [{ label: 'Failed reads', color: 'critical', series: 'cdn.failures:rate' }],
+        lines: [
+          { label: 'Failed reads', color: 'critical', series: 'cdn.failures:rate' },
+          { label: '429 answers', color: 2, series: 'cdn.429:rate' },
+        ],
       },
     ],
   },

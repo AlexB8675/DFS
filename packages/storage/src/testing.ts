@@ -59,6 +59,9 @@ export class FakeDiscord implements DiscordRest {
   holdNextBodyAt: number | null = null
   /** The next body the CDN sends ends after this many bytes, as a cut connection does. */
   cutNextBodyAt: number | null = null
+  /** The CDN answers this many requests 429, with `slowDownRetryAfter` as `Retry-After`. */
+  slowDownNext = 0
+  slowDownRetryAfter: string | null = '0.05'
   /** Stores the next message, then fails as if its answer were lost. */
   loseNextAnswer = false
   /** Keeps one byte less of the next attachment. */
@@ -250,6 +253,16 @@ export class FakeDiscord implements DiscordRest {
   }
 
   #answer(input: string | URL | Request, init?: RequestInit): Promise<Response> {
+    if (this.slowDownNext > 0) {
+      this.slowDownNext -= 1
+      return Promise.resolve(
+        new Response('You are being rate limited.', {
+          status: 429,
+          headers:
+            this.slowDownRetryAfter === null ? {} : { 'Retry-After': this.slowDownRetryAfter },
+        }),
+      )
+    }
     const url = new URL(input instanceof Request ? input.url : input)
     const data = this.cdn.get(`${url.origin}${url.pathname}`)
     if (!data) return Promise.resolve(new Response('Not found', { status: 404 }))
