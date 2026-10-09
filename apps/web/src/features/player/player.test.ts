@@ -2,6 +2,7 @@ import type { MediaInfo, MediaStream } from '@dfs/shared'
 import { describe, expect, it } from 'vitest'
 import { describeAudio, describeVideo, mimeTypeOf, playability, type CanPlayType } from './codecs'
 import { playerAction, stepSpeed } from './keys'
+import { positionChange } from './resume-rules'
 import { formatPlayTime } from './time'
 
 const STREAM: MediaStream = {
@@ -162,5 +163,23 @@ describe('play times', () => {
     expect(formatPlayTime(3723)).toBe('1:02:03')
     expect(formatPlayTime(65, 7200)).toBe('0:01:05')
     expect(formatPlayTime(Number.NaN)).toBe('0:00')
+  })
+})
+
+describe('keeping where a viewer stopped', () => {
+  const TEN_MINUTES = 600_000
+
+  it('leaves the first 10 s alone, where every video starts with the offer to resume', () => {
+    // Opening a video and leaving it at once keeps the offer for next time.
+    expect(positionChange(0, TEN_MINUTES, false)).toBe('none')
+    expect(positionChange(9_999, TEN_MINUTES, false)).toBe('none')
+    expect(positionChange(9_999, Number.NaN, false)).toBe('none')
+  })
+
+  it('keeps a position past them, and clears it once the video is finished', () => {
+    expect(positionChange(10_000, TEN_MINUTES, false)).toBe('keep')
+    expect(positionChange(300_000, Number.NaN, false)).toBe('keep')
+    expect(positionChange(0.95 * TEN_MINUTES, TEN_MINUTES, false)).toBe('clear')
+    expect(positionChange(5_000, 6_000, true)).toBe('clear')
   })
 })

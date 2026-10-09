@@ -46,11 +46,12 @@ import {
 import { SubtitleOverlay } from './subtitle-overlay'
 import { formatPlayTime } from './time'
 import { useMediaState } from './use-media-state'
-import { RESUME_FROM_MS, useResume } from './use-resume'
+import { RESUME_FROM_MS, RESUME_OFFER_MS } from './resume-rules'
+import { useResume } from './use-resume'
 
 // The video player (DESIGN.md §10.4): direct play of the version the API
-// names, from where the viewer stopped, with controls of its own over the
-// picture. It starts at once, without waiting for the media info, which,
+// names, from the start, offering to resume where the viewer stopped, with
+// controls of its own over the picture. It starts at once, without waiting for the media info, which,
 // when it comes, says whether this browser decodes the picture and the
 // sound, and brings the chapters and the subtitles inside the file. The
 // same for a drive's file and a link's: its place says where to ask.
@@ -92,8 +93,6 @@ const DOUBLE_TAP_MS = 300
 const SKIP_TAP_SECONDS = 10
 /** A swipe is this many pixels across, and more across than down. */
 const SWIPE_PX = 60
-/** How long “Resumed at …” stays. */
-const RESUMED_NOTE_MS = 8000
 /** Each warning's icon. */
 const NOTICE_ICONS: Record<PlaybackNotice['key'], ReactNode> = {
   sound: <VolumeX />,
@@ -126,15 +125,14 @@ export default function VideoView({
   const subtitlePreference = usePlayerPreferences((state) => state.subtitles)
   const setSubtitlePreference = usePlayerPreferences((state) => state.setSubtitles)
 
-  // The version /playback named, from where the viewer stopped, played until the viewer moves on.
+  // The version /playback named, from the start, played until the viewer moves on.
   const [source, setSource] = useState<Source | null>(null)
-  /** Where it picked up, for “Resumed at …”, until that goes. */
-  const [resumedAt, setResumedAt] = useState<number | null>(null)
+  /** Where the viewer stopped, in seconds, offered until they resume or play on past it. */
+  const [resumeAt, setResumeAt] = useState<number | null>(null)
   if (source === null && playback.data) {
     const { versionId, positionMs } = playback.data
-    const startAt = positionMs !== null && positionMs >= RESUME_FROM_MS ? positionMs / 1000 : 0
-    setSource({ versionId, startAt, attempt: 0 })
-    if (startAt > 0) setResumedAt(startAt)
+    setSource({ versionId, startAt: 0, attempt: 0 })
+    if (positionMs !== null && positionMs >= RESUME_FROM_MS) setResumeAt(positionMs / 1000)
   }
   const [problem, setProblem] = useState<Problem | null>(null)
   /** The element showed no picture: Chrome plays the sound of a video it can't decode. */
@@ -172,6 +170,10 @@ export default function VideoView({
   }, [])
 
   const state = useMediaState(video)
+  // Played on past the offer's time, or to the end: what plays is where the viewer is.
+  if (resumeAt !== null && (state.ended || state.currentTime * 1000 >= RESUME_OFFER_MS)) {
+    setResumeAt(null)
+  }
   const [awake, setAwake] = useState(true)
   const [menuOpen, setMenuOpen] = useState(false)
   const hideTimer = useRef(0)
@@ -291,21 +293,13 @@ export default function VideoView({
     }
   }, [chosen, options, video])
 
-  const resume = useResume({
+  useResume({
     place,
     video,
     versionId: source?.versionId ?? null,
     savedMs: playback.data?.positionMs ?? null,
+    offering: resumeAt !== null,
   })
-  useEffect(() => {
-    if (resumedAt === null) return
-    const timer = window.setTimeout(() => {
-      setResumedAt(null)
-    }, RESUMED_NOTE_MS)
-    return () => {
-      window.clearTimeout(timer)
-    }
-  }, [resumedAt])
 
   const wake = useCallback(() => {
     setAwake(true)
@@ -681,24 +675,25 @@ export default function VideoView({
           {SKIP_TAP_SECONDS} s
         </div>
       )}
-      {resumedAt !== null && !shown && (
+      {resumeAt !== null && !shown && (
         <div className="absolute bottom-24 left-3 sm:left-4">
           <div
             role="status"
             className="flex items-center gap-1 rounded-lg bg-black/75 py-1 pr-1 pl-3 text-sm text-white shadow-lg"
           >
-            <span>Resumed at {formatPlayTime(resumedAt)}</span>
+            <span>Stopped at {formatPlayTime(resumeAt)}</span>
             <Button
               variant="ghost"
               size="sm"
               className="text-white hover:bg-white/15 hover:text-white"
               onClick={() => {
-                seek(0)
-                resume.startOver()
-                setResumedAt(null)
+                seek(resumeAt)
+                setResumeAt(null)
+                void videoRef.current?.play().catch(() => undefined)
+                wake()
               }}
             >
-              <RotateCcw /> Start over
+              <Play className="fill-current" /> Resume
             </Button>
           </div>
         </div>

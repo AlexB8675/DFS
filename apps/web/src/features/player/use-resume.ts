@@ -2,19 +2,18 @@ import { useEffect, useRef } from 'react'
 import { apiFetch } from '@/lib/api/client'
 import type { FilePlace } from '@/lib/file-place'
 import { useLinkPositions } from './link-positions'
+import { positionChange } from './resume-rules'
 
 // Where a viewer stopped a video (DESIGN.md §10.4): on the server for a
 // drive's file, and in the browser for a link's (`link-positions.ts`). Kept
 // every 10 s while it plays, on pause, and on leaving it (the viewer closing
 // or moving on, the page hidden), the last with `keepalive` so it outlives
-// the page. The first 10 s aren't kept, and finishing it (the last 5%)
-// clears it.
+// the page. Every video starts at the beginning: while the offer to resume
+// stands, the position it offers is kept, unless the video is finished.
+// Otherwise the first 10 s aren't kept, and finishing it (the last 5%)
+// clears it (`resume-rules.ts`).
 
 const EVERY_MS = 10_000
-/** Less than this in isn't worth coming back to. */
-export const RESUME_FROM_MS = 10_000
-/** Past this share of it, it is finished. */
-export const FINISHED_AT = 0.95
 
 interface ResumeOptions {
   place: FilePlace
@@ -22,17 +21,22 @@ interface ResumeOptions {
   versionId: string | null
   /** Where the viewer stopped as /playback said, for knowing whether there is one to clear. */
   savedMs: number | null
+  /** The offer to resume it stands: what it offers stays kept. */
+  offering: boolean
 }
 
-/** Keeps the position as it plays; `startOver` clears it, once the player is back at the start. */
-export function useResume({ place, video, versionId, savedMs }: ResumeOptions): {
-  startOver: () => void
-} {
+/** Keeps the position as it plays. */
+export function useResume({ place, video, versionId, savedMs, offering }: ResumeOptions): void {
   /**
    * What is kept now, as far as this player knows: what /playback said,
    * until this player saves or clears it.
    */
   const saved = useRef<number | null | undefined>(undefined)
+  /** `offering`, for saves made after the effect began: on pause, on leaving. */
+  const holding = useRef(offering)
+  useEffect(() => {
+    holding.current = offering
+  }, [offering])
   // The strings, not the place: a viewer may build its place anew each time it draws.
   const { path, token } = place
 
@@ -44,11 +48,9 @@ export function useResume({ place, video, versionId, savedMs }: ResumeOptions): 
       // Before it has played, its time says nothing yet: leaving then keeps what was saved.
       if (video.played.length === 0) return
       const ms = Math.round(video.currentTime * 1000)
-      const duration = video.duration
-      const finished =
-        video.ended ||
-        (Number.isFinite(duration) && duration > 0 && ms >= duration * 1000 * FINISHED_AT)
-      if (finished || ms < RESUME_FROM_MS) {
+      const change = positionChange(ms, video.duration * 1000, video.ended)
+      if (change === 'none' || (change === 'keep' && holding.current)) return
+      if (change === 'clear') {
         if (saved.current === null) return
         saved.current = null
         clearPosition(at, keepalive)
@@ -83,13 +85,6 @@ export function useResume({ place, video, versionId, savedMs }: ResumeOptions): 
       save(true)
     }
   }, [path, savedMs, token, video, versionId])
-
-  return {
-    startOver: () => {
-      saved.current = null
-      clearPosition({ path, token })
-    },
-  }
 }
 
 /** Keeps where the viewer stopped, in the version they played. */
@@ -105,7 +100,7 @@ function savePosition(place: FilePlace, versionId: string, positionMs: number, k
   }).catch(() => undefined)
 }
 
-function clearPosition(place: FilePlace, keepalive = false) {
+function clearPosition(place: FilePlace, keepalive: boolean) {
   if (place.token !== null) {
     useLinkPositions.getState().forget(place.path)
     return
