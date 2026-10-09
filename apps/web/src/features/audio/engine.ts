@@ -2,6 +2,7 @@ import { splitExtension } from '@dfs/shared'
 import { z } from 'zod'
 import { queryClient } from '@/app/query-client'
 import { mediaQuery, playbackQuery } from '@/features/player/api'
+import { LEAVING_EVENT } from '@/features/player/use-resume'
 import { browserCanPlayType, codecLabel, playability } from '@/features/player/codecs'
 import { ApiError, errorMessage } from '@/lib/api/client'
 import { drivePlace, linkPlace, type FilePlace } from '@/lib/file-place'
@@ -82,6 +83,7 @@ export function trackTitle(track: Pick<QueuedTrack, 'title' | 'name'>): string {
 /** Loads `track` into the element, from `at` seconds, playing if asked. */
 function load(track: QueuedTrack, play: boolean, at = 0): void {
   if (!audio) return
+  leave()
   store.setState({ loaded: track.key, problem: null, resume: null })
   audio.preload = 'auto'
   audio.src = trackUrl(track)
@@ -262,6 +264,8 @@ export function clearQueue(): void {
 /** What a queue entry's media info or version adds to it, once known. */
 export function updateEntry(key: string, change: Partial<Omit<QueuedTrack, 'key'>>): void {
   setQueue(updateTrack(store.getState().queue, key, change))
+  // Its title and cover, when they come later, reach the lock screen at once.
+  if (key === store.getState().loaded && audio && !audio.paused) announce()
 }
 
 /** Only links' tracks stay: one user's drive files aren't another's (§10.4). */
@@ -290,10 +294,19 @@ export function unlockAudio(): void {
 
 function stop(): void {
   if (!audio) return
+  leave()
   audio.pause()
   audio.removeAttribute('src')
   audio.load()
   store.setState({ loaded: null })
+}
+
+/**
+ * Says the element is about to play something else, while its time is still
+ * the track's: what keeps a long file's place saves it (`useResume`).
+ */
+function leave(): void {
+  if (audio && store.getState().loaded !== null) audio.dispatchEvent(new Event(LEAVING_EVENT))
 }
 
 function setQueue(queue: Queue): void {

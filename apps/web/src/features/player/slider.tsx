@@ -1,4 +1,4 @@
-import { useRef, useState, type PointerEvent, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type PointerEvent, type ReactNode } from 'react'
 import { cn } from '@/lib/utils'
 
 // The player's sliders, the seek bar and the volume: dragged with any
@@ -28,6 +28,9 @@ interface SliderProps {
   className?: string
 }
 
+/** Keys pressed within this of each other move on from where the last one went. */
+const KEYS_SETTLE_MS = 1000
+
 export function Slider({
   value,
   label,
@@ -44,6 +47,17 @@ export function Slider({
   const theme = tone === 'theme'
   const track = useRef<HTMLDivElement>(null)
   const [dragging, setDragging] = useState(false)
+  /**
+   * Where the keys last moved it, while they go on: `value` catches up only
+   * once a seek lands, so quick presses add up from here rather than from it.
+   */
+  const keyed = useRef<{ value: number; timer: number } | null>(null)
+  useEffect(
+    () => () => {
+      window.clearTimeout(keyed.current?.timer)
+    },
+    [],
+  )
 
   function at(event: PointerEvent<HTMLDivElement>): number {
     const rect = track.current?.getBoundingClientRect()
@@ -81,7 +95,14 @@ export function Slider({
         if (move === undefined) return
         event.preventDefault()
         event.stopPropagation()
-        const next = Math.min(1, Math.max(0, value + move))
+        const next = Math.min(1, Math.max(0, (keyed.current?.value ?? value) + move))
+        window.clearTimeout(keyed.current?.timer)
+        keyed.current = {
+          value: next,
+          timer: window.setTimeout(() => {
+            keyed.current = null
+          }, KEYS_SETTLE_MS),
+        }
         onChange(next)
         onCommit?.(next)
       }}

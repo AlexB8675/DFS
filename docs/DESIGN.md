@@ -809,7 +809,7 @@ What a file holds, seen without downloading it (D33). First images, PDFs, text a
 - **Safety:** the server sends content as it always has, an attachment with `nosniff` (§7.5): images go through `<img>`, text is rendered as text, and PDFs are drawn by pdf.js. Nothing uploaded runs in the page.
 - **Caching:** the content route answers `304` to a browser that has the version (§6.2), so going back and forth between files moves no bytes again.
 - **Share page:** a file link's preview fills its page, under a bar with its name, the link's facts and Download; a folder link opens its files in the same viewer as the drive, with Download and Details but no Share. Previews ask with `?preview=1`, which never counts toward the download limit (§7.5); only Download does. A file the viewer can't show keeps the page as it was, with Download.
-- **Mock:** the demo's images, PDFs and text files have sample content, so previews work in it too; every video plays one 12-second sample (`apps/web/src/mocks/sample-video.mp4`, made by `make-sample-video.sh` in the media image), with made-up media info: chapters and subtitles inside, an MKV's sound in Dolby Digital and an AVI in MPEG-4 Part 2, so the player's notice and reasons show, and an Italian subtitle file beside one video.
+- **Mock:** the demo's images, PDFs and text files have sample content, so previews work in it too; every video plays one 12-second sample (`apps/web/src/mocks/sample-video.mp4`, made by `make-sample-video.sh` in the media image), with made-up media info: chapters and subtitles inside, an MKV's sound in Dolby Digital and an AVI in MPEG-4 Part 2, so the player's notice and reasons show, and an Italian subtitle file beside one video. Every audio file plays one 10-second MP3 (`sample-audio.mp3`, by `make-sample-audio.sh`), with a cover (`sample-cover.jpg`), its title and track number from its name and its album from its folder's.
 
 ### 10.4 Audio and video players
 
@@ -832,7 +832,7 @@ The players of D35, over the streaming of §6.7.
 - **Audio** plays in a player bar docked at the bottom of the app, which keeps playing while the user browses (it lives outside the routes):
   - opening an audio file plays it, with the folder's other audio files queued in order: disc and track number from the tags, else the name in natural order; Play and Add to queue on files and folders, a folder bringing everything below it, folder by folder in name order (at most 1,000 files; the user's decision, 2026-10-09);
   - previous (to the track's start once 3 s in) and next, shuffle, repeat (all or one), seek, volume, speed (0.5–3×, for audiobooks and podcasts), and a queue to open, reorder and clear;
-  - title, artist, album and cover from the tags (§6.7), else the file's name;
+  - title, artist, album and cover from the tags (§6.7), else the file's name; a playlist (M3U, M3U8, PLS), which browsers type as audio, isn't audio, and downloads;
   - Media Session: the lock screen, notifications and media keys show and control it, so a phone plays on in the background;
   - on a computer, one bar under the page, with the queue in a side panel; on a phone, a slim bar (cover, title, play, next) that opens a full view with the rest (the user's decision, 2026-10-09);
   - a track this browser can't play (its codec, from the media info, or the browser's error) stops the bar with why, and Download; Next goes on (the user's decision, 2026-10-09). From commit 4 its sound is converted instead;

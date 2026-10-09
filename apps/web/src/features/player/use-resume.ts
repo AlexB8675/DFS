@@ -15,6 +15,12 @@ import { positionChange } from './resume-rules'
 
 const EVERY_MS = 10_000
 
+/**
+ * Fired on an element about to play something else (the audio bar's, which
+ * goes from track to track): the last moment its time is the one leaving's.
+ */
+export const LEAVING_EVENT = 'dfs:leaving'
+
 interface ResumeOptions {
   place: FilePlace
   /** A video, or the audio bar's element. */
@@ -75,12 +81,14 @@ export function useResume({ place, video, versionId, savedMs, offering }: Resume
     }, EVERY_MS)
     video.addEventListener('pause', onStop)
     video.addEventListener('ended', onStop)
+    video.addEventListener(LEAVING_EVENT, onStop)
     document.addEventListener('visibilitychange', onHidden)
     window.addEventListener('pagehide', onPageHide)
     return () => {
       window.clearInterval(timer)
       video.removeEventListener('pause', onStop)
       video.removeEventListener('ended', onStop)
+      video.removeEventListener(LEAVING_EVENT, onStop)
       document.removeEventListener('visibilitychange', onHidden)
       window.removeEventListener('pagehide', onPageHide)
       save(true)
