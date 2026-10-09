@@ -104,7 +104,7 @@ const IDLE: PlaybackSignals = {
 }
 
 /** What the server sent between two asks while the player waited. */
-interface Arrival {
+export interface Arrival {
   ms: number
   bytes: number
   sourceMs: number
@@ -143,10 +143,10 @@ export function usePlaybackStats(
     /** When it first played: its first frame may come long before. */
     let playingAt: number | null = null
     /**
-     * Since when it waits for data, as the viewer sees it: before its first
-     * frame, or playing but without the data to go on (a stall or a seek).
+     * Since when it waits for data, as the viewer sees it: asked to play,
+     * before its first frame or without the data to go on (a stall or a seek).
      */
-    let starvingSince: number | null = startedAt
+    let starvingSince: number | null = null
     let stalls = 0
     let stallMs = 0
     let stallSince: number | null = null
@@ -174,14 +174,8 @@ export function usePlaybackStats(
         const before = lastAsk
         lastAsk = { at, totals }
         if (!before || starvingSince === null) return
-        const arrival: Arrival = {
-          ms: at - before.at,
-          bytes: totals.bytes - before.totals.bytes,
-          sourceMs: totals.waitedForSourceMs - before.totals.waitedForSourceMs,
-          clientMs: totals.waitedForClientMs - before.totals.waitedForClientMs,
-        }
-        // Totals go back only when the server forgot them: no reading then.
-        if (arrival.bytes < 0 || arrival.ms <= 0) return
+        const arrival = arrivalBetween(before.totals, totals, at - before.at)
+        if (!arrival) return
         starvedBytes += arrival.bytes
         starvedMs += arrival.ms
         arrivals = [...arrivals, arrival].slice(-ARRIVAL_WINDOW)
@@ -228,9 +222,7 @@ export function usePlaybackStats(
     const sample = () => {
       const at = now()
       samples += 1
-      const starving =
-        firstFrameAt === null ||
-        (!video.paused && !video.ended && video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA)
+      const starving = waitingForData(video, firstFrameAt !== null)
       if (!starving) {
         // The next wait starts its own readings.
         starvingSince = null
@@ -342,6 +334,40 @@ export function usePlaybackStats(
 
   return video ? signals : IDLE
 }
+
+/**
+ * What the server sent between two asks of its totals, `ms` apart; `null`
+ * when it says nothing of the connection: totals that went back (the server
+ * forgot them), or no read running and nothing sent, as when the browser
+ * reads its own cache or waits on its decoder, which is no rate of 0.
+ */
+export function arrivalBetween(before: Delivery, after: Delivery, ms: number): Arrival | null {
+  const arrival: Arrival = {
+    ms,
+    bytes: after.bytes - before.bytes,
+    sourceMs: after.waitedForSourceMs - before.waitedForSourceMs,
+    clientMs: after.waitedForClientMs - before.waitedForClientMs,
+  }
+  if (arrival.bytes < 0 || arrival.ms <= 0) return null
+  if (arrival.bytes === 0 && before.running === 0 && after.running === 0) return null
+  return arrival
+}
+
+/**
+ * Whether a video waits for data, as its viewer sees it: asked to play, and
+ * without its first frame or the data to go on (a stall, a seek). One paused
+ * before its first frame waits for the viewer, not the connection: an
+ * iPhone loads nothing until Play is pressed.
+ */
+export function waitingForData(
+  video: Pick<HTMLMediaElement, 'paused' | 'ended' | 'readyState'>,
+  shownFirstFrame: boolean,
+): boolean {
+  return !video.paused && !video.ended && (!shownFirstFrame || video.readyState < HAVE_FUTURE_DATA)
+}
+
+/** `HTMLMediaElement.HAVE_FUTURE_DATA`, the standard's number, for code run without a DOM. */
+const HAVE_FUTURE_DATA = 3
 
 /** Milliseconds within the report's bounds (a day). */
 function bounded(ms: number): number {

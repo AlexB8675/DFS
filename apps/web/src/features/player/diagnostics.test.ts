@@ -1,9 +1,11 @@
 import type { MediaInfo, MediaStream } from '@dfs/shared'
 import { describe, expect, it } from 'vitest'
 import {
+  arrivalBetween,
   decodingConfiguration,
   formatBitRate,
   playbackNotices,
+  waitingForData,
   type PlaybackSignals,
 } from './diagnostics'
 
@@ -123,5 +125,55 @@ describe('the player’s warnings', () => {
   it('formats rates as people read them', () => {
     expect(formatBitRate(24_282_105)).toBe('24.3 Mbit/s')
     expect(formatBitRate(640_000)).toBe('640 kbit/s')
+  })
+})
+
+describe('telling a wait for data from other waits', () => {
+  const HAVE_METADATA = 1
+  const HAVE_ENOUGH_DATA = 4
+
+  it('counts a video asked to play without its first frame or enough data', () => {
+    expect(waitingForData({ paused: false, ended: false, readyState: HAVE_METADATA }, false)).toBe(
+      true,
+    )
+    // A stall, or a seek, after the first frame.
+    expect(waitingForData({ paused: false, ended: false, readyState: HAVE_METADATA }, true)).toBe(
+      true,
+    )
+    expect(
+      waitingForData({ paused: false, ended: false, readyState: HAVE_ENOUGH_DATA }, true),
+    ).toBe(false)
+  })
+
+  it('leaves out a video paused before its first frame, which waits for its viewer', () => {
+    expect(waitingForData({ paused: true, ended: false, readyState: 0 }, false)).toBe(false)
+    expect(waitingForData({ paused: false, ended: true, readyState: HAVE_METADATA }, true)).toBe(
+      false,
+    )
+  })
+})
+
+describe('what the server sent between two asks', () => {
+  const totals = (bytes: number, running: number, clientMs = 0) => ({
+    bytes,
+    waitedForSourceMs: 0,
+    waitedForClientMs: clientMs,
+    running,
+  })
+
+  it('is the difference, with the waits on each side', () => {
+    expect(arrivalBetween(totals(1000, 1), totals(5000, 1, 1500), 2000)).toEqual({
+      ms: 2000,
+      bytes: 4000,
+      sourceMs: 0,
+      clientMs: 1500,
+    })
+    // A read running that sent nothing in the time: a connection at 0.
+    expect(arrivalBetween(totals(1000, 1), totals(1000, 1), 2000)?.bytes).toBe(0)
+  })
+
+  it('says nothing when no read ran, or the server forgot its totals', () => {
+    expect(arrivalBetween(totals(1000, 0), totals(1000, 0), 2000)).toBeNull()
+    expect(arrivalBetween(totals(9000, 1), totals(100, 1), 2000)).toBeNull()
   })
 })
