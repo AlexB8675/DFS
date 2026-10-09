@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useEffect, useRef } from 'react'
 import { mediaQuery, playbackQuery } from '@/features/player/api'
 import { usePlayerPreferences } from '@/features/player/preferences'
-import { RESUME_FROM_MS, RESUME_OFFER_MS } from '@/features/player/resume-rules'
+import { RESUME_FROM_MS, RESUME_NOTE_MS, RESUME_OFFER_MS } from '@/features/player/resume-rules'
 import { useMediaState } from '@/features/player/use-media-state'
 import { useResume } from '@/features/player/use-resume'
 import { audio, placeOf, updateEntry } from './engine'
@@ -68,9 +68,23 @@ function TrackEffects({ track }: { track: QueuedTrack }) {
     if (offered.current || positionMs === undefined || positionMs === null || !audio) return
     offered.current = true
     if (positionMs >= RESUME_FROM_MS && audio.currentTime * 1000 < RESUME_OFFER_MS) {
-      useAudioStore.setState({ resume: { key: track.key, seconds: positionMs / 1000 } })
+      useAudioStore.setState({
+        resume: { key: track.key, seconds: positionMs / 1000, shown: true },
+      })
     }
   }, [playback, track.key])
+  // The offer goes from the bar a while after it plays, as the video player's does.
+  const offerShown = useAudioStore((state) => state.resume?.key === track.key && state.resume.shown)
+  useEffect(() => {
+    if (!offerShown || state.paused) return
+    const timer = window.setTimeout(() => {
+      const { resume } = useAudioStore.getState()
+      if (resume?.key === track.key) useAudioStore.setState({ resume: { ...resume, shown: false } })
+    }, RESUME_NOTE_MS)
+    return () => {
+      window.clearTimeout(timer)
+    }
+  }, [offerShown, state.paused, track.key])
   // Played on past the offer's time, or to the end: what plays is where the listener is.
   useEffect(() => {
     if (offering && (state.ended || state.currentTime * 1000 >= RESUME_OFFER_MS)) {

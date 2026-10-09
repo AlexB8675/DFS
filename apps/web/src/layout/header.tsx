@@ -32,10 +32,11 @@ export function Header({ onOpenNavigation }: HeaderProps) {
         aria-label="DFS home"
         className="flex shrink-0 items-center rounded-md px-1 outline-none focus-visible:ring-2 focus-visible:ring-ring md:w-[calc(var(--sidebar-width)-0.75rem)]"
       >
-        <AppLogo withName />
+        {/* On a phone, the mark alone: search needs the room. */}
+        <AppLogo withName nameClassName="max-sm:hidden" />
       </Link>
       <SearchBox className="min-w-0 flex-1 md:max-w-2xl" />
-      <div className="ml-auto flex items-center gap-1">
+      <div className="ml-auto flex shrink-0 items-center gap-1">
         <UploadsButton />
         <LiveIndicator />
         <ThemeMenu />

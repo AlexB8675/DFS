@@ -1,5 +1,5 @@
 import type { DriveNode, SortField } from '@dfs/shared'
-import { ArrowUpDown, LayoutGrid, List, X } from 'lucide-react'
+import { ArrowUpDown, Ellipsis, LayoutGrid, List, X } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
 import {
@@ -15,6 +15,8 @@ import { Separator } from '@/components/ui/separator'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { usePreferences, type ViewMode } from '@/lib/preferences'
+import { cn } from '@/lib/utils'
+import { DropdownMenuActions } from './menu-actions'
 import { useNodeMenu } from './node-menu'
 import { useSelection } from './selection'
 
@@ -25,14 +27,20 @@ interface DriveToolbarProps {
   sortable?: boolean
 }
 
-/** Title on the left; selection actions, or sort and view controls, on the right. */
+/** On a phone, the selection's first actions as buttons; the rest go in a menu. */
+const PHONE_ACTIONS = 3
+
+/**
+ * Title on the left; selection actions, or sort and view controls, on the
+ * right. On a phone, a selection's actions take the whole bar.
+ */
 export function DriveToolbar({ title, nodes, sortable = true }: DriveToolbarProps) {
   const selected = useSelection((state) => state.selected)
   const targets = nodes.filter((node) => selected.has(node.id))
 
   return (
     <div className="flex h-14 shrink-0 items-center gap-3 border-b px-3 sm:px-4">
-      <div className="min-w-0 flex-1">{title}</div>
+      <div className={cn('min-w-0 flex-1', targets.length > 0 && 'max-sm:hidden')}>{title}</div>
       {targets.length > 0 ? (
         <SelectionActions targets={targets} />
       ) : (
@@ -46,19 +54,24 @@ function SelectionActions({ targets }: { targets: DriveNode[] }) {
   const clear = useSelection((state) => state.clear)
   const actions = useNodeMenu(targets, null).filter((action) => action.key !== 'open')
 
+  const overflow = actions.slice(PHONE_ACTIONS)
+
   return (
-    <div className="flex animate-in items-center gap-1 duration-150 ease-smooth fade-in-0">
-      <span className="mr-1 text-sm whitespace-nowrap text-muted-foreground">
+    <div className="flex animate-in items-center gap-1 duration-150 ease-smooth fade-in-0 max-sm:flex-1">
+      <span className="mr-1 text-sm whitespace-nowrap text-muted-foreground max-sm:flex-1">
         {targets.length} selected
       </span>
-      {actions.map((action) => (
+      {actions.map((action, index) => (
         <Tooltip key={action.key}>
           <TooltipTrigger asChild>
             <Button
               variant="ghost"
               size="icon"
               aria-label={action.label}
-              className={action.destructive ? 'text-destructive hover:text-destructive' : undefined}
+              className={cn(
+                action.destructive && 'text-destructive hover:text-destructive',
+                index >= PHONE_ACTIONS && 'max-sm:hidden',
+              )}
               onClick={action.onSelect}
             >
               <action.icon />
@@ -67,6 +80,18 @@ function SelectionActions({ targets }: { targets: DriveNode[] }) {
           <TooltipContent>{action.label}</TooltipContent>
         </Tooltip>
       ))}
+      {overflow.length > 0 && (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon" aria-label="More actions" className="sm:hidden">
+              <Ellipsis />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-48">
+            <DropdownMenuActions actions={overflow} />
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
       <Separator orientation="vertical" className="mx-1 h-5" />
       <Tooltip>
         <TooltipTrigger asChild>

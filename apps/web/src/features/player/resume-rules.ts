@@ -9,6 +9,11 @@
 export const RESUME_FROM_MS = 10_000
 /** The offer to resume stands until the video has played this far, unless it ends sooner. */
 export const RESUME_OFFER_MS = 30_000
+/**
+ * The offer shows this long once it plays, then fades; what it offers stays
+ * kept until `RESUME_OFFER_MS` all the same (the user, 2026-10-09).
+ */
+export const RESUME_NOTE_MS = 8000
 /** Past this share of it, it is finished. */
 export const FINISHED_AT = 0.95
 

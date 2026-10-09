@@ -4,9 +4,11 @@ interface AppLogoProps {
   className?: string
   /** Shows the "DFS" wordmark next to the mark. */
   withName?: boolean
+  /** Classes for the wordmark: hidden on a phone's header, say. */
+  nameClassName?: string
 }
 
-export function AppLogo({ className, withName = false }: AppLogoProps) {
+export function AppLogo({ className, withName = false, nameClassName }: AppLogoProps) {
   return (
     <span className={cn('inline-flex items-center gap-2.5', className)}>
       <svg viewBox="0 0 32 32" className="size-8 shrink-0" aria-hidden>
@@ -16,7 +18,9 @@ export function AppLogo({ className, withName = false }: AppLogoProps) {
           className="fill-primary-foreground"
         />
       </svg>
-      {withName && <span className="text-lg font-semibold tracking-tight">DFS</span>}
+      {withName && (
+        <span className={cn('text-lg font-semibold tracking-tight', nameClassName)}>DFS</span>
+      )}
     </span>
   )
 }

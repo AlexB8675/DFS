@@ -390,14 +390,21 @@ function SharedFolder({ token, share }: { token: string; share: OpenShare }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex min-h-14 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b px-4 py-2">
-        <nav aria-label="Folder path" className="min-w-0 flex-1">
+        {/* On a phone, the path has a row of its own, and the buttons wrap below it. */}
+        <nav aria-label="Folder path" className="min-w-0 flex-1 max-sm:basis-full">
           <ol className="flex min-w-0 items-center gap-0.5 text-sm">
             {path.map((entry, index) => (
               <Fragment key={entry.id}>
                 {index > 0 && (
                   <ChevronRight className="size-4 shrink-0 text-muted-foreground/60" aria-hidden />
                 )}
-                <li className="min-w-0">
+                <li
+                  className={cn(
+                    'min-w-0',
+                    // The folder you are in first; the path above takes the rest.
+                    index === path.length - 1 && 'max-w-[70%] shrink-0',
+                  )}
+                >
                   <Link
                     to={folderUrl(entry.id)}
                     {...transitionLinkProps('back')}

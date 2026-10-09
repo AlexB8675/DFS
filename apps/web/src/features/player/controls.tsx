@@ -28,7 +28,7 @@ import { audioTracksOf, type AudioTrack } from './audio-tracks'
 import { SPEEDS } from './keys'
 import { Slider } from './slider'
 import type { SubtitleOption } from './subtitle-options'
-import { formatPlayTime } from './time'
+import { formatPlayTime, loadedUntil } from './time'
 import { useMediaState } from './use-media-state'
 
 // The video player's controls (DESIGN.md §10.4): the seek bar over a row of
@@ -192,18 +192,16 @@ export function Controls({
                   .map((chapter) => chapter.start / duration)
               : []
           }
+          // One stretch, from where it plays to as far as it has loaded there.
           under={
-            duration > 0 &&
-            state.buffered.map(([start, end]) => (
+            duration > 0 && (
               <div
-                key={start}
-                className="absolute inset-y-0 bg-white/35"
+                className="absolute inset-y-0 left-0 bg-white/35"
                 style={{
-                  left: `${String((start / duration) * 100)}%`,
-                  width: `${String(((end - start) / duration) * 100)}%`,
+                  width: `${String((Math.min(duration, loadedUntil(state.buffered, state.currentTime)) / duration) * 100)}%`,
                 }}
               />
-            ))
+            )
           }
         />
       </div>

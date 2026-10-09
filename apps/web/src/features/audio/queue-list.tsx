@@ -28,7 +28,8 @@ export function QueueList({ className }: { className?: string }) {
   }
 
   return (
-    <ol ref={list} className={cn('grid gap-0.5', className)}>
+    // One column as wide as the list, not its widest name: long names truncate.
+    <ol ref={list} className={cn('grid grid-cols-[minmax(0,1fr)] gap-0.5', className)}>
       {tracks.map((track, i) => {
         const current = track.key === playing
         const landing = drag !== null && drag.to === i && drag.from !== i
@@ -80,7 +81,7 @@ export function QueueList({ className }: { className?: string }) {
             >
               <span className="flex items-center gap-1.5 truncate text-sm font-medium">
                 {current && <Volume2 className="size-3.5 shrink-0 text-primary" aria-hidden />}
-                <span className="truncate">{trackTitle(track)}</span>
+                <span className="min-w-0 truncate">{trackTitle(track)}</span>
               </span>
               <span className="block truncate text-xs text-muted-foreground">
                 {track.artist ?? track.name}

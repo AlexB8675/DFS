@@ -121,24 +121,27 @@ export function AuditPage() {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b px-4 py-2 sm:px-5">
-        <ToggleGroup
-          type="single"
-          variant="outline"
-          size="sm"
-          spacing={0}
-          value={category}
-          aria-label="Kind of action"
-          onValueChange={(value) => {
-            const found = CATEGORIES.find((entry) => entry.value === value)
-            if (found) setCategory(found.value)
-          }}
-        >
-          {CATEGORIES.map((entry) => (
-            <ToggleGroupItem key={entry.value} value={entry.value} className="px-2.5">
-              {entry.label}
-            </ToggleGroupItem>
-          ))}
-        </ToggleGroup>
+        {/* Tighter on a phone; on the narrowest, it scrolls rather than run off the page. */}
+        <div className="max-w-full overflow-x-auto [scrollbar-width:none]">
+          <ToggleGroup
+            type="single"
+            variant="outline"
+            size="sm"
+            spacing={0}
+            value={category}
+            aria-label="Kind of action"
+            onValueChange={(value) => {
+              const found = CATEGORIES.find((entry) => entry.value === value)
+              if (found) setCategory(found.value)
+            }}
+          >
+            {CATEGORIES.map((entry) => (
+              <ToggleGroupItem key={entry.value} value={entry.value} className="px-2 sm:px-2.5">
+                {entry.label}
+              </ToggleGroupItem>
+            ))}
+          </ToggleGroup>
+        </div>
         <div className="relative ml-auto w-full sm:w-64">
           <Search
             className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"

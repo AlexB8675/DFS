@@ -18,7 +18,11 @@ import { DropdownMenuActions } from './menu-actions'
 import { useNodeMenu } from './node-menu'
 import { folderUrl } from './use-node-actions'
 
-/** Ancestors beyond this many collapse into a "…" menu. */
+/**
+ * Ancestors beyond this many collapse into a "…" menu. On a phone, only the
+ * parent shows, as the way up: the width holds no more, and the navigation
+ * menu has the whole tree.
+ */
 const MAX_VISIBLE_ANCESTORS = 3
 
 interface BreadcrumbsProps {
@@ -49,41 +53,28 @@ export function Breadcrumbs({ path, folder }: BreadcrumbsProps) {
   return (
     <nav aria-label="Folder path" className="min-w-0">
       <ol className="flex min-w-0 items-center gap-0.5 text-sm">
-        {shown.map((entry, index) => (
-          <Fragment key={entry.id}>
-            {index === 1 && hidden.length > 0 && (
-              <>
-                <li>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button variant="ghost" size="icon-sm" aria-label="Show hidden path segments">
-                        <Ellipsis />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="start">
-                      {hidden.map((segment) => (
-                        <DropdownMenuItem key={segment.id} asChild>
-                          <Link
-                            to={folderUrl(segment.id, rootFolderId)}
-                            {...transitionLinkProps('back')}
-                          >
-                            {segment.name}
-                          </Link>
-                        </DropdownMenuItem>
-                      ))}
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </li>
-                <Separator />
-              </>
-            )}
-            <li className="min-w-0">
-              <AncestorLink entry={entry} isRoot={entry.id === rootFolderId} />
-            </li>
-            <Separator />
-          </Fragment>
-        ))}
-        <li className="min-w-0">
+        {shown.map((entry, index) => {
+          // On a phone, the parent alone.
+          const phone = index === shown.length - 1 ? undefined : 'max-sm:hidden'
+          return (
+            <Fragment key={entry.id}>
+              {index === 1 && hidden.length > 0 && (
+                <>
+                  <li className="max-sm:hidden">
+                    <HiddenSegments segments={hidden} />
+                  </li>
+                  <Separator className="max-sm:hidden" />
+                </>
+              )}
+              <li className={cn('min-w-0', phone)}>
+                <AncestorLink entry={entry} isRoot={entry.id === rootFolderId} />
+              </li>
+              <Separator className={phone} />
+            </Fragment>
+          )
+        })}
+        {/* The folder you are in first: up to most of the width, the path above taking the rest. */}
+        <li className="max-w-[60%] min-w-0 shrink-0">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" className="max-w-full text-base font-semibold">
@@ -106,6 +97,30 @@ export function Breadcrumbs({ path, folder }: BreadcrumbsProps) {
   )
 }
 
+/** The "…" for folders up the path that aren't shown, as a menu of them. */
+function HiddenSegments({ segments }: { segments: NodePath }) {
+  const { rootFolderId } = useCurrentUser()
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="icon-sm" aria-label="Show hidden path segments">
+          <Ellipsis />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start">
+        {segments.map((segment) => (
+          <DropdownMenuItem key={segment.id} asChild>
+            <Link to={folderUrl(segment.id, rootFolderId)} {...transitionLinkProps('back')}>
+              {segment.id === rootFolderId && <HardDrive />}
+              {segment.name}
+            </Link>
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
 /** A folder up the path. Items can be dropped on it to move them there. */
 function AncestorLink({ entry, isRoot }: { entry: NodePath[number]; isRoot: boolean }) {
   const { rootFolderId } = useCurrentUser()
@@ -115,7 +130,8 @@ function AncestorLink({ entry, isRoot }: { entry: NodePath[number]; isRoot: bool
       variant="ghost"
       size="sm"
       className={cn(
-        'max-w-48 text-muted-foreground',
+        // Within its place in the path, which shrinks: the name truncates.
+        'max-w-[min(12rem,100%)] text-muted-foreground',
         drag.over && 'scale-105 bg-(--drop-target) text-foreground ring-1 ring-primary/60',
         drag.springing && 'animate-[spring-load_450ms_ease-in-out]',
       )}
@@ -134,9 +150,9 @@ function AncestorLink({ entry, isRoot }: { entry: NodePath[number]; isRoot: bool
   )
 }
 
-function Separator() {
+function Separator({ className }: { className?: string | undefined }) {
   return (
-    <li aria-hidden className="text-muted-foreground/60">
+    <li aria-hidden className={cn('text-muted-foreground/60', className)}>
       <ChevronRight className="size-4" />
     </li>
   )

@@ -25,7 +25,8 @@ const DOT_COLORS: Record<LiveStatus, string> = {
 
 /**
  * The state of the live connection: a quiet dot while it is up, which
- * ripples once when it connects, and a label when it is not.
+ * ripples once when it connects, and a label when it is not, but on a
+ * phone, where the dot's colour says it and the label would crowd search.
  */
 export function LiveIndicator() {
   const status = useLiveStatus((state) => state.status)
@@ -38,7 +39,7 @@ export function LiveIndicator() {
           role="status"
           tabIndex={0}
           aria-label={DESCRIPTIONS[status]}
-          className="flex h-8 items-center gap-2 rounded-full px-2.5 text-xs font-medium text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="flex h-8 shrink-0 items-center gap-2 rounded-full px-2.5 text-xs font-medium whitespace-nowrap text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           {/* Keyed by state, so the dot pops in again whenever the state changes. */}
           <span key={status} className="relative flex size-2 animate-in zoom-in-0 motion-bounce">
@@ -54,7 +55,7 @@ export function LiveIndicator() {
             />
           </span>
           {troubled && (
-            <span className="animate-in fade-in-0 slide-in-from-right-2 motion-spring">
+            <span className="animate-in fade-in-0 slide-in-from-right-2 motion-spring max-sm:hidden">
               {LABELS[status]}
             </span>
           )}

@@ -12,3 +12,19 @@ export function formatPlayTime(seconds: number, scale = seconds): string {
   }
   return `${String(minutes)}:${rest}`
 }
+
+/** A gap this small before the time still counts as loaded up to it: ranges meet at keyframes. */
+const LOADED_SLACK_S = 0.5
+
+/**
+ * How far it has loaded from where it plays, as a seek bar shows it (as
+ * YouTube does): the end of the loaded range the time is in, else the time
+ * itself. Ranges elsewhere, behind or after a seek, aren't drawn.
+ */
+export function loadedUntil(
+  buffered: readonly (readonly [number, number])[],
+  time: number,
+): number {
+  const range = buffered.find(([start, end]) => start <= time + LOADED_SLACK_S && end >= time)
+  return range ? Math.max(range[1], time) : time
+}

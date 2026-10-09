@@ -94,8 +94,9 @@ export function ShareDialog({ node, onClose }: ShareDialogProps) {
                 ))}
               </ToggleGroup>
             </div>
+            {/* The boxes line up when a label wraps onto two lines, as on a phone. */}
             <div className="grid grid-cols-2 gap-3">
-              <div className="grid gap-2">
+              <div className="grid content-end gap-2">
                 <Label htmlFor="share-password">Password (optional)</Label>
                 <Input
                   id="share-password"
@@ -104,7 +105,7 @@ export function ShareDialog({ node, onClose }: ShareDialogProps) {
                   autoComplete="new-password"
                 />
               </div>
-              <div className="grid gap-2">
+              <div className="grid content-end gap-2">
                 <Label htmlFor="share-limit">Download limit (optional)</Label>
                 <Input
                   id="share-limit"

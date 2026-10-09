@@ -26,7 +26,7 @@ import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/
 import { Spinner } from '@/components/ui/spinner'
 import { usePlayerPreferences } from '@/features/player/preferences'
 import { Slider } from '@/features/player/slider'
-import { formatPlayTime } from '@/features/player/time'
+import { formatPlayTime, loadedUntil } from '@/features/player/time'
 import { useMediaState } from '@/features/player/use-media-state'
 import { errorMessage } from '@/lib/api/client'
 import { downloadFromApi } from '@/lib/download'
@@ -99,6 +99,8 @@ function usePlayState(track: QueuedTrack) {
     // Before the first Play after a reload, where it was.
     time: loaded ? state.currentTime : savedPosition(track.key),
     duration: known ? state.duration : (track.durationMs ?? 0) / 1000,
+    /** As far as it has loaded from where it plays, in seconds (`loadedUntil`). */
+    loaded: loaded ? loadedUntil(state.buffered, state.currentTime) : 0,
     playing: loaded && !stopped && !state.paused && !state.ended,
     waiting: loaded && !stopped && state.waiting && !state.paused,
   }
@@ -281,7 +283,9 @@ function Subline({
   const problem = useAudioStore((state) =>
     state.problem?.key === track.key ? state.problem : null,
   )
-  const resume = useAudioStore((state) => (state.resume?.key === track.key ? state.resume : null))
+  const resume = useAudioStore((state) =>
+    state.resume?.key === track.key && state.resume.shown ? state.resume : null,
+  )
   if (problem) {
     return (
       <span className={cn('flex min-w-0 items-center gap-2 text-destructive', className)}>
@@ -413,7 +417,7 @@ function Transport({
 
 /** The seek bar, with the time and the length on either side. */
 function Seek({ track, className }: { track: QueuedTrack; className?: string }) {
-  const { time, duration } = usePlayState(track)
+  const { time, duration, loaded } = usePlayState(track)
   /** Where a drag would go, shown while it lasts. */
   const [dragTo, setDragTo] = useState<number | null>(null)
   const shown = dragTo ?? time
@@ -439,6 +443,14 @@ function Seek({ track, className }: { track: QueuedTrack; className?: string }) 
           setDragTo(null)
           if (duration > 0) seekTo(value * duration)
         }}
+        under={
+          duration > 0 && (
+            <div
+              className="absolute inset-y-0 left-0 bg-foreground/25"
+              style={{ width: `${String((Math.min(duration, loaded) / duration) * 100)}%` }}
+            />
+          )
+        }
       />
       <span className="w-12">{duration > 0 ? formatPlayTime(duration) : '–:––'}</span>
     </div>

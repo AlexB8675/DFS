@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { describeAudio, describeVideo, mimeTypeOf, playability, type CanPlayType } from './codecs'
 import { playerAction, stepSpeed } from './keys'
 import { positionChange } from './resume-rules'
-import { formatPlayTime } from './time'
+import { formatPlayTime, loadedUntil } from './time'
 
 const STREAM: MediaStream = {
   index: 0,
@@ -163,6 +163,29 @@ describe('play times', () => {
     expect(formatPlayTime(3723)).toBe('1:02:03')
     expect(formatPlayTime(65, 7200)).toBe('0:01:05')
     expect(formatPlayTime(Number.NaN)).toBe('0:00')
+  })
+})
+
+describe('how far it has loaded, as the seek bar shows it', () => {
+  it('runs from where it plays to the end of the range it plays in', () => {
+    expect(loadedUntil([[0, 42]], 10)).toBe(42)
+    // After a seek: the range behind isn't drawn, and the one it plays in is.
+    expect(
+      loadedUntil(
+        [
+          [0, 30],
+          [120, 150],
+        ],
+        125,
+      ),
+    ).toBe(150)
+  })
+
+  it('is the time itself where nothing is loaded yet, as just after a seek', () => {
+    expect(loadedUntil([[0, 30]], 200)).toBe(200)
+    expect(loadedUntil([], 0)).toBe(0)
+    // A range starting a moment after the time, at a keyframe, counts.
+    expect(loadedUntil([[60.3, 90]], 60)).toBe(90)
   })
 })
 

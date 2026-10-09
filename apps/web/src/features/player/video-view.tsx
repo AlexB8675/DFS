@@ -47,7 +47,7 @@ import {
 import { SubtitleOverlay } from './subtitle-overlay'
 import { formatPlayTime } from './time'
 import { useMediaState } from './use-media-state'
-import { RESUME_FROM_MS, RESUME_OFFER_MS } from './resume-rules'
+import { RESUME_FROM_MS, RESUME_NOTE_MS, RESUME_OFFER_MS } from './resume-rules'
 import { useResume } from './use-resume'
 
 // The video player (DESIGN.md §10.4): direct play of the version the API
@@ -130,6 +130,8 @@ export default function VideoView({
   const [source, setSource] = useState<Source | null>(null)
   /** Where the viewer stopped, in seconds, offered until they resume or play on past it. */
   const [resumeAt, setResumeAt] = useState<number | null>(null)
+  /** The offer on screen, fading, or gone while what it offers is still kept. */
+  const [offer, setOffer] = useState<'shown' | 'fading' | 'gone'>('shown')
   if (source === null && playback.data) {
     const { versionId, positionMs } = playback.data
     setSource({ versionId, startAt: 0, attempt: 0 })
@@ -293,6 +295,17 @@ export default function VideoView({
       video.removeEventListener('webkitendfullscreen', end)
     }
   }, [chosen, options, video])
+
+  // The offer fades a while after it starts playing: a video held for Play keeps it until then.
+  useEffect(() => {
+    if (resumeAt === null || offer !== 'shown' || state.paused) return
+    const timer = window.setTimeout(() => {
+      setOffer('fading')
+    }, RESUME_NOTE_MS)
+    return () => {
+      window.clearTimeout(timer)
+    }
+  }, [offer, resumeAt, state.paused])
 
   useResume({
     place,
@@ -681,8 +694,17 @@ export default function VideoView({
           {SKIP_TAP_SECONDS} s
         </div>
       )}
-      {resumeAt !== null && !shown && (
-        <div className="absolute bottom-24 left-3 sm:left-4">
+      {resumeAt !== null && offer !== 'gone' && !shown && (
+        <div
+          className={cn(
+            'absolute bottom-24 left-3 sm:left-4',
+            offer === 'fading' &&
+              'pointer-events-none animate-out duration-500 fade-out-0 fill-mode-forwards',
+          )}
+          onAnimationEnd={() => {
+            if (offer === 'fading') setOffer('gone')
+          }}
+        >
           <div
             role="status"
             className="flex items-center gap-1 rounded-lg bg-black/75 py-1 pr-1 pl-3 text-sm text-white shadow-lg"

@@ -30,8 +30,11 @@ interface AudioState {
   /** The queue entry the element holds; `null` until one is loaded, as after a reload. */
   loaded: string | null
   problem: AudioProblem | null
-  /** Where the track stopped last time, in seconds, offered until resumed or played past. */
-  resume: { key: string; seconds: number } | null
+  /**
+   * Where the track stopped last time, in seconds, kept until resumed or
+   * played past; offered (`shown`) for a while once it plays.
+   */
+  resume: { key: string; seconds: number; shown: boolean } | null
   /** On a computer, the queue's panel; on a phone, the full view. */
   panel: 'queue' | 'full' | null
 }
