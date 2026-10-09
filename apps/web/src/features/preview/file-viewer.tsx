@@ -8,6 +8,7 @@ import { MediaDetails } from '@/features/player/media-details'
 import { fileCategory, fileCategoryLabel } from '@/lib/file-types'
 import { formatBytes, formatFullDate } from '@/lib/format'
 import { previewKind } from '@/lib/preview-kind'
+import { keepOpenForToasts } from '@/lib/toasts'
 import { cn } from '@/lib/utils'
 import { handlePreviewKey } from './keys'
 import { PreviewBody, type ViewedFile } from './preview-body'
@@ -88,6 +89,7 @@ export function FileViewer({
             if (opener.current instanceof HTMLElement && opener.current.isConnected)
               opener.current.focus()
           }}
+          onInteractOutside={keepOpenForToasts}
           onEscapeKeyDown={(event) => {
             // What is open inside closes first: the text's search, then Details.
             if (view.current?.dismiss?.()) {
