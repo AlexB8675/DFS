@@ -691,7 +691,9 @@ export class MockDb {
       title: info?.tags.title ?? null,
       artist: info?.tags.artist ?? null,
       album: info?.tags.album ?? null,
-      hasCover: info?.hasCover ?? false,
+      hasCover:
+        info?.hasCover === true ||
+        (node.parentId !== null && this.coverBeside(node.parentId) !== null),
     }
   }
 

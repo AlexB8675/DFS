@@ -310,7 +310,7 @@ export const audioTrackSchema = z.object({
   title: z.string().nullable(),
   artist: z.string().nullable(),
   album: z.string().nullable(),
-  /** A picture in its tags (`…/cover`). */
+  /** A cover to show (`…/cover`): the picture in its tags, or one beside it. */
   hasCover: z.boolean(),
 })
 

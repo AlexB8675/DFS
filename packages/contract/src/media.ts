@@ -450,7 +450,11 @@ export function mediaTests({
 
       const own = await client.call('GET', `/folders/${music.id}/audio`, audioQueueSchema)
       expect(own.items.map((item) => item.name)).toEqual(['Track 2.mp3', 'Track 10.mp3'])
-      expect(own.items[1]).toMatchObject({ id: ten.nodeId, versionId: ten.versionId })
+      expect(own.items[1]).toMatchObject({
+        id: ten.nodeId,
+        versionId: ten.versionId,
+        hasCover: false,
+      })
       expect(own.truncated).toBe(false)
       expect(await queued(client, `/folders/${music.id}/audio?deep=1`)).toEqual([
         'Track 2.mp3',
@@ -489,6 +493,9 @@ export function mediaTests({
       await uploadFile(client, folder.id, 'Cover.jpg', jpeg)
       const lone = await uploadFile(client, (await workspace(client)).id, 'Lone.mp3', text('lone'))
       const cover = (base: string, versionId: string) => `${base}/media/${versionId}/cover`
+      // The queue says there is one to show, so a player asks only then.
+      const queue = await client.call('GET', `/folders/${folder.id}/audio`, audioQueueSchema)
+      expect(queue.items.map((item) => [item.id, item.hasCover])).toEqual([[song.nodeId, true]])
 
       const drive = await client.fetch('GET', cover(`/files/${song.nodeId}`, song.versionId))
       expect(drive.status).toBe(200)

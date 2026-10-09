@@ -40,7 +40,12 @@ interface QueuedFile {
   duration_ms: number | null
   tags: Partial<MediaTags> | null
   has_cover: boolean | null
+  /** A picture beside it makes a cover (`coverBeside`). */
+  cover_beside: boolean
 }
+
+/** The names `coverFileRank` takes, for the database. */
+const COVER_NAME = '^(cover|folder|front)\\.(jpe?g|png|webp)$'
 
 /**
  * A folder's audio files, or everything below it (`deep`), in play order, at
@@ -63,7 +68,15 @@ export async function audioQueue(
     )
     SELECT n.id, n.name, n.mime_type, version.id AS version_id, tree.path,
       (info.info ->> 'durationMs')::float8 AS duration_ms, info.info -> 'tags' AS tags,
-      (info.info ->> 'hasCover')::boolean AS has_cover
+      (info.info ->> 'hasCover')::boolean AS has_cover,
+      EXISTS (
+        SELECT 1 FROM nodes picture
+        JOIN file_versions shown ON shown.id = picture.current_version_id
+        WHERE picture.parent_id = n.parent_id AND picture.kind = 'file'
+          AND picture.deleted_at IS NULL AND picture.trashed_via IS NULL
+          AND shown.state IN ('syncing', 'stored')
+          AND shown.size_bytes BETWEEN 1 AND ${MAX_COVER_BYTES}
+          AND lower(picture.name) ~ ${COVER_NAME}) AS cover_beside
     FROM tree
     JOIN nodes n ON n.parent_id = tree.id
     JOIN file_versions version ON version.id = n.current_version_id
@@ -92,7 +105,7 @@ function toTrack(file: QueuedFile): AudioTrack {
     title: file.tags?.title ?? null,
     artist: file.tags?.artist ?? null,
     album: file.tags?.album ?? null,
-    hasCover: file.has_cover ?? false,
+    hasCover: file.has_cover === true || file.cover_beside,
   }
 }
 
@@ -114,7 +127,7 @@ export async function coverBeside(
     WHERE n.parent_id = ${audio.parent_id} AND n.owner_id = ${audio.owner_id} AND n.kind = 'file'
       AND ${VISIBLE} AND version.state IN ('syncing', 'stored')
       AND version.size_bytes BETWEEN 1 AND ${MAX_COVER_BYTES}
-      AND lower(n.name) ~ '^(cover|folder|front)\\.(jpe?g|png|webp)$'`)
+      AND lower(n.name) ~ ${COVER_NAME}`)
   const ranked = rows
     .map((file) => ({ file, rank: coverFileRank(file.name) }))
     .filter((found): found is { file: DownloadableFile; rank: number } => found.rank !== null)
