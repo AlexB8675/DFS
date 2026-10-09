@@ -156,8 +156,12 @@ export function SharesPage() {
                             aria-label={`Copy link to “${link.nodeName}”`}
                             className={link.url ? undefined : 'text-muted-foreground/50'}
                             onClick={() => {
-                              if (link.url) void copyLink(link.url)
-                              else toast.info(NOT_KEPT)
+                              // Refused, the link to select by hand is in its edit dialog.
+                              if (link.url) {
+                                void copyLink(link.url).then((copied) => {
+                                  if (!copied) setEditing(link)
+                                })
+                              } else toast.info(NOT_KEPT)
                             }}
                           >
                             <Copy />

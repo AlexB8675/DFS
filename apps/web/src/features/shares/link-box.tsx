@@ -17,6 +17,10 @@ export function LinkBox({ url, label = 'Share link' }: { url: string; label?: st
         onFocus={(event) => {
           event.currentTarget.select()
         }}
+        // In a dialog's form, Enter here would submit it: a link only to copy.
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') event.preventDefault()
+        }}
       />
       <Button
         type="button"

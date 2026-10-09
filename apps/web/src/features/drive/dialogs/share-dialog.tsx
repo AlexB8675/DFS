@@ -89,7 +89,8 @@ export function ShareDialog({ node, onClose }: ShareDialogProps) {
         {state.link?.url ? (
           <CreatedLink url={state.link.url} onDone={onClose} />
         ) : (
-          <form action={submit} className="grid gap-4">
+          <>
+            {/* Outside the form: Enter in a link's box doesn't make a new one. */}
             {working.length > 0 && (
               <div className="grid gap-3 border-b pb-4">
                 <p className="text-sm font-medium">
@@ -104,61 +105,63 @@ export function ShareDialog({ node, onClose }: ShareDialogProps) {
                 <p className="text-sm font-medium">Or make a new one</p>
               </div>
             )}
-            <div className="grid gap-2">
-              <Label id="expiry-label">Link expires</Label>
-              <ToggleGroup
-                type="single"
-                variant="outline"
-                spacing={0}
-                value={expiry}
-                aria-labelledby="expiry-label"
-                onValueChange={(value) => {
-                  if (value) setExpiry(value)
-                }}
-              >
-                {EXPIRY_OPTIONS.map((option) => (
-                  <ToggleGroupItem key={option.value} value={option.value} className="flex-1">
-                    {option.label}
-                  </ToggleGroupItem>
-                ))}
-              </ToggleGroup>
-            </div>
-            {/* The boxes line up when a label wraps onto two lines, as on a phone. */}
-            <div className="grid grid-cols-2 gap-3">
-              <div className="grid content-end gap-2">
-                <Label htmlFor="share-password">Password (optional)</Label>
-                <Input
-                  id="share-password"
-                  name="password"
-                  type="password"
-                  autoComplete="new-password"
-                />
+            <form action={submit} className="grid gap-4">
+              <div className="grid gap-2">
+                <Label id="expiry-label">Link expires</Label>
+                <ToggleGroup
+                  type="single"
+                  variant="outline"
+                  spacing={0}
+                  value={expiry}
+                  aria-labelledby="expiry-label"
+                  onValueChange={(value) => {
+                    if (value) setExpiry(value)
+                  }}
+                >
+                  {EXPIRY_OPTIONS.map((option) => (
+                    <ToggleGroupItem key={option.value} value={option.value} className="flex-1">
+                      {option.label}
+                    </ToggleGroupItem>
+                  ))}
+                </ToggleGroup>
               </div>
-              <div className="grid content-end gap-2">
-                <Label htmlFor="share-limit">Download limit (optional)</Label>
-                <Input
-                  id="share-limit"
-                  name="maxDownloads"
-                  type="number"
-                  min={1}
-                  inputMode="numeric"
-                />
+              {/* The boxes line up when a label wraps onto two lines, as on a phone. */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="grid content-end gap-2">
+                  <Label htmlFor="share-password">Password (optional)</Label>
+                  <Input
+                    id="share-password"
+                    name="password"
+                    type="password"
+                    autoComplete="new-password"
+                  />
+                </div>
+                <div className="grid content-end gap-2">
+                  <Label htmlFor="share-limit">Download limit (optional)</Label>
+                  <Input
+                    id="share-limit"
+                    name="maxDownloads"
+                    type="number"
+                    min={1}
+                    inputMode="numeric"
+                  />
+                </div>
               </div>
-            </div>
-            {state.error && (
-              <p role="alert" className="text-sm text-destructive">
-                {state.error}
-              </p>
-            )}
-            <DialogFooter>
-              <DialogClose asChild>
-                <Button variant="outline">Cancel</Button>
-              </DialogClose>
-              <Button type="submit" disabled={pending}>
-                {pending && <Spinner />} Create link
-              </Button>
-            </DialogFooter>
-          </form>
+              {state.error && (
+                <p role="alert" className="text-sm text-destructive">
+                  {state.error}
+                </p>
+              )}
+              <DialogFooter>
+                <DialogClose asChild>
+                  <Button variant="outline">Cancel</Button>
+                </DialogClose>
+                <Button type="submit" disabled={pending}>
+                  {pending && <Spinner />} Create link
+                </Button>
+              </DialogFooter>
+            </form>
+          </>
         )}
       </DialogContent>
     </Dialog>

@@ -1,5 +1,6 @@
-import type { MetricSeries } from '@dfs/shared'
+import { MAX_SERIES, parseSeriesId, type MetricSeries } from '@dfs/shared'
 import { describe, expect, it } from 'vitest'
+import { DATABASE_CHARTS, MONITORING_SECTIONS, OVERVIEW_CHARTS } from './dashboards'
 import { resolveLines, seriesOf, type ChartSpec } from './metrics'
 
 const data: MetricSeries = {
@@ -73,5 +74,22 @@ describe('graph lines (§16)', () => {
     )
     expect(missing?.values).toEqual([null, null, null])
     expect(missing?.summary).toBe('—')
+  })
+})
+
+describe('the admin’s graphs (§16)', () => {
+  // Each page, and each section of Monitoring, asks for its series in one request.
+  const requests = [
+    OVERVIEW_CHARTS,
+    DATABASE_CHARTS,
+    ...MONITORING_SECTIONS.map((section) => section.charts),
+  ].map((charts) => seriesOf(...charts))
+
+  it('ask only for series the API reads', () => {
+    for (const id of requests.flat()) expect(parseSeriesId(id), id).not.toBeNull()
+  })
+
+  it('ask for no more series at once than the API takes', () => {
+    for (const ids of requests) expect(ids.length).toBeLessThanOrEqual(MAX_SERIES)
   })
 })
