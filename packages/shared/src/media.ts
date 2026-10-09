@@ -292,3 +292,106 @@ export const savePositionSchema = z.object({
 })
 
 export type SavePositionInput = z.infer<typeof savePositionSchema>
+
+// ── The audio bar (§10.4) ────────────────────────────────────────────────────
+
+/** A queue from a folder holds at most this many files. */
+export const MAX_AUDIO_QUEUE = 1000
+
+/**
+ * An audio file in a queue, as the bar shows it before it plays: from the
+ * media info kept for its version, which a file not examined yet hasn't.
+ */
+export const audioTrackSchema = z.object({
+  id: z.uuid(),
+  name: z.string(),
+  versionId: z.uuid(),
+  durationMs: z.number().int().min(0).nullable(),
+  title: z.string().nullable(),
+  artist: z.string().nullable(),
+  album: z.string().nullable(),
+  /** A picture in its tags (`…/cover`). */
+  hasCover: z.boolean(),
+})
+
+/**
+ * `GET /folders/:id/audio?deep=`: a folder's audio files, or everything below
+ * it, in play order: folder by folder, each by disc and track, else by name.
+ */
+export const audioQueueSchema = z.object({
+  items: z.array(audioTrackSchema).max(MAX_AUDIO_QUEUE),
+  /** More were there than a queue holds. */
+  truncated: z.boolean(),
+})
+
+export type AudioTrack = z.infer<typeof audioTrackSchema>
+export type AudioQueue = z.infer<typeof audioQueueSchema>
+
+/** What puts a queue in play order: where a file sits below the folder played, and its tags. */
+export interface PlayOrderKey {
+  name: string
+  /** The folders between the one played and the file: `[]` for its own files. */
+  path: readonly string[]
+  disc: number | null
+  track: number | null
+}
+
+const naturalNames = new Intl.Collator('en', { numeric: true, sensitivity: 'base' })
+
+/**
+ * Play order (§10.4): folder by folder, a folder's own files before its
+ * subfolders', folders by name in natural order; in each, by disc and track
+ * from the tags, files without a track after, by name in natural order.
+ */
+export function playOrder<T extends PlayOrderKey>(files: readonly T[]): T[] {
+  return [...files].sort((a, b) => {
+    const folders = comparePaths(a.path, b.path)
+    if (folders !== 0) return folders
+    // Those without a track, whatever their disc, after those with one.
+    if (a.track === null || b.track === null) {
+      if (a.track !== b.track) return a.track === null ? 1 : -1
+    } else {
+      const disc = (a.disc ?? 1) - (b.disc ?? 1)
+      if (disc !== 0) return disc
+      if (a.track !== b.track) return a.track - b.track
+    }
+    return naturalNames.compare(a.name, b.name)
+  })
+}
+
+/** Folder paths in the order a walk through them takes: a folder before what is inside it. */
+function comparePaths(a: readonly string[], b: readonly string[]): number {
+  for (let i = 0; i < Math.min(a.length, b.length); i += 1) {
+    const order = naturalNames.compare(a[i] ?? '', b[i] ?? '')
+    if (order !== 0) return order
+  }
+  return a.length - b.length
+}
+
+/** A cover larger than this, in a file's tags or beside it, isn't shown. */
+export const MAX_COVER_BYTES = 10 * 1024 * 1024
+
+const COVER_NAMES = ['cover', 'folder', 'front']
+const COVER_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp']
+
+/**
+ * How good a cover a file beside an audio file makes, by its name, lower
+ * first (§6.7): `cover`, `folder`, then `front`, each a JPEG, PNG or WebP;
+ * `null` for any other file.
+ */
+export function coverFileRank(name: string): number | null {
+  const { base, extension } = splitExtension(name.toLowerCase())
+  const named = COVER_NAMES.indexOf(base)
+  const typed = COVER_EXTENSIONS.indexOf(extension)
+  return named === -1 || typed === -1 ? null : named * COVER_EXTENSIONS.length + typed
+}
+
+/** A cover's type, from its first bytes: only pictures every browser draws. */
+export function coverType(bytes: Uint8Array): 'image/jpeg' | 'image/png' | 'image/webp' | null {
+  const starts = (...prefix: number[]) => prefix.every((byte, i) => bytes[i] === byte)
+  if (starts(0xff, 0xd8, 0xff)) return 'image/jpeg'
+  if (starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) return 'image/png'
+  const riff = starts(0x52, 0x49, 0x46, 0x46)
+  const webp = bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
+  return riff && webp ? 'image/webp' : null
+}

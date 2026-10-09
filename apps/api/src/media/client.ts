@@ -1,4 +1,5 @@
 import {
+  MAX_COVER_BYTES,
   probeResultSchema,
   subtitleTracksResultSchema,
   type ProbeResult,
@@ -15,6 +16,8 @@ const PROBE_TIMEOUT_MS = 150_000
 /** Extracting reads the whole file (15 minutes at most), and may wait its turn behind another. */
 const SUBTITLES_TIMEOUT_MS = 40 * 60_000
 const HEALTH_TIMEOUT_MS = 2000
+/** A cover is read from the file's start or its index, and may wait its turn behind a probe. */
+const COVER_TIMEOUT_MS = 150_000
 
 /** The media service didn't answer, or couldn't read the file from the API: ask again later. */
 export class MediaUnavailableError extends Error {
@@ -81,6 +84,27 @@ export class MediaClient {
       throw new MediaUnavailableError('The media service gave an answer out of bounds.')
     }
     return answer.data
+  }
+
+  /** Has the service copy out the picture in an audio file's tags: its bytes, or `null` without one. */
+  async cover(versionId: string, token: string): Promise<Buffer | null> {
+    const response = await this.#ask('/cover', COVER_TIMEOUT_MS, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ versionId, token }),
+    })
+    if (response.status === 404) {
+      await response.body?.cancel()
+      return null
+    }
+    if (!response.ok) {
+      await response.body?.cancel()
+      throw new MediaUnavailableError(
+        `The media service answered ${String(response.status)} to a cover.`,
+      )
+    }
+    const bytes = Buffer.from(await response.arrayBuffer())
+    return bytes.length > MAX_COVER_BYTES ? null : bytes
   }
 
   async health(): Promise<z.infer<typeof healthSchema>> {

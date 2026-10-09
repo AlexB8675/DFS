@@ -2,6 +2,7 @@ import { MAX_SUBTITLE_STREAMS, type ProbeResult, type SubtitleTracksResult } fro
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify'
 import { z } from 'zod'
 import type { MediaConfig } from './config.ts'
+import { extractCover } from './cover.ts'
 import { ffmpegVersion, ProbeError, runProbe } from './ffprobe.ts'
 import { toMediaInfo } from './media-info.ts'
 import { extractSubtitles } from './subtitles.ts'
@@ -77,6 +78,28 @@ export function buildMediaServer({
     }
   })
 
+  // An audio file's cover, copied out as it is (§6.7): its bytes, or a 404 without one.
+  app.post('/cover', async (request, reply) => {
+    const body = probeBody.safeParse(request.body)
+    if (!body.success) {
+      return reply
+        .code(400)
+        .send({ error: { code: 'invalid_request', message: 'A version and a token, please.' } })
+    }
+    const { versionId, token } = body.data
+    const url = `${config.apiUrl}/internal/media/${versionId}`
+    let cover: Buffer | null
+    try {
+      cover = await probes.run(() => extractCover(url, token, { command: ffmpeg }))
+    } catch (error) {
+      if (error instanceof ProbeError && !error.sourceFailed) return reply.code(404).send(NO_COVER)
+      request.log.warn({ err: error, versionId }, 'could not read a file for its cover')
+      return reply.code(502).send(SOURCE_UNAVAILABLE)
+    }
+    if (!cover) return reply.code(404).send(NO_COVER)
+    return reply.type('application/octet-stream').send(cover)
+  })
+
   // Text subtitles inside a file, as WebVTT, all of them in one pass (§6.7).
   app.post('/subtitles', async (request, reply) => {
     const body = subtitlesBody.safeParse(request.body)
@@ -105,6 +128,10 @@ export function buildMediaServer({
 }
 
 type SubtitlesResultOk = Extract<SubtitleTracksResult, { ok: true }>
+
+const NO_COVER = {
+  error: { code: 'no_cover', message: 'This file has no cover that can be read.' },
+}
 
 const SOURCE_UNAVAILABLE = {
   error: {

@@ -89,6 +89,12 @@ export const STAND_IN_VIDEO: MediaInfo = {
   hasCover: false,
 }
 
+/** The cover the stand-in finds in a file whose media info says it has one: a 1×1 PNG. */
+export const STAND_IN_COVER = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==',
+  'base64',
+)
+
 /** What the stand-in makes of a subtitle stream. */
 export const STAND_IN_SUBTITLES = 'WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nCiao\n'
 
@@ -103,6 +109,11 @@ export const standInMediaFetch: typeof fetch = (input, init) => {
   if (url.pathname === '/probe') {
     const result: ProbeResult = { ok: true, info: STAND_IN_VIDEO }
     return Promise.resolve(Response.json(result))
+  }
+  if (url.pathname === '/cover') {
+    return Promise.resolve(
+      new Response(STAND_IN_COVER, { headers: { 'content-type': 'application/octet-stream' } }),
+    )
   }
   if (url.pathname === '/subtitles') {
     const { streams } = JSON.parse(init?.body as string) as { streams: number[] }

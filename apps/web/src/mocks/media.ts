@@ -48,6 +48,14 @@ export const SAMPLE_SUBTITLES = [
   '',
 ].join('\n')
 
+/** The cover in the demo's audio files: a small PNG, as the media service would copy it out. */
+export const SAMPLE_COVER = Uint8Array.from(
+  atob(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==',
+  ),
+  (char) => char.charCodeAt(0),
+)
+
 /** What examining a file of this kind finds, made up. */
 export function sampleMediaInfo(kind: MediaKind, name: string): MediaInfo {
   if (kind === 'audio') {

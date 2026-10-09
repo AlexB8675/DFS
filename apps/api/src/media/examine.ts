@@ -61,6 +61,15 @@ export class MediaExaminer {
   }
 
   /**
+   * The picture in an audio version's tags, copied out by the media service
+   * each time it is asked: the browser keeps it, not the server (§6.7).
+   * Throws a `MediaUnavailableError` if the media service can't say now.
+   */
+  async cover(versionId: string): Promise<Buffer | null> {
+    return this.client.cover(versionId, await mediaToken(this.#keys, versionId))
+  }
+
+  /**
    * What the version holds: kept from before, or examined now. Throws a
    * `MediaUnavailableError` if the media service can't say now.
    */

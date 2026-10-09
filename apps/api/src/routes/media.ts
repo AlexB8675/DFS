@@ -2,6 +2,8 @@ import { randomBytes } from 'node:crypto'
 import { Readable } from 'node:stream'
 import type { Executor } from '@dfs/db'
 import {
+  audioQueueSchema,
+  coverType,
   fileMediaSchema,
   deliverySchema,
   isTextSubtitles,
@@ -23,6 +25,7 @@ import type { RateLimiter } from '../auth/rate-limit.ts'
 import { linkReader } from '../content/deliveries.ts'
 import { paced, sendFile, type DownloadableFile } from '../content/send.ts'
 import { ApiError } from '../errors.ts'
+import { audioQueue, coverBeside } from '../media/audio.ts'
 import { keptExamination, MediaUnavailableError, type Examined } from '../media/examine.ts'
 import {
   clearPosition,
@@ -33,7 +36,7 @@ import {
 } from '../media/playback.ts'
 import { keptSubtitles } from '../media/subtitles.ts'
 import { mediaTokenValid } from '../media/token.ts'
-import { visibleNode, type NodeRow } from '../nodes/read.ts'
+import { visibleFolder, visibleNode, type NodeRow } from '../nodes/read.ts'
 import { nodeInShare, openShare } from '../shares/public.ts'
 import { assertOwnOrigin } from './auth.ts'
 import { downloadableFile, versionChanged } from './content.ts'
@@ -56,6 +59,9 @@ const PLACES = [
 ] as const
 /** A file's place: a token only under a link. */
 const fileParams = z.object({ token: byToken.shape.token.optional(), id: z.uuid() })
+
+/** `?deep=1`: a folder's audio and everything below it. */
+const deepQuery = z.object({ deep: z.literal('1').optional() })
 
 const connectionTestQuery = z.object({
   bytes: z.coerce.number().int().min(1).max(MAX_CONNECTION_TEST_BYTES),
@@ -141,6 +147,32 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
       },
     )
 
+    // An audio file's cover (§6.7): the picture in its tags, else one beside it.
+    routes.get(
+      `${place.path}/media/:versionId/cover`,
+      {
+        config: place.config,
+        schema: { params: fileParams.extend({ versionId: z.uuid() }) },
+      },
+      async (request, reply) => {
+        const played = await playedFile(app, request, request.params)
+        const file = await servedVersion(app.db, played)
+        if (file.version_id !== request.params.versionId) throw versionChanged()
+        const inside = await coverInside(app, file.version_id)
+        if (inside) {
+          // The version never changes, so the browser keeps it: the server keeps nothing.
+          return reply
+            .header('content-type', inside.type)
+            .header('cache-control', 'private, max-age=31536000, immutable')
+            .header('x-content-type-options', 'nosniff')
+            .send(inside.bytes)
+        }
+        const beside = played.besideOffered ? await coverBeside(app.db, played.node) : null
+        if (!beside) throw new ApiError(404, 'not_found', 'This file has no cover.')
+        return sendFile(app, request, reply, { ...beside, mime_type: imageType(beside.name) })
+      },
+    )
+
     // Subtitles as WebVTT (§6.7): a stream inside the file by its number, or a
     // subtitle file beside it by its ID.
     routes.get(
@@ -179,6 +211,38 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
       },
     )
   }
+
+  // A folder's audio files for the bar's queue, or everything below it (§10.4).
+  routes.get(
+    '/folders/:id/audio',
+    { schema: { params: byId, querystring: deepQuery, response: { 200: audioQueueSchema } } },
+    async (request) => {
+      const auth = requireAuth(request.auth)
+      const folder = await visibleFolder(app.db, auth.user.id, request.params.id)
+      return audioQueue(app.db, folder.id, request.query.deep === '1')
+    },
+  )
+
+  routes.get(
+    '/s/:token/audio',
+    {
+      config: { access: 'public' },
+      schema: {
+        params: byToken,
+        querystring: deepQuery.extend({ folderId: z.uuid().optional() }),
+        response: { 200: audioQueueSchema },
+      },
+    },
+    async (request) => {
+      const { root } = await openShare(app, request, request.params.token)
+      const { folderId, deep } = request.query
+      const folder = folderId ? await nodeInShare(app, root, folderId) : root
+      if (folder.kind !== 'folder') {
+        throw new ApiError(404, 'not_found', 'This folder no longer exists.')
+      }
+      return audioQueue(app.db, folder.id, deep === '1')
+    },
+  )
 
   // Where a user stopped, on the server for a drive's file. A link's viewers
   // have no account, and keep theirs in the browser (§10.4).
@@ -328,6 +392,45 @@ function sendConnectionTest(
     .header('content-length', String(bytes))
     .header('cache-control', 'no-store')
     .send(Readable.from(paced(reply.raw, randomPieces(bytes), stats)))
+}
+
+/**
+ * The picture in an audio version's tags, as the media info kept for it says
+ * there is one, if it is one every browser draws; `null` otherwise. A `503`
+ * while the media service can't say.
+ */
+async function coverInside(
+  app: FastifyInstance,
+  versionId: string,
+): Promise<{ bytes: Buffer; type: string } | null> {
+  const kept = await keptExamination(app.db, versionId)
+  if (!kept?.info?.hasCover) return null
+  if (!app.media) throw coverUnavailable('there is no media service')
+  try {
+    const bytes = await app.media.cover(versionId)
+    const type = bytes && coverType(bytes)
+    return bytes && type ? { bytes, type } : null
+  } catch (error) {
+    if (!(error instanceof MediaUnavailableError)) throw error
+    app.log.warn({ err: error, versionId }, 'could not read a cover')
+    throw coverUnavailable('the media service isn’t answering')
+  }
+}
+
+function coverUnavailable(why: string): ApiError {
+  return new ApiError(
+    503,
+    'media_unavailable',
+    `This cover can’t be read now: ${why}. Try again in a moment.`,
+  )
+}
+
+/** A cover file's type, by its name, which `coverFileRank` has checked. */
+function imageType(name: string): string {
+  const lower = name.toLowerCase()
+  if (lower.endsWith('.png')) return 'image/png'
+  if (lower.endsWith('.webp')) return 'image/webp'
+  return 'image/jpeg'
 }
 
 /** Counts one against `key`, or refuses with `429` while it is over its limit. */

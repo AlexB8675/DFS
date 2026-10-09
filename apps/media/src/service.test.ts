@@ -218,6 +218,34 @@ async function subtitles(name: string, streams: number[]) {
   })
 }
 
+describe('covers (§6.7)', () => {
+  async function cover(name: string) {
+    const versionId = ids.get(name) ?? randomUUID()
+    return fetch(`${mediaUrl}/cover`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ versionId, token: tokenFor(versionId) }),
+    })
+  }
+
+  it('copies the picture in an audio file’s tags out as it is', async () => {
+    const response = await cover('song.mp3')
+    expect(response.status).toBe(200)
+    const bytes = Buffer.from(await response.arrayBuffer())
+    // The PNG the file holds, byte for byte: its signature, and its 64×64.
+    expect(bytes.subarray(0, 8)).toEqual(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    )
+    expect(bytes.readUInt32BE(16)).toBe(64)
+  })
+
+  it('says a file without one has none, for good', async () => {
+    const response = await cover('track.flac')
+    expect(response.status).toBe(404)
+    expect(await response.json()).toMatchObject({ error: { code: 'no_cover' } })
+  })
+})
+
 describe('extracting subtitles (§6.7)', () => {
   it('turns every text stream asked for into WebVTT in one read of the file', async () => {
     requests.length = 0

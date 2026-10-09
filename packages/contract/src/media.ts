@@ -1,4 +1,5 @@
 import {
+  audioQueueSchema,
   deliverySchema,
   fileMediaSchema,
   isTextSubtitles,
@@ -424,6 +425,100 @@ export function mediaTests({
           json: report,
         }),
       ).toEqual({ status: 422, code: 'not_media' })
+    })
+  })
+
+  describe('the audio bar (§6.7, §10.4)', () => {
+    /** The names a queue plays, in order. */
+    async function queued(client: ApiClient, path: string) {
+      return (await client.call('GET', path, audioQueueSchema)).items.map((item) => item.name)
+    }
+
+    it('queues a folder’s audio files in play order, and everything below it when asked', async () => {
+      const client = await owner()
+      const music = await createFolder(client, (await workspace(client)).id, 'Music')
+      const ten = await uploadFile(client, music.id, 'Track 10.mp3', text('ten'))
+      await uploadFile(client, music.id, 'Track 2.mp3', text('two'))
+      await uploadFile(client, music.id, 'notes.txt', text('not audio'))
+      await uploadFile(client, music.id, 'clip.mp4', text('a video'))
+      const gone = await uploadFile(client, music.id, 'Gone.mp3', text('trashed'))
+      await client.send('POST', '/nodes/trash', { json: { ids: [gone.nodeId] } })
+      const second = await createFolder(client, music.id, 'Album 2')
+      const tenth = await createFolder(client, music.id, 'Album 10')
+      await uploadFile(client, second.id, 'b.mp3', text('b'))
+      await uploadFile(client, tenth.id, 'a.flac', text('a'))
+
+      const own = await client.call('GET', `/folders/${music.id}/audio`, audioQueueSchema)
+      expect(own.items.map((item) => item.name)).toEqual(['Track 2.mp3', 'Track 10.mp3'])
+      expect(own.items[1]).toMatchObject({ id: ten.nodeId, versionId: ten.versionId })
+      expect(own.truncated).toBe(false)
+      expect(await queued(client, `/folders/${music.id}/audio?deep=1`)).toEqual([
+        'Track 2.mp3',
+        'Track 10.mp3',
+        'b.mp3',
+        'a.flac',
+      ])
+    })
+
+    it('queues through a folder link, its folders included, and not through a file link', async () => {
+      const client = await owner()
+      const music = await createFolder(client, (await workspace(client)).id, 'Shared music')
+      const song = await uploadFile(client, music.id, 'Song.mp3', text('song'))
+      const album = await createFolder(client, music.id, 'Album')
+      await uploadFile(client, album.id, 'Inside.mp3', text('inside'))
+
+      const folder = visitorOf(target(), (await shareLink(client, music.id)).url)
+      const base = `/s/${folder.token}/audio`
+      expect(await queued(folder.client, base)).toEqual(['Song.mp3'])
+      expect(await queued(folder.client, `${base}?deep=1`)).toEqual(['Song.mp3', 'Inside.mp3'])
+      expect(await queued(folder.client, `${base}?folderId=${album.id}`)).toEqual(['Inside.mp3'])
+
+      const file = visitorOf(target(), (await shareLink(client, song.nodeId)).url)
+      expect(await file.client.error('GET', `/s/${file.token}/audio`)).toEqual({
+        status: 404,
+        code: 'not_found',
+      })
+    })
+
+    it('shows the picture beside an audio file as its cover, but not through a file link', async () => {
+      const client = await owner()
+      const folder = await createFolder(client, (await workspace(client)).id, 'Covered')
+      const song = await uploadFile(client, folder.id, 'Song.mp3', text('song'))
+      const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, ...text('a cover')])
+      await uploadFile(client, folder.id, 'front.png', text('the second choice'))
+      await uploadFile(client, folder.id, 'Cover.jpg', jpeg)
+      const lone = await uploadFile(client, (await workspace(client)).id, 'Lone.mp3', text('lone'))
+      const cover = (base: string, versionId: string) => `${base}/media/${versionId}/cover`
+
+      const drive = await client.fetch('GET', cover(`/files/${song.nodeId}`, song.versionId))
+      expect(drive.status).toBe(200)
+      expect(drive.headers.get('content-type')).toBe('image/jpeg')
+      expect(new Uint8Array(await drive.arrayBuffer())).toEqual(jpeg)
+      expect(await client.error('GET', cover(`/files/${lone.nodeId}`, lone.versionId))).toEqual({
+        status: 404,
+        code: 'not_found',
+      })
+
+      const inFolder = visitorOf(target(), (await shareLink(client, folder.id)).url)
+      const shared = await inFolder.client.fetch(
+        'GET',
+        cover(`/s/${inFolder.token}/files/${song.nodeId}`, song.versionId),
+      )
+      expect(new Uint8Array(await shared.arrayBuffer())).toEqual(jpeg)
+      // A file link shares that file alone.
+      const alone = visitorOf(target(), (await shareLink(client, song.nodeId)).url)
+      expect(
+        await alone.client.error(
+          'GET',
+          cover(`/s/${alone.token}/files/${song.nodeId}`, song.versionId),
+        ),
+      ).toEqual({ status: 404, code: 'not_found' })
+
+      await uploadFile(client, folder.id, 'Song.mp3', text('a new version'))
+      expect(await client.error('GET', cover(`/files/${song.nodeId}`, song.versionId))).toEqual({
+        status: 412,
+        code: 'version_changed',
+      })
     })
   })
 }

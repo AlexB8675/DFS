@@ -3,9 +3,13 @@ import {
   fileCategory,
   formatBytes,
   isTextSubtitles,
+  coverFileRank,
+  MAX_AUDIO_QUEUE,
+  MAX_COVER_BYTES,
   MAX_SUBTITLE_FILE_BYTES,
   mediaKind,
   nameKey,
+  playOrder,
   normalizeName,
   splitExtension,
   subtitleFileOf,
@@ -14,6 +18,8 @@ import {
   validateName,
   type AdminUser,
   type ArchiveTicket,
+  type AudioQueue,
+  type AudioTrack,
   type AuditEntry,
   type ChangePasswordInput,
   type CreateUploadInput,
@@ -50,7 +56,7 @@ import {
   type User,
 } from '@dfs/shared'
 import { previewKind } from '@/lib/preview-kind'
-import { SAMPLE_SUBTITLES, sampleMediaInfo } from './media'
+import { SAMPLE_COVER, SAMPLE_SUBTITLES, sampleMediaInfo } from './media'
 import { sampleImage, samplePdf, sampleText, sampleVideo } from './samples'
 import { createSeed } from './seed'
 import { createZip, type ZipEntry } from './zip'
@@ -614,6 +620,90 @@ export class MockDb {
       throw new MockApiError(404, 'not_found', 'There are no such subtitles.')
     }
     return toWebVtt(decodeSubtitles(this.contentOf(subtitle).body, beside.language), format)
+  }
+
+  /**
+   * `GET …/media/:versionId/cover`: the picture in an audio file's tags, else
+   * one beside it (not through a file link, which shares that file alone).
+   */
+  cover(place: MockPlace, versionId: string): { body: Uint8Array; type: string } {
+    const played = this.playedFile(place)
+    if (versionId !== played.versionId) throw versionChanged()
+    if (played.sizeBytes > 0 && sampleMediaInfo(played.kind, played.node.name).hasCover) {
+      return { body: SAMPLE_COVER.slice(), type: 'image/png' }
+    }
+    const parentId = played.node.parentId
+    const beside = played.besideOffered && parentId !== null ? this.coverBeside(parentId) : null
+    if (!beside) throw new MockApiError(404, 'not_found', 'This file has no cover.')
+    const { extension } = splitExtension(beside.name.toLowerCase())
+    const type =
+      extension === '.png' ? 'image/png' : extension === '.webp' ? 'image/webp' : 'image/jpeg'
+    return { body: this.contentOf(beside).body, type }
+  }
+
+  /** `GET /folders/:id/audio?deep=`: a folder's audio files, or everything below it, in play order. */
+  audioQueue(folderId: string, deep: boolean): AudioQueue {
+    return this.queueIn(this.requireFolder(folderId), deep)
+  }
+
+  /** `GET /s/:token/audio?folderId=&deep=`: the same, in the shared folder or one inside it. */
+  shareAudioQueue(token: string, folderId: string | null, deep: boolean): AudioQueue {
+    const { root } = this.liveShare(token)
+    const folder = folderId ? this.nodeInShare(root, folderId) : root
+    if (folder.kind !== 'folder') throw notFound()
+    return this.queueIn(folder, deep)
+  }
+
+  private queueIn(folder: MockNode, deep: boolean): AudioQueue {
+    const found: {
+      node: MockNode
+      name: string
+      path: string[]
+      disc: number | null
+      track: number | null
+    }[] = []
+    const walk = (parent: MockNode, path: string[]) => {
+      for (const child of this.childrenOf(parent.id)) {
+        if (child.kind === 'folder') {
+          if (deep) walk(child, [...path, child.name])
+        } else if (mediaKind(child.name, child.mimeType) === 'audio' && isReady(child)) {
+          const { tags } = sampleMediaInfo('audio', child.name)
+          found.push({ node: child, name: child.name, path, disc: tags.disc, track: tags.track })
+        }
+      }
+    }
+    walk(folder, [])
+    const ordered = playOrder(found)
+    return {
+      items: ordered.slice(0, MAX_AUDIO_QUEUE).map(({ node }) => this.audioTrack(node)),
+      truncated: ordered.length > MAX_AUDIO_QUEUE,
+    }
+  }
+
+  /** A queued file as the media info made up for it says; an empty one has none. */
+  private audioTrack(node: MockNode): AudioTrack {
+    const info = node.sizeBytes > 0 ? sampleMediaInfo('audio', node.name) : null
+    return {
+      id: node.id,
+      name: node.name,
+      versionId: versionIdOf(node),
+      durationMs: info?.durationMs ?? null,
+      title: info?.tags.title ?? null,
+      artist: info?.tags.artist ?? null,
+      album: info?.tags.album ?? null,
+      hasCover: info?.hasCover ?? false,
+    }
+  }
+
+  /** The best picture in a folder to show as a cover beside an audio file (§6.7). */
+  private coverBeside(folderId: string): MockNode | null {
+    const ranked = this.childrenOf(folderId)
+      .filter((node) => node.kind === 'file' && isReady(node) && node.sizeBytes > 0)
+      .filter((node) => node.sizeBytes <= MAX_COVER_BYTES)
+      .map((node) => ({ node, rank: coverFileRank(node.name) }))
+      .filter((found): found is { node: MockNode; rank: number } => found.rank !== null)
+      .sort((a, b) => a.rank - b.rank)
+    return ranked[0]?.node ?? null
   }
 
   /** The file a player's route names: the user's, or, under a token, one the link reaches. */
@@ -1654,6 +1744,11 @@ function mockContent(
  * A file's version, by its ID: the upload's, or for the demo's files one made
  * from the file's own ID and its version's number.
  */
+/** Uploaded, so it can be read: syncing or stored. */
+function isReady(node: MockNode): boolean {
+  return node.syncState === 'syncing' || node.syncState === 'stored'
+}
+
 function versionIdOf(node: MockNode): string {
   return node.versionId ?? madeUpVersionId(node, node.versionNo ?? 1)
 }

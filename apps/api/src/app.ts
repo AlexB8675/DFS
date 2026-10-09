@@ -104,6 +104,9 @@ const UNTIMED_ROUTES = new Set([
   // As long as the device's connection takes.
   '/api/connection-test',
   '/api/s/:token/connection-test',
+  // A cover is copied out of the file by the media service, which reads it.
+  '/api/files/:id/media/:versionId/cover',
+  '/api/s/:token/files/:id/media/:versionId/cover',
   // Subtitles inside a file may be extracted on the first ask, reading it whole.
   '/api/files/:id/media/:versionId/subtitles/:track',
   '/api/s/:token/files/:id/media/:versionId/subtitles/:track',

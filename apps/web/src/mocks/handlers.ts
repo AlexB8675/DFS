@@ -347,6 +347,20 @@ export const handlers = [
         options,
       ),
     ),
+    http.get<Place & { versionId: string }>(
+      `${path}/media/:versionId/cover`,
+      ({ request, params }) =>
+        respond(
+          request,
+          () => {
+            const cover = db.cover(placeOf(params), params.versionId)
+            return new HttpResponse(cover.body.slice(), {
+              headers: { 'Content-Type': cover.type, 'Cache-Control': 'private, no-cache' },
+            })
+          },
+          options,
+        ),
+    ),
     http.get<Place & { versionId: string; track: string }>(
       `${path}/media/:versionId/subtitles/:track`,
       ({ request, params }) =>
@@ -363,6 +377,21 @@ export const handlers = [
         ),
     ),
   ]),
+  http.get<Id>('/api/folders/:id/audio', ({ request, params }) =>
+    respond(request, () =>
+      db.audioQueue(params.id, new URL(request.url).searchParams.get('deep') === '1'),
+    ),
+  ),
+  http.get<Token>('/api/s/:token/audio', ({ request, params }) =>
+    respond(
+      request,
+      () => {
+        const query = new URL(request.url).searchParams
+        return db.shareAudioQueue(params.token, query.get('folderId'), query.get('deep') === '1')
+      },
+      { public: true },
+    ),
+  ),
   // Where a user stopped: a link's viewers keep theirs in the browser.
   http.put<Id>('/api/files/:id/position', ({ request, params }) =>
     respondEmpty(request, async () => {

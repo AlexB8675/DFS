@@ -16,6 +16,7 @@ import type { FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest'
 import { buildApp } from '../app.ts'
 import { testConfig } from '../testing/config.ts'
+import { STAND_IN_COVER } from '../testing/media-stand-in.ts'
 import { seedUser } from '../testing/seed.ts'
 import { mediaToken } from './token.ts'
 
@@ -33,7 +34,10 @@ let standIn: http.Server
 let folderId: string
 
 /** What the stand-in answers next, and what it was asked and read. */
-let answer: 'media' | 'film' | 'not media' | 'down' = 'media'
+let answer: 'media' | 'film' | 'covered' | 'not media' | 'down' = 'media'
+/** What the stand-in copies out as a cover; every version asked for one. */
+let coverBytes: Buffer = STAND_IN_COVER
+const covers: string[] = []
 const probes: { versionId: string; readStatus: number; firstBytes: string }[] = []
 /** Subtitle streams the stand-in can't read, and every extraction it was asked for. */
 let unreadable: number[] = []
@@ -143,6 +147,17 @@ beforeAll(async () => {
         const read = await fetch(`${apiUrl}/internal/media/${versionId}`, {
           headers: { authorization: `Bearer ${token}`, range: 'bytes=0-3' },
         })
+        if (request.url === '/cover') {
+          await read.body?.cancel()
+          covers.push(versionId)
+          if (answer === 'down' || read.status !== 206) {
+            response.writeHead(502).end()
+            return
+          }
+          response.writeHead(200, { 'content-type': 'application/octet-stream' })
+          response.end(coverBytes)
+          return
+        }
         if (request.url === '/subtitles') {
           await read.body?.cancel()
           extractions.push({ versionId, streams: streams ?? [], readStatus: read.status })
@@ -171,7 +186,9 @@ beforeAll(async () => {
         const result: ProbeResult =
           answer === 'media' || answer === 'film'
             ? { ok: true, info: answer === 'film' ? FILM : SONG }
-            : { ok: false, reason: 'It holds no audio or video.' }
+            : answer === 'covered'
+              ? { ok: true, info: { ...SONG, hasCover: true } }
+              : { ok: false, reason: 'It holds no audio or video.' }
         response.writeHead(200, { 'content-type': 'application/json' })
         response.end(JSON.stringify(result))
       })()
@@ -200,6 +217,8 @@ afterAll(async () => {
 
 beforeEach(() => {
   answer = 'media'
+  coverBytes = STAND_IN_COVER
+  covers.length = 0
   probes.length = 0
   unreadable = []
   extractions.length = 0
@@ -402,6 +421,41 @@ describe('where users stopped (§10.4)', () => {
     expect(await positions()).toEqual([{ version_id: first.versionId }])
     await uploadFile(client, folderId, 'resumed.mp3', text('second'))
     expect(await positions()).toEqual([])
+  })
+})
+
+describe('covers (§6.7)', () => {
+  async function covered(name: string) {
+    answer = 'covered'
+    const song = await uploadFile(client, folderId, name, text('ID3 and a picture'))
+    await vi.waitFor(async () => {
+      expect(await kept(song.versionId)).not.toBeNull()
+    })
+    return { song, path: `/files/${song.nodeId}/media/${song.versionId}/cover` }
+  }
+
+  it('copies the picture out of an audio file when asked, for the browser to keep', async () => {
+    const { song, path } = await covered('covered.mp3')
+    const response = await client.fetch('GET', path)
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-type')).toBe('image/png')
+    expect(response.headers.get('cache-control')).toBe('private, max-age=31536000, immutable')
+    expect(Buffer.from(await response.arrayBuffer())).toEqual(STAND_IN_COVER)
+    // Read with the file's own token, and kept nowhere: asked again, copied again.
+    await (await client.fetch('GET', path)).arrayBuffer()
+    expect(covers).toEqual([song.versionId, song.versionId])
+  })
+
+  it('serves nothing that isn’t a picture every browser draws', async () => {
+    const { path } = await covered('crafted.mp3')
+    coverBytes = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script/></svg>')
+    expect(await client.error('GET', path)).toEqual({ status: 404, code: 'not_found' })
+  })
+
+  it('says the media service is away, rather than that there is no cover', async () => {
+    const { path } = await covered('away.mp3')
+    answer = 'down'
+    expect(await client.error('GET', path)).toEqual({ status: 503, code: 'media_unavailable' })
   })
 })
 
