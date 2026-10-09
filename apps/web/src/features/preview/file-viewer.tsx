@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { NodeIcon } from '@/components/node-icon'
 import { SyncStatus } from '@/components/sync-status'
 import { MediaDetails } from '@/features/player/media-details'
+import type { FilePlace } from '@/lib/file-place'
 import { fileCategory, fileCategoryLabel } from '@/lib/file-types'
 import { formatBytes, formatFullDate } from '@/lib/format'
 import { previewKind } from '@/lib/preview-kind'
@@ -19,8 +20,8 @@ interface FileViewerProps {
   /** `null` while it loads, or when it can't be shown (`error`). */
   file: ViewedFile | null
   error: { title: string; description: string } | null
-  /** Where its bytes are, as an API path (`/files/:id/content`). */
-  contentPath: string | null
+  /** Where it is: the drive's, or a link's. */
+  place: FilePlace | null
   /** The previewable files around it in the list it was opened from. */
   previous: (() => void) | null
   next: (() => void) | null
@@ -45,7 +46,7 @@ export function FileViewer({
   open,
   file,
   error,
-  contentPath,
+  place,
   previous,
   next,
   position,
@@ -172,7 +173,7 @@ export function FileViewer({
             <PreviewBody
               file={file}
               error={error}
-              contentPath={contentPath}
+              place={place}
               view={view}
               previous={previous}
               next={next}
@@ -193,8 +194,8 @@ export function FileViewer({
               <Details
                 file={file}
                 media={
-                  contentPath && previewKind(file.name, file.mimeType) === 'video' ? (
-                    <MediaDetails contentPath={contentPath} />
+                  place && previewKind(file.name, file.mimeType) === 'video' ? (
+                    <MediaDetails place={place} />
                   ) : null
                 }
               />

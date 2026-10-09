@@ -51,11 +51,6 @@ export function useUnlockShare(token: string) {
   })
 }
 
-/** A file's bytes for its preview (§10.3): `?preview=1`, so looking never counts toward the limit. */
-export function sharedPreviewPath(token: string, fileId: string): string {
-  return `/s/${token}/files/${fileId}/content?preview=1`
-}
-
 export async function downloadSharedFile(token: string, file: SharedNode): Promise<void> {
   await downloadFromApi(`/s/${token}/files/${file.id}/content`, file.name)
   await refreshDownloadsLeft(token)

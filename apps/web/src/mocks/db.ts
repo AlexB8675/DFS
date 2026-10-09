@@ -91,6 +91,8 @@ export interface MockNode {
 /** An earlier version of a file, kept for a share link. */
 export interface MockVersion {
   no: number
+  /** Its ID while it was the file's, for a player through the link. */
+  id?: string
   sizeBytes: number
   mimeType: string | null
   updatedAt: string
@@ -112,6 +114,23 @@ export interface MockShare {
   downloadCount: number
   /** A file link's version, which it serves however the file changes (§7.5); `null` for a folder. */
   versionNo: number | null
+}
+
+/** Where a player finds a file: the drive (`token: null`), or a share link. */
+export interface MockPlace {
+  token: string | null
+  id: string
+}
+
+/** What a player plays, as `playedFile` finds it. */
+interface PlayedFile {
+  node: MockNode
+  kind: 'video' | 'audio'
+  /** The version served: a file link's own, or the file's current one. */
+  versionId: string
+  sizeBytes: number
+  /** Subtitle files beside it are offered: in the drive and in a shared folder. */
+  besideOffered: boolean
 }
 
 interface MockUpload {
@@ -510,38 +529,41 @@ export class MockDb {
 
   // ── Audio and video (§6.7, §10.4) ──────────────────────────────────────────
 
-  /** `GET /files/:id/media`: what the media service would find, made up. */
-  media(id: string): FileMedia {
-    const { node, kind } = this.mediaNode(id)
-    const versionId = versionIdOf(node)
-    if (node.sizeBytes === 0) return { versionId, info: null, problem: 'It’s empty.' }
+  /** `GET …/media`: what the media service would find, made up. */
+  media(place: MockPlace): FileMedia {
+    const { node, kind, versionId, sizeBytes } = this.playedFile(place)
+    if (sizeBytes === 0) return { versionId, info: null, problem: 'It’s empty.' }
     return { versionId, info: sampleMediaInfo(kind, node.name), problem: null }
   }
 
-  /** `GET /files/:id/playback`: the version, where this user stopped, the subtitle files beside it. */
-  playback(id: string): Playback {
-    const { node } = this.mediaNode(id)
-    const versionId = versionIdOf(node)
-    const saved = this.state.positions?.[this.positionKey(node)]
+  /**
+   * `GET …/playback`: the version, where this user stopped (a link's viewer
+   * keeps theirs in the browser), the subtitle files beside it.
+   */
+  playback(place: MockPlace): Playback {
+    const { node, versionId, besideOffered } = this.playedFile(place)
+    const saved = place.token === null ? this.state.positions?.[this.positionKey(node)] : undefined
     return {
       versionId,
       positionMs: saved?.versionId === versionId ? saved.positionMs : null,
-      subtitleFiles: this.subtitleFilesBeside(node),
+      subtitleFiles: besideOffered ? this.subtitleFilesBeside(node) : [],
     }
   }
 
-  /** Bytes sent of a version to the signed-in user's player, by `userId:versionId` (§10.4). */
+  /** Bytes sent of a version to a player, by reader and version (§10.4). */
   private readonly deliveries = new Map<string, number>()
 
-  recordDelivery(versionId: string, bytes: number): void {
-    const key = `${this.state.userId}:${versionId}`
+  /** A player's read of the version it names, through the drive (a user's) or a link. */
+  recordDelivery(place: MockPlace, versionId: string, bytes: number): void {
+    const key = `${this.readerOf(place)}:${versionId}`
     this.deliveries.set(key, (this.deliveries.get(key) ?? 0) + bytes)
   }
 
-  /** `GET /files/:id/media/:versionId/delivery`: the mock sends at once, so it never waits. */
-  delivery(versionId: string): Delivery {
+  /** `GET …/media/:versionId/delivery`: the mock sends at once, so it never waits. */
+  delivery(place: MockPlace, versionId: string): Delivery {
+    this.playedFile(place)
     return {
-      bytes: this.deliveries.get(`${this.state.userId}:${versionId}`) ?? 0,
+      bytes: this.deliveries.get(`${this.readerOf(place)}:${versionId}`) ?? 0,
       waitedForSourceMs: 0,
       waitedForClientMs: 0,
       running: 0,
@@ -550,7 +572,7 @@ export class MockDb {
 
   /** `PUT /files/:id/position` */
   savePosition(id: string, { versionId, positionMs }: SavePositionInput): void {
-    const { node } = this.mediaNode(id)
+    const { node } = this.playedFile({ token: null, id })
     if (versionId !== versionIdOf(node)) throw versionChanged()
     this.state.positions = {
       ...this.state.positions,
@@ -561,18 +583,20 @@ export class MockDb {
 
   /** `DELETE /files/:id/position` */
   clearPosition(id: string): void {
-    const { node } = this.mediaNode(id)
+    const { node } = this.playedFile({ token: null, id })
     if (this.state.positions) Reflect.deleteProperty(this.state.positions, this.positionKey(node))
     this.save()
   }
 
   /**
-   * `GET /files/:id/media/:versionId/subtitles/:track`: a text stream inside
-   * the video, or a subtitle file beside it, as WebVTT.
+   * `GET …/media/:versionId/subtitles/:track`: a text stream inside the
+   * video, or a subtitle file beside it, as WebVTT; none beside it through a
+   * file link, which shares that file alone.
    */
-  subtitles(id: string, versionId: string, track: string): string {
-    const { node, kind } = this.mediaNode(id)
-    if (versionId !== versionIdOf(node)) throw versionChanged()
+  subtitles(place: MockPlace, versionId: string, track: string): string {
+    const played = this.playedFile(place)
+    const { node, kind } = played
+    if (versionId !== played.versionId) throw versionChanged()
     const index = /^(\d+)\.vtt$/.exec(track)?.[1]
     if (index !== undefined) {
       const stream = sampleMediaInfo(kind, node.name).streams.find(
@@ -582,7 +606,8 @@ export class MockDb {
       throw new MockApiError(404, 'not_found', 'There are no such subtitles.')
     }
     const fileId = track.replace(/\.vtt$/i, '').toLowerCase()
-    const beside = this.subtitleFilesBeside(node).find((file) => file.id === fileId)
+    const offered = played.besideOffered ? this.subtitleFilesBeside(node) : []
+    const beside = offered.find((file) => file.id === fileId)
     const subtitle = beside && this.state.nodes[beside.id]
     const format = beside && subtitleFormat(beside.name)
     if (!beside || !subtitle || !format) {
@@ -591,11 +616,35 @@ export class MockDb {
     return toWebVtt(decodeSubtitles(this.contentOf(subtitle).body, beside.language), format)
   }
 
-  private mediaNode(id: string): { node: MockNode; kind: 'video' | 'audio' } {
-    const node = this.visibleNode(id)
-    const kind = node.kind === 'file' ? mediaKind(node.name, node.mimeType) : null
-    if (!kind) throw new MockApiError(422, 'not_media', 'This file isn’t audio or video.')
-    return { node, kind }
+  /** The file a player's route names: the user's, or, under a token, one the link reaches. */
+  private playedFile(place: MockPlace): PlayedFile {
+    if (place.token === null) {
+      const node = this.visibleNode(place.id)
+      return {
+        node,
+        kind: mediaKindOf(node),
+        versionId: versionIdOf(node),
+        sizeBytes: node.sizeBytes,
+        besideOffered: true,
+      }
+    }
+    const { share, root } = this.liveShare(place.token)
+    const node = this.nodeInShare(root, place.id)
+    const kind = mediaKindOf(node)
+    // A file link plays its own version, which may be an earlier one (§7.5).
+    const earlier = node.id === root.id ? this.sharedVersion(share, root) : undefined
+    return {
+      node,
+      kind,
+      versionId: earlier ? earlierVersionId(node, earlier) : versionIdOf(node),
+      sizeBytes: earlier?.sizeBytes ?? node.sizeBytes,
+      besideOffered: root.kind === 'folder',
+    }
+  }
+
+  /** Whose reads a player's are: the user's, or a link's viewer's (one per link here; the API tells them apart by address too). */
+  private readerOf(place: MockPlace): string {
+    return place.token === null ? this.state.userId : `link:${this.liveShare(place.token).share.id}`
   }
 
   private positionKey(node: MockNode): string {
@@ -974,6 +1023,7 @@ export class MockDb {
           ...(node.earlierVersions ?? []),
           {
             no: replaced,
+            id: versionIdOf(node),
             sizeBytes: node.sizeBytes,
             mimeType: node.mimeType,
             updatedAt: node.updatedAt,
@@ -1171,6 +1221,11 @@ export class MockDb {
     }
   }
 
+  /** A link that works and is unlocked, for a route under it that gives nothing of its own. */
+  openShare(token: string): void {
+    this.liveShare(token)
+  }
+
   unlockShare(token: string, password: string): void {
     const { share } = this.liveShare(token, { requireUnlocked: false })
     if (share.password !== null && share.password !== password) {
@@ -1203,12 +1258,15 @@ export class MockDb {
    * `GET /s/:token/files/:id/content`, which counts toward the download limit
    * only when it is a download (`countShareDownload`, §7.5).
    */
-  shareFileContent(token: string, id: string): MockFileContent {
+  shareFileContent(token: string, id: string, versionId: string | null = null): MockFileContent {
     const { share, root } = this.liveShare(token)
     const node = this.nodeInShare(root, id)
     if (node.kind !== 'file') throw notFound()
     // A file link serves its own version, which may be an earlier one.
     const earlier = node.id === root.id ? this.sharedVersion(share, root) : undefined
+    // A player names the version it plays (§10.4).
+    const served = earlier ? earlierVersionId(node, earlier) : versionIdOf(node)
+    if (versionId !== null && versionId !== served) throw versionChanged()
     if (!earlier) return this.contentOf(node)
     const bytes = this.versionBytes.get(`${node.id}#${String(earlier.no)}`)
     const etag = versionTag(node, earlier.no)
@@ -1597,7 +1655,24 @@ function mockContent(
  * from the file's own ID and its version's number.
  */
 function versionIdOf(node: MockNode): string {
-  return node.versionId ?? `${node.id.slice(0, 24)}${String(node.versionNo ?? 1).padStart(12, '0')}`
+  return node.versionId ?? madeUpVersionId(node, node.versionNo ?? 1)
+}
+
+/** An earlier version's ID, as it was while it was the file's. */
+function earlierVersionId(node: MockNode, version: MockVersion): string {
+  return version.id ?? madeUpVersionId(node, version.no)
+}
+
+/** A version's ID for the demo's files, made up from the file's and its number. */
+function madeUpVersionId(node: MockNode, versionNo: number): string {
+  return `${node.id.slice(0, 24)}${String(versionNo).padStart(12, '0')}`
+}
+
+/** A file's kind as a player has it, or `422 not_media`. */
+function mediaKindOf(node: MockNode): 'video' | 'audio' {
+  const kind = node.kind === 'file' ? mediaKind(node.name, node.mimeType) : null
+  if (!kind) throw new MockApiError(422, 'not_media', 'This file isn’t audio or video.')
+  return kind
 }
 
 /** The version a player named is no longer the file's (§10.4). */

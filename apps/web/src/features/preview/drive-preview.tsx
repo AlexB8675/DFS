@@ -5,6 +5,7 @@ import { useDialogStore } from '@/features/drive/dialogs/dialog-store'
 import { useSelectionStore } from '@/features/drive/selection'
 import { useNodeActions } from '@/features/drive/use-node-actions'
 import { ApiError } from '@/lib/api/client'
+import { drivePlace } from '@/lib/file-place'
 import { FileViewer } from './file-viewer'
 import { usePreviewList } from './use-preview-list'
 
@@ -22,7 +23,13 @@ interface DrivePreviewProps {
  * end, and closing it selects the file last seen.
  */
 export function DrivePreview({ nodes, hasMore, isLoadingMore, onLoadMore }: DrivePreviewProps) {
-  const list = usePreviewList({ items: nodes, hasMore, isLoadingMore, onLoadMore, contentPath })
+  const list = usePreviewList({
+    items: nodes,
+    hasMore,
+    isLoadingMore,
+    onLoadMore,
+    placeOf: drivePlace,
+  })
   const actions = useNodeActions()
   const store = useSelectionStore()
   const covered = useDialogStore((state) => state.dialog !== null)
@@ -49,7 +56,7 @@ export function DrivePreview({ nodes, hasMore, isLoadingMore, onLoadMore }: Driv
       open={list.previewId !== null}
       file={node?.kind === 'file' ? node : null}
       error={error}
-      contentPath={list.shownId ? contentPath(list.shownId) : null}
+      place={list.shownId ? drivePlace(list.shownId) : null}
       previous={list.previous}
       next={list.next}
       position={list.position}
@@ -66,8 +73,4 @@ export function DrivePreview({ nodes, hasMore, isLoadingMore, onLoadMore }: Driv
       }}
     />
   )
-}
-
-function contentPath(id: string): string {
-  return `/files/${id}/content`
 }

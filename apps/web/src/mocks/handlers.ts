@@ -36,7 +36,7 @@ import {
 import { delay, http, HttpResponse, sse, type JsonBodyType } from 'msw'
 import { z, ZodError } from 'zod'
 import { AdminMockDb, MOCK_RELEASE } from './admin-db'
-import { MockApiError, type MockEvent, type MockFileContent } from './db'
+import { MockApiError, type MockEvent, type MockFileContent, type MockPlace } from './db'
 import { MOCK_RESPONSE_HEADER } from './marker'
 import { DEMO_ACCOUNTS } from './seed'
 
@@ -46,8 +46,11 @@ export const db = new AdminMockDb()
 
 /** A realistic delay before each answer; the contract suite turns it off for speed. */
 let responseDelay = true
-/** A connection test is running: the API allows one at a time (§10.4). */
-let connectionTesting = false
+/**
+ * Connection tests running, a user's and this browser's through links: the
+ * API allows each one at a time (§10.4), a link viewer's by their address.
+ */
+const connectionTests = new Set<'user' | 'address'>()
 
 export function setResponseDelay(enabled: boolean): void {
   responseDelay = enabled
@@ -62,6 +65,22 @@ interface Id {
 
 interface Token {
   token: string
+}
+
+/** A file's place in a player's route: a token only under a link. */
+interface Place {
+  token?: string
+  id: string
+}
+
+/** Where the players find a file (§10.4): the drive, or a share link, with no session. */
+const PLAYER_PLACES = [
+  { path: '/api/files/:id', options: {} },
+  { path: '/api/s/:token/files/:id', options: { public: true } },
+] as const
+
+function placeOf(params: Place): MockPlace {
+  return { token: params.token ?? null, id: params.id }
 }
 
 const listQuery = z.object({
@@ -296,61 +315,55 @@ export const handlers = [
     respond(request, async () => {
       const version = new URL(request.url).searchParams.get('version')
       const response = fileResponse(request, db.fileContent(params.id, version))
-      // A player's reads, counted for its warning (§10.4): sent at once, so no waits.
-      if (version) {
-        db.recordDelivery(version, (await response.clone().arrayBuffer()).byteLength)
-      }
+      if (version) await recordDelivery({ token: null, id: params.id }, version, response)
       return response
     }),
   ),
-  http.get<Id & { versionId: string }>(
-    '/api/files/:id/media/:versionId/delivery',
-    ({ request, params }) =>
-      respond(request, () => {
-        db.media(params.id)
-        return db.delivery(params.versionId)
-      }),
-  ),
   http.get('/api/connection-test', ({ request }) =>
-    respond(request, () => {
-      const bytes = z.coerce
-        .number()
-        .int()
-        .min(1)
-        .max(MAX_CONNECTION_TEST_BYTES)
-        .parse(new URL(request.url).searchParams.get('bytes'))
-      // One at a time, as the API has it: the bytes go out at once here, so for a moment.
-      if (connectionTesting) {
-        throw new MockApiError(
-          429,
-          'rate_limited',
-          'A connection test is running, or ran just now.',
-        )
-      }
-      connectionTesting = true
-      setTimeout(() => {
-        connectionTesting = false
-      }, 500)
-      return new HttpResponse(new Uint8Array(bytes), {
-        headers: { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store' },
-      })
-    }),
+    respond(request, () => connectionTest(request, 'user')),
   ),
 
-  // ── Audio and video (§6.7, §10.4) ──────────────────────────────────────────
-  http.get<Id>('/api/files/:id/media', ({ request, params }) =>
-    respond(request, () => db.media(params.id)),
-  ),
-  http.get<Id>('/api/files/:id/playback', ({ request, params }) =>
-    respond(request, () => db.playback(params.id)),
-  ),
-  http.post<Id>('/api/files/:id/playback-report', ({ request, params }) =>
-    respondEmpty(request, async () => {
-      // Checked as the API checks it, and then forgotten: the mock keeps no logs.
-      playbackReportSchema.parse(await request.json())
-      db.media(params.id)
-    }),
-  ),
+  // ── Audio and video (§6.7, §10.4): the drive's, and a link's alike ─────────
+  ...PLAYER_PLACES.flatMap(({ path, options }) => [
+    http.get<Place>(`${path}/media`, ({ request, params }) =>
+      respond(request, () => db.media(placeOf(params)), options),
+    ),
+    http.get<Place>(`${path}/playback`, ({ request, params }) =>
+      respond(request, () => db.playback(placeOf(params)), options),
+    ),
+    http.get<Place & { versionId: string }>(
+      `${path}/media/:versionId/delivery`,
+      ({ request, params }) =>
+        respond(request, () => db.delivery(placeOf(params), params.versionId), options),
+    ),
+    http.post<Place>(`${path}/playback-report`, ({ request, params }) =>
+      respondEmpty(
+        request,
+        async () => {
+          // Checked as the API checks it, and then forgotten: the mock keeps no logs.
+          playbackReportSchema.parse(await request.json())
+          db.media(placeOf(params))
+        },
+        options,
+      ),
+    ),
+    http.get<Place & { versionId: string; track: string }>(
+      `${path}/media/:versionId/subtitles/:track`,
+      ({ request, params }) =>
+        respond(
+          request,
+          () =>
+            new HttpResponse(db.subtitles(placeOf(params), params.versionId, params.track), {
+              headers: {
+                'Content-Type': 'text/vtt; charset=utf-8',
+                'Cache-Control': 'private, no-cache',
+              },
+            }),
+          options,
+        ),
+    ),
+  ]),
+  // Where a user stopped: a link's viewers keep theirs in the browser.
   http.put<Id>('/api/files/:id/position', ({ request, params }) =>
     respondEmpty(request, async () => {
       db.savePosition(params.id, savePositionSchema.parse(await request.json()))
@@ -360,20 +373,6 @@ export const handlers = [
     respondEmpty(request, () => {
       db.clearPosition(params.id)
     }),
-  ),
-  http.get<Id & { versionId: string; track: string }>(
-    '/api/files/:id/media/:versionId/subtitles/:track',
-    ({ request, params }) =>
-      respond(
-        request,
-        () =>
-          new HttpResponse(db.subtitles(params.id, params.versionId, params.track), {
-            headers: {
-              'Content-Type': 'text/vtt; charset=utf-8',
-              'Cache-Control': 'private, no-cache',
-            },
-          }),
-      ),
   ),
 
   // ── Archives (§6.2) ────────────────────────────────────────────────────────
@@ -578,17 +577,31 @@ export const handlers = [
   http.get<Token & Id>('/api/s/:token/files/:id/content', ({ request, params }) =>
     respond(
       request,
-      () => {
-        const file = db.shareFileContent(params.token, params.id)
+      async () => {
+        const query = new URL(request.url).searchParams
+        const version = query.get('version')
+        const file = db.shareFileContent(params.token, params.id, version)
         // Only a download counts (§7.5): a request from byte 0, so seeking in
         // a video doesn't, and never a preview or a browser that has the file.
         const range = request.headers.get('Range')
         const fromStart = range === null || range.startsWith('bytes=0-')
-        const preview = new URL(request.url).searchParams.get('preview') === '1'
+        const preview = query.get('preview') === '1'
         if (fromStart && !preview && !notModified(request, file)) {
           db.countShareDownload(params.token)
         }
-        return fileResponse(request, file)
+        const response = fileResponse(request, file)
+        if (version) await recordDelivery(placeOf(params), version, response)
+        return response
+      },
+      { public: true },
+    ),
+  ),
+  http.get<Token>('/api/s/:token/connection-test', ({ request, params }) =>
+    respond(
+      request,
+      () => {
+        db.openShare(params.token)
+        return connectionTest(request, 'address')
       },
       { public: true },
     ),
@@ -640,6 +653,32 @@ interface RespondOptions {
 }
 
 type WorkResult = JsonBodyType | Response
+
+/** A player's read, counted for its warning (§10.4): sent at once here, so it never waits. */
+async function recordDelivery(place: MockPlace, versionId: string, response: Response) {
+  db.recordDelivery(place, versionId, (await response.clone().arrayBuffer()).byteLength)
+}
+
+/** `GET /connection-test`, and a link's: bytes to time, one test at a time, as the API has it. */
+function connectionTest(request: Request, by: 'user' | 'address'): Response {
+  const bytes = z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_CONNECTION_TEST_BYTES)
+    .parse(new URL(request.url).searchParams.get('bytes'))
+  // The bytes go out at once here, so a test runs for a moment.
+  if (connectionTests.has(by)) {
+    throw new MockApiError(429, 'rate_limited', 'A connection test is running, or ran just now.')
+  }
+  connectionTests.add(by)
+  setTimeout(() => {
+    connectionTests.delete(by)
+  }, 500)
+  return new HttpResponse(new Uint8Array(bytes), {
+    headers: { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store' },
+  })
+}
 
 /**
  * Runs `work` after a realistic delay and sends its result as JSON (a

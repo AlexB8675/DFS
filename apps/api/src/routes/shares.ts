@@ -14,6 +14,7 @@ import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
 import { requireAuth } from '../auth/access.ts'
 import { archiveEntries } from '../content/archive.ts'
+import { linkReader } from '../content/deliveries.ts'
 import {
   archiveQuery,
   cancellation,
@@ -38,7 +39,7 @@ import {
   updateShare,
 } from '../shares/shares.ts'
 import { assertOwnOrigin } from './auth.ts'
-import { downloadableFile } from './content.ts'
+import { downloadableFile, versionChanged } from './content.ts'
 
 const byId = z.object({ id: z.uuid() })
 const byToken = z.object({ token: z.string().min(1).max(100) })
@@ -130,7 +131,10 @@ export function shareRoutes(app: FastifyInstance, _options: object, done: () => 
       config: open,
       schema: {
         params: byToken.extend({ id: z.uuid() }),
-        querystring: z.object({ preview: z.literal('1').optional() }),
+        querystring: z.object({
+          preview: z.literal('1').optional(),
+          version: z.uuid().optional(),
+        }),
       },
     },
     async (request, reply) => {
@@ -142,6 +146,9 @@ export function shareRoutes(app: FastifyInstance, _options: object, done: () => 
         node.id,
         node.id === root.id ? share.version_id : null,
       )
+      // A player names the version it plays, so a replaced file never mixes with it (§10.4).
+      const { version } = request.query
+      if (version && version !== file.version_id) throw versionChanged()
       // Only a download counts (§7.5): a request from byte 0, so seeking in a
       // video doesn't, and never a preview or a browser that has the file.
       const range = requestedRange(request, file)
@@ -152,7 +159,7 @@ export function shareRoutes(app: FastifyInstance, _options: object, done: () => 
         (range === null || (range !== 'unsatisfiable' && range.start === 0))
       )
         await countDownload(app, share)
-      return sendFile(app, request, reply, file)
+      return sendFile(app, request, reply, file, linkReader(share.id, request.ip))
     },
   )
 

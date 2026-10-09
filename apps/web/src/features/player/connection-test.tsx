@@ -18,8 +18,9 @@ interface Result {
   done: boolean
 }
 
-/** Reads from `/connection-test` for up to `TEST_MS`, reporting the rate as it goes. */
+/** Reads from a connection test (`path`) for up to `TEST_MS`, reporting the rate as it goes. */
 async function testConnection(
+  path: string,
   signal: AbortSignal,
   onProgress: (result: Result) => void,
 ): Promise<void> {
@@ -30,7 +31,7 @@ async function testConnection(
   signal.addEventListener('abort', abort)
   const asked = performance.now()
   try {
-    const response = await apiFetch('/connection-test', {
+    const response = await apiFetch(path, {
       query: { bytes: MAX_CONNECTION_TEST_BYTES },
       signal: controller.signal,
     })
@@ -62,8 +63,11 @@ async function testConnection(
   }
 }
 
-/** A Details row's value: Test, then the rate. */
-export function ConnectionTest() {
+/**
+ * A Details row's value: Test, then the rate. `path` is the user's test, or
+ * a link's for its viewers (`connectionTestPath`).
+ */
+export function ConnectionTest({ path }: { path: string }) {
   const [result, setResult] = useState<Result | null>(null)
   const [failed, setFailed] = useState(false)
   const [running, setRunning] = useState(false)
@@ -83,7 +87,7 @@ export function ConnectionTest() {
     setRunning(true)
     setFailed(false)
     setResult(null)
-    testConnection(controller.signal, setResult)
+    testConnection(path, controller.signal, setResult)
       .catch(() => {
         if (!controller.signal.aborted) setFailed(true)
       })

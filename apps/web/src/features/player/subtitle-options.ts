@@ -2,8 +2,8 @@ import { isTextSubtitles, languageOf, type MediaInfo, type SubtitleFile } from '
 import { languageName } from './codecs'
 
 // The subtitles a video offers (DESIGN.md §6.7, §10.4): files beside it, from
-// GET /files/:id/playback at once, and text streams inside it, once its media
-// info comes. Each is WebVTT from the API, for a `<track>`.
+// its /playback at once, and text streams inside it, once its media info
+// comes. Each is WebVTT from the API, for a `<track>`.
 
 export interface SubtitleOption {
   /** `file:<id>` or `stream:<index>`. */
@@ -27,6 +27,7 @@ export interface SubtitlePreference {
 
 /** Every subtitle track of the version: beside it first, then inside it. */
 export function subtitleOptions(
+  /** The file's path: `/files/:id`, or a link's. */
   base: string,
   versionId: string,
   files: readonly SubtitleFile[],

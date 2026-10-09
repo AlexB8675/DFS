@@ -4,16 +4,19 @@ import {
   isTextSubtitles,
   MAX_CONNECTION_TEST_BYTES,
   playbackSchema,
+  publicShareSchema,
 } from '@dfs/shared'
 import type { ApiClient } from './client.ts'
 import type { SuiteContext } from './context.ts'
 import { createFolder, text, uploadFile, workspace } from './files.ts'
+import { shareLink, visitorOf } from './shares.ts'
 
 /**
  * Audio and video (DESIGN.md §6.7, §10.4): what a file holds, what a player
  * needs to start, where each user stopped, subtitle files beside a video as
- * WebVTT, and the version a player names. The API's runner stands in for the
- * media service, which says every file is a video.
+ * WebVTT, and the version a player names; and the same through share links
+ * (§7.5). The API's runner stands in for the media service, which says every
+ * file is a video.
  */
 export function mediaTests({
   describe,
@@ -22,9 +25,30 @@ export function mediaTests({
   owner,
   newUser,
   activated,
+  target,
 }: SuiteContext): void {
   async function playback(client: ApiClient, nodeId: string) {
     return client.call('GET', `/files/${nodeId}/playback`, playbackSchema)
+  }
+
+  /** A player's report of a play that went well enough. */
+  function playReport(versionId: string) {
+    return {
+      versionId,
+      outcome: 'played',
+      firstFrameMs: 1850,
+      startMs: 2400,
+      openMs: 64_000,
+      stalls: 2,
+      stallMs: 4100,
+      seeks: 3,
+      seekWaitMs: 9800,
+      frames: 3000,
+      droppedFrames: 12,
+      arrivalBitsPerSecond: 2_700_000,
+      decoding: { supported: true, smooth: true, powerEfficient: true },
+      problem: null,
+    }
   }
 
   describe('audio and video (§6.7, §10.4)', () => {
@@ -181,22 +205,7 @@ export function mediaTests({
       const client = await owner()
       const root = await workspace(client)
       const video = await uploadFile(client, root.id, 'Reported.mp4', text('mp4'))
-      const report = {
-        versionId: video.versionId,
-        outcome: 'played',
-        firstFrameMs: 1850,
-        startMs: 2400,
-        openMs: 64_000,
-        stalls: 2,
-        stallMs: 4100,
-        seeks: 3,
-        seekWaitMs: 9800,
-        frames: 3000,
-        droppedFrames: 12,
-        arrivalBitsPerSecond: 2_700_000,
-        decoding: { supported: true, smooth: true, powerEfficient: true },
-        problem: null,
-      }
+      const report = playReport(video.versionId)
       const path = `/files/${video.nodeId}/playback-report`
       await client.send('POST', path, { json: report })
       expect(await client.error('POST', path, { json: { ...report, stalls: -1 } })).toMatchObject({
@@ -254,6 +263,167 @@ export function mediaTests({
 
       await uploadFile(client, root.id, 'Replaced.mp4', text('second'))
       expect(await client.error('GET', path)).toEqual({ status: 412, code: 'version_changed' })
+    })
+  })
+
+  describe('audio and video through share links (§7.5, §10.4)', () => {
+    it('plays a file link’s own version after the file has a newer one, and never counts it as a download', async () => {
+      const client = await owner()
+      const root = await workspace(client)
+      const first = await uploadFile(client, root.id, 'Pinned.mp4', text('first cut'))
+      const link = await shareLink(client, first.nodeId, { maxDownloads: 1 })
+      const second = await uploadFile(client, root.id, 'Pinned.mp4', text('second cut'))
+      const { token, client: viewer } = visitorOf(target(), link.url)
+      const base = `/s/${token}/files/${first.nodeId}`
+
+      // Where a link's viewer stopped, their browser keeps.
+      expect(await viewer.call('GET', `${base}/playback`, playbackSchema)).toEqual({
+        versionId: first.versionId,
+        positionMs: null,
+        subtitleFiles: [],
+      })
+      const media = await viewer.call('GET', `${base}/media`, fileMediaSchema)
+      expect(media.versionId).toBe(first.versionId)
+      const content = `${base}/content?version=${first.versionId}&preview=1`
+      for (let play = 0; play < 2; play += 1) {
+        expect(await (await viewer.fetch('GET', content)).text()).toBe('first cut')
+      }
+      const seek = await viewer.fetch('GET', content, { headers: { Range: 'bytes=0-4' } })
+      expect(await seek.text()).toBe('first')
+      expect(
+        await viewer.error('GET', `${base}/content?version=${second.versionId}&preview=1`),
+      ).toEqual({ status: 412, code: 'version_changed' })
+
+      // Playing took nothing from the link's one download, and the viewer's
+      // reads are followed for their player's warning.
+      expect(await viewer.call('GET', `/s/${token}`, publicShareSchema)).toMatchObject({
+        downloadsLeft: 1,
+      })
+      const delivered = `${base}/media/${first.versionId}/delivery`
+      expect((await viewer.call('GET', delivered, deliverySchema)).bytes).toBe(23)
+      // The owner plays the file as it is now.
+      expect((await playback(client, first.nodeId)).versionId).toBe(second.versionId)
+    })
+
+    it('offers the subtitle files beside a video in a shared folder, and none through a file link', async () => {
+      const client = await owner()
+      const folder = await createFolder(client, (await workspace(client)).id, 'Shared film')
+      const video = await uploadFile(client, folder.id, 'Film.mkv', text('matroska'))
+      const srt = await uploadFile(
+        client,
+        folder.id,
+        'Film.en.srt',
+        text('1\r\n00:00:01,000 --> 00:00:02,000\r\nHello\r\n'),
+      )
+      const besidePath = (base: string) =>
+        `${base}/media/${video.versionId}/subtitles/${srt.nodeId}.vtt`
+
+      const inFolder = visitorOf(target(), (await shareLink(client, folder.id)).url)
+      const folderBase = `/s/${inFolder.token}/files/${video.nodeId}`
+      const offered = await inFolder.client.call('GET', `${folderBase}/playback`, playbackSchema)
+      expect(offered.subtitleFiles.map((file) => file.id)).toEqual([srt.nodeId])
+      const beside = await inFolder.client.fetch('GET', besidePath(folderBase))
+      expect(await beside.text()).toBe('WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHello\n')
+
+      // A file link shares that file alone.
+      const alone = visitorOf(target(), (await shareLink(client, video.nodeId)).url)
+      const fileBase = `/s/${alone.token}/files/${video.nodeId}`
+      expect(
+        (await alone.client.call('GET', `${fileBase}/playback`, playbackSchema)).subtitleFiles,
+      ).toEqual([])
+      expect(await alone.client.error('GET', besidePath(fileBase))).toEqual({
+        status: 404,
+        code: 'not_found',
+      })
+
+      // Those inside the file, a link's viewer may have extracted, as its owner may.
+      const media = await alone.client.call('GET', `${fileBase}/media`, fileMediaSchema)
+      const inside = media.info?.streams.find((stream) => isTextSubtitles(stream))
+      if (!inside) throw new Error('The video has no subtitles inside.')
+      const extracted = await alone.client.fetch(
+        'GET',
+        `${fileBase}/media/${video.versionId}/subtitles/${String(inside.index)}.vtt`,
+      )
+      expect(extracted.status).toBe(200)
+      expect(await extracted.text()).toMatch(/^WEBVTT\n/)
+    })
+
+    it('refuses a locked link’s player until it is unlocked, and an ended link’s', async () => {
+      const client = await owner()
+      const root = await workspace(client)
+      const video = await uploadFile(client, root.id, 'Locked.mp4', text('mp4'))
+      const locked = visitorOf(
+        target(),
+        (await shareLink(client, video.nodeId, { password: 'popcorn' })).url,
+      )
+      const base = `/s/${locked.token}/files/${video.nodeId}`
+      for (const path of [
+        `${base}/playback`,
+        `${base}/media`,
+        `${base}/content?version=${video.versionId}&preview=1`,
+        `/s/${locked.token}/connection-test?bytes=1000`,
+      ]) {
+        expect(await locked.client.error('GET', path)).toEqual({
+          status: 403,
+          code: 'share_locked',
+        })
+      }
+      await locked.client.send('POST', `/s/${locked.token}/unlock`, {
+        json: { password: 'popcorn' },
+      })
+      expect((await locked.client.call('GET', `${base}/playback`, playbackSchema)).versionId).toBe(
+        video.versionId,
+      )
+
+      const expired = visitorOf(
+        target(),
+        (
+          await shareLink(client, video.nodeId, {
+            expiresAt: new Date(Date.now() - 60_000).toISOString(),
+          })
+        ).url,
+      )
+      expect(
+        await expired.client.error('GET', `/s/${expired.token}/files/${video.nodeId}/playback`),
+      ).toEqual({ status: 410, code: 'share_expired' })
+
+      const usedUp = visitorOf(
+        target(),
+        (await shareLink(client, video.nodeId, { maxDownloads: 1 })).url,
+      )
+      const usedBase = `/s/${usedUp.token}/files/${video.nodeId}`
+      await (await usedUp.client.fetch('GET', `${usedBase}/content`)).arrayBuffer()
+      expect(await usedUp.client.error('GET', `${usedBase}/playback`)).toEqual({
+        status: 410,
+        code: 'share_used_up',
+      })
+    })
+
+    it('tests a link viewer’s connection, and takes their reports of how a play went', async () => {
+      const client = await owner()
+      const folder = await createFolder(client, (await workspace(client)).id, 'Reported here')
+      const video = await uploadFile(client, folder.id, 'Clip.mp4', text('mp4'))
+      const notes = await uploadFile(client, folder.id, 'notes.txt', text('notes'))
+      const { token, client: viewer } = visitorOf(
+        target(),
+        (await shareLink(client, folder.id)).url,
+      )
+
+      const response = await viewer.fetch('GET', `/s/${token}/connection-test?bytes=300000`)
+      expect(response.status).toBe(200)
+      expect((await response.arrayBuffer()).byteLength).toBe(300_000)
+
+      const path = `/s/${token}/files/${video.nodeId}/playback-report`
+      const report = playReport(video.versionId)
+      await viewer.send('POST', path, { json: report })
+      expect(await viewer.error('POST', path, { json: { ...report, stalls: -1 } })).toMatchObject({
+        status: 400,
+      })
+      expect(
+        await viewer.error('POST', `/s/${token}/files/${notes.nodeId}/playback-report`, {
+          json: report,
+        }),
+      ).toEqual({ status: 422, code: 'not_media' })
     })
   })
 }

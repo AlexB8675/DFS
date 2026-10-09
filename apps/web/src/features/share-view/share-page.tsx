@@ -18,6 +18,7 @@ import { usePreview } from '@/features/preview/use-preview'
 import type { ViewHandle } from '@/features/preview/view-handle'
 import { ThemeMenu } from '@/layout/theme-menu'
 import { ApiError, errorMessage } from '@/lib/api/client'
+import { linkPlace, type FilePlace } from '@/lib/file-place'
 import { formatBytes, formatDate, formatFullDate } from '@/lib/format'
 import { formText } from '@/lib/form-data'
 import { transitionLinkProps } from '@/lib/navigation'
@@ -28,7 +29,6 @@ import {
   downloadSharedFolder,
   publicShareQuery,
   sharedFolderQuery,
-  sharedPreviewPath,
   useUnlockShare,
 } from './api'
 import { SharePreview } from './share-preview'
@@ -235,7 +235,7 @@ function SharedFile({ token, share, file }: { token: string; share: OpenShare; f
         </div>
         <InlinePreview
           file={file}
-          contentPath={sharedPreviewPath(token, file.id)}
+          place={linkPlace(token, file.id)}
           onDownload={() => void download()}
         />
       </div>
@@ -260,11 +260,11 @@ function SharedFile({ token, share, file }: { token: string; share: OpenShare; f
 /** A file link's preview, under its name and Download: dark, as in the viewer. */
 function InlinePreview({
   file,
-  contentPath,
+  place,
   onDownload,
 }: {
   file: SharedNode
-  contentPath: string
+  place: FilePlace
   onDownload: () => void
 }) {
   const frame = useRef<HTMLDivElement>(null)
@@ -285,7 +285,7 @@ function InlinePreview({
       <PreviewBody
         file={file}
         error={null}
-        contentPath={contentPath}
+        place={place}
         view={view}
         previous={null}
         next={null}

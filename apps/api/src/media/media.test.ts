@@ -4,6 +4,7 @@ import { ApiClient, createFolder, text, uploadFile, workspace } from '@dfs/contr
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
 import {
   fileMediaSchema,
+  shareLinkSchema,
   systemHealthSchema,
   type MediaInfo,
   type MediaStream,
@@ -401,6 +402,61 @@ describe('where users stopped (§10.4)', () => {
     expect(await positions()).toEqual([{ version_id: first.versionId }])
     await uploadFile(client, folderId, 'resumed.mp3', text('second'))
     expect(await positions()).toEqual([])
+  })
+})
+
+describe('through share links (§7.5, §10.4)', () => {
+  /** What a viewer's requests come from here: the same address for every one. */
+  const ADDRESS = 'address:127.0.0.1'
+
+  async function linkTo(nodeId: string): Promise<string> {
+    const link = await client.call('POST', '/shares', shareLinkSchema, {
+      json: { nodeId, expiresAt: null, password: null, maxDownloads: null },
+    })
+    return link.url?.split('/s/')[1] ?? ''
+  }
+
+  it('takes a link viewer’s play reports from DFS’s own pages alone, and a few per address', async () => {
+    const song = await uploadFile(client, folderId, 'linked.mp3', text('linked'))
+    const path = `/s/${await linkTo(song.nodeId)}/files/${song.nodeId}/playback-report`
+    const report = {
+      versionId: song.versionId,
+      outcome: 'left',
+      firstFrameMs: null,
+      startMs: null,
+      openMs: 1500,
+      stalls: 0,
+      stallMs: 0,
+      seeks: 0,
+      seekWaitMs: 0,
+      frames: 0,
+      droppedFrames: 0,
+      arrivalBitsPerSecond: null,
+      decoding: null,
+      problem: null,
+    }
+    const viewer = new ApiClient(apiUrl, client.origin)
+    await viewer.send('POST', path, { json: report })
+    const elsewhere = new ApiClient(apiUrl, 'https://elsewhere.example')
+    expect(await elsewhere.error('POST', path, { json: report })).toEqual({
+      status: 403,
+      code: 'forbidden_origin',
+    })
+    for (let hit = 1; hit < 60; hit += 1) app.limits.linkPlayReports.hit(ADDRESS)
+    expect(await viewer.error('POST', path, { json: report })).toEqual({
+      status: 429,
+      code: 'rate_limited',
+    })
+  })
+
+  it('tests a link viewer’s connection a few times per address, apart from the user’s own', async () => {
+    const test = `/s/${await linkTo(folderId)}/connection-test?bytes=1000`
+    const viewer = new ApiClient(apiUrl, client.origin)
+    expect((await (await viewer.fetch('GET', test)).arrayBuffer()).byteLength).toBe(1000)
+    for (let hit = 1; hit < 10; hit += 1) app.limits.connectionTests.hit(ADDRESS)
+    expect(await viewer.error('GET', test)).toEqual({ status: 429, code: 'rate_limited' })
+    const own = await client.fetch('GET', '/connection-test?bytes=1000')
+    expect((await own.arrayBuffer()).byteLength).toBe(1000)
   })
 })
 

@@ -1,7 +1,8 @@
 import { isTextSubtitles, type MediaStream } from '@dfs/shared'
 import { useQuery } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
-import { mediaQuery } from './api'
+import type { FilePlace } from '@/lib/file-place'
+import { connectionTestPath, mediaQuery } from './api'
 import { ConnectionTest } from './connection-test'
 import { decodingQuery, type Decoding } from './diagnostics'
 import {
@@ -17,12 +18,11 @@ import { formatPlayTime } from './time'
 // A video's Details (DESIGN.md §10.4): its formats from the media info, and
 // how it plays in this browser, or why it can't.
 
-/** Rows for the viewer's Details, in its grid. */
-export function MediaDetails({ contentPath }: { contentPath: string }) {
-  const base = contentPath.replace(/\/content$/, '')
-  const media = useQuery(mediaQuery(base))
+/** Rows for the viewer's Details, in its grid: of a drive's file or a link's. */
+export function MediaDetails({ place }: { place: FilePlace }) {
+  const media = useQuery(mediaQuery(place))
   const decoding = useQuery(
-    decodingQuery(base, media.data?.versionId ?? null, media.data?.info ?? null),
+    decodingQuery(place.path, media.data?.versionId ?? null, media.data?.info ?? null),
   ).data
   if (media.isPending) return <Row label="Formats">Reading…</Row>
   if (media.error) return <Row label="Formats">Can’t be read just now</Row>
@@ -60,7 +60,7 @@ export function MediaDetails({ contentPath }: { contentPath: string }) {
       {info.chapters.length > 0 && <Row label="Chapters">{info.chapters.length}</Row>}
       {decoding && <Row label="Decoding">{describeDecoding(decoding)}</Row>}
       <Row label="Connection">
-        <ConnectionTest />
+        <ConnectionTest path={connectionTestPath(place)} />
       </Row>
       <Row label="Plays here">
         {video?.decodes === false

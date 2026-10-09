@@ -21,7 +21,7 @@ export function sendFile(
   request: FastifyRequest,
   reply: FastifyReply,
   file: DownloadableFile,
-  /** The user reading it, whose player may ask how fast it goes (§10.4). */
+  /** Who reads it, whose player may ask how fast it goes (§10.4): a user, or a link's viewer. */
   readerId?: string,
 ): FastifyReply {
   void reply.header('etag', `"${file.version_id}"`).header('cache-control', 'private, no-cache')

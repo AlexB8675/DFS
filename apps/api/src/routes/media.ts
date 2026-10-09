@@ -11,13 +11,16 @@ import {
   playbackSchema,
   savePositionSchema,
   type MediaInfo,
+  type MetricName,
   type PlaybackReport,
 } from '@dfs/shared'
 import { sql } from 'drizzle-orm'
-import type { FastifyInstance } from 'fastify'
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
 import { requireAuth } from '../auth/access.ts'
+import type { RateLimiter } from '../auth/rate-limit.ts'
+import { linkReader } from '../content/deliveries.ts'
 import { paced, sendFile, type DownloadableFile } from '../content/send.ts'
 import { ApiError } from '../errors.ts'
 import { keptExamination, MediaUnavailableError, type Examined } from '../media/examine.ts'
@@ -31,6 +34,8 @@ import {
 import { keptSubtitles } from '../media/subtitles.ts'
 import { mediaTokenValid } from '../media/token.ts'
 import { visibleNode, type NodeRow } from '../nodes/read.ts'
+import { nodeInShare, openShare } from '../shares/public.ts'
+import { assertOwnOrigin } from './auth.ts'
 import { downloadableFile, versionChanged } from './content.ts'
 
 // Audio and video (DESIGN.md §6.7, §9, §10.4): what a file holds, what a
@@ -38,39 +43,145 @@ import { downloadableFile, versionChanged } from './content.ts'
 // and the plaintext of a version for the media service, which examines it.
 
 const byId = z.object({ id: z.uuid() })
+const byToken = z.object({ token: z.string().min(1).max(100) })
+
+/**
+ * Where a player finds a file (§10.4): in the drive, or through a share link,
+ * whose viewers have no session. The same routes under both; a link's go
+ * through its own checks first (§7.5).
+ */
+const PLACES = [
+  { path: '/files/:id', config: {} },
+  { path: '/s/:token/files/:id', config: { access: 'public' } },
+] as const
+/** A file's place: a token only under a link. */
+const fileParams = z.object({ token: byToken.shape.token.optional(), id: z.uuid() })
+
+const connectionTestQuery = z.object({
+  bytes: z.coerce.number().int().min(1).max(MAX_CONNECTION_TEST_BYTES),
+})
 
 export function mediaRoutes(app: FastifyInstance, _options: object, done: () => void): void {
   const routes = app.withTypeProvider<ZodTypeProvider>()
-  /** Users whose connection test is running. */
+  /** Connection tests running, by whose they are: a user's, or an address's. */
   const testing = new Set<string>()
 
-  routes.get(
-    '/files/:id/media',
-    { schema: { params: byId, response: { 200: fileMediaSchema } } },
-    async (request) => {
-      const auth = requireAuth(request.auth)
-      const node = await mediaNode(app.db, auth.user.id, request.params.id)
-      const file = await downloadableFile(app.db, node.id)
-      return { versionId: file.version_id, ...(await examined(app, file)) }
-    },
-  )
+  for (const place of PLACES) {
+    routes.get(
+      `${place.path}/media`,
+      { config: place.config, schema: { params: fileParams, response: { 200: fileMediaSchema } } },
+      async (request) => {
+        const file = await servedVersion(app.db, await playedFile(app, request, request.params))
+        return { versionId: file.version_id, ...(await examined(app, file)) }
+      },
+    )
 
-  // What a player needs to start, from the database alone (§10.4).
-  routes.get(
-    '/files/:id/playback',
-    { schema: { params: byId, response: { 200: playbackSchema } } },
-    async (request) => {
-      const auth = requireAuth(request.auth)
-      const node = await mediaNode(app.db, auth.user.id, request.params.id)
-      const file = await downloadableFile(app.db, node.id)
-      const [positionMs, subtitleFiles] = await Promise.all([
-        savedPosition(app.db, auth.user.id, node.id, file.version_id),
-        subtitleFilesBeside(app.db, node),
-      ])
-      return { versionId: file.version_id, positionMs, subtitleFiles }
-    },
-  )
+    // What a player needs to start, from the database alone (§10.4).
+    routes.get(
+      `${place.path}/playback`,
+      { config: place.config, schema: { params: fileParams, response: { 200: playbackSchema } } },
+      async (request) => {
+        const played = await playedFile(app, request, request.params)
+        const file = await servedVersion(app.db, played)
+        const { userId, node } = played
+        const [positionMs, subtitleFiles] = await Promise.all([
+          userId === null ? null : savedPosition(app.db, userId, node.id, file.version_id),
+          played.besideOffered ? subtitleFilesBeside(app.db, node) : [],
+        ])
+        return { versionId: file.version_id, positionMs, subtitleFiles }
+      },
+    )
 
+    // How fast this viewer's reads of the version go: for the player's warning (§10.4).
+    routes.get(
+      `${place.path}/media/:versionId/delivery`,
+      {
+        config: place.config,
+        schema: {
+          params: fileParams.extend({ versionId: z.uuid() }),
+          response: { 200: deliverySchema },
+        },
+      },
+      async (request) => {
+        const played = await playedFile(app, request, request.params)
+        return app.deliveries.totals(played.readerId, request.params.versionId)
+      },
+    )
+
+    // How a play went, as the player saw it (§10.4, §16): logged, with its times on the graphs.
+    routes.post(
+      `${place.path}/playback-report`,
+      { config: place.config, schema: { params: fileParams, body: playbackReportSchema } },
+      async (request, reply) => {
+        if (request.params.token !== undefined) {
+          // No session, so no CSRF token: from DFS's own page, and a few per address.
+          assertOwnOrigin(app, request)
+          withinLimit(app.limits.linkPlayReports, `address:${request.ip}`, 'Too many reports.')
+        }
+        const played = await playedFile(app, request, request.params)
+        const report = request.body
+        // Only a version of this file: any other's formats stay out of the log.
+        const kept = (await isVersionOf(app.db, played.node.id, report.versionId))
+          ? await keptExamination(app.db, report.versionId)
+          : null
+        request.log.info(
+          {
+            play: {
+              ...report,
+              nodeId: played.node.id,
+              ...(played.shareId !== null && { shareId: played.shareId }),
+              video: kept?.info ? summary(kept.info) : null,
+              userAgent: request.headers['user-agent']?.slice(0, 300) ?? null,
+            },
+          },
+          'video play reported',
+        )
+        recordPlay(app, report)
+        return reply.code(204).send()
+      },
+    )
+
+    // Subtitles as WebVTT (§6.7): a stream inside the file by its number, or a
+    // subtitle file beside it by its ID.
+    routes.get(
+      `${place.path}/media/:versionId/subtitles/:track`,
+      {
+        config: place.config,
+        schema: {
+          params: fileParams.extend({
+            versionId: z.uuid(),
+            track: z
+              .string()
+              .regex(/^(?:\d{1,5}|[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12})\.vtt$/i),
+          }),
+        },
+      },
+      async (request, reply) => {
+        const track = request.params.track.slice(0, -'.vtt'.length).toLowerCase()
+        const played = await playedFile(app, request, request.params)
+        const file = await servedVersion(app.db, played)
+        if (file.version_id !== request.params.versionId) throw versionChanged()
+        const inside = /^\d+$/.test(track)
+        if (!inside && !played.besideOffered) throw noSuchSubtitles()
+        const vtt = inside
+          ? await streamSubtitles(app, file, Number(track))
+          : await subtitleFileAsWebVtt(app, played.node, track)
+        return (
+          reply
+            .header('content-type', 'text/vtt; charset=utf-8')
+            // Inside the version, which never changes, the browser keeps them; beside it, they may change.
+            .header(
+              'cache-control',
+              inside ? 'private, max-age=31536000, immutable' : 'private, no-cache',
+            )
+            .send(vtt)
+        )
+      },
+    )
+  }
+
+  // Where a user stopped, on the server for a drive's file. A link's viewers
+  // have no account, and keep theirs in the browser (§10.4).
   routes.put(
     '/files/:id/position',
     { schema: { params: byId, body: savePositionSchema } },
@@ -92,146 +203,142 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
     return reply.code(204).send()
   })
 
-  // How fast this user's reads of the version go: for the player's warning (§10.4).
-  routes.get(
-    '/files/:id/media/:versionId/delivery',
-    {
-      schema: {
-        params: z.object({ id: z.uuid(), versionId: z.uuid() }),
-        response: { 200: deliverySchema },
-      },
-    },
-    async (request) => {
-      const auth = requireAuth(request.auth)
-      await mediaNode(app.db, auth.user.id, request.params.id)
-      return app.deliveries.totals(auth.user.id, request.params.versionId)
-    },
-  )
-
   // Bytes from the VPS itself, not from Discord: how fast this device's
   // connection to the server is, for telling a slow network from a slow file
-  // (§10.4). Random, so nothing on the way compresses them, and logged.
+  // (§10.4). A user's, and a link viewer's, by their address.
   routes.get(
     '/connection-test',
-    {
-      schema: {
-        querystring: z.object({
-          bytes: z.coerce.number().int().min(1).max(MAX_CONNECTION_TEST_BYTES),
-        }),
-      },
-    },
+    { schema: { querystring: connectionTestQuery } },
     (request, reply) => {
-      const auth = requireAuth(request.auth)
-      const userId = auth.user.id
-      // Bandwidth for nothing but measuring: one test at a time, a few in ten minutes.
-      const wait = app.limits.connectionTests.waitMs(userId)
-      if (testing.has(userId) || wait > 0) {
-        throw new ApiError(429, 'rate_limited', 'A connection test is running, or ran just now.', {
-          'retry-after': String(Math.max(1, Math.ceil(wait / 1000))),
-        })
-      }
-      app.limits.connectionTests.hit(userId)
-      testing.add(userId)
-      const { bytes } = request.query
-      const stats = {
-        startedAt: performance.now(),
-        bytes: 0,
-        firstPieceMs: null,
-        sourceMs: 0,
-        clientMs: 0,
-      }
-      reply.raw.once('close', () => {
-        testing.delete(userId)
-        const ms = performance.now() - stats.startedAt
-        request.log.info(
-          {
-            connectionTest: {
-              bytes: stats.bytes,
-              finished: reply.raw.writableFinished,
-              totalMs: Math.round(ms),
-              mbitPerSecond: ms > 0 ? Math.round((stats.bytes * 8) / ms / 100) / 10 : null,
-              userAgent: request.headers['user-agent']?.slice(0, 300) ?? null,
-            },
-          },
-          'connection tested',
-        )
-      })
-      return reply
-        .header('content-type', 'application/octet-stream')
-        .header('content-length', String(bytes))
-        .header('cache-control', 'no-store')
-        .send(Readable.from(paced(reply.raw, randomPieces(bytes), stats)))
+      const key = `user:${requireAuth(request.auth).user.id}`
+      return sendConnectionTest(app, request, reply, testing, key, {})
     },
   )
 
-  // How a play went, as the player saw it (§10.4, §16): logged, with its times on the graphs.
-  routes.post(
-    '/files/:id/playback-report',
-    { schema: { params: byId, body: playbackReportSchema } },
-    async (request, reply) => {
-      const auth = requireAuth(request.auth)
-      const node = await mediaNode(app.db, auth.user.id, request.params.id)
-      const report = request.body
-      // Only a version of this file: any other's formats stay out of the log.
-      const kept = (await isVersionOf(app.db, node.id, report.versionId))
-        ? await keptExamination(app.db, report.versionId)
-        : null
-      request.log.info(
-        {
-          play: {
-            ...report,
-            nodeId: node.id,
-            video: kept?.info ? summary(kept.info) : null,
-            userAgent: request.headers['user-agent']?.slice(0, 300) ?? null,
-          },
-        },
-        'video play reported',
-      )
-      recordPlay(app, report)
-      return reply.code(204).send()
-    },
-  )
-
-  // Subtitles as WebVTT (§6.7): a stream inside the file by its number, or a
-  // subtitle file beside it by its ID.
   routes.get(
-    '/files/:id/media/:versionId/subtitles/:track',
-    {
-      schema: {
-        params: z.object({
-          id: z.uuid(),
-          versionId: z.uuid(),
-          track: z
-            .string()
-            .regex(/^(?:\d{1,5}|[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12})\.vtt$/i),
-        }),
-      },
-    },
+    '/s/:token/connection-test',
+    { config: { access: 'public' }, schema: { params: byToken, querystring: connectionTestQuery } },
     async (request, reply) => {
-      const auth = requireAuth(request.auth)
-      const { id, versionId } = request.params
-      const track = request.params.track.slice(0, -'.vtt'.length).toLowerCase()
-      const node = await mediaNode(app.db, auth.user.id, id)
-      const file = await downloadableFile(app.db, node.id)
-      if (file.version_id !== versionId) throw versionChanged()
-      const inside = /^\d+$/.test(track)
-      const vtt = inside
-        ? await streamSubtitles(app, file, Number(track))
-        : await subtitleFileAsWebVtt(app, node, track)
-      return (
-        reply
-          .header('content-type', 'text/vtt; charset=utf-8')
-          // Inside the version, which never changes, the browser keeps them; beside it, they may change.
-          .header(
-            'cache-control',
-            inside ? 'private, max-age=31536000, immutable' : 'private, no-cache',
-          )
-          .send(vtt)
-      )
+      const { share } = await openShare(app, request, request.params.token)
+      return sendConnectionTest(app, request, reply, testing, `address:${request.ip}`, {
+        shareId: share.id,
+      })
     },
   )
 
   done()
+}
+
+/** What a player plays (§10.4): a user's file, or one a share link reaches. */
+interface Played {
+  node: NodeRow
+  /** A file link's version, which it serves however the file changes (§7.5); `null` for the current one. */
+  pinnedVersionId: string | null
+  /** Whose reads the delivery figures follow (`Deliveries`): a user's, or a link viewer's. */
+  readerId: string
+  /** The user, whose positions the server keeps; `null` through a link. */
+  userId: string | null
+  /** The link it is played through, for the log. */
+  shareId: string | null
+  /**
+   * Subtitle files beside it may be offered: in the drive, and in a shared
+   * folder, but not through a file link, which shares that file alone.
+   */
+  besideOffered: boolean
+}
+
+/** The file a player's route names: the user's, or, under a token, one the link reaches. */
+async function playedFile(
+  app: FastifyInstance,
+  request: FastifyRequest,
+  { token, id }: { token?: string | undefined; id: string },
+): Promise<Played> {
+  if (token === undefined) {
+    const auth = requireAuth(request.auth)
+    return {
+      node: await mediaNode(app.db, auth.user.id, id),
+      pinnedVersionId: null,
+      readerId: auth.user.id,
+      userId: auth.user.id,
+      shareId: null,
+      besideOffered: true,
+    }
+  }
+  const { share, root } = await openShare(app, request, token)
+  const node = asMedia(await nodeInShare(app, root, id))
+  return {
+    node,
+    pinnedVersionId: node.id === root.id ? share.version_id : null,
+    readerId: linkReader(share.id, request.ip),
+    userId: null,
+    shareId: share.id,
+    besideOffered: root.kind === 'folder',
+  }
+}
+
+/** The version a player is given: a file link's own, or the file's current one. */
+function servedVersion(db: Executor, played: Played): Promise<DownloadableFile> {
+  return downloadableFile(db, played.node.id, played.pinnedVersionId)
+}
+
+/**
+ * Sends random bytes for a connection test, a user's or a link viewer's
+ * (`key`): bandwidth for nothing but measuring, so one at a time and a few
+ * in ten minutes. Random, so nothing on the way compresses them, and logged.
+ */
+function sendConnectionTest(
+  app: FastifyInstance,
+  request: FastifyRequest<{ Querystring: z.infer<typeof connectionTestQuery> }>,
+  reply: FastifyReply,
+  testing: Set<string>,
+  key: string,
+  logged: { shareId?: string },
+): FastifyReply {
+  const busy = 'A connection test is running, or ran just now.'
+  if (testing.has(key)) throw new ApiError(429, 'rate_limited', busy, { 'retry-after': '1' })
+  withinLimit(app.limits.connectionTests, key, busy)
+  testing.add(key)
+  const { bytes } = request.query
+  const stats = {
+    startedAt: performance.now(),
+    bytes: 0,
+    firstPieceMs: null,
+    sourceMs: 0,
+    clientMs: 0,
+  }
+  reply.raw.once('close', () => {
+    testing.delete(key)
+    const ms = performance.now() - stats.startedAt
+    request.log.info(
+      {
+        connectionTest: {
+          ...logged,
+          bytes: stats.bytes,
+          finished: reply.raw.writableFinished,
+          totalMs: Math.round(ms),
+          mbitPerSecond: ms > 0 ? Math.round((stats.bytes * 8) / ms / 100) / 10 : null,
+          userAgent: request.headers['user-agent']?.slice(0, 300) ?? null,
+        },
+      },
+      'connection tested',
+    )
+  })
+  return reply
+    .header('content-type', 'application/octet-stream')
+    .header('content-length', String(bytes))
+    .header('cache-control', 'no-store')
+    .send(Readable.from(paced(reply.raw, randomPieces(bytes), stats)))
+}
+
+/** Counts one against `key`, or refuses with `429` while it is over its limit. */
+function withinLimit(limiter: RateLimiter, key: string, message: string): void {
+  const wait = limiter.waitMs(key)
+  if (wait > 0) {
+    throw new ApiError(429, 'rate_limited', message, {
+      'retry-after': String(Math.ceil(wait / 1000)),
+    })
+  }
+  limiter.hit(key)
 }
 
 /** `total` random bytes, in pieces as large as a file's: a block made once, sent again and again. */
@@ -244,12 +351,19 @@ async function* randomPieces(total: number): AsyncGenerator<Uint8Array> {
   }
 }
 
-/** A play's times on the graphs (§16). */
+/** A play on the graphs (§16): how it ended, and its times. */
 function recordPlay(app: FastifyInstance, report: PlaybackReport): void {
+  app.metrics.record(PLAY_OUTCOMES[report.outcome])
   if (report.firstFrameMs !== null) app.metrics.time('player.first_frame_ms', report.firstFrameMs)
   if (report.stalls > 0) app.metrics.record('player.stall_ms', report.stallMs)
-  if (report.outcome === 'failed') app.metrics.record('player.failures')
 }
+
+/** Each way a play ends, as its counter. */
+const PLAY_OUTCOMES = {
+  played: 'player.plays',
+  failed: 'player.failures',
+  left: 'player.left',
+} as const satisfies Record<PlaybackReport['outcome'], MetricName>
 
 /** A video in a few words, for a play's log line: `av1 3840x2160 59.94fps pq, 24.3 Mbit/s`. */
 function summary(info: MediaInfo): string {
@@ -271,7 +385,11 @@ async function isVersionOf(db: Executor, nodeId: string, versionId: string): Pro
 
 /** One of the user's audio or video files, or a 404 or `422 not_media`. */
 async function mediaNode(db: Executor, userId: string, id: string): Promise<NodeRow> {
-  const node = await visibleNode(db, userId, id)
+  return asMedia(await visibleNode(db, userId, id))
+}
+
+/** The node, if it is an audio or video file; otherwise `422 not_media`. */
+function asMedia(node: NodeRow): NodeRow {
   if (node.kind !== 'file' || !mediaKind(node.name, node.mime_type)) {
     throw new ApiError(422, 'not_media', 'This file isn’t audio or video.')
   }
@@ -350,9 +468,7 @@ async function streamSubtitles(
 ): Promise<string> {
   const { info } = await examined(app, file)
   const stream = info?.streams.find((found) => found.index === streamIndex)
-  if (!info || !stream || !isTextSubtitles(stream)) {
-    throw new ApiError(404, 'not_found', 'There are no such subtitles.')
-  }
+  if (!info || !stream || !isTextSubtitles(stream)) throw noSuchSubtitles()
   let kept = await keptSubtitles(app.db, app.keys, file.version_id, streamIndex)
   if (!kept) {
     if (!app.media) throw mediaUnavailable('there is no media service')
@@ -368,6 +484,10 @@ async function streamSubtitles(
     throw new ApiError(422, 'unreadable_subtitles', 'These subtitles can’t be read.')
   }
   return kept.vtt
+}
+
+function noSuchSubtitles(): ApiError {
+  return new ApiError(404, 'not_found', 'There are no such subtitles.')
 }
 
 function mediaUnavailable(why: string): ApiError {

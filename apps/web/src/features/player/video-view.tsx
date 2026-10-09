@@ -23,6 +23,7 @@ import { Spinner } from '@/components/ui/spinner'
 import type { ViewHandle } from '@/features/preview/view-handle'
 import { errorMessage } from '@/lib/api/client'
 import { isEditable } from '@/lib/editable'
+import type { FilePlace } from '@/lib/file-place'
 import { cn } from '@/lib/utils'
 import { contentUrl, mediaQuery, playbackQuery } from './api'
 import { browserCanPlayType, codecLabel, playability, playedStreams } from './codecs'
@@ -48,15 +49,16 @@ import { useMediaState } from './use-media-state'
 import { RESUME_FROM_MS, useResume } from './use-resume'
 
 // The video player (DESIGN.md §10.4): direct play of the version the API
-// names, from where the user stopped, with controls of its own over the
+// names, from where the viewer stopped, with controls of its own over the
 // picture. It starts at once, without waiting for the media info, which,
 // when it comes, says whether this browser decodes the picture and the
-// sound, and brings the chapters and the subtitles inside the file.
+// sound, and brings the chapters and the subtitles inside the file. The
+// same for a drive's file and a link's: its place says where to ask.
 
 interface VideoViewProps {
   name: string
-  /** Where the file's bytes are, as an API path (`/files/:id/content`). */
-  contentPath: string
+  /** Where the file is: the drive's, or a link's. */
+  place: FilePlace
   /** `false` while the viewer closes: it stops at once. */
   active: boolean
   ref?: Ref<ViewHandle>
@@ -110,21 +112,21 @@ interface Gesture {
 
 export default function VideoView({
   name,
-  contentPath,
+  place,
   active,
   ref,
   onDownload,
   onSwipe,
 }: VideoViewProps) {
-  const base = baseOf(contentPath)
+  const base = place.path
   const queryClient = useQueryClient()
-  const playback = useQuery(playbackQuery(base))
-  const media = useQuery(mediaQuery(base))
+  const playback = useQuery(playbackQuery(place))
+  const media = useQuery(mediaQuery(place))
   const setVolumePreference = usePlayerPreferences((state) => state.setVolume)
   const subtitlePreference = usePlayerPreferences((state) => state.subtitles)
   const setSubtitlePreference = usePlayerPreferences((state) => state.setSubtitles)
 
-  // The version /playback named, from where the user stopped, played until the viewer moves on.
+  // The version /playback named, from where the viewer stopped, played until the viewer moves on.
   const [source, setSource] = useState<Source | null>(null)
   /** Where it picked up, for “Resumed at …”, until that goes. */
   const [resumedAt, setResumedAt] = useState<number | null>(null)
@@ -226,12 +228,9 @@ export default function VideoView({
   // Subtitles: beside the file at once, inside it once the media info comes.
   const subtitleFiles = playback.data?.subtitleFiles
   const options = useMemo<SubtitleOption[]>(
-    () =>
-      source
-        ? subtitleOptions(baseOf(contentPath), source.versionId, subtitleFiles ?? [], info)
-        : [],
-    // The prop, not `base`: the compiler takes a string it made for one it might change.
-    [contentPath, info, subtitleFiles, source],
+    () => (source ? subtitleOptions(place.path, source.versionId, subtitleFiles ?? [], info) : []),
+    // The prop's, not `base`: the compiler takes a string it made for one it might change.
+    [info, place.path, subtitleFiles, source],
   )
   /** The viewer's own choice in this video; until then, the default. */
   const [choice, setChoice] = useState<{ key: string | null } | null>(null)
@@ -293,7 +292,7 @@ export default function VideoView({
   }, [chosen, options, video])
 
   const resume = useResume({
-    base,
+    place,
     video,
     versionId: source?.versionId ?? null,
     savedMs: playback.data?.positionMs ?? null,
@@ -492,7 +491,7 @@ export default function VideoView({
     if (!playing) return
     const startAt = element?.currentTime ?? playing.startAt
     const fresh = await queryClient
-      .query({ ...playbackQuery(base), staleTime: 0 })
+      .query({ ...playbackQuery(place), staleTime: 0 })
       .catch(() => null)
     if (fresh && fresh.versionId !== playing.versionId) {
       setSource({ ...playing, startAt })
@@ -602,7 +601,7 @@ export default function VideoView({
             if (source) restart(source.versionId)
           }}
           onPlayNew={(versionId) => {
-            void queryClient.invalidateQueries({ queryKey: mediaQuery(base).queryKey })
+            void queryClient.invalidateQueries({ queryKey: mediaQuery(place).queryKey })
             restart(versionId)
           }}
         />
@@ -612,7 +611,7 @@ export default function VideoView({
             <video
               key={`${source.versionId}:${String(source.attempt)}`}
               ref={attachVideo}
-              src={contentUrl(base, source.versionId, source.startAt)}
+              src={contentUrl(place, source.versionId, source.startAt)}
               className="size-full object-contain"
               playsInline
               preload="auto"
@@ -941,9 +940,4 @@ function setActionHandler(
   } catch {
     // Not supported here.
   }
-}
-
-/** A file's path from its content's: `/files/:id/content` → `/files/:id`. */
-function baseOf(contentPath: string): string {
-  return contentPath.replace(/\/content$/, '')
 }

@@ -349,14 +349,21 @@ export const MONITORING_SECTIONS: DashboardSection[] = [
         ],
       },
       {
-        title: 'Stalls and failures',
+        title: 'Plays',
         description:
-          'Per minute: plays that stopped to load after their first frame, and plays that couldn’t start.',
+          'Per minute, through the drive and links: plays that showed their first frame, those left before it, and those that couldn’t play.',
         format: 'perMinute',
         lines: [
-          { label: 'Stalled plays', color: 2, series: 'player.stall_ms:events' },
+          { label: 'Played', color: 1, series: 'player.plays:rate' },
+          { label: 'Left before the first frame', color: 2, series: 'player.left:rate' },
           { label: 'Couldn’t play', color: 'critical', series: 'player.failures:rate' },
         ],
+      },
+      {
+        title: 'Stalls',
+        description: 'Per minute: plays that stopped to load after their first frame.',
+        format: 'perMinute',
+        lines: [{ label: 'Stalled plays', color: 1, series: 'player.stall_ms:events' }],
       },
     ],
   },

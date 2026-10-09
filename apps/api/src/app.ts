@@ -44,6 +44,7 @@ declare module 'fastify' {
       shareUnlock: RateLimiter
       passwordResets: RateLimiter
       connectionTests: RateLimiter
+      linkPlayReports: RateLimiter
     }
     /** Frames received but not yet stored (§6.1), and whether there is room for more. */
     staging: Staging
@@ -99,10 +100,13 @@ const UNTIMED_ROUTES = new Set([
   '/internal/media/:versionId',
   // Quick once a file is examined; the first ask waits for ffprobe.
   '/api/files/:id/media',
+  '/api/s/:token/files/:id/media',
   // As long as the device's connection takes.
   '/api/connection-test',
+  '/api/s/:token/connection-test',
   // Subtitles inside a file may be extracted on the first ask, reading it whole.
   '/api/files/:id/media/:versionId/subtitles/:track',
+  '/api/s/:token/files/:id/media/:versionId/subtitles/:track',
 ])
 
 export interface AppOptions {
@@ -162,8 +166,10 @@ export async function buildApp({
     signIn: new RateLimiter(30, 10 * 60_000),
     shareUnlock: new RateLimiter(10, 10 * 60_000),
     passwordResets: new RateLimiter(5, 15 * 60_000),
-    // Connection tests per user (§10.4): each is up to 32 MiB of the VPS's bandwidth.
+    // Connection tests per user or address (§10.4): each is up to 32 MiB of the VPS's bandwidth.
     connectionTests: new RateLimiter(10, 10 * 60_000),
+    // Play reports through share links per address (§10.4): logged, and on the graphs.
+    linkPlayReports: new RateLimiter(60, 10 * 60_000),
   })
   app.decorate('staging', new Staging(config.stagingDir))
   app.decorate('stagingLimit', new StagingLimit(db, config.stagingMaxBytes))

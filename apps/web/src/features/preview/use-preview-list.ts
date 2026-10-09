@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { previewPath, type FilePlace } from '@/lib/file-place'
 import { isPreviewable, previewKind, type ListedFile } from '@/lib/preview-kind'
 import { usePreview } from './use-preview'
 
@@ -11,8 +12,8 @@ interface PreviewListOptions<T> {
   hasMore: boolean
   isLoadingMore: boolean
   onLoadMore: () => void
-  /** Where a file's bytes are, as an API path. */
-  contentPath: (id: string) => string
+  /** Where a file is: the drive's, or a link's. */
+  placeOf: (id: string) => FilePlace
   /** Load the list's next pages until the file asked for turns up (a share link's, with no other way to find it). */
   findMissing?: boolean
 }
@@ -27,7 +28,7 @@ export function usePreviewList<T extends ListedFile & { id: string }>({
   hasMore,
   isLoadingMore,
   onLoadMore,
-  contentPath,
+  placeOf,
   findMissing = false,
 }: PreviewListOptions<T>) {
   const { previewId, move, close } = usePreview()
@@ -63,7 +64,9 @@ export function usePreviewList<T extends ListedFile & { id: string }>({
 
   // The next image, loaded ahead; asked for again when shown, it costs a 304.
   const ahead =
-    after && previewKind(after.name, after.mimeType) === 'image' ? contentPath(after.id) : null
+    after && previewKind(after.name, after.mimeType) === 'image'
+      ? previewPath(placeOf(after.id))
+      : null
   useEffect(() => {
     if (!ahead) return
     const image = new Image()

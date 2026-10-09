@@ -78,8 +78,12 @@ export const METRICS = {
   'player.first_frame_ms': byApi('timing', 'ms', 'Time to a video’s first frame'),
   /** Plays that waited for data after their first frame, with how long they waited. */
   'player.stall_ms': byApi('counter', 'ms', 'Videos stalled'),
+  /** Plays that showed their first frame, through the drive or a link, by their reports. */
+  'player.plays': byApi('counter', 'count', 'Videos played'),
   /** Plays that couldn't play: a codec, a damaged file, a failed read. */
   'player.failures': byApi('counter', 'count', 'Videos that couldn’t play'),
+  /** Plays left before their first frame, with nothing wrong that the player saw. */
+  'player.left': byApi('counter', 'count', 'Videos left before their first frame'),
   'events.streams': byApi('gauge', 'count', 'Open event streams'),
   'auth.sign_ins': byApi('counter', 'count', 'Sign-ins'),
   'auth.failed_sign_ins': byApi('counter', 'count', 'Failed sign-ins'),

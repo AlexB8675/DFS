@@ -117,7 +117,7 @@ export interface Arrival {
  */
 export function usePlaybackStats(
   video: HTMLVideoElement | null,
-  /** The file's path: `/files/:id`. */
+  /** The file's path: `/files/:id`, or a link's (`/s/:token/files/:id`). */
   base: string,
   versionId: string | null,
   facts: PlaybackFacts,
@@ -164,7 +164,7 @@ export function usePlaybackStats(
     let reported = false
 
     // The server counts the bytes the video element can't (§10.4): its
-    // reads of this version for this user, summed, as they go.
+    // reads of this version for this viewer, summed, as they go.
     const ask = async () => {
       if (asking) return
       asking = true

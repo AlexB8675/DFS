@@ -3,9 +3,14 @@ import type { SendStats } from './send.ts'
 // How fast each user's reads of a version are going, for their player
 // (DESIGN.md §10.4): a player can't count the bytes its video element takes,
 // and can't tell a slow connection from slow storage, but the API can. The
-// figures are kept by user and version, cumulative, while reads run and for a
-// while after; the player asks for them now and then and works out the rates
-// from the differences.
+// figures are kept by reader and version, cumulative, while reads run and for
+// a while after; the player asks for them now and then and works out the
+// rates from the differences. A reader is a user, or a link's viewer.
+
+/** A share link's viewer, who has no account: by the link and their address. */
+export function linkReader(shareId: string, address: string): string {
+  return `link:${shareId}:${address}`
+}
 
 /** A version nobody has read for this long is forgotten. */
 const FORGET_AFTER_MS = 5 * 60_000

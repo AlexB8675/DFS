@@ -143,6 +143,7 @@ export async function systemHealth(app: FastifyInstance): Promise<SystemHealth> 
     checkedAt: new Date().toISOString(),
     alerts: healthAlerts({
       bot,
+      media: media.status,
       failedJobs: figures.failedJobs,
       oldestPendingSeconds: figures.oldestPendingSeconds,
       stagedBytes: figures.stagedBytes,

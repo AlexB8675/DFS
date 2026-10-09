@@ -1,6 +1,7 @@
 import type { SyncState } from '@dfs/shared'
 import { lazy, Suspense, useState, type RefObject } from 'react'
 import { Spinner } from '@/components/ui/spinner'
+import { previewPath, type FilePlace } from '@/lib/file-place'
 import { previewKind } from '@/lib/preview-kind'
 import { ImageView } from './image-view'
 import { NoPreview } from './no-preview'
@@ -27,8 +28,8 @@ interface PreviewBodyProps {
   /** `null` while it loads, or when it can't be shown (`error`). */
   file: ViewedFile | null
   error: { title: string; description: string } | null
-  /** Where its bytes are, as an API path (`/files/:id/content`). */
-  contentPath: string | null
+  /** Where it is: the drive's, or a link's. */
+  place: FilePlace | null
   view: RefObject<ViewHandle | null>
   /** The files around it, for an image's swipes. */
   previous: (() => void) | null
@@ -46,7 +47,7 @@ interface PreviewBodyProps {
 export function PreviewBody({
   file,
   error,
-  contentPath,
+  place,
   view,
   previous,
   next,
@@ -60,9 +61,10 @@ export function PreviewBody({
   if (error) {
     return <NoPreview title={error.title} description={error.description} />
   }
-  if (!file || !contentPath) {
+  if (!file || !place) {
     return <Loading />
   }
+  const contentPath = previewPath(place)
   if (kind === 'image' && failedId !== file.id) {
     return (
       <ImageView
@@ -94,7 +96,7 @@ export function PreviewBody({
           key={file.id}
           ref={view}
           name={file.name}
-          contentPath={contentPath}
+          place={place}
           active={active}
           onDownload={onDownload}
           onSwipe={(direction) => {

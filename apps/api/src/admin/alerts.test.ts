@@ -3,6 +3,7 @@ import { healthAlerts, type AlertFigures } from './alerts.ts'
 
 const calm: AlertFigures = {
   bot: { status: 'ok', detail: 'leader, queue running' },
+  media: 'ok',
   failedJobs: 0,
   oldestPendingSeconds: 30,
   stagedBytes: 10,
@@ -116,6 +117,17 @@ describe('health alerts (DESIGN.md §16)', () => {
     expect(raised(true, true)).toEqual([['offline', 'critical']])
     // DFS works on while only the internet check fails: the overview's dot says so.
     expect(raised(false, true)).toEqual([])
+  })
+
+  it('says when the media service doesn’t answer, and not when there is none', () => {
+    expect(healthAlerts({ ...calm, media: 'down' })).toEqual([
+      expect.objectContaining({
+        code: 'media_down',
+        level: 'warning',
+        title: 'The media service isn’t answering',
+      }),
+    ])
+    expect(healthAlerts({ ...calm, media: 'degraded' })).toEqual([])
   })
 
   it('makes a nearly full staging critical', () => {

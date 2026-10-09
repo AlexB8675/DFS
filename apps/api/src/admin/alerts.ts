@@ -31,6 +31,8 @@ const LIMITS = {
 
 export interface AlertFigures {
   bot: { status: ServiceStatus; detail: string }
+  /** The media service's answer to the API's health check (§6.7); `degraded` when there is none. */
+  media: ServiceStatus
   failedJobs: number
   oldestPendingSeconds: number
   stagedBytes: number
@@ -106,6 +108,16 @@ export function healthAlerts(figures: AlertFigures): SystemAlert[] {
       level: 'warning',
       title: 'The bot isn’t storing anything',
       detail: `It answers, but reports ${bot.detail}.`,
+    })
+  }
+  // None set up is a choice, not an alert.
+  if (figures.media === 'down') {
+    alerts.push({
+      code: 'media_down',
+      level: 'warning',
+      title: 'The media service isn’t answering',
+      detail:
+        'Videos play as they are until it is back: a file not examined yet shows no formats or chapters, and subtitles inside it can’t be read.',
     })
   }
   const staging = figures.stagingMaxBytes > 0 ? figures.stagedBytes / figures.stagingMaxBytes : 0

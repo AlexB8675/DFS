@@ -3,7 +3,8 @@ import { toast } from 'sonner'
 import { FileViewer } from '@/features/preview/file-viewer'
 import { usePreviewList } from '@/features/preview/use-preview-list'
 import { errorMessage } from '@/lib/api/client'
-import { downloadSharedFile, sharedPreviewPath } from './api'
+import { linkPlace } from '@/lib/file-place'
+import { downloadSharedFile } from './api'
 
 interface SharePreviewProps {
   token: string
@@ -28,13 +29,13 @@ export function SharePreview({
   isLoadingMore,
   onLoadMore,
 }: SharePreviewProps) {
-  const contentPath = (id: string) => sharedPreviewPath(token, id)
+  const placeOf = (id: string) => linkPlace(token, id)
   const list = usePreviewList({
     items: nodes,
     hasMore,
     isLoadingMore,
     onLoadMore,
-    contentPath,
+    placeOf,
     findMissing: true,
   })
   const node = list.listed ?? null
@@ -49,7 +50,7 @@ export function SharePreview({
       open={list.previewId !== null}
       file={node?.kind === 'file' ? node : null}
       error={error}
-      contentPath={list.shownId ? contentPath(list.shownId) : null}
+      place={list.shownId ? placeOf(list.shownId) : null}
       previous={list.previous}
       next={list.next}
       position={list.position}

@@ -10,22 +10,30 @@ import {
 import { ApiClient } from './client.ts'
 import type { SuiteContext } from './context.ts'
 import { createFolder, text, uploadFile, workspace } from './files.ts'
+import type { ContractTarget } from './target.ts'
+
+/** A link to the node, open to anyone and for good unless `options` says otherwise. */
+export function shareLink(
+  client: ApiClient,
+  nodeId: string,
+  options: Record<string, unknown> = {},
+) {
+  return client.call('POST', '/shares', shareLinkSchema, {
+    json: { nodeId, expiresAt: null, password: null, maxDownloads: null, ...options },
+  })
+}
+
+/** The token from a link, and a client with no session to open it, as a stranger would. */
+export function visitorOf(target: ContractTarget, url: string | null) {
+  const token = url?.split('/s/')[1]
+  if (!token) throw new Error(`Not a share link: ${String(url)}`)
+  return { token, client: new ApiClient(target.baseUrl, target.origin) }
+}
 
 /** Share links and the public share page's API (DESIGN.md §7.5, D18). */
 export function shareTests({ describe, it, expect, owner, target }: SuiteContext): void {
-  function share(client: ApiClient, nodeId: string, options: Record<string, unknown> = {}) {
-    return client.call('POST', '/shares', shareLinkSchema, {
-      json: { nodeId, expiresAt: null, password: null, maxDownloads: null, ...options },
-    })
-  }
-
-  /** The token from a link, and a client with no session to open it, as a stranger would. */
-  function visitor(url: string | null) {
-    const token = url?.split('/s/')[1]
-    if (!token) throw new Error(`Not a share link: ${String(url)}`)
-    const { baseUrl, origin } = target()
-    return { token, client: new ApiClient(baseUrl, origin) }
-  }
+  const share = shareLink
+  const visitor = (url: string | null) => visitorOf(target(), url)
 
   async function usedBytes(client: ApiClient): Promise<number> {
     return (await client.call('GET', '/auth/me', sessionSchema)).user.usedBytes
