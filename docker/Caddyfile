@@ -5,10 +5,11 @@
 
 {
 	servers {
-		# No HTTP/3 (QUIC, over UDP), as a test, 2026-10-09: a phone with
-		# 100 Mbit/s to the internet took 2–8 Mbit/s from here over it, 22 ms
-		# away, where the PC at home took 48. Some networks hold UDP far below
-		# TCP. HTTP/2 serves downloads and uploads as well.
+		# No HTTP/3 (QUIC, over UDP): a phone with 100 Mbit/s to the internet
+		# took 2–8 Mbit/s from here over it, 22 ms away, and 30–70 over
+		# HTTP/2 from the same network (2026-10-09). Some networks hold UDP far
+		# below TCP, and a browser offered HTTP/3 keeps to it however slow it
+		# is. HTTP/2 serves downloads and uploads as well.
 		protocols h1 h2
 	}
 }
