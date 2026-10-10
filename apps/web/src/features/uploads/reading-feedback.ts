@@ -56,6 +56,10 @@ export function reportUnreadable(unreadable: Unreadable[], readable: number): vo
     .slice(0, NAMED)
     .map(({ path, operation, reason }) => `Could not ${operation} ${path}: ${reason}`)
   if (count > NAMED) named.push(`…and ${String(count - NAMED)} more (the console lists the first).`)
+  // Browsers can't list a link to another folder (a Python venv's lib64, say).
+  if (unreadable.some(({ operation }) => operation === 'list the folder')) {
+    named.push('A folder the browser can’t list is often a symbolic link, which it can’t follow.')
+  }
   const items = `${count.toLocaleString()} ${count === 1 ? 'item' : 'items'}`
   const options = {
     description: named.join('\n'),

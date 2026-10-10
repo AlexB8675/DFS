@@ -11,7 +11,7 @@ import { useCurrentUser } from '@/features/auth/session'
 import { countShareLinks } from '@/features/shares/api'
 import { usePreview } from '@/features/preview/use-preview'
 import { pickFiles } from '@/features/uploads/picked-files'
-import { tellNoFiles, whileWaiting } from '@/features/uploads/reading-feedback'
+import { tellNoFiles, whileWaiting, type Waiting } from '@/features/uploads/reading-feedback'
 import { enqueueUploads } from '@/features/uploads/upload-engine'
 import { errorMessage } from '@/lib/api/client'
 import { useTransitionNavigate } from '@/lib/navigation'
@@ -67,19 +67,21 @@ export function useNodeActions() {
   }
 
   async function upload(parentId: string, directory: boolean) {
-    const files = await pickFiles({ directory })
-    if (!files) return
-    if (files.length === 0) {
-      tellNoFiles()
-      return
-    }
-    const waiting = whileWaiting(`Preparing ${files.length.toLocaleString()} files…`)
+    let waiting: Waiting | undefined
     try {
+      const files = await pickFiles({ directory })
+      if (!files) return
+      if (files.length === 0) {
+        tellNoFiles()
+        return
+      }
+      waiting = whileWaiting(`Preparing ${files.length.toLocaleString()} files…`)
       await enqueueUploads(parentId, files)
     } catch (error) {
+      console.error('Could not start the upload', error)
       toast.error('Could not start the upload', { description: errorMessage(error) })
     } finally {
-      waiting.end()
+      waiting?.end()
     }
   }
 

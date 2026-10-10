@@ -47,6 +47,7 @@ export function DropZone({ folderId, folderName, children }: DropZoneProps) {
       waiting.say(`Preparing ${files.length.toLocaleString()} files…`, true)
       await enqueueUploads(parentId, files)
     } catch (error) {
+      console.error('Could not start the upload', error)
       toast.error('Could not start the upload', { description: errorMessage(error) })
     } finally {
       waiting.end()

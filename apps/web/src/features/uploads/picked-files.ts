@@ -28,38 +28,55 @@ const LOGGED_FAILURES = 25
 
 /**
  * Opens the browser's file picker. Resolves with `null` if it is dismissed, and
- * with no files if the folder chosen holds none.
+ * with no files if the folder chosen holds none. If the browser fails it
+ * rejects, saying at which step: opening the picker, or reading the list of
+ * files it gave. (An error thrown in a listener would only reach the console,
+ * and the page would wait for ever.)
  */
 export function pickFiles({ directory = false } = {}): Promise<PickedFile[] | null> {
-  return new Promise((resolve) => {
-    const input = document.createElement('input')
-    input.type = 'file'
-    input.multiple = true
-    input.webkitdirectory = directory
-    input.hidden = true
-    // A large folder takes the browser a while to list before it says `change`,
-    // and an input only a variable holds can be collected meanwhile, taking the
-    // answer with it: the page would never hear. In the page, it stays.
-    document.body.append(input)
-    const answer = (files: PickedFile[] | null) => {
-      input.remove()
-      resolve(files)
+  return new Promise((resolve, reject) => {
+    let input: HTMLInputElement | undefined
+    const fail = (step: string, error: unknown) => {
+      input?.remove()
+      console.error(`The file picker failed while ${step}`, error)
+      reject(new Error(`While ${step}: ${describe(error)}`, { cause: error }))
     }
-    input.addEventListener(
-      'change',
-      () => {
-        answer(Array.from(input.files ?? [], fromInputFile))
-      },
-      { once: true },
-    )
-    input.addEventListener(
-      'cancel',
-      () => {
-        answer(null)
-      },
-      { once: true },
-    )
-    input.click()
+    try {
+      input = document.createElement('input')
+      input.type = 'file'
+      input.multiple = true
+      input.webkitdirectory = directory
+      input.hidden = true
+      // A large folder takes the browser a while to list before it says `change`,
+      // and an input only a variable holds can be collected meanwhile, taking the
+      // answer with it: the page would never hear. In the page, it stays.
+      document.body.append(input)
+      const picker = input
+      picker.addEventListener(
+        'change',
+        () => {
+          try {
+            const files = Array.from(picker.files ?? [], fromInputFile)
+            picker.remove()
+            resolve(files)
+          } catch (error) {
+            fail('reading the files the browser listed', error)
+          }
+        },
+        { once: true },
+      )
+      picker.addEventListener(
+        'cancel',
+        () => {
+          picker.remove()
+          resolve(null)
+        },
+        { once: true },
+      )
+      picker.click()
+    } catch (error) {
+      fail('opening the picker', error)
+    }
   })
 }
 
@@ -139,12 +156,16 @@ function leaveOut(
   operation: Unreadable['operation'],
   error: unknown,
 ): void {
-  const reason = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
-  walking.unreadable.push({ path, operation, reason })
+  walking.unreadable.push({ path, operation, reason: describe(error) })
   // In the console, in red, with the browser's own error: the toast says less.
   if (walking.unreadable.length <= LOGGED_FAILURES) {
     console.error(`Could not ${operation} “${path}”`, error)
   }
+}
+
+/** The browser's own words: `"InvalidStateError: An attempt was made…"`. */
+function describe(error: unknown): string {
+  return error instanceof Error ? `${error.name}: ${error.message}` : String(error)
 }
 
 function openFile(entry: FileSystemFileEntry): Promise<File> {

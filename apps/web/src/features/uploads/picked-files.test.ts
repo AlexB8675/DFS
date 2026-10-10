@@ -242,4 +242,36 @@ describe('pickFiles', () => {
     empty.dispatchEvent(new Event('change'))
     expect(await second).toEqual([])
   })
+
+  it('says at which step the browser failed, instead of waiting for ever', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const notUsable = new DOMException('not usable', 'InvalidStateError')
+
+    const opening = new FakeInput()
+    opening.click.mockImplementation(() => {
+      throw notUsable
+    })
+    pageWith(opening)
+    await expect(pickFiles({ directory: true })).rejects.toThrow(
+      'While opening the picker: InvalidStateError: not usable',
+    )
+    expect(opening.attached).toBe(false)
+
+    // The list of files is read in a listener, whose errors would go unheard.
+    const listing = new FakeInput()
+    Object.defineProperty(listing, 'files', {
+      get() {
+        throw notUsable
+      },
+    })
+    pageWith(listing)
+    const picked = pickFiles({ directory: true })
+    const heard = expect(picked).rejects.toMatchObject({
+      message: 'While reading the files the browser listed: InvalidStateError: not usable',
+      cause: notUsable,
+    })
+    listing.dispatchEvent(new Event('change'))
+    await heard
+    expect(listing.attached).toBe(false)
+  })
 })
