@@ -5,6 +5,7 @@ import { dropTargetProps, useDragStore } from '@/features/drag/drag-store'
 import { errorMessage } from '@/lib/api/client'
 import { cn } from '@/lib/utils'
 import { collectDroppedFiles } from './picked-files'
+import { reportUnreadable, tellNoFiles, whileWaiting } from './reading-feedback'
 import { enqueueUploads } from './upload-engine'
 
 interface DropZoneProps {
@@ -33,10 +34,22 @@ export function DropZone({ folderId, folderName, children }: DropZoneProps) {
   const destination = subfolder ?? { id: folderId, name: folderName }
 
   async function upload(dataTransfer: DataTransfer, parentId: string) {
+    const waiting = whileWaiting('Reading what you dropped…')
     try {
-      await enqueueUploads(parentId, await collectDroppedFiles(dataTransfer))
+      const { files, unreadable } = await collectDroppedFiles(dataTransfer, (found) => {
+        waiting.say(`Reading what you dropped… ${found.toLocaleString()} files`)
+      })
+      reportUnreadable(unreadable, files.length)
+      if (files.length === 0) {
+        if (unreadable.length === 0) tellNoFiles()
+        return
+      }
+      waiting.say(`Preparing ${files.length.toLocaleString()} files…`, true)
+      await enqueueUploads(parentId, files)
     } catch (error) {
       toast.error('Could not start the upload', { description: errorMessage(error) })
+    } finally {
+      waiting.end()
     }
   }
 
