@@ -156,9 +156,12 @@ if lost.
   replaced: a few minutes more. Run it monthly, and when one of them announces
   a security fix; ffmpeg matters most, since it reads what anyone uploads.
 - **Database by hand:** `docker compose exec postgres psql -U dfs dfs`.
-- **Backups** of the database and the journal come with M4. Until then, the
-  master key's copy off the server is what matters most, with a dump now and
-  then: `docker compose exec postgres pg_dump -U dfs -Fc dfs > dfs.dump`.
+- **Backups:** the database is rebuilt from the journal in `#dfs-journal`
+  and the master key (below), so the master key's copy off the server is what
+  matters most. Nightly snapshots of the database, which would make a
+  recovery faster than replaying the whole journal, are not built. A dump now
+  and then is still cheap:
+  `docker compose exec postgres pg_dump -U dfs -Fc dfs > dfs.dump`.
 - **Stopping:** `docker compose down` keeps every volume; `down -v` would
   delete the database and staging.
 

@@ -4,9 +4,12 @@ A private cloud drive that stores encrypted file chunks as Discord attachments a
 keeps the real file system in PostgreSQL. See [docs/DESIGN.md](docs/DESIGN.md) for
 the full design.
 
-**Status:** DFS runs at https://dfs.xlestudio.it, with test data only until the
-durability milestone (M4) brings backups. Done: the web UI, the API (M2), Discord
-storage and the bot (M1), the admin console and the first deployment.
+**Status:** DFS runs at https://dfs.xlestudio.it. Done: the web UI, the API (M2),
+Discord storage and the bot (M1), the admin console, the first deployment,
+durability (M4: the journal on Discord, `dfs recover` and a recovery drill that
+passed against production), previews of images, PDFs, text and code, and audio
+and video players, with other players reached through stream links. Left for
+later: nightly database snapshots and the scrubber.
 [docs/BACKEND.md](docs/BACKEND.md) is the build plan, and
 [docs/DEPLOY.md](docs/DEPLOY.md) the runbook for the server.
 
@@ -78,20 +81,20 @@ end-to-end tests.
 Run from the repository root. pnpm starts the dev services in parallel;
 Turborepo runs the build and check tasks across the workspace.
 
-| Command            | What it does                                                    |
-| ------------------ | --------------------------------------------------------------- |
-| `pnpm dev`         | Starts the web app (with its mock API), the API and the bot     |
-| `pnpm check`       | Formatting, typecheck, lint and tests: run it before every push |
-| `pnpm build`       | Production build of the web app                                 |
-| `pnpm typecheck`   | TypeScript checks                                               |
-| `pnpm lint`        | ESLint, including the React Compiler rules                      |
-| `pnpm test`        | Unit and integration tests (Vitest); the latter need Docker     |
-| `pnpm format`      | Formats with Prettier                                           |
-| `pnpm db:up`       | Starts PostgreSQL 18 in Docker, on localhost only               |
-| `pnpm db:down`     | Stops it; the data stays in a Docker volume                     |
-| `pnpm db:migrate`  | Applies database migrations                                     |
-| `pnpm dfs`         | Admin commands: `owner`, `setup` (Discord), `master-key`        |
-| `docker/deploy.sh` | Sends the committed code to the VPS and restarts DFS there      |
+| Command            | What it does                                                                        |
+| ------------------ | ----------------------------------------------------------------------------------- |
+| `pnpm dev`         | Starts the web app (with its mock API), the API and the bot                         |
+| `pnpm check`       | Formatting, typecheck, lint and tests: run it before every push                     |
+| `pnpm build`       | Production build of the web app                                                     |
+| `pnpm typecheck`   | TypeScript checks                                                                   |
+| `pnpm lint`        | ESLint, including the React Compiler rules                                          |
+| `pnpm test`        | Unit and integration tests (Vitest); the latter need Docker                         |
+| `pnpm format`      | Formats with Prettier                                                               |
+| `pnpm db:up`       | Starts PostgreSQL 18 in Docker, on localhost only                                   |
+| `pnpm db:down`     | Stops it; the data stays in a Docker volume                                         |
+| `pnpm db:migrate`  | Applies database migrations                                                         |
+| `pnpm dfs`         | Admin commands: `owner`, `setup`, `master-key`, `recover`, `drill`, `reset-storage` |
+| `docker/deploy.sh` | Sends the committed code to the VPS and restarts DFS there                          |
 
 Integration tests start their own PostgreSQL in Docker. Without Docker, point
 `TEST_DATABASE_URL` at a server where the user may create databases.
@@ -107,6 +110,7 @@ apps/web          React SPA (React 19 + React Compiler, Vite, Tailwind, shadcn/u
   src/mocks       mock API (MSW) and demo data, dev only
 apps/api          Fastify HTTP API, run by Node straight from its TypeScript sources
 apps/bot          the Discord bot: storing, packing and deleting blobs, leader election
+apps/media        the media service: ffprobe and ffmpeg for media info, subtitles and covers
 packages/shared   API schemas (Zod), metrics and file-name rules, shared by the web app and the API
 packages/config   settings from the environment (or secret files), with development defaults
 packages/db       Drizzle schema, SQL migrations, metrics, and the integration test harness
@@ -114,6 +118,7 @@ packages/crypto   envelope encryption and the frame format
 packages/storage  the blob stores: Discord, local and chaos
 packages/contract the API's contract suite, run against the mock and the real API
 docker/           production images, Compose, Caddyfile and deploy script; PostgreSQL for development
+tools/            scripts for the user's own machine: dfs-reencode, for videos that seek fast
 docs/DESIGN.md    design document
 docs/BACKEND.md   backend build plan
 docs/TESTING.md   testing locally
