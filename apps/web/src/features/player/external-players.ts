@@ -1,8 +1,10 @@
 // Players outside the browser that play a stream link (DESIGN.md §6.7), in
-// the order they are offered: the device's own player first (the user's
-// decision, 2026-10-10), then VLC. A stream link is an address any player
-// that plays addresses opens, so another player is another entry here: its
-// name, and how a page opens a link in it on each device, if a page can.
+// the order they are offered: the device's own player first, then VLC (the
+// user's decisions, 2026-10-10). A page opens an app only through an address
+// the app registers (a phone's), or a file it opens: on a computer, a
+// playlist of the one link, downloaded and opened. A stream link is an
+// address any player that plays addresses opens, so another player is another
+// entry here: its name, and how it opens a link on each device.
 
 /** The kind of device the page runs on, as far as opening another app goes. */
 export type Device = 'ios' | 'android' | 'mac' | 'windows' | 'other'
@@ -14,19 +16,18 @@ export interface Stream {
   kind: 'video' | 'audio'
 }
 
+/** How a player opens a stream: an address to go to, or a playlist to download and open. */
+export type Opening =
+  { kind: 'address'; url: string } | { kind: 'playlist'; file: Blob; fileName: string }
+
 export interface ExternalPlayer {
   id: string
-  /** Its name in “Open in …” on this device. */
+  /** Its name in Open in… on this device. */
   name: (device: Device) => string
-  /**
-   * An address that opens the stream in it on this device; `null` where a
-   * page can't open it (a computer's player, which only takes a pasted link).
-   */
-  openUrl: (stream: Stream, device: Device) => string | null
-  /** How to open a copied link in it by hand on this device; `null` where it isn't worth saying. */
-  pasteHint: (device: Device) => string | null
-  /** Where to get it for this device; `null` for the device's own. */
-  getUrl: (device: Device) => string | null
+  /** Whether it is offered on this device. */
+  offered: (device: Device) => boolean
+  /** How it opens a stream on this device, where it is offered. */
+  opening: (stream: Stream, device: Device) => Opening
 }
 
 /** Chrome's intent address for `url`, `extras` its parameters before the end (`package=…`). */
@@ -41,61 +42,64 @@ function intent(url: string, extras: string[]): string {
 }
 
 /**
- * The device's own player: on Android, the app it plays video (or audio)
- * with, or its Open with list, as an intent naming no app. Elsewhere a page
- * can't open one: an iPhone's is Safari's own, which plays what the browser
- * plays, and a computer's takes no address from a page.
+ * The device's own player. On Android, the app it plays video (or audio)
+ * with, or its Open with list, as an intent naming no app. On a computer,
+ * whatever opens playlists (`.m3u`): Windows' Media Player, unless another
+ * player took them. An iPhone's is Safari's own, the browser's, and a Mac's
+ * playlists go to Music, so there is none.
  */
 export const NATIVE: ExternalPlayer = {
   id: 'native',
-  name: (device) => (device === 'android' ? 'this phone’s player' : 'this device’s player'),
-  openUrl: (stream, device) =>
+  name: (device) => (device === 'android' ? 'This phone’s player' : 'This computer’s player'),
+  offered: (device) => device === 'android' || device === 'windows' || device === 'other',
+  opening: (stream, device) =>
     device === 'android'
       ? // No fallback: the browser would download the whole file instead.
-        intent(stream.url, [`type=${stream.kind}/*`])
-      : null,
-  pasteHint: () => null,
-  getUrl: () => null,
+        { kind: 'address', url: intent(stream.url, [`type=${stream.kind}/*`]) }
+      : { kind: 'playlist', file: m3u(stream), fileName: `${baseName(stream.title)}.m3u` },
 }
 
 const VLC_ANDROID = 'org.videolan.vlc'
 
+/**
+ * VLC: on an iPhone or iPad, its x-callback address (`stream` plays without
+ * asking whether to download); on Android, an intent naming its package, else
+ * its page in the store; on a computer, where it registers no address, its
+ * own playlist (`.xspf`), which another player doesn't take.
+ */
 export const VLC: ExternalPlayer = {
   id: 'vlc',
   name: () => 'VLC',
-  openUrl: (stream, device) => {
-    // VLC for iOS's x-callback-url: `stream` plays it without asking whether to download.
+  offered: () => true,
+  opening: (stream, device) => {
     if (device === 'ios') {
-      return `vlc-x-callback://x-callback-url/stream?url=${encodeURIComponent(stream.url)}`
+      return {
+        kind: 'address',
+        url: `vlc-x-callback://x-callback-url/stream?url=${encodeURIComponent(stream.url)}`,
+      }
     }
-    // An intent naming VLC's package, else VLC's page in the store.
     if (device === 'android') {
-      return intent(stream.url, [
-        `package=${VLC_ANDROID}`,
-        `type=${stream.kind}/*`,
-        `S.title=${encodeURIComponent(stream.title)}`,
-        `S.browser_fallback_url=${encodeURIComponent(`https://play.google.com/store/apps/details?id=${VLC_ANDROID}`)}`,
-      ])
+      return {
+        kind: 'address',
+        url: intent(stream.url, [
+          `package=${VLC_ANDROID}`,
+          `type=${stream.kind}/*`,
+          `S.title=${encodeURIComponent(stream.title)}`,
+          `S.browser_fallback_url=${encodeURIComponent(`https://play.google.com/store/apps/details?id=${VLC_ANDROID}`)}`,
+        ]),
+      }
     }
-    // VLC on a computer registers no address of its own.
-    return null
+    return { kind: 'playlist', file: xspf(stream), fileName: `${baseName(stream.title)}.xspf` }
   },
-  pasteHint: (device) =>
-    device === 'mac'
-      ? 'In VLC, choose File → Open Network (⌘N), paste the link and choose Open.'
-      : device === 'ios' || device === 'android'
-        ? 'In VLC, open a network stream and paste the link.'
-        : 'In VLC, choose Media → Open Network Stream (Ctrl+N), paste the link and choose Play.',
-  getUrl: (device) =>
-    device === 'ios'
-      ? 'https://apps.apple.com/app/vlc-media-player/id650377962'
-      : device === 'android'
-        ? `https://play.google.com/store/apps/details?id=${VLC_ANDROID}`
-        : 'https://www.videolan.org/vlc/',
 }
 
 /** The players a stream link is offered for, in this order. */
 export const EXTERNAL_PLAYERS: readonly ExternalPlayer[] = [NATIVE, VLC]
+
+/** Those offered on this device, in their order. */
+export function playersFor(device: Device): ExternalPlayer[] {
+  return EXTERNAL_PLAYERS.filter((player) => player.offered(device))
+}
 
 /** This device, from what the browser says it is. An iPad says it is a Mac, but touches. */
 export function currentDevice(
@@ -107,4 +111,38 @@ export function currentDevice(
   if (/Macintosh|Mac OS X/.test(userAgent)) return touchPoints > 1 ? 'ios' : 'mac'
   if (userAgent.includes('Windows')) return 'windows'
   return 'other'
+}
+
+/** A playlist of the one link, as Windows' Media Player and most players read it. */
+export function m3u(stream: Stream): Blob {
+  const title = stream.title.replace(/[\r\n]+/g, ' ')
+  return new Blob([`#EXTM3U\r\n#EXTINF:-1,${title}\r\n${stream.url}\r\n`], {
+    type: 'audio/x-mpegurl',
+  })
+}
+
+/** VLC's own playlist of the one link. */
+export function xspf(stream: Stream): Blob {
+  return new Blob(
+    [
+      '<?xml version="1.0" encoding="UTF-8"?>\n',
+      '<playlist xmlns="http://xspf.org/ns/0/" version="1"><trackList><track>',
+      `<location>${escapeXml(stream.url)}</location><title>${escapeXml(stream.title)}</title>`,
+      '</track></trackList></playlist>\n',
+    ],
+    { type: 'application/xspf+xml' },
+  )
+}
+
+/** A file's name without its extension, for its playlist's. */
+function baseName(name: string): string {
+  return name.replace(/\.[^.]+$/, '') || name
+}
+
+function escapeXml(text: string): string {
+  return text.replace(
+    /[&<>"']/g,
+    (char) =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' })[char] ?? char,
+  )
 }

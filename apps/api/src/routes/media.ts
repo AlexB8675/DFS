@@ -39,7 +39,13 @@ import {
   subtitleFilesBeside,
 } from '../media/playback.ts'
 import { keptSubtitles } from '../media/subtitles.ts'
-import { readStreamToken, streamToken } from '../media/stream-links.ts'
+import {
+  parseStreamToken,
+  readLegacyStreamToken,
+  streamToken,
+  streamTokenValid,
+  type StreamGrant,
+} from '../media/stream-links.ts'
 import { mediaTokenValid } from '../media/token.ts'
 import { visibleFolder, visibleNode, type NodeRow } from '../nodes/read.ts'
 import { liveShareById, nodeInShare, openShare } from '../shares/public.ts'
@@ -150,18 +156,18 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
             )
           }
         }
-        const token = await streamToken(app.keys, {
-          shareId: share.id,
-          passwordVersion: share.passwordVersion,
-          nodeId: played.node.id,
-        })
+        const token = await streamToken(
+          app.keys,
+          { shareId: share.id, passwordVersion: share.passwordVersion, nodeId: played.node.id },
+          share.rootNodeId,
+        )
         request.log.info(
           { streamLink: { nodeId: played.node.id, shareId: share.id, created } },
           'stream link given',
         )
-        return reply.code(created ? 201 : 200).send({
-          url: `${app.config.publicBaseUrl}/api/stream/${token}/${encodeURIComponent(played.node.name)}`,
-        })
+        return reply
+          .code(created ? 201 : 200)
+          .send({ url: `${app.config.publicBaseUrl}/api/stream/${token}` })
       },
     )
 
@@ -359,31 +365,54 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
 
   // What a stream link reads (§6.7): no session nor password, its token names
   // the share link and the file; sent as any download is, with Range, and,
-  // as playing, never counted toward the link's downloads. Its name is the
-  // player's title.
-  routes.get(
-    '/stream/:token/:name',
-    {
-      config: { access: 'public' },
-      schema: { params: z.object({ token: z.string().max(300), name: z.string().max(2000) }) },
-    },
-    async (request, reply) => {
-      const grant = await readStreamToken(app.keys, request.params.token)
-      if (!grant) throw streamLinkEnded()
-      const { share, root } = await liveShareById(app, grant.shareId)
-      if (share.password_version !== grant.passwordVersion) throw streamLinkEnded()
-      const node = asMedia(await nodeInShare(app, root, grant.nodeId))
-      // A file link serves its own version; a folder link, the file's current one.
-      const file = await downloadableFile(
-        app.db,
-        node.id,
-        node.id === root.id ? share.version_id : null,
-      )
-      return sendFile(app, request, reply, file)
-    },
-  )
+  // as playing, never counted toward the link's downloads. A name after it
+  // (as links of the first form carried) is the player's alone.
+  for (const path of ['/stream/:token', '/stream/:token/:name']) {
+    routes.get(
+      path,
+      {
+        config: { access: 'public' },
+        schema: {
+          params: z.object({ token: z.string().max(300), name: z.string().max(2000).optional() }),
+        },
+      },
+      async (request, reply) => {
+        const { share, root, nodeId } = await streamed(app, request.params.token)
+        const node = asMedia(await nodeInShare(app, root, nodeId))
+        // A file link serves its own version; a folder link, the file's current one.
+        const file = await downloadableFile(
+          app.db,
+          node.id,
+          node.id === root.id ? share.version_id : null,
+        )
+        return sendFile(app, request, reply, file)
+      },
+    )
+  }
 
   done()
+}
+
+/**
+ * The share link a stream link's token names, if it still works and the token
+ * was made for it as it is now (its password unchanged), and the file in it.
+ */
+async function streamed(app: FastifyInstance, token: string) {
+  const parsed = parseStreamToken(token)
+  const legacy = parsed ? null : await readLegacyStreamToken(app.keys, token)
+  const shareId = parsed?.shareId ?? legacy?.shareId
+  if (!shareId) throw streamLinkEnded()
+  const { share, root } = await liveShareById(app, shareId)
+  const grant: StreamGrant = {
+    shareId,
+    passwordVersion: share.password_version,
+    nodeId: parsed ? (parsed.nodeId ?? root.id) : (legacy?.nodeId ?? ''),
+  }
+  const valid = parsed
+    ? await streamTokenValid(app.keys, parsed, grant)
+    : legacy?.passwordVersion === share.password_version
+  if (!valid) throw streamLinkEnded()
+  return { share, root, nodeId: grant.nodeId }
 }
 
 /**
@@ -395,7 +424,7 @@ async function streamShare(
   db: Executor,
   userId: string,
   nodeId: string,
-): Promise<{ id: string; passwordVersion: number } | null> {
+): Promise<{ id: string; passwordVersion: number; rootNodeId: string } | null> {
   const { rows } = await db.execute<{ id: string; password_version: number }>(sql`
     SELECT link.id, link.password_version
     FROM share_links link JOIN nodes node ON node.id = link.node_id
@@ -405,7 +434,7 @@ async function streamShare(
     ORDER BY (link.expires_at IS NULL AND link.max_downloads IS NULL) DESC, link.created_at
     LIMIT 1`)
   const [row] = rows
-  return row ? { id: row.id, passwordVersion: row.password_version } : null
+  return row ? { id: row.id, passwordVersion: row.password_version, rootNodeId: nodeId } : null
 }
 
 /** A stream link that was never one, or whose share link has a new password. */
@@ -428,8 +457,8 @@ interface Played {
   userId: string | null
   /** The link it is played through, for the log. */
   shareId: string | null
-  /** The link, and its password's version, which a stream link made through it keeps to (§6.7). */
-  share: { id: string; passwordVersion: number } | null
+  /** The link, its password's version, which a stream link made through it keeps to, and its own item (§6.7). */
+  share: { id: string; passwordVersion: number; rootNodeId: string } | null
   /**
    * Subtitle files beside it may be offered: in the drive, and in a shared
    * folder, but not through a file link, which shares that file alone.
@@ -463,7 +492,7 @@ async function playedFile(
     readerId: linkReader(share.id, request.ip),
     userId: null,
     shareId: share.id,
-    share: { id: share.id, passwordVersion: share.password_version },
+    share: { id: share.id, passwordVersion: share.password_version, rootNodeId: root.id },
     besideOffered: root.kind === 'folder',
   }
 }

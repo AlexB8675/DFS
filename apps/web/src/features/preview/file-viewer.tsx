@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { NodeIcon } from '@/components/node-icon'
 import { SyncStatus } from '@/components/sync-status'
 import { MediaDetails } from '@/features/player/media-details'
+import { OpenInMenu } from '@/features/player/open-in-menu'
 import type { FilePlace } from '@/lib/file-place'
 import { fileCategory, fileCategoryLabel } from '@/lib/file-types'
 import { formatBytes, formatFullDate } from '@/lib/format'
@@ -150,16 +151,17 @@ export function FileViewer({
                 <Download />
               </Button>
             )}
-            {file && previewKind(file.name, file.mimeType) === 'video' && (
-              <Button
-                variant="ghost"
-                size="icon"
-                aria-label="Open in another player"
-                title="Open in another player"
-                onClick={() => view.current?.openExternal?.()}
+            {file && place && previewKind(file.name, file.mimeType) === 'video' && (
+              <OpenInMenu
+                place={place}
+                name={file.name}
+                kind="video"
+                onChosen={() => view.current?.pause?.()}
               >
-                <ExternalLink />
-              </Button>
+                <Button variant="ghost" size="icon" aria-label="Open in…" title="Open in…">
+                  <ExternalLink />
+                </Button>
+              </OpenInMenu>
             )}
             {file && onShare && (
               <Button variant="ghost" size="icon" aria-label="Share link" onClick={onShare}>

@@ -1,56 +1,73 @@
 import { describe, expect, it } from 'vitest'
-import { currentDevice, EXTERNAL_PLAYERS, NATIVE, VLC, type Device } from './external-players'
+import {
+  currentDevice,
+  NATIVE,
+  playersFor,
+  VLC,
+  type Device,
+  type Opening,
+} from './external-players'
 
 // Opening a stream link in another player (DESIGN.md §6.7): the device's own first, then VLC.
 
 const stream = {
-  url: 'https://dfs.example/api/stream/s.abc.0.def.mac/A%20film%20(cut).mkv',
-  title: 'A film (cut).mkv',
+  url: 'https://dfs.example/api/stream/AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_',
+  title: 'A film & more (cut).mkv',
   kind: 'video' as const,
 }
 
-/** The players a tap opens on a device, by name, in their order. */
+/** The players offered on a device, by name, in their order. */
 function offered(device: Device): string[] {
-  return EXTERNAL_PLAYERS.filter((player) => player.openUrl(stream, device) !== null).map(
-    (player) => player.name(device),
-  )
+  return playersFor(device).map((player) => player.name(device))
+}
+
+/** What a playlist opening holds, as text. */
+async function playlist(
+  opening: Opening,
+): Promise<{ fileName: string; type: string; text: string }> {
+  if (opening.kind !== 'playlist') throw new Error('Not a playlist.')
+  return { fileName: opening.fileName, type: opening.file.type, text: await opening.file.text() }
 }
 
 describe('opening a stream link in another player (§6.7)', () => {
-  it('offers the device’s own player first, where a page can open it, then VLC', () => {
-    expect(offered('android')).toEqual(['this phone’s player', 'VLC'])
+  it('offers the device’s own player first where it has one, then VLC', () => {
+    expect(offered('android')).toEqual(['This phone’s player', 'VLC'])
+    expect(offered('windows')).toEqual(['This computer’s player', 'VLC'])
+    expect(offered('other')).toEqual(['This computer’s player', 'VLC'])
+    // An iPhone's own is the browser's; a Mac's playlists go to Music.
     expect(offered('ios')).toEqual(['VLC'])
-    // A computer's players take no address from a page: the link is copied instead.
-    expect(offered('windows')).toEqual([])
-    expect(offered('mac')).toEqual([])
-    expect(offered('other')).toEqual([])
+    expect(offered('mac')).toEqual(['VLC'])
   })
 
-  it('opens an Android phone’s player with an intent naming no app, and no download to fall back on', () => {
-    expect(NATIVE.openUrl(stream, 'android')).toBe(
-      'intent://dfs.example/api/stream/s.abc.0.def.mac/A%20film%20(cut).mkv#Intent;scheme=https;type=video/*;end',
-    )
-    expect(NATIVE.openUrl({ ...stream, kind: 'audio' }, 'android')).toContain(';type=audio/*;')
+  it('opens a phone’s players at once: an intent on Android, VLC’s address on iOS', () => {
+    expect(NATIVE.opening(stream, 'android')).toEqual({
+      kind: 'address',
+      url: 'intent://dfs.example/api/stream/AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_#Intent;scheme=https;type=video/*;end',
+    })
+    expect(VLC.opening(stream, 'android')).toEqual({
+      kind: 'address',
+      url: 'intent://dfs.example/api/stream/AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_#Intent;scheme=https;package=org.videolan.vlc;type=video/*;S.title=A%20film%20%26%20more%20(cut).mkv;S.browser_fallback_url=https%3A%2F%2Fplay.google.com%2Fstore%2Fapps%2Fdetails%3Fid%3Dorg.videolan.vlc;end',
+    })
+    expect(VLC.opening(stream, 'ios')).toEqual({
+      kind: 'address',
+      url: `vlc-x-callback://x-callback-url/stream?url=${encodeURIComponent(stream.url)}`,
+    })
   })
 
-  it('opens VLC for iOS with its x-callback address, to stream rather than download', () => {
-    expect(VLC.openUrl(stream, 'ios')).toBe(
-      `vlc-x-callback://x-callback-url/stream?url=${encodeURIComponent(stream.url)}`,
-    )
-  })
-
-  it('opens VLC for Android with an intent naming it, else its page in the store', () => {
-    expect(VLC.openUrl(stream, 'android')).toBe(
-      'intent://dfs.example/api/stream/s.abc.0.def.mac/A%20film%20(cut).mkv#Intent;scheme=https;package=org.videolan.vlc;type=video/*;S.title=A%20film%20(cut).mkv;S.browser_fallback_url=https%3A%2F%2Fplay.google.com%2Fstore%2Fapps%2Fdetails%3Fid%3Dorg.videolan.vlc;end',
-    )
-  })
-
-  it('says where to paste a link in VLC on a computer, and where to get it', () => {
-    expect(VLC.pasteHint('windows')).toContain('Open Network Stream (Ctrl+N)')
-    expect(VLC.pasteHint('mac')).toContain('(⌘N)')
-    expect(VLC.getUrl('ios')).toContain('apps.apple.com')
-    expect(VLC.getUrl('other')).toBe('https://www.videolan.org/vlc/')
-    expect(NATIVE.getUrl('android')).toBeNull()
+  it('opens a computer’s from a playlist of the link: .m3u for its own, VLC’s .xspf', async () => {
+    expect(await playlist(NATIVE.opening(stream, 'windows'))).toEqual({
+      fileName: 'A film & more (cut).m3u',
+      type: 'audio/x-mpegurl',
+      text: `#EXTM3U\r\n#EXTINF:-1,A film & more (cut).mkv\r\n${stream.url}\r\n`,
+    })
+    const vlc = await playlist(VLC.opening(stream, 'mac'))
+    expect(vlc.fileName).toBe('A film & more (cut).xspf')
+    expect(vlc.type).toBe('application/xspf+xml')
+    expect(vlc.text).toContain(`<location>${stream.url}</location>`)
+    expect(vlc.text).toContain('<title>A film &amp; more (cut).mkv</title>')
+    // A title on two lines stays one entry.
+    const twoLines = await playlist(NATIVE.opening({ ...stream, title: 'Two\nlines' }, 'other'))
+    expect(twoLines.text).toContain('#EXTINF:-1,Two lines\r\n')
   })
 
   it('tells devices apart by what their browsers say, an iPad by its touch', () => {

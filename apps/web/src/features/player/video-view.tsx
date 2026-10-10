@@ -49,7 +49,7 @@ import {
   type PlaybackNotice,
 } from './diagnostics'
 import { playerAction, stepSpeed, type PlayerAction } from './keys'
-import { OpenInPlayerDialog } from './open-in-player'
+import { OpenInMenu } from './open-in-menu'
 import { usePlayerPreferences } from './preferences'
 import {
   defaultSubtitle,
@@ -160,8 +160,6 @@ export default function VideoView({
   /** Warnings dismissed in this video, and those fading out. */
   const [dismissed, setDismissed] = useState<ReadonlySet<string>>(new Set())
   const [fading, setFading] = useState<ReadonlySet<string>>(new Set())
-  /** Playing it in another player (VLC, §6.7): its stream link, offered over the player. */
-  const [external, setExternal] = useState(false)
   /** Asked to play, and not playing yet nor refused: a spinner, not a play button. */
   const [starting, setStarting] = useState(true)
 
@@ -494,7 +492,7 @@ export default function VideoView({
         run(action)
         return true
       },
-      openExternal,
+      pause,
     }),
     [run, stopped],
   )
@@ -560,10 +558,18 @@ export default function VideoView({
     else setProblem({ kind: 'unsupported', detail })
   }
 
-  /** Offers other players (this device's, VLC); this one pauses, as the video goes on there. */
-  function openExternal() {
+  /** Pauses it: as it goes on in another player (§6.7). */
+  function pause() {
     videoRef.current?.pause()
-    setExternal(true)
+  }
+
+  /** Open in…, over the player: the players that play it on this device (§6.7). */
+  function openIn(button: ReactNode) {
+    return (
+      <OpenInMenu place={place} name={name} kind="video" container={root} onChosen={pause}>
+        {button}
+      </OpenInMenu>
+    )
   }
 
   function restart(versionId: string) {
@@ -658,7 +664,11 @@ export default function VideoView({
         <ProblemPanel
           problem={shown}
           onDownload={onDownload}
-          onExternal={openExternal}
+          openIn={openIn(
+            <Button>
+              <ExternalLink /> Open in…
+            </Button>,
+          )}
           onRetry={() => {
             if (source) restart(source.versionId)
           }}
@@ -787,16 +797,16 @@ export default function VideoView({
             >
               {NOTICE_ICONS[notice.key]}
               <span>{notice.text}</span>
-              {notice.external && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="shrink-0 text-white hover:bg-white/15 hover:text-white"
-                  onClick={openExternal}
-                >
-                  <ExternalLink /> Open in…
-                </Button>
-              )}
+              {notice.external &&
+                openIn(
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="shrink-0 text-white hover:bg-white/15 hover:text-white"
+                  >
+                    <ExternalLink /> Open in…
+                  </Button>,
+                )}
               <Button
                 variant="ghost"
                 size="icon-sm"
@@ -845,13 +855,6 @@ export default function VideoView({
           }}
         />
       )}
-      <OpenInPlayerDialog
-        open={external}
-        onOpenChange={setExternal}
-        place={place}
-        name={name}
-        kind="video"
-      />
     </div>
   )
 }
@@ -923,22 +926,18 @@ function Center({
 function ProblemPanel({
   problem,
   onDownload,
-  onExternal,
+  openIn,
   onRetry,
   onPlayNew,
 }: {
   problem: Problem
   onDownload: () => void
-  /** Plays it in another player (this device's, VLC), which may play what this browser can't. */
-  onExternal: () => void
+  /** Open in… another player (this device's, VLC), which may play what this browser can't. */
+  openIn: ReactNode
   onRetry: () => void
   onPlayNew: (versionId: string) => void
 }) {
-  const external = (
-    <Button onClick={onExternal}>
-      <ExternalLink /> Open in…
-    </Button>
-  )
+  const external = openIn
   switch (problem.kind) {
     case 'codec':
       return (

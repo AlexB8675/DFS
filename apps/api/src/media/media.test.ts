@@ -546,7 +546,8 @@ describe('stream links, for another player (§6.7)', () => {
       code: 'no_share_link',
     })
     const link = await streamLink(film.nodeId, true)
-    expect(link.url).toMatch(/\/api\/stream\/s\.[\w.-]+\/A%20film%20\(cut\)\.mp4$/)
+    // Short, to copy and paste: the share link's ID and a MAC, 38 characters.
+    expect(link.url).toMatch(/\/api\/stream\/[\w-]{38}$/)
     // An ordinary share link, to turn off in Shared links; the same address each time.
     const shares = await client.call('GET', '/shares', shareLinkPageSchema)
     expect(shares.items.filter((share) => share.nodeId === film.nodeId)).toHaveLength(1)
@@ -562,10 +563,11 @@ describe('stream links, for another player (§6.7)', () => {
     const head = await played(link, { method: 'HEAD' })
     expect(head.headers.get('content-length')).toBe('14')
 
-    // Anything changed in its token, and it grants nothing.
-    const changed = { url: link.url.replace(/[\w-]{20}(?=[\w-]{23}\/)/, 'A'.repeat(20)) }
+    // Anything changed in its token, and it grants nothing; a name after it is the player's.
+    const changed = { url: link.url.replace(/[\w-]{4}([\w-]{6})$/, 'AbCd$1') }
     expect(changed.url).not.toBe(link.url)
     expect((await played(changed)).status).toBe(410)
+    expect(await (await played({ url: `${link.url}/A film.mp4` })).text()).toBe('the whole film')
   })
 
   it('takes a plain link, not one with a password, and ends with the link or the file', async () => {
@@ -610,7 +612,7 @@ describe('stream links, for another player (§6.7)', () => {
     const path = `/s/${token}/files/${song.nodeId}/stream-link`
     const viewer = new ApiClient(apiUrl, client.origin)
     const link = await viewer.call('POST', path, streamLinkSchema, { json: {} })
-    expect(link.url).toContain('/api/stream/s.')
+    expect(link.url).toMatch(/\/api\/stream\/[\w-]{38}$/)
     // Playing, it never counts toward the link's downloads.
     for (let play = 0; play < 3; play += 1) {
       expect(await (await played(link)).text()).toBe('shared song')
@@ -623,6 +625,31 @@ describe('stream links, for another player (§6.7)', () => {
 
     await client.send('DELETE', `/shares/${share.id}`)
     expect((await played(link)).status).toBe(404)
+  })
+
+  it('plays a file inside a shared folder, by its own address, while the folder is shared', async () => {
+    const shared = await createFolder(client, folderId, 'Shared films')
+    const film = await uploadFile(client, shared.id, 'Inside.mkv', text('inside'))
+    const share = await linkTo(shared.id)
+    const path = `/s/${share.url?.split('/s/')[1] ?? ''}/files/${film.nodeId}/stream-link`
+    const link = await new ApiClient(apiUrl, client.origin).call('POST', path, streamLinkSchema, {
+      json: {},
+    })
+    // The file's ID too: 59 characters.
+    expect(link.url).toMatch(/\/api\/stream\/[\w-]{59}$/)
+    expect(await (await played(link)).text()).toBe('inside')
+    await client.send('DELETE', `/shares/${share.id}`)
+    expect((await played(link)).status).toBe(404)
+  })
+
+  it('still plays a link of the first, longer form', async () => {
+    const song = await uploadFile(client, folderId, 'early.mp3', text('early song'))
+    const share = await linkTo(song.nodeId)
+    const mac = Buffer.from(
+      await app.keys.sign(`stream:share:${share.id}:0:${song.nodeId}`),
+    ).toString('base64url')
+    const legacy = { url: `${apiUrl}/api/stream/s.${share.id}.0.${song.nodeId}.${mac}/early.mp3` }
+    expect(await (await played(legacy)).text()).toBe('early song')
   })
 
   it('keeps to a link’s password: made once it is given, and ended by a new one', async () => {

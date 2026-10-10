@@ -34,6 +34,7 @@ import { Label } from '@/components/ui/label'
 import { Spinner } from '@/components/ui/spinner'
 import { VirtualList } from '@/components/virtual-list'
 import { MediaDetails } from '@/features/player/media-details'
+import { OpenInMenu } from '@/features/player/open-in-menu'
 import { FileDetails } from '@/features/preview/file-viewer'
 import { handlePreviewKey } from '@/features/preview/keys'
 import { PreviewBody } from '@/features/preview/preview-body'
@@ -261,15 +262,16 @@ function SharedFile({ token, share, file }: { token: string; share: OpenShare; f
             />
           </div>
           {video && (
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label="Open in another player"
-              title="Open in another player"
-              onClick={() => view.current?.openExternal?.()}
+            <OpenInMenu
+              place={place}
+              name={file.name}
+              kind="video"
+              onChosen={() => view.current?.pause?.()}
             >
-              <ExternalLink />
-            </Button>
+              <Button variant="ghost" size="icon" aria-label="Open in…" title="Open in…">
+                <ExternalLink />
+              </Button>
+            </OpenInMenu>
           )}
           {video && (
             <Button

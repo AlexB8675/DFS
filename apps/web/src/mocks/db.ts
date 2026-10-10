@@ -569,8 +569,9 @@ export class MockDb {
    */
   streamLink(place: MockPlace, create: boolean): { link: StreamLink; created: boolean } {
     const { node } = this.playedFile(place)
+    // Short, as the API's: made up from the link's ID, which no player outside this page reaches.
     const address = (shareId: string) => ({
-      url: `${location.origin}/api/stream/s.${shareId}.0.${node.id}.mock/${encodeURIComponent(node.name)}`,
+      url: `${location.origin}/api/stream/${shareId.replaceAll('-', '')}`,
     })
     if (place.token !== null) {
       const share = this.state.shares.find((candidate) => candidate.token === place.token)
