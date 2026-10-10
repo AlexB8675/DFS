@@ -118,11 +118,15 @@ export function TrashPage() {
             <thead className="sticky top-0 bg-background text-xs text-muted-foreground">
               <tr className="border-b text-left">
                 <th className="py-2 pl-5 font-medium">Name</th>
-                <th className="hidden w-56 py-2 pl-4 font-medium lg:table-cell">
+                <th className="hidden w-56 py-2 pl-4 font-medium @min-[52rem]:table-cell">
                   Original location
                 </th>
-                <th className="hidden w-32 py-2 pl-4 font-medium sm:table-cell">Deleted</th>
-                <th className="hidden w-24 py-2 pl-4 text-right font-medium sm:table-cell">Size</th>
+                <th className="hidden w-32 py-2 pl-4 font-medium @min-[38rem]:table-cell">
+                  Deleted
+                </th>
+                <th className="hidden w-24 py-2 pl-4 text-right font-medium @min-[38rem]:table-cell">
+                  Size
+                </th>
                 <th className="w-40 py-2 pr-5">
                   <span className="sr-only">Actions</span>
                 </th>
@@ -134,34 +138,37 @@ export function TrashPage() {
                   <td className="py-2 pl-5">
                     <span className="flex min-w-0 items-center gap-3">
                       <NodeIcon node={item} className="size-5 shrink-0" />
-                      <span className="min-w-0 truncate" title={item.name}>
-                        {item.name}
+                      {/* The badge goes under the name when it doesn't fit beside it. */}
+                      <span className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+                        <span className="max-w-full truncate" title={item.name}>
+                          {item.name}
+                        </span>
+                        {item.moderationReason && (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Badge variant="destructive" className="shrink-0">
+                                <ShieldAlert /> Removed by admin
+                              </Badge>
+                            </TooltipTrigger>
+                            <TooltipContent>{item.moderationReason}</TooltipContent>
+                          </Tooltip>
+                        )}
                       </span>
-                      {item.moderationReason && (
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Badge variant="destructive" className="shrink-0">
-                              <ShieldAlert /> Removed by admin
-                            </Badge>
-                          </TooltipTrigger>
-                          <TooltipContent>{item.moderationReason}</TooltipContent>
-                        </Tooltip>
-                      )}
                     </span>
                   </td>
                   <td
-                    className="hidden truncate py-2 pl-4 text-muted-foreground lg:table-cell"
+                    className="hidden truncate py-2 pl-4 text-muted-foreground @min-[52rem]:table-cell"
                     title={item.location}
                   >
                     {item.location}
                   </td>
                   <td
-                    className="hidden truncate py-2 pl-4 text-muted-foreground sm:table-cell"
+                    className="hidden truncate py-2 pl-4 text-muted-foreground @min-[38rem]:table-cell"
                     title={formatFullDate(item.deletedAt)}
                   >
                     {formatDate(item.deletedAt)}
                   </td>
-                  <td className="hidden py-2 pl-4 text-right whitespace-nowrap text-muted-foreground tabular-nums sm:table-cell">
+                  <td className="hidden py-2 pl-4 text-right whitespace-nowrap text-muted-foreground tabular-nums @min-[38rem]:table-cell">
                     {formatBytes(item.sizeBytes)}
                   </td>
                   <td className="py-2 pr-5">

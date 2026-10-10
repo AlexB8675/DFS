@@ -6,10 +6,12 @@ interface StatusBarProps {
   nodes: DriveNode[]
   /** More pages exist, so the count is a lower bound. */
   hasMore: boolean
+  /** The listing hasn't arrived: no count yet, rather than "0 items". */
+  loading?: boolean
 }
 
 /** Item count and the size of the selection, like a file manager's status bar. */
-export function StatusBar({ nodes, hasMore }: StatusBarProps) {
+export function StatusBar({ nodes, hasMore, loading = false }: StatusBarProps) {
   const selected = useSelection((state) => state.selected)
   const selectedNodes = nodes.filter((node) => selected.has(node.id))
   const selectedBytes = selectedNodes.reduce((total, node) => total + node.sizeBytes, 0)
@@ -20,8 +22,8 @@ export function StatusBar({ nodes, hasMore }: StatusBarProps) {
       aria-live="polite"
     >
       <span>
-        {formatCount(nodes.length, 'item')}
-        {hasMore && '+'}
+        {!loading && formatCount(nodes.length, 'item')}
+        {!loading && hasMore && '+'}
       </span>
       {selectedNodes.length > 0 && (
         <>

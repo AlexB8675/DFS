@@ -14,7 +14,6 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Spinner } from '@/components/ui/spinner'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import {
   EXPIRY_OPTIONS,
@@ -112,6 +111,7 @@ export function ShareDialog({ node, onClose }: ShareDialogProps) {
                   type="single"
                   variant="outline"
                   spacing={0}
+                  className="w-full"
                   value={expiry}
                   aria-labelledby="expiry-label"
                   onValueChange={(value) => {
@@ -119,7 +119,7 @@ export function ShareDialog({ node, onClose }: ShareDialogProps) {
                   }}
                 >
                   {EXPIRY_OPTIONS.map((option) => (
-                    <ToggleGroupItem key={option.value} value={option.value} className="flex-1">
+                    <ToggleGroupItem key={option.value} value={option.value} className="flex-auto">
                       {option.label}
                     </ToggleGroupItem>
                   ))}
@@ -156,8 +156,8 @@ export function ShareDialog({ node, onClose }: ShareDialogProps) {
                 <DialogClose asChild>
                   <Button variant="outline">Cancel</Button>
                 </DialogClose>
-                <Button type="submit" disabled={pending}>
-                  {pending && <Spinner />} Create link
+                <Button type="submit" disabled={pending} pending={pending}>
+                  Create link
                 </Button>
               </DialogFooter>
             </form>

@@ -24,7 +24,13 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '@/components/ui/spinner'
 import { errorMessage } from '@/lib/api/client'
-import { formatBytes, formatDate, formatDuration, formatFullDate } from '@/lib/format'
+import {
+  formatBytes,
+  formatDate,
+  formatDateInSentence,
+  formatDuration,
+  formatFullDate,
+} from '@/lib/format'
 import { usePreferences } from '@/lib/preferences'
 import { cn } from '@/lib/utils'
 import { databaseQuery, useSignalSession, useVacuumTable } from './api'
@@ -118,9 +124,9 @@ function Now({ status }: { status: DatabaseStatus }) {
         />
         <li className="ml-auto self-center text-xs text-muted-foreground">
           {status.statsSince
-            ? `Counting since ${formatDate(status.statsSince)}`
+            ? `Counting since ${formatDateInSentence(status.statsSince)}`
             : 'Counting since the server started'}{' '}
-          · Updated {formatDate(status.checkedAt)}
+          · Updated {formatDateInSentence(status.checkedAt)}
         </li>
       </ul>
       <Sessions sessions={status.sessions} />
@@ -131,7 +137,9 @@ function Now({ status }: { status: DatabaseStatus }) {
 function Chip({ label, detail, warn = false }: { label: string; detail: string; warn?: boolean }) {
   return (
     <li className="flex items-center gap-2 rounded-full border bg-card px-3 py-1.5">
-      {warn && <TriangleAlert className="size-3.5 text-status-warning" aria-label="Look at this" />}
+      {warn && (
+        <TriangleAlert className="size-3.5 text-status-warning-ink" aria-label="Look at this" />
+      )}
       <span className="font-medium">{label}</span>
       <span className="text-muted-foreground tabular-nums">{detail}</span>
     </li>
@@ -200,7 +208,7 @@ function Sessions({ sessions }: { sessions: DatabaseSession[] }) {
                       {session.waitingFor && (
                         <span className="flex items-center gap-1 text-xs text-muted-foreground">
                           <TriangleAlert
-                            className="size-3 shrink-0 text-status-warning"
+                            className="size-3 shrink-0 text-status-warning-ink"
                             aria-hidden
                           />
                           waits for {session.waitingFor}
@@ -300,7 +308,7 @@ function Sessions({ sessions }: { sessions: DatabaseSession[] }) {
 
 /** Connections by service, the slowest statements, tables, unused indexes and settings. */
 function Details({ status }: { status: DatabaseStatus }) {
-  const since = status.statsSince ? formatDate(status.statsSince) : 'the server started'
+  const since = status.statsSince ? formatDateInSentence(status.statsSince) : 'the server started'
 
   return (
     <section aria-label="Details" className="grid gap-4 lg:grid-cols-2">
@@ -365,7 +373,7 @@ function Details({ status }: { status: DatabaseStatus }) {
                 {deadShare >= DEAD_ROWS_WARNING.share &&
                   table.deadRows >= DEAD_ROWS_WARNING.rows && (
                     <TriangleAlert
-                      className="size-3 text-status-warning"
+                      className="size-3 text-status-warning-ink"
                       aria-label="Many dead rows"
                     />
                   )}

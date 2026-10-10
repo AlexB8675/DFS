@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef, type ReactNode } from 'react'
 import { NavLink, useLocation } from 'react-router'
+import { prefersReducedMotion } from '@/lib/motion'
 import { cn } from '@/lib/utils'
 
 export interface NavTab {
@@ -23,6 +24,20 @@ export function NavTabs({ tabs, label }: { tabs: NavTab[]; label: string }) {
     if (!list) return
     list.style.setProperty('--tab-x', `${active?.offsetLeft ?? 0}px`)
     list.style.setProperty('--tab-w', `${active?.offsetWidth ?? 0}px`)
+    // On a phone the strip is wider than the screen: bring the active tab in, to the middle.
+    const strip = list.parentElement
+    if (strip && active) {
+      const tab = active.getBoundingClientRect()
+      const view = strip.getBoundingClientRect()
+      if (tab.left < view.left || tab.right > view.right) {
+        strip.scrollBy({
+          left: tab.left - view.left - (view.width - tab.width) / 2,
+          // Not animated when the page has just opened.
+          behavior:
+            list.dataset.ready === undefined || prefersReducedMotion() ? 'instant' : 'smooth',
+        })
+      }
+    }
     // No slide on the first placement, only between tabs.
     requestAnimationFrame(() => {
       list.dataset.ready = ''

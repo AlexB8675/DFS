@@ -89,13 +89,19 @@ export function SharesPage() {
             <thead className="sticky top-0 bg-background text-xs text-muted-foreground">
               <tr className="border-b text-left">
                 <th className="py-2 pl-5 font-medium">Item</th>
-                <th className="w-32 py-2 pl-4 font-medium">Status</th>
-                <th className="hidden w-32 py-2 pl-4 font-medium md:table-cell">Created</th>
-                <th className="hidden w-48 py-2 pl-4 font-medium md:table-cell">Expires</th>
-                <th className="hidden w-28 py-2 pl-4 text-right font-medium sm:table-cell">
+                <th className="hidden w-32 py-2 pl-4 font-medium @min-[32rem]:table-cell">
+                  Status
+                </th>
+                <th className="hidden w-32 py-2 pl-4 font-medium @min-[58rem]:table-cell">
+                  Created
+                </th>
+                <th className="hidden w-48 py-2 pl-4 font-medium @min-[58rem]:table-cell">
+                  Expires
+                </th>
+                <th className="hidden w-28 py-2 pl-4 text-right font-medium @min-[38rem]:table-cell">
                   Downloads
                 </th>
-                <th className="w-32 py-2 pr-5">
+                <th className="w-28 py-2 pr-5">
                   <span className="sr-only">Actions</span>
                 </th>
               </tr>
@@ -112,38 +118,46 @@ export function SharesPage() {
                           node={{ kind: link.nodeKind, name: link.nodeName, mimeType: null }}
                           className="size-5 shrink-0"
                         />
-                        <span className="min-w-0 truncate" title={link.nodeName}>
-                          {link.nodeName}
-                        </span>
-                        {link.version === 'earlier' && (
-                          <span
-                            className="shrink-0 text-xs text-muted-foreground"
-                            title="The file was replaced since this link was made; the link still shares the version it was made for."
-                          >
-                            earlier version
+                        <span className="min-w-0">
+                          <span className="flex min-w-0 items-center gap-3">
+                            <span className="min-w-0 truncate" title={link.nodeName}>
+                              {link.nodeName}
+                            </span>
+                            {link.version === 'earlier' && (
+                              <span
+                                className="shrink-0 text-xs text-muted-foreground"
+                                title="The file was replaced since this link was made; the link still shares the version it was made for."
+                              >
+                                earlier version
+                              </span>
+                            )}
+                            {link.hasPassword && (
+                              <Lock
+                                className="size-3.5 shrink-0 text-muted-foreground"
+                                aria-label="Password protected"
+                              />
+                            )}
                           </span>
-                        )}
-                        {link.hasPassword && (
-                          <Lock
-                            className="size-3.5 shrink-0 text-muted-foreground"
-                            aria-label="Password protected"
-                          />
-                        )}
+                          {/* Without a column of its own, the status goes under the name. */}
+                          <Badge variant={badge.variant} className="mt-1 @min-[32rem]:hidden">
+                            {badge.label}
+                          </Badge>
+                        </span>
                       </span>
                     </td>
-                    <td className="py-2.5 pl-4">
+                    <td className="hidden py-2.5 pl-4 @min-[32rem]:table-cell">
                       <Badge variant={badge.variant}>{badge.label}</Badge>
                     </td>
                     <td
-                      className="hidden truncate py-2.5 pl-4 text-muted-foreground md:table-cell"
+                      className="hidden truncate py-2.5 pl-4 text-muted-foreground @min-[58rem]:table-cell"
                       title={formatFullDate(link.createdAt)}
                     >
                       {formatDate(link.createdAt)}
                     </td>
-                    <td className="hidden truncate py-2.5 pl-4 text-muted-foreground md:table-cell">
+                    <td className="hidden truncate py-2.5 pl-4 text-muted-foreground @min-[58rem]:table-cell">
                       {link.expiresAt ? formatFullDate(link.expiresAt) : 'Never'}
                     </td>
-                    <td className="hidden py-2.5 pl-4 text-right text-muted-foreground tabular-nums sm:table-cell">
+                    <td className="hidden py-2.5 pl-4 text-right text-muted-foreground tabular-nums @min-[38rem]:table-cell">
                       {link.downloadCount}
                       {link.maxDownloads !== null && ` / ${link.maxDownloads}`}
                     </td>

@@ -11,7 +11,7 @@ const SYNC_STATES: Record<SyncState, { icon: LucideIcon; label: string; classNam
   syncing: {
     icon: CloudUpload,
     label: 'Syncing to Discord. You can already open it.',
-    className: 'animate-pulse text-sky-500',
+    className: 'animate-pulse text-sky-600 dark:text-sky-500',
   },
   stored: {
     icon: CloudCheck,
@@ -21,7 +21,7 @@ const SYNC_STATES: Record<SyncState, { icon: LucideIcon; label: string; classNam
   failed: {
     icon: CloudOff,
     label: 'Upload failed. Upload the file again.',
-    className: 'text-amber-500',
+    className: 'text-amber-700 dark:text-amber-500',
   },
 }
 

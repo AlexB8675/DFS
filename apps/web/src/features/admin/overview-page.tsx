@@ -18,7 +18,7 @@ import { Link } from 'react-router'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Progress } from '@/components/ui/progress'
 import { Skeleton } from '@/components/ui/skeleton'
-import { formatBytes, formatDate, formatDuration } from '@/lib/format'
+import { formatBytes, formatDateInSentence, formatDuration } from '@/lib/format'
 import { usePreferences } from '@/lib/preferences'
 import { cn } from '@/lib/utils'
 import { healthQuery } from './api'
@@ -130,7 +130,7 @@ function HealthView({ health }: { health: SystemHealth }) {
               Nothing needs attention ·
             </>
           )}{' '}
-          Updated {formatDate(health.checkedAt)}
+          Updated {formatDateInSentence(health.checkedAt)}
         </li>
       </ul>
 
@@ -194,7 +194,8 @@ function HealthView({ health }: { health: SystemHealth }) {
             <span className={cn(scrubber.problems > 0 && 'text-destructive')}>
               {scrubber.problems} problem{scrubber.problems === 1 ? '' : 's'}
             </span>
-            {' · '}last backup {backups.lastBackupAt ? formatDate(backups.lastBackupAt) : 'never'}
+            {' · '}last backup{' '}
+            {backups.lastBackupAt ? formatDateInSentence(backups.lastBackupAt) : 'never'}
           </Detail>
         </StatCard>
       </div>
@@ -212,7 +213,7 @@ const ALERT_LOOKS = {
   warning: {
     icon: TriangleAlert,
     label: 'Warning',
-    tone: 'text-status-warning',
+    tone: 'text-status-warning-ink',
     border: 'border-status-warning/60',
   },
 } as const

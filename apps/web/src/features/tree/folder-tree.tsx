@@ -270,7 +270,7 @@ function TreeItem({
  */
 function FolderIcon({ open }: { open: boolean }) {
   const shape =
-    'absolute inset-0 size-4 fill-sky-500/25 text-sky-500 transition-[opacity,scale] motion-spring'
+    'absolute inset-0 size-4 fill-sky-600/25 text-sky-600 dark:fill-sky-500/25 dark:text-sky-500 transition-[opacity,scale] motion-spring'
   return (
     <span className="relative size-4 shrink-0" aria-hidden>
       <Folder className={cn(shape, open ? 'scale-75 opacity-0' : 'scale-100 opacity-100')} />

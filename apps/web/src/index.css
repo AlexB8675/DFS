@@ -18,6 +18,7 @@
   --color-sidebar: var(--sidebar);
   --color-status-good: var(--status-good);
   --color-status-warning: var(--status-warning);
+  --color-status-warning-ink: var(--status-warning-ink);
   --color-status-serious: var(--status-serious);
   --color-status-critical: var(--status-critical);
   --color-chart-5: var(--chart-5);
@@ -235,21 +236,26 @@
   --accent-foreground: oklch(0.3 0.012 270);
   --destructive: oklch(0.54 0.18 25);
   --border: oklch(0.905 0.006 270);
-  --input: oklch(0.89 0.007 270);
+  /* The edge of a field or a switch: 3:1 against the page (WCAG 1.4.11). */
+  --input: oklch(0.64 0.01 270);
   --ring: oklch(0.62 0.12 277);
   /*
    * Graphs (admin): series take these in this order, never cycled; the order
    * keeps neighbours apart for colour-blind readers, checked against the card
    * in both themes. Status colours mean good to critical and nothing else.
+   * Here, every one is at least 3:1 against the page (WCAG 1.4.11); in the
+   * dark theme they are lighter, which does that already.
    */
   --chart-1: #2a78d6;
   --chart-2: #eb6834;
-  --chart-3: #1baf7a;
-  --chart-4: #eda100;
-  --chart-5: #e87ba4;
+  --chart-3: #07a06e;
+  --chart-4: #bd7f02;
+  --chart-5: #d36992;
   --status-good: #0ca30c;
-  --status-warning: #fab219;
-  --status-serious: #ec835a;
+  --status-warning: #b8810a;
+  /* Warning as text, which needs 4.5:1 where lines and bars need 3:1. */
+  --status-warning-ink: oklch(0.555 0.163 49);
+  --status-serious: #d66f46;
   --status-critical: #d03b3b;
   --sidebar: oklch(0.968 0.004 270);
   --sidebar-foreground: oklch(0.29 0.012 270);
@@ -295,6 +301,7 @@
   --chart-5: #d55181;
   --status-good: #0ca30c;
   --status-warning: #fab219;
+  --status-warning-ink: #fab219;
   --status-serious: #ec835a;
   --status-critical: #d03b3b;
   --sidebar: oklch(0.19 0.006 270);

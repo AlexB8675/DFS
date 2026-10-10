@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { formatBytes, formatCount, formatDate, formatDuration } from './format'
+import {
+  formatBytes,
+  formatCount,
+  formatDate,
+  formatDateInSentence,
+  formatDuration,
+} from './format'
 
 describe('formatBytes', () => {
   it.each([
@@ -30,6 +36,24 @@ describe('formatDate', () => {
   it('falls back to a calendar date', () => {
     const result = formatDate(new Date(2025, 2, 4).toISOString(), now)
     expect(result).toContain('2025')
+  })
+})
+
+describe('formatDateInSentence', () => {
+  const now = new Date(2026, 9, 3, 15, 30)
+
+  it('keeps its first letter small, as in "active just now"', () => {
+    expect(formatDateInSentence(new Date(2026, 9, 3, 15, 29, 45).toISOString(), now)).toBe(
+      'just now',
+    )
+    expect(formatDateInSentence(new Date(2026, 9, 2, 9, 0).toISOString(), now)).toBe('yesterday')
+  })
+
+  it('leaves the rest as formatDate has it', () => {
+    const minutes = new Date(2026, 9, 3, 15, 18).toISOString()
+    expect(formatDateInSentence(minutes, now)).toBe(formatDate(minutes, now))
+    const old = new Date(2025, 2, 4).toISOString()
+    expect(formatDateInSentence(old, now)).toBe(formatDate(old, now))
   })
 })
 

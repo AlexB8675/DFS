@@ -20,7 +20,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '@/components/ui/spinner'
 import { errorMessage } from '@/lib/api/client'
 import { appRelease } from '@/lib/env'
-import { formatBytes, formatDate, formatFullDate } from '@/lib/format'
+import { formatBytes, formatDateInSentence, formatFullDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { isFinished, systemQuery, tasksQuery, useClearFrameCache, useStartTask } from './api'
 import { Section } from './section'
@@ -89,13 +89,15 @@ function SystemView({ system }: { system: SystemInfo }) {
         <Chip label={system.environment} detail={`instance ${system.instanceId}`} />
         <Chip
           label="Version"
-          detail={deployed ? `${api.version} · deployed ${formatDate(deployed)}` : api.version}
+          detail={
+            deployed ? `${api.version} · deployed ${formatDateInSentence(deployed)}` : api.version
+          }
           title={deployed ? formatFullDate(deployed) : undefined}
         />
         <Chip label="Node.js" detail={system.node} />
         <Chip
           label="API"
-          detail={`up since ${formatDate(system.apiStartedAt)}`}
+          detail={`up since ${formatDateInSentence(system.apiStartedAt)}`}
           title={formatFullDate(system.apiStartedAt)}
         />
         <Chip
@@ -108,7 +110,7 @@ function SystemView({ system }: { system: SystemInfo }) {
 
       {differing.length > 0 && (
         <p className="flex items-start gap-2 rounded-xl border border-status-warning/60 bg-card px-4 py-3 text-sm">
-          <TriangleAlert className="mt-0.5 size-4 shrink-0 text-status-warning" aria-hidden />
+          <TriangleAlert className="mt-0.5 size-4 shrink-0 text-status-warning-ink" aria-hidden />
           <span>
             The API and the bot read these differently:{' '}
             {differing.map((setting) => setting.key).join(', ')}. Both read them, so both must have
@@ -154,7 +156,7 @@ function SystemView({ system }: { system: SystemInfo }) {
                           </span>
                         )}
                         {setting.botValue !== null && (
-                          <Badge variant="outline" className="text-status-warning">
+                          <Badge variant="outline" className="text-status-warning-ink">
                             bot: {setting.botValue}
                           </Badge>
                         )}
@@ -243,7 +245,7 @@ function DiscordCard({ system, discord }: { system: SystemInfo; discord: boolean
             <tr>
               <th className="pb-2 font-medium">Channel</th>
               <th className="pb-2 pl-4 font-medium">For</th>
-              <th className="hidden pb-2 pl-4 font-medium sm:table-cell">Discord ID</th>
+              <th className="hidden pb-2 pl-4 font-medium @min-[34rem]:table-cell">Discord ID</th>
             </tr>
           </thead>
           <tbody>
@@ -254,7 +256,7 @@ function DiscordCard({ system, discord }: { system: SystemInfo; discord: boolean
                   {!channel.enabled && ' (no new blobs)'}
                 </td>
                 <td className="py-1.5 pl-4 text-muted-foreground">{KINDS[channel.kind]}</td>
-                <td className="hidden py-1.5 pl-4 font-mono text-xs text-muted-foreground sm:table-cell">
+                <td className="hidden py-1.5 pl-4 font-mono text-xs text-muted-foreground @min-[34rem]:table-cell">
                   {channel.discordChannelId}
                 </td>
               </tr>
@@ -285,7 +287,7 @@ function JournalCard({ journal }: { journal: SystemInfo['journal'] }) {
             <>
               Batch {journal.lastBatch.toLocaleString()} posted{' '}
               <time dateTime={journal.lastPostedAt} title={formatFullDate(journal.lastPostedAt)}>
-                {formatDate(journal.lastPostedAt).toLowerCase()}
+                {formatDateInSentence(journal.lastPostedAt)}
               </time>
               .
             </>
@@ -424,7 +426,7 @@ function VersionsDiffer({ page, api, bot }: { page: string; api: string; bot: st
   if (problems.length === 0) return null
   return (
     <p className="flex items-start gap-2 rounded-xl border border-status-warning/60 bg-card px-4 py-3 text-sm">
-      <TriangleAlert className="mt-0.5 size-4 shrink-0 text-status-warning" aria-hidden />
+      <TriangleAlert className="mt-0.5 size-4 shrink-0 text-status-warning-ink" aria-hidden />
       <span>{problems.join(' ')}</span>
     </p>
   )

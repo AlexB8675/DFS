@@ -20,7 +20,6 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Spinner } from '@/components/ui/spinner'
 import { Switch } from '@/components/ui/switch'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { useCurrentUser } from '@/features/auth/session'
@@ -155,8 +154,8 @@ export function AddUserDialog({ onClose }: { onClose: () => void }) {
               <DialogClose asChild>
                 <Button variant="outline">Cancel</Button>
               </DialogClose>
-              <Button type="submit" disabled={pending}>
-                {pending && <Spinner />} Add user
+              <Button type="submit" disabled={pending} pending={pending}>
+                Add user
               </Button>
             </DialogFooter>
           </form>
@@ -217,8 +216,8 @@ export function ResetPasswordDialog({ user, onClose }: { user: AdminUser; onClos
               <DialogClose asChild>
                 <Button variant="outline">Cancel</Button>
               </DialogClose>
-              <Button type="submit" disabled={pending}>
-                {pending && <Spinner />} Reset password
+              <Button type="submit" disabled={pending} pending={pending}>
+                Reset password
               </Button>
             </DialogFooter>
           </form>
@@ -327,8 +326,8 @@ export function EditUserDialog({ user, onClose }: { user: AdminUser; onClose: ()
             <DialogClose asChild>
               <Button variant="outline">Cancel</Button>
             </DialogClose>
-            <Button type="submit" disabled={pending}>
-              {pending && <Spinner />} Save
+            <Button type="submit" disabled={pending} pending={pending}>
+              Save
             </Button>
           </DialogFooter>
         </form>
@@ -492,7 +491,7 @@ function SignInDetails({
     <div className="grid animate-in gap-5 fade-in-0 zoom-in-95 motion-spring">
       <DialogHeader className="items-center text-center">
         <span className="mb-1 flex size-12 animate-in items-center justify-center rounded-full bg-emerald-500/15 zoom-in-50 motion-bounce">
-          <UserCheck className="size-5 text-emerald-500" aria-hidden />
+          <UserCheck className="size-5 text-emerald-700 dark:text-emerald-500" aria-hidden />
         </span>
         <DialogTitle>{title}</DialogTitle>
         <DialogDescription>Send them these details.</DialogDescription>

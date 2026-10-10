@@ -101,7 +101,10 @@ export function MoveDialog({ nodes, onClose }: MoveDialogProps) {
                       setFolderId(folder.id)
                     }}
                   >
-                    <Folder className="size-4 shrink-0 fill-sky-500/25 text-sky-500" aria-hidden />
+                    <Folder
+                      className="size-4 shrink-0 fill-sky-600/25 text-sky-600 dark:fill-sky-500/25 dark:text-sky-500"
+                      aria-hidden
+                    />
                     <span className="truncate">{folder.name}</span>
                     <ChevronRight
                       className="ml-auto size-4 shrink-0 text-muted-foreground"

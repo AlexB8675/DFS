@@ -32,11 +32,10 @@ export function NameField({ defaultValue, error, selectBaseName = false }: NameF
           input.setSelectionRange(0, end)
         }}
       />
-      {error && (
-        <p id={errorId} role="alert" className="text-sm text-destructive">
-          {error}
-        </p>
-      )}
+      {/* A line is kept for the error, so the dialog doesn't re-centre when one comes. */}
+      <p id={errorId} role="alert" className="min-h-5 text-sm text-destructive">
+        {error}
+      </p>
     </div>
   )
 }

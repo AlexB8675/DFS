@@ -8,7 +8,15 @@ import { DrivePreview } from '@/features/preview/drive-preview'
 import { useElementWidth } from '@/lib/use-element-width'
 import { usePreferences } from '@/lib/preferences'
 import { ListHeader } from './list-header'
-import { optionId, ROW_HEIGHT, TILE_HEIGHT, TILE_MIN_WIDTH, type ListedNode } from './list-layout'
+import {
+  listLayout,
+  optionId,
+  ROW_HEIGHT,
+  STACKED_ROW_HEIGHT,
+  TILE_HEIGHT,
+  TILE_MIN_WIDTH,
+  type ListedNode,
+} from './list-layout'
 import { ContextMenuActions } from './menu-actions'
 import { useNodeMenu } from './node-menu'
 import { NodeRow } from './node-row'
@@ -58,6 +66,13 @@ export function NodeList({
   const [measureRef, width] = useElementWidth<HTMLDivElement>()
 
   const columns = viewMode === 'grid' ? Math.max(1, Math.floor(width / TILE_MIN_WIDTH)) : 1
+  const layout = listLayout(width, showLocation)
+  const itemHeight =
+    viewMode === 'grid'
+      ? TILE_HEIGHT
+      : layout.location === 'under'
+        ? STACKED_ROW_HEIGHT
+        : ROW_HEIGHT
   const menu = useNodeMenu(
     nodes.filter((node) => selected.has(node.id)),
     folderId,
@@ -118,14 +133,14 @@ export function NodeList({
           onContextMenu={handleBackgroundClick}
         >
           {viewMode === 'list' && nodes.length > 0 && (
-            <ListHeader showLocation={showLocation} sortable={sortable} />
+            <ListHeader layout={layout} sortable={sortable} />
           )}
           {nodes.length === 0 ? (
             empty
           ) : (
             <VirtualList
-              // A new list per view mode, so switching list/grid fades too.
-              key={viewMode}
+              // A new list per view mode, so switching list/grid fades too; and per row height, which the virtualizer reads once.
+              key={`${viewMode}:${String(itemHeight)}`}
               role="listbox"
               aria-label={label}
               aria-multiselectable
@@ -138,14 +153,14 @@ export function NodeList({
               onKeyDown={handleKeyDown}
               items={nodes}
               getKey={(node) => node.id}
-              itemHeight={viewMode === 'list' ? ROW_HEIGHT : TILE_HEIGHT}
+              itemHeight={itemHeight}
               lanes={columns}
               scrollToIndex={activeIndex}
               animateMoves
               onEndReached={hasMore && !isLoadingMore ? onLoadMore : undefined}
               renderItem={(node) =>
                 viewMode === 'list' ? (
-                  <NodeRow node={node} showLocation={showLocation} {...itemProps} />
+                  <NodeRow node={node} layout={layout} {...itemProps} />
                 ) : (
                   <NodeTile node={node} {...itemProps} />
                 )

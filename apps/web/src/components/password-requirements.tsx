@@ -36,7 +36,7 @@ function Requirement({ met, children }: { met: boolean; children: ReactNode }) {
         {met ? (
           <Check
             key="met"
-            className="size-3.5 animate-in text-emerald-500 zoom-in-0 motion-bounce"
+            className="size-3.5 animate-in text-emerald-700 dark:text-emerald-500 zoom-in-0 motion-bounce"
             aria-hidden
           />
         ) : (

@@ -2,33 +2,37 @@ import type { SortField } from '@dfs/shared'
 import { ArrowDown, ArrowUp } from 'lucide-react'
 import { usePreferences } from '@/lib/preferences'
 import { cn } from '@/lib/utils'
-import { listColumns } from './list-layout'
+import type { ListLayout } from './list-layout'
 
 interface ListHeaderProps {
-  showLocation: boolean
+  layout: ListLayout
   /** Search results have a fixed order. */
   sortable: boolean
 }
 
 /** Column titles for the list view; clicking one sorts by it. */
-export function ListHeader({ showLocation, sortable }: ListHeaderProps) {
+export function ListHeader({ layout, sortable }: ListHeaderProps) {
   return (
     <div
       className={cn(
         'mx-2 grid h-9 shrink-0 items-center gap-4 border-b px-3 text-xs font-medium text-muted-foreground',
-        listColumns(showLocation),
+        layout.columns,
       )}
     >
       <ColumnTitle field="name" sortable={sortable}>
         Name
       </ColumnTitle>
-      {showLocation && <span className="hidden lg:block">Location</span>}
-      <ColumnTitle field="updatedAt" sortable={sortable} className="hidden sm:flex">
-        Modified
-      </ColumnTitle>
-      <ColumnTitle field="size" sortable={sortable} className="hidden justify-end sm:flex">
-        Size
-      </ColumnTitle>
+      {layout.location === 'column' && <span>Location</span>}
+      {layout.details && (
+        <>
+          <ColumnTitle field="updatedAt" sortable={sortable}>
+            Modified
+          </ColumnTitle>
+          <ColumnTitle field="size" sortable={sortable} className="justify-end">
+            Size
+          </ColumnTitle>
+        </>
+      )}
       <span className="sr-only">Sync status</span>
     </div>
   )

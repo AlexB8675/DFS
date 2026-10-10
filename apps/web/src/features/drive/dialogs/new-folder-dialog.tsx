@@ -9,7 +9,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { Spinner } from '@/components/ui/spinner'
 import { errorMessage } from '@/lib/api/client'
 import { formText } from '@/lib/form-data'
 import { useCreateFolder } from '../api'
@@ -61,8 +60,8 @@ export function NewFolderDialog({ parentId, onClose }: NewFolderDialogProps) {
             <DialogClose asChild>
               <Button variant="outline">Cancel</Button>
             </DialogClose>
-            <Button type="submit" disabled={pending}>
-              {pending && <Spinner />} Create
+            <Button type="submit" disabled={pending} pending={pending}>
+              Create
             </Button>
           </DialogFooter>
         </form>

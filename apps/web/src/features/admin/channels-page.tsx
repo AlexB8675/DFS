@@ -30,7 +30,7 @@ import { Label } from '@/components/ui/label'
 import { Spinner } from '@/components/ui/spinner'
 import { Switch } from '@/components/ui/switch'
 import { errorMessage } from '@/lib/api/client'
-import { formatBytes, formatDate, formatFullDate } from '@/lib/format'
+import { formatBytes, formatDateInSentence, formatFullDate } from '@/lib/format'
 import { formText } from '@/lib/form-data'
 import { cn } from '@/lib/utils'
 import { channelsQuery, useCreateChannel, useSetChannelEnabled } from './api'
@@ -57,11 +57,11 @@ export function ChannelsSection({
   return (
     <Card size="sm">
       <CardHeader>
-        <CardTitle>Channels</CardTitle>
-        <p className="text-xs text-muted-foreground">
+        <CardTitle className="col-start-1">Channels</CardTitle>
+        <p className="col-start-1 text-xs text-muted-foreground">
           New blobs go to the least busy enabled channel. Disabled channels stay readable.
         </p>
-        <CardAction className="flex gap-2">
+        <CardAction stackWhenNarrow className="flex flex-wrap gap-2">
           <Button
             variant="outline"
             size="sm"
@@ -92,11 +92,13 @@ export function ChannelsSection({
             <thead className="text-xs text-muted-foreground">
               <tr className="border-b text-left">
                 <th className="py-2 pl-5 font-medium">Channel</th>
-                <th className="hidden w-48 py-2 pl-4 font-medium md:table-cell">Discord ID</th>
-                <th className="hidden w-24 py-2 pl-4 text-right font-medium sm:table-cell">
+                <th className="hidden w-48 py-2 pl-4 font-medium @min-[50rem]:table-cell">
+                  Discord ID
+                </th>
+                <th className="hidden w-24 py-2 pl-4 text-right font-medium @min-[38rem]:table-cell">
                   Blobs
                 </th>
-                <th className="hidden w-28 py-2 pl-4 text-right font-medium sm:table-cell">
+                <th className="hidden w-28 py-2 pl-4 text-right font-medium @min-[38rem]:table-cell">
                   Stored
                 </th>
                 <th className="w-36 py-2 pr-5 text-right font-medium">Takes new blobs</th>
@@ -155,16 +157,16 @@ function ChannelRow({ channel }: { channel: StorageChannel }) {
           className="ml-6 block text-xs text-muted-foreground"
           title={formatFullDate(channel.createdAt)}
         >
-          Added {formatDate(channel.createdAt)}
+          Added {formatDateInSentence(channel.createdAt)}
         </span>
       </td>
-      <td className="hidden truncate py-2.5 pl-4 font-mono text-xs text-muted-foreground md:table-cell">
+      <td className="hidden truncate py-2.5 pl-4 font-mono text-xs text-muted-foreground @min-[50rem]:table-cell">
         {channel.discordChannelId}
       </td>
-      <td className="hidden py-2.5 pl-4 text-right tabular-nums sm:table-cell">
+      <td className="hidden py-2.5 pl-4 text-right tabular-nums @min-[38rem]:table-cell">
         {channel.blobCount.toLocaleString()}
       </td>
-      <td className="hidden py-2.5 pl-4 text-right text-muted-foreground tabular-nums sm:table-cell">
+      <td className="hidden py-2.5 pl-4 text-right text-muted-foreground tabular-nums @min-[38rem]:table-cell">
         {formatBytes(channel.storedBytes)}
       </td>
       <td className="py-2.5 pr-5 text-right">
@@ -262,8 +264,8 @@ function AddChannelDialog({ onClose }: { onClose: () => void }) {
             <DialogClose asChild>
               <Button variant="outline">Cancel</Button>
             </DialogClose>
-            <Button type="submit" disabled={pending}>
-              {pending && <Spinner />} Add channel
+            <Button type="submit" disabled={pending} pending={pending}>
+              Add channel
             </Button>
           </DialogFooter>
         </form>

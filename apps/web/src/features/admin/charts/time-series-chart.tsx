@@ -131,24 +131,16 @@ export function TimeSeriesChart({
           }}
         >
           {ticks.map((tick) => (
-            <g key={tick}>
-              <line
-                x1={0}
-                x2={width}
-                y1={y(tick)}
-                y2={y(tick)}
-                stroke="var(--border)"
-                strokeWidth={1}
-                shapeRendering="crispEdges"
-              />
-              <text
-                x={0}
-                y={y(tick) - 4}
-                className="fill-muted-foreground text-[10px] tabular-nums"
-              >
-                {formatValue(tick, format)}
-              </text>
-            </g>
+            <line
+              key={tick}
+              x1={0}
+              x2={width}
+              y1={y(tick)}
+              y2={y(tick)}
+              stroke="var(--border)"
+              strokeWidth={1}
+              shapeRendering="crispEdges"
+            />
           ))}
 
           {timeTicks(start, end, Math.max(2, Math.floor(width / 96))).map((tick) => {
@@ -204,6 +196,21 @@ export function TimeSeriesChart({
               </g>
             )
           })}
+
+          {ticks.map((tick) => (
+            <text
+              key={tick}
+              x={0}
+              y={y(tick) - 4}
+              stroke="var(--card)"
+              strokeWidth={3}
+              strokeLinejoin="round"
+              paintOrder="stroke"
+              className="fill-muted-foreground text-[10px] tabular-nums"
+            >
+              {formatValue(tick, format)}
+            </text>
+          ))}
 
           {active !== null && (
             <g>

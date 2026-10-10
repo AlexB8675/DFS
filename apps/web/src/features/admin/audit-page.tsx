@@ -43,8 +43,16 @@ const ROW_HEIGHT = 56
 const ACTIONS: Record<string, { label: string; icon: LucideIcon; tone?: string }> = {
   'user.created': { label: 'Added user', icon: UserPlus },
   'user.updated': { label: 'Updated user', icon: UserCog },
-  'user.password_reset': { label: 'Reset password', icon: KeyRound, tone: 'text-amber-500' },
-  'user.disabled': { label: 'Disabled user', icon: UserX, tone: 'text-amber-500' },
+  'user.password_reset': {
+    label: 'Reset password',
+    icon: KeyRound,
+    tone: 'text-amber-700 dark:text-amber-500',
+  },
+  'user.disabled': {
+    label: 'Disabled user',
+    icon: UserX,
+    tone: 'text-amber-700 dark:text-amber-500',
+  },
   'user.enabled': { label: 'Enabled user', icon: UserCheck },
   'auth.login': { label: 'Signed in', icon: LogIn },
   'auth.login_failed': { label: 'Failed sign-in', icon: UserLock, tone: 'text-destructive' },
@@ -59,30 +67,50 @@ const ACTIONS: Record<string, { label: string; icon: LucideIcon; tone?: string }
   'node.moderated': { label: 'Removed content', icon: ShieldAlert, tone: 'text-destructive' },
   'channel.created': { label: 'Added channel', icon: Hash },
   'channel.enabled': { label: 'Enabled channel', icon: Hash },
-  'channel.disabled': { label: 'Disabled channel', icon: Hash, tone: 'text-amber-500' },
+  'channel.disabled': {
+    label: 'Disabled channel',
+    icon: Hash,
+    tone: 'text-amber-700 dark:text-amber-500',
+  },
   'task.started': { label: 'Ran a task', icon: Play },
-  'session.ended': { label: 'Signed a session out', icon: LogOut, tone: 'text-amber-500' },
-  'user.signed_out': { label: 'Signed out everywhere', icon: LogOut, tone: 'text-amber-500' },
-  'upload.cancelled': { label: 'Gave up an upload', icon: XCircle, tone: 'text-amber-500' },
+  'session.ended': {
+    label: 'Signed a session out',
+    icon: LogOut,
+    tone: 'text-amber-700 dark:text-amber-500',
+  },
+  'user.signed_out': {
+    label: 'Signed out everywhere',
+    icon: LogOut,
+    tone: 'text-amber-700 dark:text-amber-500',
+  },
+  'upload.cancelled': {
+    label: 'Gave up an upload',
+    icon: XCircle,
+    tone: 'text-amber-700 dark:text-amber-500',
+  },
   'database.vacuumed': { label: 'Vacuumed a table', icon: Database },
   'system.cache_cleared': { label: 'Cleared the frame cache', icon: Database },
   'storage.reset': { label: 'Started storage over', icon: Trash2, tone: 'text-destructive' },
   'database.query_cancelled': {
     label: 'Cancelled a query',
     icon: Database,
-    tone: 'text-amber-500',
+    tone: 'text-amber-700 dark:text-amber-500',
   },
   'database.session_ended': {
     label: 'Ended a database session',
     icon: Database,
-    tone: 'text-amber-500',
+    tone: 'text-amber-700 dark:text-amber-500',
   },
   'auth.password_reset_requested': {
     label: 'Asked for a new password',
     icon: KeyRound,
-    tone: 'text-amber-500',
+    tone: 'text-amber-700 dark:text-amber-500',
   },
-  'backup.completed': { label: 'Backup completed', icon: DatabaseBackup, tone: 'text-emerald-500' },
+  'backup.completed': {
+    label: 'Backup completed',
+    icon: DatabaseBackup,
+    tone: 'text-emerald-700 dark:text-emerald-500',
+  },
   'scrub.completed': { label: 'Scrub completed', icon: ScanSearch },
 }
 

@@ -328,7 +328,7 @@ function UploadRowActions({ item }: { item: UploadItem }) {
       if (item.syncState === 'stored') {
         return (
           <CircleCheck
-            className="mx-1.5 size-4 animate-in text-emerald-500 zoom-in-0 motion-bounce"
+            className="mx-1.5 size-4 animate-in text-emerald-700 dark:text-emerald-500 zoom-in-0 motion-bounce"
             aria-label="Stored on Discord"
           />
         )
@@ -343,7 +343,7 @@ function UploadRowActions({ item }: { item: UploadItem }) {
       }
       return (
         <CloudUpload
-          className="mx-1.5 size-4 animate-pulse text-sky-500"
+          className="mx-1.5 size-4 animate-pulse text-sky-600 dark:text-sky-500"
           aria-label="Syncing to Discord"
         />
       )

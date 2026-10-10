@@ -13,7 +13,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '@/components/ui/spinner'
 import { errorMessage } from '@/lib/api/client'
-import { formatBytes, formatDate, formatFullDate } from '@/lib/format'
+import { formatBytes, formatDateInSentence, formatFullDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { isFinished, storageQuery, tasksQuery, useStartTask } from './api'
 import { ChannelsSection } from './channels-page'
@@ -193,7 +193,7 @@ function RecentTasks({ tasks }: { tasks: AdminTask[] | undefined }) {
             className="ml-auto shrink-0 text-xs whitespace-nowrap text-muted-foreground"
             title={formatFullDate(task.createdAt)}
           >
-            {task.requestedBy} · {formatDate(task.createdAt)}
+            {task.requestedBy} · {formatDateInSentence(task.createdAt)}
           </span>
         </li>
       ))}
@@ -292,7 +292,7 @@ function Uploads({
               <span key="blob" className="font-mono text-xs">
                 {upload.blobId}
                 <span className="block font-sans text-muted-foreground">
-                  {upload.kind ?? 'purged'} · since {formatDate(upload.since)}
+                  {upload.kind ?? 'purged'} · since {formatDateInSentence(upload.since)}
                 </span>
               </span>,
               upload.sizeBytes === null ? '—' : formatBytes(upload.sizeBytes),

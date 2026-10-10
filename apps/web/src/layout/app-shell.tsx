@@ -47,8 +47,12 @@ export function AppShell() {
             <Sidebar onNavigate={closeNavigation} />
           </SheetContent>
         </Sheet>
-        {/* Named for View Transitions: navigating animates this pane alone (lib/navigation.ts). */}
-        <main className="flex min-w-0 flex-1 flex-col [view-transition-name:page]">
+        {/*
+          Named for View Transitions: navigating animates this pane alone (lib/navigation.ts).
+          A container too: pages fit their columns to this pane's width (`@min-[…]:`), not the
+          screen's, which the sidebar takes a share of.
+        */}
+        <main className="@container flex min-w-0 flex-1 flex-col [view-transition-name:page]">
           <Outlet />
         </main>
       </div>

@@ -21,7 +21,6 @@ import {
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Spinner } from '@/components/ui/spinner'
 import { VirtualList } from '@/components/virtual-list'
 import { sessionQuery } from '@/features/auth/session'
 import { linkCount } from '@/features/shares/api'
@@ -106,7 +105,8 @@ function UserSummary({
   viewerIsOwner: boolean
 }) {
   return (
-    <div className="grid shrink-0 gap-3 border-b px-4 py-3 sm:px-5">
+    // One column that may shrink: a grid's default track would grow to the row's widest content.
+    <div className="grid shrink-0 grid-cols-[minmax(0,1fr)] gap-3 border-b px-4 py-3 sm:px-5">
       <div className="flex items-center gap-3">
         <Button variant="ghost" size="icon-sm" asChild>
           <Link to="/admin/users" {...transitionLinkProps('back')} aria-label="All users">
@@ -115,8 +115,8 @@ function UserSummary({
         </Button>
         <UserAvatar user={user} className="size-9" />
         <div className="min-w-0 flex-1">
-          <p className="flex items-center gap-2 font-medium">
-            <span className="truncate">{user.displayName}</span>
+          <p className="flex flex-wrap items-center gap-x-2 gap-y-1 font-medium">
+            <span className="max-w-full truncate">{user.displayName}</span>
             {user.role === 'admin' && <Badge>Admin</Badge>}
             <UserBadges user={user} />
           </p>
@@ -203,7 +203,7 @@ function MetadataBrowser({ user, folderId }: { user: AdminUser; folderId: string
             )}
           </ol>
         </nav>
-        <span className="hidden shrink-0 items-center gap-1.5 text-xs text-muted-foreground sm:flex">
+        <span className="hidden shrink-0 items-center gap-1.5 text-xs text-muted-foreground @min-[34rem]:flex">
           <EyeOff className="size-3.5" aria-hidden /> Read-only: contents stay private
         </span>
       </div>
@@ -270,7 +270,7 @@ function MetadataRow({
   return (
     <div
       role="listitem"
-      className="group/row mx-2 grid h-full grid-cols-[minmax(0,1fr)_2rem] items-center gap-4 rounded-md px-3 text-sm hover:bg-muted/60 sm:grid-cols-[minmax(0,1fr)_9.5rem_5.5rem_2rem_2rem]"
+      className="group/row mx-2 grid h-full grid-cols-[minmax(0,1fr)_2rem] items-center gap-4 rounded-md px-3 text-sm hover:bg-muted/60 @min-[34rem]:grid-cols-[minmax(0,1fr)_9.5rem_5.5rem_2rem_2rem]"
     >
       {node.kind === 'folder' ? (
         <Link
@@ -284,15 +284,15 @@ function MetadataRow({
         name
       )}
       <span
-        className="hidden truncate text-muted-foreground sm:block"
+        className="hidden truncate text-muted-foreground @min-[34rem]:block"
         title={formatFullDate(node.updatedAt)}
       >
         {formatDate(node.updatedAt)}
       </span>
-      <span className="hidden text-right text-muted-foreground tabular-nums sm:block">
+      <span className="hidden text-right text-muted-foreground tabular-nums @min-[34rem]:block">
         {node.kind === 'folder' && node.sizeBytes === 0 ? '—' : formatBytes(node.sizeBytes)}
       </span>
-      <span className="hidden justify-center sm:flex">
+      <span className="hidden justify-center @min-[34rem]:flex">
         {node.syncState && <SyncStatus state={node.syncState} />}
       </span>
       <Button
@@ -395,8 +395,8 @@ function ModerationDialog({
             <DialogClose asChild>
               <Button variant="outline">Cancel</Button>
             </DialogClose>
-            <Button type="submit" variant="destructive" disabled={pending}>
-              {pending && <Spinner />} Remove
+            <Button type="submit" variant="destructive" disabled={pending} pending={pending}>
+              Remove
             </Button>
           </DialogFooter>
         </form>

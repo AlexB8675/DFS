@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
-import { formatDate, formatFullDate, initials } from '@/lib/format'
+import { formatDate, formatDateInSentence, formatFullDate, initials } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import {
   adminShareOwnersQuery,
@@ -169,12 +169,12 @@ function OwnerGroup({
             aria-hidden
           />
           <Avatar className="size-6">
-            <AvatarFallback className="bg-primary/20 text-[0.625rem] font-medium text-primary">
+            <AvatarFallback className="bg-primary/10 text-[0.625rem] font-medium text-primary">
               {initials(owner.ownerName)}
             </AvatarFallback>
           </Avatar>
           <span className="min-w-0 truncate font-medium">{owner.ownerName}</span>
-          <span className="hidden truncate text-muted-foreground sm:inline">
+          <span className="hidden truncate text-muted-foreground @min-[30rem]:inline">
             @{owner.ownerUsername}
           </span>
           <span className="ml-auto shrink-0 text-xs text-muted-foreground tabular-nums">
@@ -230,14 +230,14 @@ function OwnerLinks({
               <th className="py-1.5 font-medium">Shared</th>
               <th className="py-1.5 pl-4 font-medium">State</th>
               <th className="py-1.5 pl-4 text-right font-medium">Downloads</th>
-              <th className="py-1.5 pl-4 font-medium">Created</th>
+              <th className="hidden py-1.5 pl-4 font-medium @min-[40rem]:table-cell">Created</th>
               <th className="w-10 py-1.5" aria-label="Actions" />
             </tr>
           </thead>
           <tbody>
             {items.map((share) => (
               <tr key={share.id} className="border-t border-border/60">
-                <td className="max-w-80 py-1.5">
+                <td className="max-w-80 min-w-44 py-1.5">
                   <span className="flex min-w-0 items-center gap-2">
                     <NodeIcon
                       node={{ kind: share.nodeKind, name: share.nodeName, mimeType: null }}
@@ -285,7 +285,7 @@ function OwnerLinks({
                   {share.state === 'active' && share.expiresAt && (
                     <span title={formatFullDate(share.expiresAt)}>
                       {' '}
-                      · until {formatDate(share.expiresAt)}
+                      · until {formatDateInSentence(share.expiresAt)}
                     </span>
                   )}
                 </td>
@@ -294,7 +294,7 @@ function OwnerLinks({
                   {share.maxDownloads !== null && ` of ${String(share.maxDownloads)}`}
                 </td>
                 <td
-                  className="py-1.5 pl-4 whitespace-nowrap text-muted-foreground"
+                  className="hidden py-1.5 pl-4 whitespace-nowrap text-muted-foreground @min-[40rem]:table-cell"
                   title={formatFullDate(share.createdAt)}
                 >
                   {formatDate(share.createdAt)}

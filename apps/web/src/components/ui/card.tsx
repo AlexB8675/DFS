@@ -55,11 +55,24 @@ function CardDescription({ className, ...props }: React.ComponentProps<'div'>) {
   )
 }
 
-function CardAction({ className, ...props }: React.ComponentProps<'div'>) {
+function CardAction({
+  className,
+  stackWhenNarrow = false,
+  ...props
+}: React.ComponentProps<'div'> & {
+  /** Under the title and description, rather than beside them, when the header is narrow. */
+  stackWhenNarrow?: boolean
+}) {
   return (
     <div
       data-slot="card-action"
-      className={cn('col-start-2 row-span-2 row-start-1 self-start justify-self-end', className)}
+      className={cn(
+        'col-start-2 row-span-2 row-start-1 self-start justify-self-end',
+        // Queries the header (its container), so a card in a narrow column stacks too.
+        stackWhenNarrow &&
+          '@max-[36rem]:col-start-1 @max-[36rem]:row-span-1 @max-[36rem]:row-start-auto @max-[36rem]:mt-2 @max-[36rem]:justify-self-start',
+        className,
+      )}
       {...props}
     />
   )

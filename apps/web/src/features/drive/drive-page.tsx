@@ -1,5 +1,6 @@
 import { keepPreviousData, useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { FolderOpen, FolderPlus, FolderX, Upload } from 'lucide-react'
+import { useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router'
 import { Button } from '@/components/ui/button'
 import {
@@ -41,6 +42,10 @@ function FolderView({ folderId }: { folderId: string }) {
   const sort = usePreferences((state) => state.sortField)
   const order = usePreferences((state) => state.sortOrder)
   const actions = useNodeActions()
+  // Until the folder's name is known the title stays as it was: not a flash of the bare "DFS".
+  const [previousTitle] = useState(() =>
+    folderId === rootFolderId ? 'My Drive – DFS' : document.title,
+  )
 
   const path = useQuery(pathQuery(folderId))
   const folder = useQuery(nodeQuery(folderId))
@@ -59,7 +64,7 @@ function FolderView({ folderId }: { folderId: string }) {
 
   return (
     <SelectionProvider initialId={searchParams.get('select')}>
-      {name && <title>{`${name} – DFS`}</title>}
+      <title>{name ? `${name} – DFS` : previousTitle}</title>
       <DropZone folderId={folderId} folderName={name}>
         <DriveToolbar
           nodes={nodes}
@@ -120,7 +125,7 @@ function FolderView({ folderId }: { folderId: string }) {
             }
           />
         )}
-        <StatusBar nodes={nodes} hasMore={children.hasNextPage} />
+        <StatusBar nodes={nodes} hasMore={children.hasNextPage} loading={children.isPending} />
       </DropZone>
     </SelectionProvider>
   )

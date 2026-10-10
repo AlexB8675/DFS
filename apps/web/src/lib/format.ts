@@ -25,6 +25,12 @@ export function formatDate(iso: string, now: Date = new Date()): string {
   return dateFormat.format(date)
 }
 
+/** `formatDate` in the middle of a sentence: "modified yesterday", not "modified Yesterday". */
+export function formatDateInSentence(iso: string, now: Date = new Date()): string {
+  const text = formatDate(iso, now)
+  return text === 'Just now' || text === 'Yesterday' ? text.toLowerCase() : text
+}
+
 /** Unambiguous date and time, for tooltips and detail views. */
 export function formatFullDate(iso: string): string {
   return fullFormat.format(new Date(iso))

@@ -30,9 +30,9 @@ export function Header({ onOpenNavigation }: HeaderProps) {
         to="/drive"
         {...transitionLinkProps('section')}
         aria-label="DFS home"
-        className="flex shrink-0 items-center rounded-md px-1 outline-none focus-visible:ring-2 focus-visible:ring-ring md:w-[calc(var(--sidebar-width)-0.75rem)]"
+        className="flex shrink-0 items-center rounded-md px-1 outline-none focus-visible:ring-2 focus-visible:ring-ring max-[21.5rem]:hidden md:w-[calc(var(--sidebar-width)-0.75rem)]"
       >
-        {/* On a phone, the mark alone: search needs the room. */}
+        {/* On a phone, the mark alone: search needs the room (and on the narrowest, not even that). */}
         <AppLogo withName nameClassName="max-sm:hidden" />
       </Link>
       <SearchBox className="min-w-0 flex-1 md:max-w-2xl" />

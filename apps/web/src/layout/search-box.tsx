@@ -4,6 +4,7 @@ import { useLocation, useSearchParams } from 'react-router'
 import { Input } from '@/components/ui/input'
 import { Kbd } from '@/components/ui/kbd'
 import { useHotkey } from '@/lib/use-hotkey'
+import { useMediaQuery } from '@/lib/use-media-query'
 import { useTransitionNavigate } from '@/lib/navigation'
 import { cn } from '@/lib/utils'
 
@@ -13,6 +14,8 @@ export function SearchBox({ className }: { className?: string }) {
   const { pathname } = useLocation()
   const [searchParams] = useSearchParams()
   const inputRef = useRef<HTMLInputElement>(null)
+  // "Search in Drive" needs more room than a phone's header has left; "Search" fits.
+  const roomy = useMediaQuery('(min-width: 25rem)')
   const query = pathname === '/search' ? (searchParams.get('q') ?? '') : ''
 
   useHotkey('/', () => inputRef.current?.focus())
@@ -40,10 +43,10 @@ export function SearchBox({ className }: { className?: string }) {
         name="q"
         type="search"
         defaultValue={query}
-        placeholder="Search in Drive"
+        placeholder={roomy ? 'Search in Drive' : 'Search'}
         aria-label="Search files and folders"
         autoComplete="off"
-        className="h-9 rounded-md border-transparent bg-muted/60 pr-10 pl-9 focus-visible:bg-background"
+        className="h-9 rounded-md bg-muted/60 pr-3 pl-9 focus-visible:bg-background sm:pr-10"
         onKeyDown={(event) => {
           if (event.key === 'Escape') event.currentTarget.blur()
         }}

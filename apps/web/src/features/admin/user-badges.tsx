@@ -24,7 +24,7 @@ export function UserBadges({ user }: { user: AdminUser }) {
     status = {
       label: 'Password expired',
       title: 'Their temporary password ran out before they used it. Reset it to send a new one.',
-      tone: 'border-amber-500/40 text-amber-600 dark:text-amber-400',
+      tone: 'border-amber-500/40 text-amber-700 dark:text-amber-400',
     }
   } else if (user.activatedAt === null) {
     status = { label: 'Not signed in yet', title: `Hasn’t chosen a password yet. ${until}` }
@@ -54,7 +54,7 @@ export function UserBadges({ user }: { user: AdminUser }) {
           title={`Asked on the sign-in page, ${formatFullDate(asked)}. Make sure it was them, then ${
             user.isOwner ? 'run dfs owner on the server' : 'give them one with Reset password'
           }.`}
-          className="border-amber-500/40 text-amber-600 dark:text-amber-400"
+          className="border-amber-500/40 text-amber-700 dark:text-amber-400"
         >
           <KeyRound /> Asked for a new password
         </Badge>

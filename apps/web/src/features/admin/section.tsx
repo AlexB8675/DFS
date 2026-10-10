@@ -19,9 +19,10 @@ export function Section({
   return (
     <Card size="sm">
       <CardHeader>
-        <CardTitle>{title}</CardTitle>
-        <p className="text-xs text-muted-foreground">{description}</p>
-        {action && <CardAction>{action}</CardAction>}
+        {/* Column 1 by name: the action may stack under them, into the same column. */}
+        <CardTitle className="col-start-1">{title}</CardTitle>
+        <p className="col-start-1 text-xs text-muted-foreground">{description}</p>
+        {action && <CardAction stackWhenNarrow>{action}</CardAction>}
       </CardHeader>
       <CardContent>{children}</CardContent>
     </Card>

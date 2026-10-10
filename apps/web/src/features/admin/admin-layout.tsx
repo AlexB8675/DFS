@@ -19,10 +19,13 @@ export function AdminLayout() {
   // Keyed by section, so switching tabs eases the content in, while moving
   // around inside one section (the file browser) doesn't.
   const section = pathname.split('/')[2] ?? ''
+  const tab = TABS.find((entry) =>
+    entry.end ? pathname === entry.to : pathname.startsWith(entry.to),
+  )
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <title>Admin – DFS</title>
+      <title>{tab ? `${tab.label} – Admin – DFS` : 'Admin – DFS'}</title>
       <PageHeader
         title="Admin"
         description="Health, graphs, users and storage. Admins see file names and sizes, never contents."

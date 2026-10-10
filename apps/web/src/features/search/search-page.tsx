@@ -69,7 +69,11 @@ export function SearchPage() {
           }
         />
       )}
-      <StatusBar nodes={nodes} hasMore={results.hasNextPage} />
+      <StatusBar
+        nodes={nodes}
+        hasMore={results.hasNextPage}
+        loading={q !== '' && results.isPending}
+      />
     </SelectionProvider>
   )
 }

@@ -56,11 +56,15 @@ export function UsersPage() {
           <thead className="sticky top-0 z-10 bg-background text-xs text-muted-foreground">
             <tr className="border-b text-left">
               <th className="py-2 pl-5 font-medium">User</th>
-              <th className="hidden w-24 py-2 pl-4 font-medium sm:table-cell">Role</th>
-              <th className="hidden w-56 py-2 pl-4 font-medium md:table-cell">Storage</th>
-              <th className="hidden w-24 py-2 pl-4 text-right font-medium lg:table-cell">Files</th>
-              <th className="hidden w-32 py-2 pl-4 font-medium lg:table-cell">Last seen</th>
-              <th className="w-32 py-2 pr-5">
+              <th className="hidden w-24 py-2 pl-4 font-medium @min-[30rem]:table-cell">Role</th>
+              <th className="hidden w-56 py-2 pl-4 font-medium @min-[44rem]:table-cell">Storage</th>
+              <th className="hidden w-24 py-2 pl-4 text-right font-medium @min-[58rem]:table-cell">
+                Files
+              </th>
+              <th className="hidden w-32 py-2 pl-4 font-medium @min-[58rem]:table-cell">
+                Last seen
+              </th>
+              <th className="w-28 py-2 pr-5">
                 <span className="sr-only">Actions</span>
               </th>
             </tr>
@@ -116,8 +120,9 @@ function UserRow({
         >
           <UserAvatar user={user} className="size-8" />
           <span className="min-w-0">
-            <span className="flex items-center gap-2">
-              <span className="truncate font-medium">{user.displayName}</span>
+            {/* The badges go under the name when they don't fit beside it, rather than squeezing it away. */}
+            <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span className="max-w-full truncate font-medium">{user.displayName}</span>
               <UserBadges user={user} />
             </span>
             <span className="block truncate font-mono text-xs text-muted-foreground">
@@ -126,12 +131,12 @@ function UserRow({
           </span>
         </Link>
       </td>
-      <td className="hidden py-2.5 pl-4 sm:table-cell">
+      <td className="hidden py-2.5 pl-4 @min-[30rem]:table-cell">
         <Badge variant={user.role === 'admin' ? 'default' : 'secondary'}>
           {user.role === 'admin' ? 'Admin' : 'User'}
         </Badge>
       </td>
-      <td className="hidden py-2.5 pl-4 md:table-cell">
+      <td className="hidden py-2.5 pl-4 @min-[44rem]:table-cell">
         <Progress
           value={ratio * 100}
           aria-label={`Storage used by ${user.displayName}`}
@@ -144,11 +149,11 @@ function UserRow({
           {formatBytes(user.usedBytes)} of {formatBytes(user.quotaBytes)}
         </span>
       </td>
-      <td className="hidden py-2.5 pl-4 text-right text-muted-foreground tabular-nums lg:table-cell">
+      <td className="hidden py-2.5 pl-4 text-right text-muted-foreground tabular-nums @min-[58rem]:table-cell">
         {user.fileCount.toLocaleString()}
       </td>
       <td
-        className="hidden truncate py-2.5 pl-4 text-muted-foreground lg:table-cell"
+        className="hidden truncate py-2.5 pl-4 text-muted-foreground @min-[58rem]:table-cell"
         title={user.lastSeenAt ? formatFullDate(user.lastSeenAt) : undefined}
       >
         {user.lastSeenAt ? formatDate(user.lastSeenAt) : 'Never'}

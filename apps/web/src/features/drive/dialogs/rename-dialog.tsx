@@ -10,7 +10,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { Spinner } from '@/components/ui/spinner'
 import { errorMessage } from '@/lib/api/client'
 import { formText } from '@/lib/form-data'
 import { useRenameNode } from '../api'
@@ -68,8 +67,8 @@ export function RenameDialog({ node, onClose }: RenameDialogProps) {
             <DialogClose asChild>
               <Button variant="outline">Cancel</Button>
             </DialogClose>
-            <Button type="submit" disabled={pending}>
-              {pending && <Spinner />} Rename
+            <Button type="submit" disabled={pending} pending={pending}>
+              Rename
             </Button>
           </DialogFooter>
         </form>

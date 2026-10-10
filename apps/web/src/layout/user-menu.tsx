@@ -66,7 +66,7 @@ export function UserMenu() {
 export function UserAvatar({ user, className }: { user: User; className?: string }) {
   return (
     <Avatar className={className}>
-      <AvatarFallback className="bg-primary/20 font-medium text-primary">
+      <AvatarFallback className="bg-primary/10 font-medium text-primary">
         {initials(user.displayName)}
       </AvatarFallback>
     </Avatar>

@@ -19,7 +19,7 @@ import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 import { Skeleton } from '@/components/ui/skeleton'
 import { errorMessage } from '@/lib/api/client'
-import { formatBytes, formatDate, formatFullDate } from '@/lib/format'
+import { formatBytes, formatDateInSentence, formatFullDate } from '@/lib/format'
 import { describeUserAgent } from '@/lib/user-agent'
 import { adminSessionsQuery, adminUploadsQuery, useCancelUploadAsAdmin, useEndSession } from './api'
 import { AllClear, Section } from './section'
@@ -129,12 +129,14 @@ export function SessionList({
             </span>
             <span className="text-xs text-muted-foreground">
               {session.ip ?? 'unknown address'} · signed in{' '}
-              <span title={formatFullDate(session.createdAt)}>{formatDate(session.createdAt)}</span>
+              <span title={formatFullDate(session.createdAt)}>
+                {formatDateInSentence(session.createdAt)}
+              </span>
               {session.lastSeenAt && (
                 <>
                   {' · active '}
                   <span title={formatFullDate(session.lastSeenAt)}>
-                    {formatDate(session.lastSeenAt)}
+                    {formatDateInSentence(session.lastSeenAt)}
                   </span>
                 </>
               )}
@@ -223,7 +225,7 @@ function UploadRow({ upload, onCancel }: { upload: AdminUpload; onCancel: () => 
         )}
         <span className="text-muted-foreground">
           {upload.userName} · {formatBytes(upload.receivedBytes)} of {formatBytes(upload.sizeBytes)}{' '}
-          · started {formatDate(upload.createdAt)}
+          · started {formatDateInSentence(upload.createdAt)}
         </span>
         <Button variant="ghost" size="sm" className="ml-auto" onClick={onCancel}>
           <XCircle /> Give up

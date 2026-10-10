@@ -63,6 +63,11 @@ export function NodeTile({ node, onSelect, onOpen, onContextMenu, onPointerDown 
         <div className="text-xs text-muted-foreground">
           {node.kind === 'folder' ? 'Folder' : formatBytes(node.sizeBytes)}
         </div>
+        {node.location && (
+          <div className="truncate text-xs text-muted-foreground" title={node.location}>
+            {node.location}
+          </div>
+        )}
       </div>
     </div>
   )

@@ -43,7 +43,7 @@ import type { ViewHandle } from '@/features/preview/view-handle'
 import { ThemeMenu } from '@/layout/theme-menu'
 import { ApiError, errorMessage } from '@/lib/api/client'
 import { linkPlace, type FilePlace } from '@/lib/file-place'
-import { formatBytes, formatDate, formatFullDate } from '@/lib/format'
+import { formatBytes, formatDate, formatDateInSentence, formatFullDate } from '@/lib/format'
 import { formText } from '@/lib/form-data'
 import { transitionLinkProps } from '@/lib/navigation'
 import { isPreviewable, previewKind } from '@/lib/preview-kind'
@@ -258,7 +258,7 @@ function SharedFile({ token, share, file }: { token: string; share: OpenShare; f
             </h1>
             <ShareFacts
               share={share}
-              lead={`${formatBytes(file.sizeBytes)} · modified ${formatDate(file.updatedAt)}`}
+              lead={`${formatBytes(file.sizeBytes)} · modified ${formatDateInSentence(file.updatedAt)}`}
             />
           </div>
           {video && (
@@ -312,7 +312,7 @@ function SharedFile({ token, share, file }: { token: string; share: OpenShare; f
       <div className="grid gap-1">
         <h1 className="text-lg font-semibold break-all">{file.name}</h1>
         <p className="text-sm text-muted-foreground tabular-nums">
-          {formatBytes(file.sizeBytes)} · modified {formatDate(file.updatedAt)}
+          {formatBytes(file.sizeBytes)} · modified {formatDateInSentence(file.updatedAt)}
         </p>
       </div>
       <div className="flex flex-wrap justify-center gap-2">

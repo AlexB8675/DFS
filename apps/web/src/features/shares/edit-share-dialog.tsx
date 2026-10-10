@@ -13,7 +13,6 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Spinner } from '@/components/ui/spinner'
 import { Switch } from '@/components/ui/switch'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { errorMessage } from '@/lib/api/client'
@@ -94,17 +93,18 @@ export function EditShareDialog({ link, onClose }: { link: ShareLink; onClose: (
               type="single"
               variant="outline"
               spacing={0}
+              className="w-full"
               value={expiry}
               aria-labelledby="edit-expiry-label"
               onValueChange={(value) => {
                 if (value) setExpiry(value)
               }}
             >
-              <ToggleGroupItem value="keep" className="flex-1">
+              <ToggleGroupItem value="keep" className="flex-auto">
                 Keep
               </ToggleGroupItem>
               {EXPIRY_OPTIONS.map((option) => (
-                <ToggleGroupItem key={option.value} value={option.value} className="flex-1">
+                <ToggleGroupItem key={option.value} value={option.value} className="flex-auto">
                   {option.label}
                 </ToggleGroupItem>
               ))}
@@ -169,8 +169,8 @@ export function EditShareDialog({ link, onClose }: { link: ShareLink; onClose: (
             <DialogClose asChild>
               <Button variant="outline">Cancel</Button>
             </DialogClose>
-            <Button type="submit" disabled={pending}>
-              {pending && <Spinner />} Save
+            <Button type="submit" disabled={pending} pending={pending}>
+              Save
             </Button>
           </DialogFooter>
         </form>

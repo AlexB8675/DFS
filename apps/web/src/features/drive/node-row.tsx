@@ -4,7 +4,7 @@ import { NodeIcon } from '@/components/node-icon'
 import { SyncStatus } from '@/components/sync-status'
 import { formatBytes, formatDate, formatFullDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
-import { listColumns, optionId, type ListedNode } from './list-layout'
+import { optionId, type ListedNode, type ListLayout } from './list-layout'
 import { itemDropProps, useItemState } from './item-state'
 import { usePrefetchOnHover } from './use-prefetch-on-hover'
 
@@ -20,12 +20,12 @@ export interface NodeItemProps {
 /** One row of the list view. */
 export function NodeRow({
   node,
-  showLocation,
+  layout,
   onSelect,
   onOpen,
   onContextMenu,
   onPointerDown,
-}: NodeItemProps & { showLocation: boolean }) {
+}: NodeItemProps & { layout: ListLayout }) {
   const state = useItemState(node)
   const prefetch = usePrefetchOnHover(node)
 
@@ -39,7 +39,7 @@ export function NodeRow({
       {...prefetch}
       className={cn(
         'mx-2 grid h-full cursor-default items-center gap-4 rounded-md px-3 text-sm transition-[background-color,box-shadow,opacity] select-none',
-        listColumns(showLocation),
+        layout.columns,
         state.selected ? 'bg-primary/15' : 'hover:bg-muted/60',
         state.active &&
           'group-focus-visible/list:ring-1 group-focus-visible/list:ring-ring group-focus-visible/list:ring-inset',
@@ -64,24 +64,32 @@ export function NodeRow({
     >
       <span className="flex min-w-0 items-center gap-3">
         <NodeIcon node={node} className="size-5 shrink-0" />
-        <span className="truncate" title={node.name}>
-          {node.name}
+        <span className="min-w-0">
+          <span className="block truncate" title={node.name}>
+            {node.name}
+          </span>
+          {layout.location === 'under' && (
+            <span className="block truncate text-xs text-muted-foreground" title={node.location}>
+              {node.location}
+            </span>
+          )}
         </span>
       </span>
-      {showLocation && (
-        <span className="hidden truncate text-muted-foreground lg:block" title={node.location}>
+      {layout.location === 'column' && (
+        <span className="truncate text-muted-foreground" title={node.location}>
           {node.location}
         </span>
       )}
-      <span
-        className="hidden truncate text-muted-foreground sm:block"
-        title={formatFullDate(node.updatedAt)}
-      >
-        {formatDate(node.updatedAt)}
-      </span>
-      <span className="hidden text-right text-muted-foreground tabular-nums sm:block">
-        {node.kind === 'folder' && node.sizeBytes === 0 ? '—' : formatBytes(node.sizeBytes)}
-      </span>
+      {layout.details && (
+        <>
+          <span className="truncate text-muted-foreground" title={formatFullDate(node.updatedAt)}>
+            {formatDate(node.updatedAt)}
+          </span>
+          <span className="text-right text-muted-foreground tabular-nums">
+            {node.kind === 'folder' && node.sizeBytes === 0 ? '—' : formatBytes(node.sizeBytes)}
+          </span>
+        </>
+      )}
       <span className="flex justify-center">
         {node.syncState && <SyncStatus state={node.syncState} />}
       </span>
