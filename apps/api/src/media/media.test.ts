@@ -4,6 +4,7 @@ import { ApiClient, createFolder, text, uploadFile, workspace } from '@dfs/contr
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
 import {
   fileMediaSchema,
+  shareLinkPageSchema,
   shareLinkSchema,
   streamLinkSchema,
   systemHealthSchema,
@@ -521,19 +522,36 @@ describe('stream links, for another player (§6.7)', () => {
     return fetch(`${apiUrl}${new URL(link.url).pathname}`, init)
   }
 
-  async function linkTo(nodeId: string, password: string | null = null) {
+  async function linkTo(nodeId: string, terms: { password?: string; maxDownloads?: number } = {}) {
     return client.call('POST', '/shares', shareLinkSchema, {
-      json: { nodeId, expiresAt: null, password, maxDownloads: null },
+      json: {
+        nodeId,
+        expiresAt: null,
+        password: terms.password ?? null,
+        maxDownloads: terms.maxDownloads ?? null,
+      },
     })
   }
 
-  it('plays a user’s file without a session, with Range, for 12 hours', async () => {
+  function streamLink(nodeId: string, create = false) {
+    return client.call('POST', `/files/${nodeId}/stream-link`, streamLinkSchema, {
+      json: { create },
+    })
+  }
+
+  it('plays a user’s file through its share link, made only when asked, with Range', async () => {
     const film = await uploadFile(client, folderId, 'A film (cut).mp4', text('the whole film'))
-    const link = await client.call('POST', `/files/${film.nodeId}/stream-link`, streamLinkSchema)
-    expect(link.url).toMatch(/\/api\/stream\/u\.[\w.-]+\/A%20film%20\(cut\)\.mp4$/)
-    const lasts = Date.parse(link.expiresAt) - Date.now()
-    expect(lasts).toBeGreaterThan(11.9 * 60 * 60_000)
-    expect(lasts).toBeLessThanOrEqual(12 * 60 * 60_000)
+    expect(await client.error('POST', `/files/${film.nodeId}/stream-link`, { json: {} })).toEqual({
+      status: 404,
+      code: 'no_share_link',
+    })
+    const link = await streamLink(film.nodeId, true)
+    expect(link.url).toMatch(/\/api\/stream\/s\.[\w.-]+\/A%20film%20\(cut\)\.mp4$/)
+    // An ordinary share link, to turn off in Shared links; the same address each time.
+    const shares = await client.call('GET', '/shares', shareLinkPageSchema)
+    expect(shares.items.filter((share) => share.nodeId === film.nodeId)).toHaveLength(1)
+    expect((await streamLink(film.nodeId)).url).toBe(link.url)
+    expect((await streamLink(film.nodeId, true)).url).toBe(link.url)
 
     const whole = await played(link)
     expect(whole.status).toBe(200)
@@ -544,19 +562,21 @@ describe('stream links, for another player (§6.7)', () => {
     const head = await played(link, { method: 'HEAD' })
     expect(head.headers.get('content-length')).toBe('14')
 
-    // Anything changed in its token, and it grants nothing: here, its expiry.
-    const changed = {
-      url: link.url.replace(
-        /\.(\d+)\.([\w-]{43})\//,
-        (_, at: string, mac: string) => `.${String(Number(at) + 1)}.${mac}/`,
-      ),
-    }
+    // Anything changed in its token, and it grants nothing.
+    const changed = { url: link.url.replace(/[\w-]{20}(?=[\w-]{23}\/)/, 'A'.repeat(20)) }
+    expect(changed.url).not.toBe(link.url)
     expect((await played(changed)).status).toBe(410)
   })
 
-  it('stops with its file in the trash, or its user disabled, and serves the version it named', async () => {
-    const film = await uploadFile(client, folderId, 'Trashed.mkv', text('first cut'))
-    const link = await client.call('POST', `/files/${film.nodeId}/stream-link`, streamLinkSchema)
+  it('takes a plain link, not one with a password, and ends with the link or the file', async () => {
+    const film = await uploadFile(client, folderId, 'Kept.mkv', text('first cut'))
+    await linkTo(film.nodeId, { password: 'not for VLC' })
+    expect(await client.error('POST', `/files/${film.nodeId}/stream-link`, { json: {} })).toEqual({
+      status: 404,
+      code: 'no_share_link',
+    })
+    const link = await streamLink(film.nodeId, true)
+
     await client.send('POST', '/nodes/trash', { json: { ids: [film.nodeId] } })
     expect((await played(link)).status).toBe(404)
     await client.send('POST', `/nodes/${film.nodeId}/restore`)
@@ -565,46 +585,58 @@ describe('stream links, for another player (§6.7)', () => {
     const owner = sql`(SELECT owner_id FROM nodes WHERE id = ${film.nodeId})`
     await app.db.execute(sql`UPDATE users SET disabled_at = now() WHERE id = ${owner}`)
     try {
-      expect((await played(link)).status).toBe(410)
+      expect((await played(link)).status).toBe(404)
     } finally {
       await app.db.execute(sql`UPDATE users SET disabled_at = NULL WHERE id = ${owner}`)
     }
-    expect((await played(link)).status).toBe(200)
+
+    const shares = await client.call('GET', '/shares', shareLinkPageSchema)
+    const plain = shares.items.find((share) => share.nodeId === film.nodeId && !share.hasPassword)
+    await client.send('DELETE', `/shares/${plain?.id ?? ''}`)
+    expect((await played(link)).status).toBe(404)
   })
 
   it('is made for audio and video alone', async () => {
     const notes = await uploadFile(client, folderId, 'notes.txt', text('not media'))
-    expect(await client.error('POST', `/files/${notes.nodeId}/stream-link`)).toEqual({
-      status: 422,
-      code: 'not_media',
-    })
+    expect(
+      await client.error('POST', `/files/${notes.nodeId}/stream-link`, { json: { create: true } }),
+    ).toEqual({ status: 422, code: 'not_media' })
   })
 
-  it('is made through a share link from DFS’s own pages, and stops with the link', async () => {
+  it('is made through a share link from DFS’s own pages, plays uncounted, and ends with it', async () => {
     const song = await uploadFile(client, folderId, 'shared.mp3', text('shared song'))
-    const share = await linkTo(song.nodeId)
+    const share = await linkTo(song.nodeId, { maxDownloads: 1 })
     const token = share.url?.split('/s/')[1] ?? ''
     const path = `/s/${token}/files/${song.nodeId}/stream-link`
     const viewer = new ApiClient(apiUrl, client.origin)
-    const link = await viewer.call('POST', path, streamLinkSchema)
+    const link = await viewer.call('POST', path, streamLinkSchema, { json: {} })
     expect(link.url).toContain('/api/stream/s.')
-    expect(await (await played(link)).text()).toBe('shared song')
+    // Playing, it never counts toward the link's downloads.
+    for (let play = 0; play < 3; play += 1) {
+      expect(await (await played(link)).text()).toBe('shared song')
+    }
     const elsewhere = new ApiClient(apiUrl, 'https://elsewhere.example')
-    expect(await elsewhere.error('POST', path)).toEqual({ status: 403, code: 'forbidden_origin' })
+    expect(await elsewhere.error('POST', path, { json: {} })).toEqual({
+      status: 403,
+      code: 'forbidden_origin',
+    })
 
     await client.send('DELETE', `/shares/${share.id}`)
     expect((await played(link)).status).toBe(404)
   })
 
-  it('keeps to a link’s password: made once it is given, and stopped by a new one', async () => {
+  it('keeps to a link’s password: made once it is given, and ended by a new one', async () => {
     const song = await uploadFile(client, folderId, 'locked.mp3', text('locked song'))
-    const share = await linkTo(song.nodeId, 'open sesame')
+    const share = await linkTo(song.nodeId, { password: 'open sesame' })
     const token = share.url?.split('/s/')[1] ?? ''
     const path = `/s/${token}/files/${song.nodeId}/stream-link`
     const viewer = new ApiClient(apiUrl, client.origin)
-    expect(await viewer.error('POST', path)).toEqual({ status: 403, code: 'share_locked' })
+    expect(await viewer.error('POST', path, { json: {} })).toEqual({
+      status: 403,
+      code: 'share_locked',
+    })
     await viewer.send('POST', `/s/${token}/unlock`, { json: { password: 'open sesame' } })
-    const link = await viewer.call('POST', path, streamLinkSchema)
+    const link = await viewer.call('POST', path, streamLinkSchema, { json: {} })
     expect(await (await played(link)).text()).toBe('locked song')
 
     await client.call('PATCH', `/shares/${share.id}`, shareLinkSchema, {

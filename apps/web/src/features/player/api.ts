@@ -59,19 +59,36 @@ export function contentUrl(place: FilePlace, versionId: string, startSeconds = 0
 }
 
 /**
- * A stream link for another player (VLC, §6.7): made when first asked for,
- * then kept an hour, as each lasts 12 and anyone who has one can play the file.
+ * A share link's address for another player (VLC, §6.7); `null` for a drive
+ * file without a plain share link yet, which `makeStreamLink` makes. Asked
+ * each time it is wanted: a link turned off meanwhile isn't offered.
  */
 export function streamLinkQuery(place: FilePlace) {
   return queryOptions({
     queryKey: playerKeys.streamLink(place.path),
-    queryFn: () => apiSend('POST', `${place.path}/stream-link`, undefined, streamLinkSchema),
-    staleTime: 60 * 60_000,
-    gcTime: 60 * 60_000,
+    queryFn: async () => {
+      try {
+        return await apiSend(
+          'POST',
+          `${place.path}/stream-link`,
+          { create: false },
+          streamLinkSchema,
+        )
+      } catch (error) {
+        if (error instanceof ApiError && error.code === 'no_share_link') return null
+        throw error
+      }
+    },
+    staleTime: 0,
     refetchOnWindowFocus: false,
     retry: false,
     meta: linkMeta(place),
   })
+}
+
+/** Makes a drive file's plain share link, for another player to play it through (§6.7). */
+export function makeStreamLink(place: FilePlace) {
+  return apiSend('POST', `${place.path}/stream-link`, { create: true }, streamLinkSchema)
 }
 
 /** Where to test the connection: a user's, or a link viewer's, under the link. */

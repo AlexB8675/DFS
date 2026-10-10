@@ -25,6 +25,7 @@ import {
   savePositionSchema,
   sortFieldSchema,
   sortOrderSchema,
+  streamLinkRequestSchema,
   unlockShareSchema,
   updateChannelSchema,
   updateNodeSchema,
@@ -339,7 +340,11 @@ export const handlers = [
     http.post<Place>(`${path}/stream-link`, ({ request, params }) =>
       respond(
         request,
-        () => Response.json(db.streamLink(placeOf(params)), { status: 201 }),
+        async () => {
+          const { create } = streamLinkRequestSchema.parse(await request.json())
+          const { link, created } = db.streamLink(placeOf(params), create)
+          return Response.json(link, { status: created ? 201 : 200 })
+        },
         options,
       ),
     ),

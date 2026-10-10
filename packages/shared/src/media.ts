@@ -301,14 +301,14 @@ export const deliverySchema = z.object({
 export type Delivery = z.infer<typeof deliverySchema>
 
 /**
- * `POST /files/:id/stream-link`: an address another player (VLC) opens to
- * play the version a player is given, without signing in, until `expiresAt`
- * (§6.7). Anyone who has it can play that file until then.
+ * `POST /files/:id/stream-link`: a share link's address another player (VLC)
+ * opens to play the file without signing in (§6.7). Public, as the share link
+ * is: anyone who has it can play the file while the link works. In the
+ * drive, the file's own plain link, made when `create` says so.
  */
-export const streamLinkSchema = z.object({
-  url: z.url(),
-  expiresAt: z.iso.datetime(),
-})
+export const streamLinkRequestSchema = z.object({ create: z.boolean().default(false) })
+
+export const streamLinkSchema = z.object({ url: z.url() })
 
 export type StreamLink = z.infer<typeof streamLinkSchema>
 

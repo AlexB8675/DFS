@@ -563,15 +563,38 @@ export class MockDb {
   }
 
   /**
-   * `POST …/stream-link`: an address for VLC (§6.7), made up, for 12 hours.
+   * `POST …/stream-link`: a share link's address for VLC (§6.7), made up; in
+   * the drive, through the file's plain link, made when `create` says so.
    * Nothing outside this page reaches the mock, so no player could open it.
    */
-  streamLink(place: MockPlace): StreamLink {
-    const { node, versionId } = this.playedFile(place)
-    return {
-      url: `${location.origin}/api/stream/mock.${versionId}/${encodeURIComponent(node.name)}`,
-      expiresAt: new Date(Date.now() + 12 * 60 * 60_000).toISOString(),
+  streamLink(place: MockPlace, create: boolean): { link: StreamLink; created: boolean } {
+    const { node } = this.playedFile(place)
+    const address = (shareId: string) => ({
+      url: `${location.origin}/api/stream/s.${shareId}.0.${node.id}.mock/${encodeURIComponent(node.name)}`,
+    })
+    if (place.token !== null) {
+      const share = this.state.shares.find((candidate) => candidate.token === place.token)
+      return { link: address(share?.id ?? place.token), created: false }
     }
+    const plain = this.state.shares.find(
+      (share) =>
+        share.nodeId === node.id && !share.hasPassword && share.versionNo === (node.versionNo ?? 1),
+    )
+    if (plain) return { link: address(plain.id), created: false }
+    if (!create) {
+      throw new MockApiError(
+        404,
+        'no_share_link',
+        'This file has no share link for another player to play it through.',
+      )
+    }
+    const made = this.createShare({
+      nodeId: node.id,
+      expiresAt: null,
+      password: null,
+      maxDownloads: null,
+    })
+    return { link: address(made.id), created: true }
   }
 
   /**

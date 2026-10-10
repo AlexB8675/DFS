@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto'
 import { Readable } from 'node:stream'
-import type { Executor } from '@dfs/db'
+import { WORKING_LINK, type Executor } from '@dfs/db'
 import {
   audioQueueSchema,
   coverType,
@@ -12,6 +12,7 @@ import {
   playbackReportSchema,
   playbackSchema,
   savePositionSchema,
+  streamLinkRequestSchema,
   streamLinkSchema,
   type MediaInfo,
   type MetricName,
@@ -38,16 +39,11 @@ import {
   subtitleFilesBeside,
 } from '../media/playback.ts'
 import { keptSubtitles } from '../media/subtitles.ts'
-import {
-  readStreamToken,
-  STREAM_LINK_LIFETIME_MS,
-  streamToken,
-  type StreamGrant,
-  type StreamScope,
-} from '../media/stream-links.ts'
+import { readStreamToken, streamToken } from '../media/stream-links.ts'
 import { mediaTokenValid } from '../media/token.ts'
 import { visibleFolder, visibleNode, type NodeRow } from '../nodes/read.ts'
 import { liveShareById, nodeInShare, openShare } from '../shares/public.ts'
+import { createShare } from '../shares/shares.ts'
 import { assertOwnOrigin } from './auth.ts'
 import { downloadableFile, versionChanged } from './content.ts'
 
@@ -113,10 +109,19 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
       },
     )
 
-    // An address another player opens (VLC, §6.7), for what this browser can't play.
+    // A share link's address for another player (VLC, §6.7), for what this
+    // browser can't play: through a link, that link's; in the drive, the
+    // file's own plain link, which is made only when asked to (`create`).
     routes.post(
       `${place.path}/stream-link`,
-      { config: place.config, schema: { params: fileParams, response: { 201: streamLinkSchema } } },
+      {
+        config: place.config,
+        schema: {
+          params: fileParams,
+          body: streamLinkRequestSchema,
+          response: { 200: streamLinkSchema, 201: streamLinkSchema },
+        },
+      },
       async (request, reply) => {
         // No session through a link, so no CSRF token: from DFS's own page.
         if (request.params.token !== undefined) assertOwnOrigin(app, request)
@@ -126,34 +131,36 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
           played.userId === null ? `address:${request.ip}` : `user:${played.userId}`,
           'Too many stream links. Try again in a few minutes.',
         )
-        const file = await servedVersion(app.db, played)
-        const scope: StreamScope = played.share
-          ? {
-              kind: 'share',
-              shareId: played.share.id,
-              passwordVersion: played.share.passwordVersion,
-            }
-          : { kind: 'user', userId: requireAuth(request.auth).user.id }
-        const expiresAt = Date.now() + STREAM_LINK_LIFETIME_MS
+        let share = played.share
+        let created = false
+        if (!share) {
+          const auth = requireAuth(request.auth)
+          share = await streamShare(app.db, auth.user.id, played.node.id)
+          if (!share && request.body.create) {
+            const link = { expiresAt: null, password: null, maxDownloads: null }
+            await createShare(app, auth, { nodeId: played.node.id, ...link })
+            share = await streamShare(app.db, auth.user.id, played.node.id)
+            created = true
+          }
+          if (!share) {
+            throw new ApiError(
+              404,
+              'no_share_link',
+              'This file has no share link for another player to play it through.',
+            )
+          }
+        }
         const token = await streamToken(app.keys, {
-          scope,
+          shareId: share.id,
+          passwordVersion: share.passwordVersion,
           nodeId: played.node.id,
-          versionId: file.version_id,
-          expiresAt,
         })
         request.log.info(
-          {
-            streamLink: {
-              nodeId: played.node.id,
-              versionId: file.version_id,
-              ...(played.shareId !== null && { shareId: played.shareId }),
-            },
-          },
-          'stream link made',
+          { streamLink: { nodeId: played.node.id, shareId: share.id, created } },
+          'stream link given',
         )
-        return reply.code(201).send({
+        return reply.code(created ? 201 : 200).send({
           url: `${app.config.publicBaseUrl}/api/stream/${token}/${encodeURIComponent(played.node.name)}`,
-          expiresAt: new Date(expiresAt).toISOString(),
         })
       },
     )
@@ -350,8 +357,10 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
     },
   )
 
-  // What a stream link reads (§6.7): no session, its token says whose and which
-  // version; sent as any download is, with Range. Its name is the player's title.
+  // What a stream link reads (§6.7): no session nor password, its token names
+  // the share link and the file; sent as any download is, with Range, and,
+  // as playing, never counted toward the link's downloads. Its name is the
+  // player's title.
   routes.get(
     '/stream/:token/:name',
     {
@@ -361,8 +370,15 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
     async (request, reply) => {
       const grant = await readStreamToken(app.keys, request.params.token)
       if (!grant) throw streamLinkEnded()
-      await streamAllowed(app, grant)
-      const file = await downloadableFile(app.db, grant.nodeId, grant.versionId)
+      const { share, root } = await liveShareById(app, grant.shareId)
+      if (share.password_version !== grant.passwordVersion) throw streamLinkEnded()
+      const node = asMedia(await nodeInShare(app, root, grant.nodeId))
+      // A file link serves its own version; a folder link, the file's current one.
+      const file = await downloadableFile(
+        app.db,
+        node.id,
+        node.id === root.id ? share.version_id : null,
+      )
       return sendFile(app, request, reply, file)
     },
   )
@@ -371,28 +387,28 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
 }
 
 /**
- * Whether whoever made a stream link may still read its file: the user, with
- * the file in their drive and their account enabled; or the share link, live,
- * with the same password, still reaching the file (and, a file link, its
- * version). Throws why not.
+ * The user's plain link to a file's current version (no password, so a
+ * stream link of it plays what its viewers may see), the one that never ends
+ * first; `null` if there is none.
  */
-async function streamAllowed(app: FastifyInstance, grant: StreamGrant): Promise<void> {
-  const { scope } = grant
-  if (scope.kind === 'user') {
-    const { rows } = await app.db.execute(sql`
-      SELECT 1 FROM users WHERE id = ${scope.userId} AND disabled_at IS NULL`)
-    if (rows.length === 0) throw streamLinkEnded()
-    asMedia(await visibleNode(app.db, scope.userId, grant.nodeId))
-  } else {
-    const { share, root } = await liveShareById(app, scope.shareId)
-    if (share.password_version !== scope.passwordVersion) throw streamLinkEnded()
-    const node = asMedia(await nodeInShare(app, root, grant.nodeId))
-    if (node.id === root.id && share.version_id !== grant.versionId) throw streamLinkEnded()
-  }
-  if (!(await isVersionOf(app.db, grant.nodeId, grant.versionId))) throw streamLinkEnded()
+async function streamShare(
+  db: Executor,
+  userId: string,
+  nodeId: string,
+): Promise<{ id: string; passwordVersion: number } | null> {
+  const { rows } = await db.execute<{ id: string; password_version: number }>(sql`
+    SELECT link.id, link.password_version
+    FROM share_links link JOIN nodes node ON node.id = link.node_id
+    WHERE link.node_id = ${nodeId} AND node.owner_id = ${userId}
+      AND link.password_hash IS NULL AND link.version_id = node.current_version_id
+      AND ${WORKING_LINK}
+    ORDER BY (link.expires_at IS NULL AND link.max_downloads IS NULL) DESC, link.created_at
+    LIMIT 1`)
+  const [row] = rows
+  return row ? { id: row.id, passwordVersion: row.password_version } : null
 }
 
-/** A stream link past its time, or whose file its maker can't read any more. */
+/** A stream link that was never one, or whose share link has a new password. */
 function streamLinkEnded(): ApiError {
   return new ApiError(
     410,
