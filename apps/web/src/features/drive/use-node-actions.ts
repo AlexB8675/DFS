@@ -11,6 +11,7 @@ import { useCurrentUser } from '@/features/auth/session'
 import { countShareLinks } from '@/features/shares/api'
 import { usePreview } from '@/features/preview/use-preview'
 import { pickFiles } from '@/features/uploads/picked-files'
+import { tellNoFiles } from '@/features/uploads/reading-feedback'
 import { couldNotStart, startUploads } from '@/features/uploads/start-uploads'
 import { errorMessage } from '@/lib/api/client'
 import { useTransitionNavigate } from '@/lib/navigation'
@@ -66,14 +67,19 @@ export function useNodeActions() {
   }
 
   async function upload(parentId: string, directory: boolean) {
-    let chosen
+    let files
     try {
-      chosen = await pickFiles({ directory })
+      files = await pickFiles({ directory })
     } catch (error) {
       couldNotStart(error)
       return
     }
-    if (chosen) await startUploads(parentId, chosen.read)
+    if (!files) return
+    if (files.length === 0) {
+      tellNoFiles(directory ? 'folder' : 'files')
+      return
+    }
+    await startUploads(parentId, () => Promise.resolve({ files, unreadable: [] }))
   }
 
   async function moveTo(nodes: DriveNode[], target: MoveTarget) {

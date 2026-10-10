@@ -22,7 +22,7 @@ export async function startUploads(
     })
     reportUnreadable(unreadable, files.length)
     if (files.length === 0) {
-      if (unreadable.length === 0) tellNoFiles()
+      if (unreadable.length === 0) tellNoFiles('drop')
       return
     }
     waiting.say(`Preparing ${files.length.toLocaleString()} files…`, true)

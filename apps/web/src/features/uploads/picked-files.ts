@@ -26,24 +26,19 @@ export const WALK_CONCURRENCY = 12
 /** Unreadable entries logged to the console one by one; the rest are only counted. */
 const LOGGED_FAILURES = 25
 
-/** What was picked, not yet read: listing a big folder takes a while, and is told as it goes. */
-export interface Chosen {
-  /** `onProgress` hears the files found so far. */
-  read: (onProgress?: (found: number) => void) => Promise<Dropped>
-}
-
 /**
  * Opens the browser's file picker. Resolves with `null` if it is dismissed. If
  * the browser fails it rejects, saying at which step. (An error thrown in a
  * listener would only reach the console, and the page would wait for ever.)
  *
- * A folder is read as a dropped one is, through the entries the input gives
- * (`webkitEntries`), so what the browser won't list, a symbolic link say, is
- * left out and reported, not fatal. Where it gives none for a folder (Chrome
- * lists the files themselves), or nothing comes of them, the plain list of
- * files serves.
+ * The list is the browser's alone. It lists a picked folder whole, and Firefox
+ * gives up the whole listing when one folder inside can't be listed (a
+ * Linux-style symlink such as a Python venv's `lib64`, found 2026-10-11): the
+ * answer is no files, with no error. `webkitEntries` is the same flat list,
+ * so nothing here can leave out the one thing that fails. Only a drop is
+ * listed folder by folder, and so only a drop can.
  */
-export function pickFiles({ directory = false } = {}): Promise<Chosen | null> {
+export function pickFiles({ directory = false } = {}): Promise<PickedFile[] | null> {
   return new Promise((resolve, reject) => {
     let picker: HTMLInputElement | undefined
     const failed = (error: unknown) => {
@@ -62,7 +57,11 @@ export function pickFiles({ directory = false } = {}): Promise<Chosen | null> {
           'change',
           () => {
             try {
-              resolve(chosenFrom(input, directory))
+              const files = atStep('reading the files the browser listed', () =>
+                Array.from(input.files ?? [], fromInputFile),
+              )
+              input.remove()
+              resolve(files)
             } catch (error) {
               failed(error)
             }
@@ -79,8 +78,7 @@ export function pickFiles({ directory = false } = {}): Promise<Chosen | null> {
         )
         // A large folder takes the browser a while to list before it says `change`,
         // and an input only a variable holds can be collected meanwhile, taking the
-        // answer with it: the page would never hear. In the page, it stays, until
-        // what was chosen has been read.
+        // answer with it: the page would never hear. In the page, it stays.
         document.body.append(input)
         input.click()
       })
@@ -88,43 +86,6 @@ export function pickFiles({ directory = false } = {}): Promise<Chosen | null> {
       failed(error)
     }
   })
-}
-
-function chosenFrom(picker: HTMLInputElement, directory: boolean): Chosen {
-  const entries = directory ? entriesOf(picker) : []
-  if (!entries.some(isDirectoryEntry)) {
-    const files = listedBy(picker)
-    picker.remove()
-    return { read: () => Promise.resolve({ files, unreadable: [] }) }
-  }
-  return {
-    read: async (onProgress) => {
-      try {
-        const walked = await walkEntries(entries, onProgress)
-        // Nothing found and nothing to say: ask for the plain list instead.
-        if (walked.files.length > 0 || walked.unreadable.length > 0) return walked
-        return { files: listedBy(picker), unreadable: [] }
-      } finally {
-        picker.remove()
-      }
-    },
-  }
-}
-
-/** The entries the browser gives for what was picked; none if it gives none, or fails. */
-function entriesOf(picker: HTMLInputElement): FileSystemEntry[] {
-  try {
-    return Array.from(picker.webkitEntries)
-  } catch (error) {
-    console.warn('The browser gave no entries for the folder; using its list of files', error)
-    return []
-  }
-}
-
-function listedBy(picker: HTMLInputElement): PickedFile[] {
-  return atStep('reading the files the browser listed', () =>
-    Array.from(picker.files ?? [], fromInputFile),
-  )
 }
 
 /** Runs `work`; if it throws, the error says which step it was, and the console has it in full. */

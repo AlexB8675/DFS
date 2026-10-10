@@ -191,7 +191,6 @@ describe('pickFiles', () => {
     webkitdirectory = false
     hidden = false
     files: File[] = []
-    webkitEntries: FileSystemEntry[] = []
     attached = false
     click = vi.fn()
     remove() {
@@ -210,95 +209,23 @@ describe('pickFiles', () => {
     })
   }
 
-  function unusable(input: FakeInput, property: 'files' | 'webkitEntries', error: DOMException) {
-    Object.defineProperty(input, property, {
-      get() {
-        throw error
-      },
-    })
-  }
-
-  function inFolder(name: string, path: string): File {
-    const file = new File(['x'], name)
-    Object.defineProperty(file, 'webkitRelativePath', { value: path })
-    return file
-  }
-
   afterEach(() => {
     vi.unstubAllGlobals()
   })
 
-  it('reads a folder as a dropped one is, leaving out what the browser won’t list', async () => {
-    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+  it('keeps its input in the page until the browser answers', async () => {
     const input = new FakeInput()
-    // The browser's own list of files is what failed on Docs/…/venv/lib64.
-    unusable(input, 'files', new DOMException('not usable', 'InvalidStateError'))
-    input.webkitEntries = [
-      directoryEntry('Docs', { 'a.txt': 'file', venv: { lib64: 'fails', 'b.txt': 'file' } }, 'x'),
-    ]
     pageWith(input)
-
-    const pending = pickFiles({ directory: true })
-    input.dispatchEvent(new Event('change'))
-    const picked = await pending
-    // The input stays in the page while the folder is read.
+    const picked = pickFiles({ directory: true })
     expect(input.attached).toBe(true)
     expect(input.webkitdirectory).toBe(true)
     expect(input.click).toHaveBeenCalledOnce()
-    const { files, unreadable } = await (picked?.read() ?? Promise.reject(new Error('dismissed')))
-    expect(names(files)).toEqual(['Docs/venv/b.txt', 'Docs/a.txt'].sort())
-    expect(unreadable.map(({ path }) => path)).toEqual(['Docs/venv/lib64'])
-    expect(input.attached).toBe(false)
-  })
-
-  it('tells the files found as it reads', async () => {
-    const input = new FakeInput()
-    input.webkitEntries = [directoryEntry('F', { a: 'file', b: 'file' }, 'x')]
-    pageWith(input)
-    const picked = pickFiles({ directory: true })
-    input.dispatchEvent(new Event('change'))
-    const found: number[] = []
-    await (await picked)?.read((count) => found.push(count))
-    expect(found).toEqual([1, 2])
-  })
-
-  it('uses the list of files where the browser gives no folder entry, as Chrome does', async () => {
-    const input = new FakeInput()
-    const file = inFolder('a.txt', 'Folder/Sub/a.txt')
+    const file = new File(['x'], 'a.txt')
+    Object.defineProperty(file, 'webkitRelativePath', { value: 'Folder/Sub/a.txt' })
     input.files = [file]
-    // Chrome's entries are the files, flattened: a walk would lose their folders.
-    input.webkitEntries = [fileEntry('a.txt', false, 'x')]
-    pageWith(input)
-    const picked = pickFiles({ directory: true })
     input.dispatchEvent(new Event('change'))
+    expect(await picked).toEqual([{ file, relativeDir: 'Folder/Sub' }])
     expect(input.attached).toBe(false)
-    expect(await (await picked)?.read()).toEqual({
-      files: [{ file, relativeDir: 'Folder/Sub' }],
-      unreadable: [],
-    })
-  })
-
-  it('goes back to the list of files when the entries came to nothing', async () => {
-    const input = new FakeInput()
-    const file = inFolder('a.txt', 'Folder/a.txt')
-    input.files = [file]
-    input.webkitEntries = [directoryEntry('Folder', {}, 'x')]
-    pageWith(input)
-    const picked = pickFiles({ directory: true })
-    input.dispatchEvent(new Event('change'))
-    expect((await (await picked)?.read())?.files).toEqual([{ file, relativeDir: 'Folder' }])
-    expect(input.attached).toBe(false)
-  })
-
-  it('does not ask for entries when picking plain files', async () => {
-    const input = new FakeInput()
-    const file = inFolder('plain.txt', '')
-    input.files = [file]
-    unusable(input, 'webkitEntries', new DOMException('never asked', 'InvalidStateError'))
-    pageWith(input)
-    const picked = pickFiles()
-    input.dispatchEvent(new Event('change'))
-    expect((await (await picked)?.read())?.files).toEqual([{ file, relativeDir: '' }])
   })
 
   it('answers nothing when the picker is dismissed, and no files for an empty folder', async () => {
@@ -313,19 +240,7 @@ describe('pickFiles', () => {
     pageWith(empty)
     const second = pickFiles({ directory: true })
     empty.dispatchEvent(new Event('change'))
-    expect(await (await second)?.read()).toEqual({ files: [], unreadable: [] })
-  })
-
-  it('uses the list of files if asking for entries fails', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
-    const input = new FakeInput()
-    const file = inFolder('a.txt', 'Folder/a.txt')
-    input.files = [file]
-    unusable(input, 'webkitEntries', new DOMException('not usable', 'InvalidStateError'))
-    pageWith(input)
-    const picked = pickFiles({ directory: true })
-    input.dispatchEvent(new Event('change'))
-    expect((await (await picked)?.read())?.files).toEqual([{ file, relativeDir: 'Folder' }])
+    expect(await second).toEqual([])
   })
 
   it('says at which step the browser failed, instead of waiting for ever', async () => {
@@ -344,7 +259,11 @@ describe('pickFiles', () => {
 
     // The list of files is read in a listener, whose errors would go unheard.
     const listing = new FakeInput()
-    unusable(listing, 'files', notUsable)
+    Object.defineProperty(listing, 'files', {
+      get() {
+        throw notUsable
+      },
+    })
     pageWith(listing)
     const picked = pickFiles({ directory: true })
     const heard = expect(picked).rejects.toMatchObject({

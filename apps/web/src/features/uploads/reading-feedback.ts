@@ -72,9 +72,23 @@ export function reportUnreadable(unreadable: Unreadable[], readable: number): vo
     toast.warning(`${items} could not be read and ${count === 1 ? 'was' : 'were'} skipped`, options)
 }
 
-/** What was picked or dropped holds no file, which `enqueue` would take for nothing to do. */
-export function tellNoFiles(): void {
+/**
+ * What was picked or dropped holds no file, which `enqueue` would take for
+ * nothing to do. For a picked folder, the browser giving no files is usually
+ * not an empty folder: Firefox gives up on the whole folder when something in
+ * it can't be listed, and says nothing.
+ */
+export function tellNoFiles(kind: 'drop' | 'files' | 'folder'): void {
+  if (kind === 'folder') {
+    toast.info('The browser listed no files in that folder', {
+      description:
+        'It may be empty. If it isn’t, the browser couldn’t list it: Firefox gives up on a whole folder when something inside can’t be followed, such as a symbolic link (a Python venv’s lib64). Drag the folder onto the page instead, which leaves out what can’t be listed.',
+      duration: 20_000,
+      closeButton: true,
+    })
+    return
+  }
   toast.info('No files to upload', {
-    description: 'What was chosen has no files in it, or the browser listed none.',
+    description: kind === 'drop' ? 'What you dropped has no files in it.' : 'No files were chosen.',
   })
 }
