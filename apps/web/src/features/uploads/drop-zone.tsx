@@ -1,12 +1,9 @@
 import { Upload } from 'lucide-react'
 import { useRef, useState, type DragEvent, type ReactNode } from 'react'
-import { toast } from 'sonner'
 import { dropTargetProps, useDragStore } from '@/features/drag/drag-store'
-import { errorMessage } from '@/lib/api/client'
 import { cn } from '@/lib/utils'
 import { collectDroppedFiles } from './picked-files'
-import { reportUnreadable, tellNoFiles, whileWaiting } from './reading-feedback'
-import { enqueueUploads } from './upload-engine'
+import { startUploads } from './start-uploads'
 
 interface DropZoneProps {
   folderId: string
@@ -33,25 +30,9 @@ export function DropZone({ folderId, folderName, children }: DropZoneProps) {
   const depth = useRef(0)
   const destination = subfolder ?? { id: folderId, name: folderName }
 
-  async function upload(dataTransfer: DataTransfer, parentId: string) {
-    const waiting = whileWaiting('Reading what you dropped…')
-    try {
-      const { files, unreadable } = await collectDroppedFiles(dataTransfer, (found) => {
-        waiting.say(`Reading what you dropped… ${found.toLocaleString()} files`)
-      })
-      reportUnreadable(unreadable, files.length)
-      if (files.length === 0) {
-        if (unreadable.length === 0) tellNoFiles()
-        return
-      }
-      waiting.say(`Preparing ${files.length.toLocaleString()} files…`, true)
-      await enqueueUploads(parentId, files)
-    } catch (error) {
-      console.error('Could not start the upload', error)
-      toast.error('Could not start the upload', { description: errorMessage(error) })
-    } finally {
-      waiting.end()
-    }
+  /** Called in the drop handler itself: the browser clears the `DataTransfer` after it. */
+  function upload(dataTransfer: DataTransfer, parentId: string) {
+    void startUploads(parentId, (onProgress) => collectDroppedFiles(dataTransfer, onProgress))
   }
 
   /** Highlights the folder row under the pointer, the same way drag-to-move does. */
@@ -104,7 +85,7 @@ export function DropZone({ folderId, folderName, children }: DropZoneProps) {
         event.preventDefault()
         const { id } = destination
         reset()
-        void upload(event.dataTransfer, id)
+        upload(event.dataTransfer, id)
       }}
     >
       {children}

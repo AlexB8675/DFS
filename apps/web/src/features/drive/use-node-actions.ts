@@ -11,8 +11,7 @@ import { useCurrentUser } from '@/features/auth/session'
 import { countShareLinks } from '@/features/shares/api'
 import { usePreview } from '@/features/preview/use-preview'
 import { pickFiles } from '@/features/uploads/picked-files'
-import { tellNoFiles, whileWaiting, type Waiting } from '@/features/uploads/reading-feedback'
-import { enqueueUploads } from '@/features/uploads/upload-engine'
+import { couldNotStart, startUploads } from '@/features/uploads/start-uploads'
 import { errorMessage } from '@/lib/api/client'
 import { useTransitionNavigate } from '@/lib/navigation'
 import { isPreviewable } from '@/lib/preview-kind'
@@ -67,22 +66,14 @@ export function useNodeActions() {
   }
 
   async function upload(parentId: string, directory: boolean) {
-    let waiting: Waiting | undefined
+    let chosen
     try {
-      const files = await pickFiles({ directory })
-      if (!files) return
-      if (files.length === 0) {
-        tellNoFiles()
-        return
-      }
-      waiting = whileWaiting(`Preparing ${files.length.toLocaleString()} files…`)
-      await enqueueUploads(parentId, files)
+      chosen = await pickFiles({ directory })
     } catch (error) {
-      console.error('Could not start the upload', error)
-      toast.error('Could not start the upload', { description: errorMessage(error) })
-    } finally {
-      waiting?.end()
+      couldNotStart(error)
+      return
     }
+    if (chosen) await startUploads(parentId, chosen.read)
   }
 
   async function moveTo(nodes: DriveNode[], target: MoveTarget) {

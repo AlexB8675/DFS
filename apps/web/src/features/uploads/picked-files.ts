@@ -26,58 +26,115 @@ export const WALK_CONCURRENCY = 12
 /** Unreadable entries logged to the console one by one; the rest are only counted. */
 const LOGGED_FAILURES = 25
 
+/** What was picked, not yet read: listing a big folder takes a while, and is told as it goes. */
+export interface Chosen {
+  /** `onProgress` hears the files found so far. */
+  read: (onProgress?: (found: number) => void) => Promise<Dropped>
+}
+
 /**
- * Opens the browser's file picker. Resolves with `null` if it is dismissed, and
- * with no files if the folder chosen holds none. If the browser fails it
- * rejects, saying at which step: opening the picker, or reading the list of
- * files it gave. (An error thrown in a listener would only reach the console,
- * and the page would wait for ever.)
+ * Opens the browser's file picker. Resolves with `null` if it is dismissed. If
+ * the browser fails it rejects, saying at which step. (An error thrown in a
+ * listener would only reach the console, and the page would wait for ever.)
+ *
+ * A folder is read as a dropped one is, through the entries the input gives
+ * (`webkitEntries`), so what the browser won't list, a symbolic link say, is
+ * left out and reported, not fatal. Where it gives none for a folder (Chrome
+ * lists the files themselves), or nothing comes of them, the plain list of
+ * files serves.
  */
-export function pickFiles({ directory = false } = {}): Promise<PickedFile[] | null> {
+export function pickFiles({ directory = false } = {}): Promise<Chosen | null> {
   return new Promise((resolve, reject) => {
-    let input: HTMLInputElement | undefined
-    const fail = (step: string, error: unknown) => {
-      input?.remove()
-      console.error(`The file picker failed while ${step}`, error)
-      reject(new Error(`While ${step}: ${describe(error)}`, { cause: error }))
+    let picker: HTMLInputElement | undefined
+    const failed = (error: unknown) => {
+      picker?.remove()
+      reject(error instanceof Error ? error : new Error(String(error)))
     }
     try {
-      input = document.createElement('input')
-      input.type = 'file'
-      input.multiple = true
-      input.webkitdirectory = directory
-      input.hidden = true
-      // A large folder takes the browser a while to list before it says `change`,
-      // and an input only a variable holds can be collected meanwhile, taking the
-      // answer with it: the page would never hear. In the page, it stays.
-      document.body.append(input)
-      const picker = input
-      picker.addEventListener(
-        'change',
-        () => {
-          try {
-            const files = Array.from(picker.files ?? [], fromInputFile)
-            picker.remove()
-            resolve(files)
-          } catch (error) {
-            fail('reading the files the browser listed', error)
-          }
-        },
-        { once: true },
-      )
-      picker.addEventListener(
-        'cancel',
-        () => {
-          picker.remove()
-          resolve(null)
-        },
-        { once: true },
-      )
-      picker.click()
+      atStep('opening the picker', () => {
+        const input = document.createElement('input')
+        picker = input
+        input.type = 'file'
+        input.multiple = true
+        input.webkitdirectory = directory
+        input.hidden = true
+        input.addEventListener(
+          'change',
+          () => {
+            try {
+              resolve(chosenFrom(input, directory))
+            } catch (error) {
+              failed(error)
+            }
+          },
+          { once: true },
+        )
+        input.addEventListener(
+          'cancel',
+          () => {
+            input.remove()
+            resolve(null)
+          },
+          { once: true },
+        )
+        // A large folder takes the browser a while to list before it says `change`,
+        // and an input only a variable holds can be collected meanwhile, taking the
+        // answer with it: the page would never hear. In the page, it stays, until
+        // what was chosen has been read.
+        document.body.append(input)
+        input.click()
+      })
     } catch (error) {
-      fail('opening the picker', error)
+      failed(error)
     }
   })
+}
+
+function chosenFrom(picker: HTMLInputElement, directory: boolean): Chosen {
+  const entries = directory ? entriesOf(picker) : []
+  if (!entries.some(isDirectoryEntry)) {
+    const files = listedBy(picker)
+    picker.remove()
+    return { read: () => Promise.resolve({ files, unreadable: [] }) }
+  }
+  return {
+    read: async (onProgress) => {
+      try {
+        const walked = await walkEntries(entries, onProgress)
+        // Nothing found and nothing to say: ask for the plain list instead.
+        if (walked.files.length > 0 || walked.unreadable.length > 0) return walked
+        return { files: listedBy(picker), unreadable: [] }
+      } finally {
+        picker.remove()
+      }
+    },
+  }
+}
+
+/** The entries the browser gives for what was picked; none if it gives none, or fails. */
+function entriesOf(picker: HTMLInputElement): FileSystemEntry[] {
+  try {
+    return Array.from(picker.webkitEntries)
+  } catch (error) {
+    console.warn('The browser gave no entries for the folder; using its list of files', error)
+    return []
+  }
+}
+
+function listedBy(picker: HTMLInputElement): PickedFile[] {
+  return atStep('reading the files the browser listed', () =>
+    Array.from(picker.files ?? [], fromInputFile),
+  )
+}
+
+/** Runs `work`; if it throws, the error says which step it was, and the console has it in full. */
+function atStep<T>(step: string, work: () => T): T {
+  try {
+    return work()
+  } catch (error) {
+    console.error(`The file picker failed while ${step}`, error)
+    throw new Error(`While ${step}: ${describe(error)}`, { cause: error })
+  }
 }
 
 function fromInputFile(file: File): PickedFile {
@@ -105,6 +162,13 @@ export async function collectDroppedFiles(
     const files = Array.from(dataTransfer.files, (file) => ({ file, relativeDir: '' }))
     return { files, unreadable: [] }
   }
+  return walkEntries(entries, onProgress)
+}
+
+async function walkEntries(
+  entries: FileSystemEntry[],
+  onProgress: ((found: number) => void) | undefined,
+): Promise<Dropped> {
   const walking: Walking = {
     files: [],
     unreadable: [],
