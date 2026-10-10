@@ -6,7 +6,7 @@ import type { MasterKeys } from '@dfs/crypto'
 // is asked to play. Signed like share-unlock cookies (§7.5), under a claim
 // of its own, so neither can pass for the other.
 
-/** Long enough for a film to be examined and, later, remuxed while it plays. */
+/** Long enough for a film to be examined, and read whole for its subtitles. */
 export const MEDIA_TOKEN_LIFETIME_MS = 6 * 60 * 60_000
 
 /** A token for reading `versionId`: `<expiry ms>.<HMAC, base64url>`. */

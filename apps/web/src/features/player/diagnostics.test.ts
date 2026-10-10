@@ -8,6 +8,7 @@ import {
   waitingForData,
   type PlaybackSignals,
 } from './diagnostics'
+import type { Unplayable } from './codecs'
 
 /** The video that took a phone two minutes: 4K, 60 fps, 10-bit HDR AV1 at 24 Mbit/s. */
 const AV1: MediaStream = {
@@ -61,7 +62,8 @@ const QUIET: PlaybackSignals = {
 
 function notices(overrides: Partial<Parameters<typeof playbackNotices>[0]>) {
   return playbackNotices({
-    silentCodec: null,
+    unplayable: null,
+    playerName: 'VLC',
     decoding: { supported: true, smooth: true, powerEfficient: true },
     picture: AV1,
     bitRate: INFO.bitRate,
@@ -88,6 +90,38 @@ describe('asking the browser about decoding a video', () => {
 })
 
 describe('the player’s warnings', () => {
+  it('says what this browser can’t play of a video, offering VLC', () => {
+    const said = (unplayable: Unplayable) =>
+      playbackNotices({
+        unplayable,
+        playerName: 'VLC',
+        decoding: null,
+        picture: AV1,
+        bitRate: null,
+        signals: QUIET,
+      })
+    expect(said({ sound: 'AC‑3', pictureSubtitles: false, otherSounds: 0 })).toEqual([
+      {
+        key: 'sound',
+        text: 'No sound here: this browser can’t play its AC‑3 sound. VLC plays all of it.',
+        external: true,
+      },
+    ])
+    expect(said({ sound: 'DTS', pictureSubtitles: true, otherSounds: 2 })[0]?.text).toBe(
+      'No sound here: this browser can’t play its DTS sound, show its picture subtitles or switch to its 2 other sound tracks. VLC plays all of it.',
+    )
+    // With its sound, it plays as it is: the rest is worth knowing, and fades.
+    expect(said({ sound: null, pictureSubtitles: false, otherSounds: 1 })).toEqual([
+      {
+        key: 'limits',
+        text: 'This browser can’t switch to its other sound track. VLC plays all of it.',
+        fades: true,
+        external: true,
+      },
+    ])
+    expect(said({ sound: null, pictureSubtitles: false, otherSounds: 0 })).toEqual([])
+  })
+
   it('says nothing of a play going well', () => {
     expect(notices({})).toEqual([])
   })
@@ -107,7 +141,8 @@ describe('the player’s warnings', () => {
 
   it('says when the device decodes in software, in a warning that fades', () => {
     const shown = playbackNotices({
-      silentCodec: null,
+      unplayable: null,
+      playerName: 'VLC',
       decoding: { supported: true, smooth: true, powerEfficient: false },
       picture: AV1,
       bitRate: INFO.bitRate,

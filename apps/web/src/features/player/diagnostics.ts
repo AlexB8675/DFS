@@ -9,7 +9,7 @@ import {
 import { queryOptions } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
 import { apiFetch, apiGet } from '@/lib/api/client'
-import { describeBriefly, mimeTypeOf, playedStreams } from './codecs'
+import { describeBriefly, mimeTypeOf, playedStreams, type Unplayable } from './codecs'
 
 // Why a video is slow (DESIGN.md §10.4, §16), as the player can tell: whether
 // this device decodes it smoothly (Media Capabilities), how fast it arrives
@@ -405,16 +405,20 @@ const DROPPING_SHARE = 0.2
 
 /** A warning above the picture: why the video may be silent, slow or stuttering. */
 export interface PlaybackNotice {
-  key: 'sound' | 'decoding' | 'software' | 'slow' | 'dropping'
+  key: 'sound' | 'limits' | 'decoding' | 'software' | 'slow' | 'dropping'
   text: string
   /** Worth knowing rather than wrong: shown a while once it plays, then faded. */
   fades?: boolean
+  /** It offers to play the file in another player (VLC, §6.7), which plays what this browser can't. */
+  external?: boolean
 }
 
 /** The warnings a play deserves now, from what the browser and the play itself say. */
 export function playbackNotices(input: {
-  /** The sound's codec, when this browser can't decode it. */
-  silentCodec: string | null
+  /** What this browser can't play of it, if anything. */
+  unplayable: Unplayable | null
+  /** The player offered for it. */
+  playerName: string
   decoding: Decoding | null
   /** The picture played. */
   picture: MediaStream | null
@@ -422,10 +426,27 @@ export function playbackNotices(input: {
   bitRate: number | null
   signals: PlaybackSignals
 }): PlaybackNotice[] {
-  const { silentCodec, decoding, picture, bitRate, signals } = input
+  const { unplayable, playerName, decoding, picture, bitRate, signals } = input
   const notices: PlaybackNotice[] = []
-  if (silentCodec) {
-    notices.push({ key: 'sound', text: `No sound here: this browser can’t play ${silentCodec}.` })
+  if (unplayable) {
+    const { sound, pictureSubtitles, otherSounds } = unplayable
+    const cant = [
+      sound && `play its ${sound} sound`,
+      pictureSubtitles && 'show its picture subtitles',
+      otherSounds === 1 && 'switch to its other sound track',
+      otherSounds > 1 && `switch to its ${String(otherSounds)} other sound tracks`,
+    ].filter((part) => typeof part === 'string')
+    if (cant.length > 0) {
+      const listed =
+        cant.length > 1 ? `${cant.slice(0, -1).join(', ')} or ${cant.at(-1) ?? ''}` : cant[0]
+      notices.push({
+        key: sound ? 'sound' : 'limits',
+        text: `${sound ? 'No sound here: this' : 'This'} browser can’t ${listed ?? ''}. ${playerName} plays all of it.`,
+        // Silent, it stays; it plays as it is otherwise, and the rest is worth knowing.
+        ...(!sound && { fades: true }),
+        external: true,
+      })
+    }
   }
   if (decoding?.supported && picture) {
     const software = decoding.powerEfficient ? '' : ', which it decodes in software'

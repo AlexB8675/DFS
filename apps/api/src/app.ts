@@ -4,7 +4,12 @@ import type { Config } from '@dfs/config'
 import type { MasterKeys } from '@dfs/crypto'
 import { createDatabase, createPool, Metrics, recordProcess, type Database } from '@dfs/db'
 import { LocalBlobStore, Staging, type BlobReader } from '@dfs/storage'
-import Fastify, { LogController, type FastifyInstance, type FastifyServerOptions } from 'fastify'
+import Fastify, {
+  LogController,
+  type FastifyInstance,
+  type FastifyRequest,
+  type FastifyServerOptions,
+} from 'fastify'
 import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod'
 import type pg from 'pg'
 import { registerAccess } from './auth/access.ts'
@@ -19,6 +24,7 @@ import { EventHub } from './events/hub.ts'
 import { DataKeyCache, loadMasterKeys } from './keys.ts'
 import { MediaClient } from './media/client.ts'
 import { MediaExaminer } from './media/examine.ts'
+import { hideStreamToken } from './media/stream-links.ts'
 import { JobQueue } from './queue.ts'
 import { adminRoutes } from './routes/admin.ts'
 import { authRoutes } from './routes/auth.ts'
@@ -45,6 +51,7 @@ declare module 'fastify' {
       passwordResets: RateLimiter
       connectionTests: RateLimiter
       linkPlayReports: RateLimiter
+      streamLinks: RateLimiter
     }
     /** Frames received but not yet stored (§6.1), and whether there is room for more. */
     staging: Staging
@@ -141,6 +148,8 @@ export async function buildApp({
     logController: new LogController({ requestIdLogLabel: 'requestId' }),
     // Only Caddy may set X-Forwarded-For (§3.2).
     trustProxy: config.trustedProxyCidrs,
+    // A stream link's token is about 170 characters (§6.7); past the default 100, a 414.
+    routerOptions: { maxParamLength: 300 },
   })
 
   app.setValidatorCompiler(validatorCompiler)
@@ -173,6 +182,8 @@ export async function buildApp({
     connectionTests: new RateLimiter(10, 10 * 60_000),
     // Play reports through share links per address (§10.4): logged, and on the graphs.
     linkPlayReports: new RateLimiter(60, 10 * 60_000),
+    // Stream links made per user or, through share links, per address (§6.7).
+    streamLinks: new RateLimiter(30, 10 * 60_000),
   })
   app.decorate('staging', new Staging(config.stagingDir))
   app.decorate('stagingLimit', new StagingLimit(db, config.stagingMaxBytes))
@@ -289,6 +300,16 @@ function loggerOptions(config: Config): FastifyServerOptions['logger'] {
       'req.headers["x-csrf-token"]',
       'res.headers["set-cookie"]',
     ],
+    serializers: {
+      // As Fastify's own, but a stream link's token, which lets anyone play its file, stays out (§6.7).
+      req: (request: FastifyRequest) => ({
+        method: request.method,
+        url: hideStreamToken(request.url),
+        host: request.host,
+        remoteAddress: request.ip,
+        remotePort: request.socket.remotePort,
+      }),
+    },
     ...(config.nodeEnv === 'development' && {
       transport: {
         target: 'pino-pretty',

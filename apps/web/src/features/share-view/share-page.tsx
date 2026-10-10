@@ -3,6 +3,7 @@ import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import {
   ChevronRight,
   Download,
+  ExternalLink,
   FileArchive,
   Info,
   Link2Off,
@@ -10,7 +11,15 @@ import {
   Play,
   TriangleAlert,
 } from 'lucide-react'
-import { Fragment, useActionState, useEffect, useRef, useState, type ReactNode } from 'react'
+import {
+  Fragment,
+  useActionState,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from 'react'
 import { Link, useParams, useSearchParams } from 'react-router'
 import { toast } from 'sonner'
 import { AppLogo } from '@/components/app-logo'
@@ -24,6 +33,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Spinner } from '@/components/ui/spinner'
 import { VirtualList } from '@/components/virtual-list'
+import { VLC } from '@/features/player/external-players'
 import { MediaDetails } from '@/features/player/media-details'
 import { FileDetails } from '@/features/preview/file-viewer'
 import { handlePreviewKey } from '@/features/preview/keys'
@@ -209,6 +219,7 @@ function PasswordGate({ token }: { token: string }) {
 function SharedFile({ token, share, file }: { token: string; share: OpenShare; file: SharedNode }) {
   const [downloading, setDownloading] = useState(false)
   const [detailsOpen, setDetailsOpen] = useState(false)
+  const view = useRef<ViewHandle>(null)
   const previewable = isPreviewable(file)
   const place = linkPlace(token, file.id)
   // A video's Details hold what its header doesn't: its formats, and the connection test.
@@ -254,6 +265,17 @@ function SharedFile({ token, share, file }: { token: string; share: OpenShare; f
             <Button
               variant="ghost"
               size="icon"
+              aria-label={`Open in ${VLC.name}`}
+              title={`Open in ${VLC.name}`}
+              onClick={() => view.current?.openExternal?.()}
+            >
+              <ExternalLink />
+            </Button>
+          )}
+          {video && (
+            <Button
+              variant="ghost"
+              size="icon"
               aria-label="Details"
               aria-expanded={detailsOpen}
               onClick={() => {
@@ -268,6 +290,7 @@ function SharedFile({ token, share, file }: { token: string; share: OpenShare; f
         <InlinePreview
           file={file}
           place={place}
+          view={view}
           details={
             video && detailsOpen ? (
               <FileDetails file={file} media={<MediaDetails place={place} />} />
@@ -317,16 +340,18 @@ function InlinePreview({
   place,
   details,
   onCloseDetails,
+  view,
   onDownload,
 }: {
   file: SharedNode
   place: FilePlace
   details: ReactNode
   onCloseDetails: () => void
+  /** The view showing it, for the keys and the header's buttons. */
+  view: RefObject<ViewHandle | null>
   onDownload: () => void
 }) {
   const frame = useRef<HTMLDivElement>(null)
-  const view = useRef<ViewHandle>(null)
   // The keys are the preview's: + − 0 zoom, Ctrl+F searches text.
   useEffect(() => {
     frame.current?.focus({ preventScroll: true })

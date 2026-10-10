@@ -49,6 +49,7 @@ import {
   type SortOrder,
   type SyncState,
   type StorageChannel,
+  type StreamLink,
   type TrashItem,
   type UpdateShareInput,
   type UploadBatchResult,
@@ -559,6 +560,18 @@ export class MockDb {
     const folder = node.parentId === null ? null : (this.state.nodes[node.parentId]?.name ?? null)
     const info = sampleMediaInfo(kind, node.name, folder)
     return this.fileBytes.has(node.id) ? { ...info, hasCover: false } : info
+  }
+
+  /**
+   * `POST …/stream-link`: an address for VLC (§6.7), made up, for 12 hours.
+   * Nothing outside this page reaches the mock, so no player could open it.
+   */
+  streamLink(place: MockPlace): StreamLink {
+    const { node, versionId } = this.playedFile(place)
+    return {
+      url: `${location.origin}/api/stream/mock.${versionId}/${encodeURIComponent(node.name)}`,
+      expiresAt: new Date(Date.now() + 12 * 60 * 60_000).toISOString(),
+    }
   }
 
   /**

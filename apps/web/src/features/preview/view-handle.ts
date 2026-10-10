@@ -12,4 +12,6 @@ export interface ViewHandle {
   find?: () => void
   /** Closes what the view has open, its search say, if anything: Esc does that before closing the viewer. */
   dismiss?: () => boolean
+  /** Offers to play it in another player (VLC, §6.7): a video's. */
+  openExternal?: () => void
 }

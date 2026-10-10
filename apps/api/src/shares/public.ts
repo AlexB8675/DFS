@@ -1,5 +1,5 @@
 import type { DriveNode, PublicShare, SharedFolderPage, SharedNode } from '@dfs/shared'
-import { sql } from 'drizzle-orm'
+import { sql, type SQL } from 'drizzle-orm'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { verifyPassword } from '../auth/passwords.ts'
 import { ApiError } from '../errors.ts'
@@ -35,9 +35,24 @@ export interface LiveShare extends Record<string, unknown> {
 }
 
 /** The share behind a token, if it still works: not expired or used up. */
-export async function liveShare(
+export function liveShare(
   app: FastifyInstance,
   token: string,
+): Promise<{ share: LiveShare; root: NodeRow }> {
+  return liveShareWhere(app, sql`share.token_hash = ${tokenHash(token)}`)
+}
+
+/** The share `id`, if it still works: for a stream link made through it (§6.7). */
+export function liveShareById(
+  app: FastifyInstance,
+  id: string,
+): Promise<{ share: LiveShare; root: NodeRow }> {
+  return liveShareWhere(app, sql`share.id = ${id}`)
+}
+
+async function liveShareWhere(
+  app: FastifyInstance,
+  condition: SQL,
 ): Promise<{ share: LiveShare; root: NodeRow }> {
   const { rows } = await app.db.execute<LiveShare>(sql`
     SELECT share.id, share.node_id, share.password_hash, share.password_version,
@@ -46,7 +61,7 @@ export async function liveShare(
     FROM share_links share
     JOIN nodes node ON node.id = share.node_id
     JOIN users owner ON owner.id = node.owner_id
-    WHERE share.token_hash = ${tokenHash(token)}
+    WHERE ${condition}
       AND node.deleted_at IS NULL AND node.trashed_via IS NULL AND owner.disabled_at IS NULL`)
   const [share] = rows
   // A link turned off is deleted: it is gone, like one that never was.

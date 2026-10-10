@@ -1,4 +1,4 @@
-import type { MediaInfo, MediaStream } from '@dfs/shared'
+import { isTextSubtitles, type MediaInfo, type MediaStream } from '@dfs/shared'
 
 // What this browser decodes (DESIGN.md §6.7, §10.4): each codec of a file's
 // media info put to the browser by its RFC 6381 string, never the
@@ -44,6 +44,32 @@ export function playability(info: MediaInfo, canPlayType: CanPlayType): Playabil
   return {
     video: video && { stream: video, decodes: decodes(video, canPlayType) },
     audio: audio && { stream: audio, decodes: decodes(audio, canPlayType) },
+  }
+}
+
+/** What this browser can't do with a video it plays (§10.4), which another player can. */
+export interface Unplayable {
+  /** The sound's codec, when it can't decode it: the video plays silent. */
+  sound: string | null
+  /** It has picture subtitles (PGS, VobSub), which a browser can't show. */
+  pictureSubtitles: boolean
+  /** Its other sound tracks, which this browser can't switch to: it lists no tracks of its own. */
+  otherSounds: number
+}
+
+/** What this browser can't do with a video, given whether it lists audio tracks of its own (Safari). */
+export function unplayableOf(
+  info: MediaInfo,
+  verdict: Playability,
+  listsTracks: boolean,
+): Unplayable {
+  const sounds = info.streams.filter((stream) => stream.type === 'audio').length
+  return {
+    sound: verdict.audio?.decodes === false ? codecLabel(verdict.audio.stream.codec) : null,
+    pictureSubtitles: info.streams.some(
+      (stream) => stream.type === 'subtitle' && !isTextSubtitles(stream),
+    ),
+    otherSounds: listsTracks ? 0 : Math.max(0, sounds - 1),
   }
 }
 

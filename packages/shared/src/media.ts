@@ -300,6 +300,18 @@ export const deliverySchema = z.object({
 
 export type Delivery = z.infer<typeof deliverySchema>
 
+/**
+ * `POST /files/:id/stream-link`: an address another player (VLC) opens to
+ * play the version a player is given, without signing in, until `expiresAt`
+ * (§6.7). Anyone who has it can play that file until then.
+ */
+export const streamLinkSchema = z.object({
+  url: z.url(),
+  expiresAt: z.iso.datetime(),
+})
+
+export type StreamLink = z.infer<typeof streamLinkSchema>
+
 /** `GET /connection-test?bytes=`: at most this much, so a test can't become a load. */
 export const MAX_CONNECTION_TEST_BYTES = 32 * 1024 * 1024
 

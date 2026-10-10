@@ -1,9 +1,10 @@
-import { ChevronLeft, ChevronRight, Download, Info, Share2, X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Download, ExternalLink, Info, Share2, X } from 'lucide-react'
 import { Dialog as DialogPrimitive } from 'radix-ui'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
 import { NodeIcon } from '@/components/node-icon'
 import { SyncStatus } from '@/components/sync-status'
+import { VLC } from '@/features/player/external-players'
 import { MediaDetails } from '@/features/player/media-details'
 import type { FilePlace } from '@/lib/file-place'
 import { fileCategory, fileCategoryLabel } from '@/lib/file-types'
@@ -148,6 +149,17 @@ export function FileViewer({
             {file && (
               <Button variant="ghost" size="icon" aria-label="Download" onClick={onDownload}>
                 <Download />
+              </Button>
+            )}
+            {file && previewKind(file.name, file.mimeType) === 'video' && (
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label={`Open in ${VLC.name}`}
+                title={`Open in ${VLC.name}`}
+                onClick={() => view.current?.openExternal?.()}
+              >
+                <ExternalLink />
               </Button>
             )}
             {file && onShare && (

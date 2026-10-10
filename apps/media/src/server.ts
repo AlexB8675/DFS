@@ -12,7 +12,7 @@ import { extractSubtitles } from './subtitles.ts'
 // needs none: it reads a file only with the API's token for that file, and
 // the API it reads from is its own setting, never the caller's.
 
-/** ffprobes at once: the service has one CPU, shared with remuxes. */
+/** ffprobes at once: the service has one CPU, shared with extracting subtitles. */
 const PROBES_AT_ONCE = 2
 /** Extractions read whole files: one at a time. */
 const EXTRACTIONS_AT_ONCE = 1

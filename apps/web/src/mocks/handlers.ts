@@ -336,6 +336,13 @@ export const handlers = [
       ({ request, params }) =>
         respond(request, () => db.delivery(placeOf(params), params.versionId), options),
     ),
+    http.post<Place>(`${path}/stream-link`, ({ request, params }) =>
+      respond(
+        request,
+        () => Response.json(db.streamLink(placeOf(params)), { status: 201 }),
+        options,
+      ),
+    ),
     http.post<Place>(`${path}/playback-report`, ({ request, params }) =>
       respondEmpty(
         request,

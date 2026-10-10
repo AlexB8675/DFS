@@ -1,6 +1,6 @@
-import { fileMediaSchema, playbackSchema } from '@dfs/shared'
+import { fileMediaSchema, playbackSchema, streamLinkSchema } from '@dfs/shared'
 import { queryOptions } from '@tanstack/react-query'
-import { ApiError, apiGet } from '@/lib/api/client'
+import { ApiError, apiGet, apiSend } from '@/lib/api/client'
 import type { FilePlace } from '@/lib/file-place'
 import { linkPosition } from './link-positions'
 
@@ -11,6 +11,7 @@ export const playerKeys = {
   all: ['player'] as const,
   playback: (path: string) => [...playerKeys.all, path, 'playback'] as const,
   media: (path: string) => [...playerKeys.all, path, 'media'] as const,
+  streamLink: (path: string) => [...playerKeys.all, path, 'stream-link'] as const,
 }
 
 /**
@@ -55,6 +56,22 @@ export function contentUrl(place: FilePlace, versionId: string, startSeconds = 0
   const preview = place.token === null ? '' : '&preview=1'
   const start = startSeconds > 0 ? `#t=${startSeconds.toFixed(3)}` : ''
   return `/api${place.path}/content?version=${versionId}${preview}${start}`
+}
+
+/**
+ * A stream link for another player (VLC, §6.7): made when first asked for,
+ * then kept an hour, as each lasts 12 and anyone who has one can play the file.
+ */
+export function streamLinkQuery(place: FilePlace) {
+  return queryOptions({
+    queryKey: playerKeys.streamLink(place.path),
+    queryFn: () => apiSend('POST', `${place.path}/stream-link`, undefined, streamLinkSchema),
+    staleTime: 60 * 60_000,
+    gcTime: 60 * 60_000,
+    refetchOnWindowFocus: false,
+    retry: false,
+    meta: linkMeta(place),
+  })
 }
 
 /** Where to test the connection: a user's, or a link viewer's, under the link. */

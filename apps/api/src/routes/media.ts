@@ -12,6 +12,7 @@ import {
   playbackReportSchema,
   playbackSchema,
   savePositionSchema,
+  streamLinkSchema,
   type MediaInfo,
   type MetricName,
   type PlaybackReport,
@@ -37,15 +38,23 @@ import {
   subtitleFilesBeside,
 } from '../media/playback.ts'
 import { keptSubtitles } from '../media/subtitles.ts'
+import {
+  readStreamToken,
+  STREAM_LINK_LIFETIME_MS,
+  streamToken,
+  type StreamGrant,
+  type StreamScope,
+} from '../media/stream-links.ts'
 import { mediaTokenValid } from '../media/token.ts'
 import { visibleFolder, visibleNode, type NodeRow } from '../nodes/read.ts'
-import { nodeInShare, openShare } from '../shares/public.ts'
+import { liveShareById, nodeInShare, openShare } from '../shares/public.ts'
 import { assertOwnOrigin } from './auth.ts'
 import { downloadableFile, versionChanged } from './content.ts'
 
 // Audio and video (DESIGN.md §6.7, §9, §10.4): what a file holds, what a
-// player needs to start, where each user stopped and subtitles, for the players,
-// and the plaintext of a version for the media service, which examines it.
+// player needs to start, where each user stopped and subtitles, for the players;
+// stream links, for another player (VLC); and the plaintext of a version for
+// the media service, which examines it.
 
 const byId = z.object({ id: z.uuid() })
 const byToken = z.object({ token: z.string().min(1).max(100) })
@@ -101,6 +110,51 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
           played.besideOffered ? subtitleFilesBeside(app.db, node) : [],
         ])
         return { versionId: file.version_id, positionMs, subtitleFiles }
+      },
+    )
+
+    // An address another player opens (VLC, §6.7), for what this browser can't play.
+    routes.post(
+      `${place.path}/stream-link`,
+      { config: place.config, schema: { params: fileParams, response: { 201: streamLinkSchema } } },
+      async (request, reply) => {
+        // No session through a link, so no CSRF token: from DFS's own page.
+        if (request.params.token !== undefined) assertOwnOrigin(app, request)
+        const played = await playedFile(app, request, request.params)
+        withinLimit(
+          app.limits.streamLinks,
+          played.userId === null ? `address:${request.ip}` : `user:${played.userId}`,
+          'Too many stream links. Try again in a few minutes.',
+        )
+        const file = await servedVersion(app.db, played)
+        const scope: StreamScope = played.share
+          ? {
+              kind: 'share',
+              shareId: played.share.id,
+              passwordVersion: played.share.passwordVersion,
+            }
+          : { kind: 'user', userId: requireAuth(request.auth).user.id }
+        const expiresAt = Date.now() + STREAM_LINK_LIFETIME_MS
+        const token = await streamToken(app.keys, {
+          scope,
+          nodeId: played.node.id,
+          versionId: file.version_id,
+          expiresAt,
+        })
+        request.log.info(
+          {
+            streamLink: {
+              nodeId: played.node.id,
+              versionId: file.version_id,
+              ...(played.shareId !== null && { shareId: played.shareId }),
+            },
+          },
+          'stream link made',
+        )
+        return reply.code(201).send({
+          url: `${app.config.publicBaseUrl}/api/stream/${token}/${encodeURIComponent(played.node.name)}`,
+          expiresAt: new Date(expiresAt).toISOString(),
+        })
       },
     )
 
@@ -296,7 +350,55 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
     },
   )
 
+  // What a stream link reads (§6.7): no session, its token says whose and which
+  // version; sent as any download is, with Range. Its name is the player's title.
+  routes.get(
+    '/stream/:token/:name',
+    {
+      config: { access: 'public' },
+      schema: { params: z.object({ token: z.string().max(300), name: z.string().max(2000) }) },
+    },
+    async (request, reply) => {
+      const grant = await readStreamToken(app.keys, request.params.token)
+      if (!grant) throw streamLinkEnded()
+      await streamAllowed(app, grant)
+      const file = await downloadableFile(app.db, grant.nodeId, grant.versionId)
+      return sendFile(app, request, reply, file)
+    },
+  )
+
   done()
+}
+
+/**
+ * Whether whoever made a stream link may still read its file: the user, with
+ * the file in their drive and their account enabled; or the share link, live,
+ * with the same password, still reaching the file (and, a file link, its
+ * version). Throws why not.
+ */
+async function streamAllowed(app: FastifyInstance, grant: StreamGrant): Promise<void> {
+  const { scope } = grant
+  if (scope.kind === 'user') {
+    const { rows } = await app.db.execute(sql`
+      SELECT 1 FROM users WHERE id = ${scope.userId} AND disabled_at IS NULL`)
+    if (rows.length === 0) throw streamLinkEnded()
+    asMedia(await visibleNode(app.db, scope.userId, grant.nodeId))
+  } else {
+    const { share, root } = await liveShareById(app, scope.shareId)
+    if (share.password_version !== scope.passwordVersion) throw streamLinkEnded()
+    const node = asMedia(await nodeInShare(app, root, grant.nodeId))
+    if (node.id === root.id && share.version_id !== grant.versionId) throw streamLinkEnded()
+  }
+  if (!(await isVersionOf(app.db, grant.nodeId, grant.versionId))) throw streamLinkEnded()
+}
+
+/** A stream link past its time, or whose file its maker can't read any more. */
+function streamLinkEnded(): ApiError {
+  return new ApiError(
+    410,
+    'stream_link_ended',
+    'This stream link no longer works. Open the file in DFS for a new one.',
+  )
 }
 
 /** What a player plays (§10.4): a user's file, or one a share link reaches. */
@@ -310,6 +412,8 @@ interface Played {
   userId: string | null
   /** The link it is played through, for the log. */
   shareId: string | null
+  /** The link, and its password's version, which a stream link made through it keeps to (§6.7). */
+  share: { id: string; passwordVersion: number } | null
   /**
    * Subtitle files beside it may be offered: in the drive, and in a shared
    * folder, but not through a file link, which shares that file alone.
@@ -331,6 +435,7 @@ async function playedFile(
       readerId: auth.user.id,
       userId: auth.user.id,
       shareId: null,
+      share: null,
       besideOffered: true,
     }
   }
@@ -342,6 +447,7 @@ async function playedFile(
     readerId: linkReader(share.id, request.ip),
     userId: null,
     shareId: share.id,
+    share: { id: share.id, passwordVersion: share.password_version },
     besideOffered: root.kind === 'folder',
   }
 }

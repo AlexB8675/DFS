@@ -1,6 +1,17 @@
 import type { PlayProblemKind } from '@dfs/shared'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Cpu, Download, Film, Play, RotateCcw, Snail, VolumeX, X } from 'lucide-react'
+import {
+  Cpu,
+  Download,
+  ExternalLink,
+  Film,
+  Info,
+  Play,
+  RotateCcw,
+  Snail,
+  VolumeX,
+  X,
+} from 'lucide-react'
 import {
   useCallback,
   useEffect,
@@ -28,8 +39,8 @@ import { isEditable } from '@/lib/editable'
 import type { FilePlace } from '@/lib/file-place'
 import { cn } from '@/lib/utils'
 import { contentUrl, mediaQuery, playbackQuery } from './api'
-import { browserCanPlayType, codecLabel, playability, playedStreams } from './codecs'
-import { chooseAudioTrack } from './audio-tracks'
+import { browserCanPlayType, codecLabel, playability, playedStreams, unplayableOf } from './codecs'
+import { audioTracksOf, chooseAudioTrack } from './audio-tracks'
 import { Controls, type Chapter } from './controls'
 import {
   decodingQuery,
@@ -37,7 +48,9 @@ import {
   usePlaybackStats,
   type PlaybackNotice,
 } from './diagnostics'
+import { VLC } from './external-players'
 import { playerAction, stepSpeed, type PlayerAction } from './keys'
+import { OpenInPlayerDialog } from './open-in-player'
 import { usePlayerPreferences } from './preferences'
 import {
   defaultSubtitle,
@@ -100,6 +113,7 @@ const NOTICE_FADE_MS = 10_000
 /** Each warning's icon. */
 const NOTICE_ICONS: Record<PlaybackNotice['key'], ReactNode> = {
   sound: <VolumeX />,
+  limits: <Info />,
   decoding: <Cpu />,
   software: <Cpu />,
   slow: <Snail />,
@@ -147,6 +161,8 @@ export default function VideoView({
   /** Warnings dismissed in this video, and those fading out. */
   const [dismissed, setDismissed] = useState<ReadonlySet<string>>(new Set())
   const [fading, setFading] = useState<ReadonlySet<string>>(new Set())
+  /** Playing it in another player (VLC, §6.7): its stream link, offered over the player. */
+  const [external, setExternal] = useState(false)
   /** Asked to play, and not playing yet nor refused: a spinner, not a play button. */
   const [starting, setStarting] = useState(true)
 
@@ -197,8 +213,9 @@ export default function VideoView({
     picture && (picture.decodes === false || (blank && picture.decodes !== true))
       ? codecLabel(picture.stream.codec)
       : null
-  const silentCodec =
-    verdict?.audio?.decodes === false ? codecLabel(verdict.audio.stream.codec) : null
+  // What it plays without: its sound, picture subtitles, other sound tracks, which VLC plays.
+  const unplayable =
+    info && verdict && video ? unplayableOf(info, verdict, audioTracksOf(video) !== null) : null
   const shown: Problem | null =
     problem ?? (pictureFails ? { kind: 'codec', codec: pictureFails } : null)
   const stopped = shown !== null
@@ -218,7 +235,8 @@ export default function VideoView({
     active,
   )
   const notices = playbackNotices({
-    silentCodec,
+    unplayable,
+    playerName: VLC.name,
     decoding,
     picture: info ? playedStreams(info).video : null,
     bitRate: info?.bitRate ?? null,
@@ -477,6 +495,7 @@ export default function VideoView({
         run(action)
         return true
       },
+      openExternal,
     }),
     [run, stopped],
   )
@@ -540,6 +559,12 @@ export default function VideoView({
     if (error?.code === MediaError.MEDIA_ERR_NETWORK) setProblem({ kind: 'network' })
     else if (error?.code === MediaError.MEDIA_ERR_DECODE) setProblem({ kind: 'decode', detail })
     else setProblem({ kind: 'unsupported', detail })
+  }
+
+  /** Offers VLC's link; this player pauses, as the video goes on there. */
+  function openExternal() {
+    videoRef.current?.pause()
+    setExternal(true)
   }
 
   function restart(versionId: string) {
@@ -634,6 +659,7 @@ export default function VideoView({
         <ProblemPanel
           problem={shown}
           onDownload={onDownload}
+          onExternal={openExternal}
           onRetry={() => {
             if (source) restart(source.versionId)
           }}
@@ -762,6 +788,16 @@ export default function VideoView({
             >
               {NOTICE_ICONS[notice.key]}
               <span>{notice.text}</span>
+              {notice.external && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="shrink-0 text-white hover:bg-white/15 hover:text-white"
+                  onClick={openExternal}
+                >
+                  <ExternalLink /> Open in {VLC.name}
+                </Button>
+              )}
               <Button
                 variant="ghost"
                 size="icon-sm"
@@ -810,6 +846,13 @@ export default function VideoView({
           }}
         />
       )}
+      <OpenInPlayerDialog
+        open={external}
+        onOpenChange={setExternal}
+        place={place}
+        name={name}
+        kind="video"
+      />
     </div>
   )
 }
@@ -881,40 +924,54 @@ function Center({
 function ProblemPanel({
   problem,
   onDownload,
+  onExternal,
   onRetry,
   onPlayNew,
 }: {
   problem: Problem
   onDownload: () => void
+  /** Plays it in another player (VLC), which plays what this browser can't. */
+  onExternal: () => void
   onRetry: () => void
   onPlayNew: (versionId: string) => void
 }) {
+  const external = (
+    <Button onClick={onExternal}>
+      <ExternalLink /> Open in {VLC.name}
+    </Button>
+  )
   switch (problem.kind) {
     case 'codec':
       return (
         <Trouble
           title="This video can’t play here"
-          description={`This browser can’t play ${problem.codec} video. Download it to watch it in another app.`}
+          description={`This browser can’t play ${problem.codec} video. ${VLC.name} can: open it there, or download it.`}
           onDownload={onDownload}
-        />
+        >
+          {external}
+        </Trouble>
       )
     case 'unsupported':
       return (
         <Trouble
           title="This video can’t play here"
-          description="This browser can’t open this file. Download it to watch it in another app."
+          description={`This browser can’t open this file. ${VLC.name} can: open it there, or download it.`}
           detail={problem.detail}
           onDownload={onDownload}
-        />
+        >
+          {external}
+        </Trouble>
       )
     case 'decode':
       return (
         <Trouble
           title="This video couldn’t be decoded"
-          description="It may be damaged, or in a form this browser can’t play."
+          description={`It may be damaged, or in a form this browser can’t play. Try it in ${VLC.name}, or download it.`}
           detail={problem.detail}
           onDownload={onDownload}
-        />
+        >
+          {external}
+        </Trouble>
       )
     case 'network':
       return (
