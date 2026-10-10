@@ -33,7 +33,6 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Spinner } from '@/components/ui/spinner'
 import { VirtualList } from '@/components/virtual-list'
-import { VLC } from '@/features/player/external-players'
 import { MediaDetails } from '@/features/player/media-details'
 import { FileDetails } from '@/features/preview/file-viewer'
 import { handlePreviewKey } from '@/features/preview/keys'
@@ -265,8 +264,8 @@ function SharedFile({ token, share, file }: { token: string; share: OpenShare; f
             <Button
               variant="ghost"
               size="icon"
-              aria-label={`Open in ${VLC.name}`}
-              title={`Open in ${VLC.name}`}
+              aria-label="Open in another player"
+              title="Open in another player"
               onClick={() => view.current?.openExternal?.()}
             >
               <ExternalLink />

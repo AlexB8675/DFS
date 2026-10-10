@@ -48,7 +48,6 @@ import {
   usePlaybackStats,
   type PlaybackNotice,
 } from './diagnostics'
-import { VLC } from './external-players'
 import { playerAction, stepSpeed, type PlayerAction } from './keys'
 import { OpenInPlayerDialog } from './open-in-player'
 import { usePlayerPreferences } from './preferences'
@@ -236,7 +235,7 @@ export default function VideoView({
   )
   const notices = playbackNotices({
     unplayable,
-    playerName: VLC.name,
+    playerName: 'VLC',
     decoding,
     picture: info ? playedStreams(info).video : null,
     bitRate: info?.bitRate ?? null,
@@ -561,7 +560,7 @@ export default function VideoView({
     else setProblem({ kind: 'unsupported', detail })
   }
 
-  /** Offers VLC's link; this player pauses, as the video goes on there. */
+  /** Offers other players (this device's, VLC); this one pauses, as the video goes on there. */
   function openExternal() {
     videoRef.current?.pause()
     setExternal(true)
@@ -795,7 +794,7 @@ export default function VideoView({
                   className="shrink-0 text-white hover:bg-white/15 hover:text-white"
                   onClick={openExternal}
                 >
-                  <ExternalLink /> Open in {VLC.name}
+                  <ExternalLink /> Open in…
                 </Button>
               )}
               <Button
@@ -930,14 +929,14 @@ function ProblemPanel({
 }: {
   problem: Problem
   onDownload: () => void
-  /** Plays it in another player (VLC), which plays what this browser can't. */
+  /** Plays it in another player (this device's, VLC), which may play what this browser can't. */
   onExternal: () => void
   onRetry: () => void
   onPlayNew: (versionId: string) => void
 }) {
   const external = (
     <Button onClick={onExternal}>
-      <ExternalLink /> Open in {VLC.name}
+      <ExternalLink /> Open in…
     </Button>
   )
   switch (problem.kind) {
@@ -945,7 +944,7 @@ function ProblemPanel({
       return (
         <Trouble
           title="This video can’t play here"
-          description={`This browser can’t play ${problem.codec} video. ${VLC.name} can: open it there, or download it.`}
+          description={`This browser can’t play ${problem.codec} video. Open it in another player, VLC say, or download it.`}
           onDownload={onDownload}
         >
           {external}
@@ -955,7 +954,7 @@ function ProblemPanel({
       return (
         <Trouble
           title="This video can’t play here"
-          description={`This browser can’t open this file. ${VLC.name} can: open it there, or download it.`}
+          description="This browser can’t open this file. Open it in another player, VLC say, or download it."
           detail={problem.detail}
           onDownload={onDownload}
         >
@@ -966,7 +965,7 @@ function ProblemPanel({
       return (
         <Trouble
           title="This video couldn’t be decoded"
-          description={`It may be damaged, or in a form this browser can’t play. Try it in ${VLC.name}, or download it.`}
+          description="It may be damaged, or in a form this browser can’t play. Try it in another player, or download it."
           detail={problem.detail}
           onDownload={onDownload}
         >
