@@ -115,10 +115,7 @@ export function useCreateFolder() {
       markFresh([folder.id])
     },
     onSettled: (_folder, _error, input) =>
-      Promise.all([
-        invalidateListings([input.parentId]),
-        invalidateFolderRows([input.parentId]),
-      ]),
+      Promise.all([invalidateListings([input.parentId]), invalidateFolderRows([input.parentId])]),
   })
 }
 
