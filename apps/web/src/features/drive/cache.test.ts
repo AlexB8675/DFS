@@ -1,7 +1,13 @@
 import type { DriveNode } from '@dfs/shared'
 import { QueryClient, QueryObserver, type InfiniteData } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { invalidateListings, invalidateNodes, patchNodes, removeFromListings } from './cache'
+import {
+  invalidateFolderRows,
+  invalidateListings,
+  invalidateNodes,
+  patchNodes,
+  removeFromListings,
+} from './cache'
 
 function node(id: string, parentId = 'folder'): DriveNode {
   return {
@@ -85,6 +91,35 @@ describe('drive cache updates', () => {
     for (const id of folders)
       expect(client.getQueryState(['nodes', id, 'children'])?.isInvalidated).toBe(true)
     expect(client.getQueryState(other)?.isInvalidated).toBe(false)
+  })
+
+  it('refetches the subfolder listings that show a folder as a row, and no others', async () => {
+    // `dest` is a row of `parent`: its arrow comes from there, not from its own listing.
+    const tree = ['nodes', 'parent', 'children', { kind: 'folder', sort: 'name', order: 'asc' }]
+    const treeElsewhere = [
+      'nodes',
+      'other',
+      'children',
+      { kind: 'folder', sort: 'name', order: 'asc' },
+    ]
+    const parentByName = ['nodes', 'parent', 'children', { sort: 'name', order: 'asc' }]
+    client.setQueryData(tree, listing([node('dest', 'parent'), node('sibling', 'parent')]))
+    client.setQueryData(treeElsewhere, listing([node('x', 'other')]))
+    client.setQueryData(parentByName, listing([node('dest', 'parent'), node('file', 'parent')]))
+
+    await invalidateFolderRows(['dest', null], client)
+
+    expect(client.getQueryState(tree)?.isInvalidated).toBe(true)
+    // Nothing but the subfolder listings carries the arrow.
+    expect(client.getQueryState(parentByName)?.isInvalidated).toBe(false)
+    expect(client.getQueryState(treeElsewhere)?.isInvalidated).toBe(false)
+    expect(client.getQueryState(byName)?.isInvalidated).toBe(false)
+  })
+
+  it('does no cache work for an empty set of folder rows', async () => {
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+    await invalidateFolderRows([null], client)
+    expect(invalidate).not.toHaveBeenCalled()
   })
 
   it('invalidates a batch of single nodes without touching their listings or paths', async () => {

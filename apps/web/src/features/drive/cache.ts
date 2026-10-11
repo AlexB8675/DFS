@@ -71,6 +71,30 @@ export async function invalidateListings(
   })
 }
 
+/**
+ * Refetches the subfolder listings (the folder tree, the move dialog) that
+ * show these folders as rows. A folder's `hasChildFolders` is read from its
+ * parent's listing, so a folder that gains or loses a subfolder keeps its old
+ * arrow there until that listing loads again.
+ */
+export async function invalidateFolderRows(
+  folderIds: Iterable<string | null>,
+  client = defaultClient,
+): Promise<void> {
+  const unique = new Set([...folderIds].filter((id) => id !== null))
+  if (unique.size === 0) return
+  await client.invalidateQueries({
+    predicate: (query) => {
+      const [scope, , kind, params] = query.queryKey
+      if (scope !== 'nodes' || kind !== 'children') return false
+      if (typeof params !== 'object' || params === null || !('kind' in params)) return false
+      if (params.kind !== 'folder') return false
+      const data = query.state.data as Listing | undefined
+      return data?.pages.some((page) => page.items.some((node) => unique.has(node.id))) ?? false
+    },
+  })
+}
+
 /** Refetches single nodes (not their listings or paths). */
 export async function invalidateNodes(
   ids: Iterable<string>,

@@ -565,6 +565,22 @@ describe('UploadEngine', () => {
     queryClient.clear()
   })
 
+  it('refreshes the arrow of the folder dropped into, which its parent lists', async () => {
+    const { transport } = fakeApi()
+    const engine = new UploadEngine(transport)
+    // `folder` is a row of `grandparent`'s subfolder listing, and may have been empty of folders.
+    const tree = ['nodes', 'grandparent', 'children', { kind: 'folder', sort: 'name', order: 'asc' }]
+    queryClient.setQueryData(tree, {
+      pages: [{ items: [{ id: 'folder', kind: 'folder', hasChildFolders: false }] }],
+      pageParams: [null],
+    })
+
+    await engine.enqueue('folder', [{ ...file('photo.jpg', 2), relativeDir: 'trip' }])
+
+    expect(queryClient.getQueryState(tree)?.isInvalidated).toBe(true)
+    queryClient.clear()
+  })
+
   it('uploads nested and loose files into their prepared folders', async () => {
     const { transport } = fakeApi()
     const engine = new UploadEngine({

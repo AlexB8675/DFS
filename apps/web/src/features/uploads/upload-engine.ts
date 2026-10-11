@@ -1,6 +1,6 @@
 import { splitExtension, type ExistingFile, type SyncState, type UploadSession } from '@dfs/shared'
 import { queryClient } from '@/app/query-client'
-import { invalidateListings } from '@/features/drive/cache'
+import { invalidateFolderRows, invalidateListings } from '@/features/drive/cache'
 import { markFresh } from '@/features/drive/list-motion'
 import { subscribeToResync, subscribeToSyncs } from '@/features/live-events/live-events'
 import { ApiError, errorMessage } from '@/lib/api/client'
@@ -790,6 +790,9 @@ export class UploadEngine {
     }
     if (folderIds.size > 0) {
       for (const id of [parentId, ...folderIds.values()]) this.refreshFolder(id)
+      // The folder dropped into may have no subfolders until now: its arrow in
+      // the tree is in its parent's listing, which those refreshes don't reach.
+      void invalidateFolderRows([parentId])
     }
     return folderIds
   }

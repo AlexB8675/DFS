@@ -15,6 +15,7 @@ import { apiGet, apiSend } from '@/lib/api/client'
 import { downloadFromApi, withTimeZone } from '@/lib/download'
 import { usePreferences } from '@/lib/preferences'
 import {
+  invalidateFolderRows,
   invalidateListings,
   invalidateNodes,
   invalidatePaths,
@@ -98,6 +99,10 @@ function ignore(): void {
   // Intentionally empty.
 }
 
+function isFolder(node: DriveNode): boolean {
+  return node.kind === 'folder'
+}
+
 // ── Mutations ────────────────────────────────────────────────────────────────
 //
 // Each change updates the cache right away (removing moved or trashed rows,
@@ -109,7 +114,11 @@ export function useCreateFolder() {
     onSuccess: (folder) => {
       markFresh([folder.id])
     },
-    onSettled: (_folder, _error, input) => invalidateListings([input.parentId]),
+    onSettled: (_folder, _error, input) =>
+      Promise.all([
+        invalidateListings([input.parentId]),
+        invalidateFolderRows([input.parentId]),
+      ]),
   })
 }
 
@@ -149,6 +158,9 @@ export function useMoveNodes() {
       settleLeaving(nodes.map((node) => node.id))
       return Promise.all([
         invalidateListings([...nodes.map((node) => node.parentId), parentId]),
+        invalidateFolderRows(
+          nodes.some(isFolder) ? [...nodes.map((node) => node.parentId), parentId] : [],
+        ),
         invalidateNodes(nodes.map((node) => node.id)),
         invalidatePaths(),
         queryClient.invalidateQueries({ queryKey: ['search'] }),
@@ -168,6 +180,7 @@ export function useTrashNodes() {
       settleLeaving(nodes.map((node) => node.id))
       return Promise.all([
         invalidateListings(nodes.map((node) => node.parentId)),
+        invalidateFolderRows(nodes.filter(isFolder).map((node) => node.parentId)),
         queryClient.invalidateQueries({ queryKey: ['trash'] }),
         queryClient.invalidateQueries({ queryKey: ['search'] }),
       ])
@@ -185,6 +198,7 @@ export function useRestoreNodes() {
     onSettled: (nodes) =>
       Promise.all([
         invalidateListings(nodes?.map((node) => node.parentId) ?? []),
+        invalidateFolderRows(nodes?.filter(isFolder).map((node) => node.parentId) ?? []),
         queryClient.invalidateQueries({ queryKey: ['trash'] }),
         queryClient.invalidateQueries({ queryKey: ['search'] }),
         queryClient.invalidateQueries({ queryKey: ['session'] }),
