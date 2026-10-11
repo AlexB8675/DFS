@@ -86,7 +86,7 @@ describe('loadConfig', () => {
       DATABASE_URL: 'postgres://dfs@postgres/dfs',
       INTERNAL_RPC_SECRET: 'x'.repeat(32),
       DISCORD_BOT_TOKEN: 'a-bot-token',
-      DISCORD_GUILD_ID: '1035095470428659723',
+      DISCORD_GUILD_ID: '123456789012345678',
     }
     // Only the API serves the public URL.
     expect(loadConfig(production, { ...api, service: 'bot' })).toMatchObject({
@@ -163,7 +163,7 @@ describe('loadConfig', () => {
       DATABASE_URL: 'postgres://dfs@postgres/dfs',
       INTERNAL_RPC_SECRET: 'x'.repeat(32),
       DISCORD_BOT_TOKEN: 'a-bot-token',
-      DISCORD_GUILD_ID: '1035095470428659723',
+      DISCORD_GUILD_ID: '123456789012345678',
     }
     expect(loadConfig(production, { ...api, service: 'bot' }).discord.categoryName).toBe('DFS')
   })

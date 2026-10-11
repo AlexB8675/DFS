@@ -97,8 +97,7 @@ anywhere:
 ## 5. Discord and the first account
 
 The `DFS` category and its channels, private to the bot, registered for
-storage (§4). Production's are new; the old channel outside any category
-stays unused.
+storage (§4).
 
 ```bash
 docker compose run --rm bot node apps/api/src/cli.ts setup
@@ -210,3 +209,43 @@ category and master key file), stop the API and the bot, recover into the
 new, empty database with `recover --into <database-url>` in the same kind of
 container, check the report, then start them. `--key-file` takes a file with
 every master key, current and retired.
+
+## A new Discord server or bot
+
+Nothing carries over. A bot in a new server can't reach the old channels, so
+`dfs reset-storage`, which deletes them by ID, refuses. And a new bot in the
+same server couldn't use what the old one wrote: Discord hides other users'
+message content and attachments from a bot without the Message Content
+intent, so the journal would read as empty (DESIGN §11). Turning that intent
+on would keep a same-server swap working, but leaves a permanent dependency on
+it. A new server and bot with a new database is the clean way: accounts,
+folders and links are made again.
+
+`docker/new-discord.sh` does steps 3 and 4 below, from the development PC in
+Git Bash, and asks before it deletes anything (`--check` only looks). It did
+the move of 2026-10-11, and its `OLD_BOT_ID` and `OLD_GUILD_ID` name that
+move's retired bot and server: set them to the ones being retired next time.
+
+1. In Discord, on the account that should own everything: a private server, an
+   application with a bot (no privileged intents), and an invite with the
+   scopes `bot` and `applications.commands` and permissions `268545040` (View
+   Channels, Send Messages, Attach Files, Read Message History, Manage
+   Messages, Manage Channels, Manage Roles). Administrator is the fallback if
+   `setup` names a missing permission.
+2. Development: the new token and `DISCORD_GUILD_ID` in `.env`, then
+   `docker compose -f docker/docker-compose.dev.yml down -v`, `pnpm db:up`,
+   `pnpm db:migrate`, `pnpm dfs setup`, `pnpm dfs owner --username <name>`,
+   and `pnpm --filter @dfs/storage check:discord`.
+3. Production, in this order: `docker compose down` first, because the bot
+   restarts by itself and would read a new token or server ID against the old
+   database. Then replace `discord_bot_token` (§3) and `DISCORD_GUILD_ID` in
+   `/etc/dfs/dfs.env`, and remove `dfs_postgres-data`, `dfs_staging` and
+   `dfs_cache`. Caddy's volumes stay: they hold the certificate. Staging and
+   the cache wouldn't confuse the new database (versions are UUIDs, cached
+   frames are keyed by their hash), but nothing would ever clean up what the
+   old one left in them. Then `docker/deploy.sh`, `setup` and `owner` (§5),
+   and `dfs drill` once the bot has posted the journal.
+4. Keep the old server and the master key until the new setup has run
+   cleanly: the old journal and the key rebuild the old database with
+   `recover --into`. Then delete the old server, which is what makes its files
+   unreadable for good, and reset the old application's token.
