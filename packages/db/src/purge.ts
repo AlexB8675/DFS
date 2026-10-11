@@ -5,7 +5,7 @@ import { appendJournal, auditRecords, type Executor, type JournalRecord } from '
 import { TREE_LOCK_NAMESPACE } from './locks.ts'
 import { auditLog } from './schema.ts'
 
-// Removing things for good (DESIGN.md §6.4): emptied trash, pruned versions,
+// Removing things for good (DESIGN.md §6.4): emptied trash, replaced versions,
 // expired uploads. Frames stop counting toward their blobs (a blob with nothing
 // live left goes to the GC), and quota is released at once.
 //
@@ -78,45 +78,20 @@ export async function purgeVersions(
 export const WORKING_LINK = sql`(link.expires_at IS NULL OR link.expires_at > now())
   AND (link.max_downloads IS NULL OR link.download_count < link.max_downloads)`
 
-/** Whether a working share link serves this version. */
-function servedByLink(versionId: ReturnType<typeof sql>) {
-  return sql`EXISTS (
-    SELECT 1 FROM share_links link WHERE link.version_id = ${versionId} AND ${WORKING_LINK})`
-}
-
 /**
- * Of these earlier versions, those no active share link serves, which can
- * go (D20). Locks them first: making a link takes a key-share lock on its
- * version, so a link made meanwhile is seen, or waits for the purge and
- * finds its version gone. Lock order (locks.ts): a file before its versions.
+ * Purges earlier versions left over (§6.4): a file keeps only its current
+ * version, as completing an upload that replaces it purges the one before
+ * (D42), but versions kept for share links before then stayed. At most
+ * `limit`, one owner per transaction; versions being purged right now wait
+ * for the next round. Returns the versions whose staged frames the caller
+ * removes, once committed.
  */
-export async function unneededVersions(
-  tx: Executor,
-  versionIds: readonly string[],
-): Promise<string[]> {
-  if (versionIds.length === 0) return []
-  const ids = uuidArray(versionIds)
-  await tx.execute(sql`SELECT id FROM file_versions WHERE id = ANY(${ids}) ORDER BY id FOR UPDATE`)
-  const { rows } = await tx.execute<{ id: string }>(sql`
-    SELECT version.id FROM file_versions version
-    WHERE version.id = ANY(${ids}) AND NOT ${servedByLink(sql`version.id`)}`)
-  return rows.map((row) => row.id)
-}
-
-/**
- * Purges earlier versions whose last share link has stopped working since
- * their file got a newer one (§6.4): expired, revoked or used up. At most
- * `limit`, one owner per transaction; versions being purged or linked right
- * now wait for the next round. Returns the versions whose staged frames the
- * caller removes, once committed.
- */
-export async function purgeUnneededVersions(db: Database, limit = 500): Promise<string[]> {
+export async function purgeEarlierVersions(db: Database, limit = 500): Promise<string[]> {
   const { rows: due } = await db.execute<{ id: string; owner_id: string }>(sql`
     SELECT version.id, node.owner_id FROM file_versions version
     JOIN nodes node ON node.id = version.node_id
     WHERE version.id <> node.current_version_id
       AND version.state IN ('syncing', 'stored', 'failed')
-      AND NOT ${servedByLink(sql`version.id`)}
     ORDER BY version.id LIMIT ${limit}`)
   const purged: string[] = []
   for (const [ownerId, rows] of Map.groupBy(due, (row) => row.owner_id)) {
@@ -124,11 +99,7 @@ export async function purgeUnneededVersions(db: Database, limit = 500): Promise<
       const { rows: locked } = await tx.execute<{ id: string }>(sql`
         SELECT id FROM file_versions WHERE id = ANY(${uuidArray(rows.map((row) => row.id))})
         ORDER BY id FOR UPDATE SKIP LOCKED`)
-      const { rows: unneeded } = await tx.execute<{ id: string }>(sql`
-        SELECT version.id FROM file_versions version
-        WHERE version.id = ANY(${uuidArray(locked.map((row) => row.id))})
-          AND NOT ${servedByLink(sql`version.id`)}`)
-      const ids = unneeded.map((row) => row.id)
+      const ids = locked.map((row) => row.id)
       await appendJournal(tx, await purgeVersions(tx, ownerId, ids))
       return ids
     })

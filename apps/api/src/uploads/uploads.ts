@@ -9,7 +9,6 @@ import {
   nodeRecords,
   nodes,
   purgeVersions,
-  unneededVersions,
   versionRecords,
   WORKING_LINK,
   QUEUES,
@@ -327,8 +326,8 @@ async function startUploads(
 }
 
 /**
- * Answers each upload that asked first with the file its name matched: how
- * many versions it has had, and how many working links serve its current one.
+ * Answers each upload that asked first with the file its name matched, and
+ * how many of its links work, which replacing it would turn off (D42).
  */
 async function answerAsked(
   tx: Executor,
@@ -339,9 +338,8 @@ async function answerAsked(
   if (asked.length === 0) return
   const fileIdOf = ({ plan, fileId }: (typeof asked)[number]) => fileId ?? fileOf.get(plan.key)
   const ids = [...new Set(asked.flatMap((upload) => fileIdOf(upload) ?? []))]
-  const { rows } = await tx.execute<{ id: string; versions: number; links: number }>(sql`
+  const { rows } = await tx.execute<{ id: string; links: number }>(sql`
     SELECT node.id,
-      coalesce((SELECT max(version_no) FROM file_versions WHERE node_id = node.id), 0) AS versions,
       (SELECT count(*) FROM share_links link
         WHERE link.version_id = node.current_version_id AND ${WORKING_LINK})::int AS links
     FROM nodes node WHERE node.id = ANY(${uuidArray(ids)})`)
@@ -353,7 +351,6 @@ async function answerAsked(
       file
         ? new FileExists(upload.plan.name, {
             nodeId: file.id,
-            versions: file.versions,
             links: file.links,
           })
         : nameConflict(upload.plan.name),
@@ -741,16 +738,14 @@ async function finishUpload(
     .set({ state: 'completed' })
     .where(eq(uploadSessions.id, upload.id))
 
-  // Earlier versions go, freeing their quota (D20, D24), but for those an
-  // active share link serves: the janitor takes those when their links end.
+  // Earlier versions go, freeing their quota (D20, D24), and the file links
+  // that served them stop working (D42): a link never shares what replaced
+  // the file it was made for.
   const { rows: earlier } = await tx.execute<{ id: string }>(sql`
     SELECT id FROM file_versions
     WHERE node_id = ${upload.node_id} AND id <> ${upload.version_id}
       AND state IN ('syncing', 'stored', 'failed')`)
-  const prunedIds = await unneededVersions(
-    tx,
-    earlier.map((row) => row.id),
-  )
+  const prunedIds = earlier.map((row) => row.id)
   const pruneRecords = await purgeVersions(tx, auth.user.id, prunedIds)
 
   if (blobs.length > 0) {
@@ -770,7 +765,7 @@ async function finishUpload(
     actorId: auth.user.id,
     action: 'upload.completed',
     target: node.name,
-    details: upload.version_no > 1 ? `${size}, new version` : size,
+    details: upload.version_no > 1 ? `${size}, replacing the file` : size,
     nodeId: node.id,
   })
   // An empty file is stored now, with no blob for the bot to journal it after.

@@ -181,7 +181,7 @@ export function adminTests({
         ['node.restored', 'beach (1).jpg', 'renamed from beach.jpg'],
         ['upload.completed', 'beach.jpg', '3 B'],
         ['node.trashed', 'beach.jpg', null],
-        ['upload.completed', 'notes.txt', '11 B, new version'],
+        ['upload.completed', 'notes.txt', '11 B, replacing the file'],
         ['upload.completed', 'notes.txt', '2 B'],
         ['upload.completed', 'beach.jpg', '10 B'],
       ])
@@ -271,7 +271,7 @@ export function adminTests({
         id: link.id,
         path: 'Trips / Lisbon 2024',
         ownerUsername: username,
-        version: 'current',
+        replaced: false,
         state: 'active',
       })
       expect((await owners('active=true')).find((entry) => entry.ownerId === user.id)).toEqual({

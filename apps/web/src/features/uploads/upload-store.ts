@@ -14,9 +14,7 @@ export type UploadStatus =
 
 /** The file an upload's name matched, and what the dialog offers as the copy's name. */
 export interface UploadConflict {
-  /** How many versions the file has had. */
-  versions: number
-  /** Working share links to its current version, which keep serving it if it is replaced. */
+  /** Its working share links, which stop working if it is replaced (D42). */
   links: number
   suggestedName: string
 }

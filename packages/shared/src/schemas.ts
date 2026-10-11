@@ -227,9 +227,9 @@ export const createUploadSchema = z.object({
    */
   modifiedAt: timestamp.optional(),
   /**
-   * When the name matches a file in the folder: make a new version of it
-   * (`replace`, the default, D20), or don't, and answer `file_exists` with
-   * that file (`ask`), so the client can ask its user first.
+   * When the name matches a file in the folder: replace it (`replace`, the
+   * default, D20), or don't, and answer `file_exists` with that file
+   * (`ask`), so the client can ask its user first.
    */
   ifExists: z.enum(['ask', 'replace']).optional(),
 })
@@ -237,9 +237,7 @@ export const createUploadSchema = z.object({
 /** The file an upload's name matched, when it asked first (`ifExists: 'ask'`). */
 export const existingFileSchema = z.object({
   nodeId: id,
-  /** How many versions it has had: a copy is named from it, `name (3).txt`. */
-  versions: z.number().int().min(0),
-  /** Working share links to its current version, which keep serving it if it is replaced (§7.5). */
+  /** Its working share links, which stop working if it is replaced (§7.5, D42). */
   links: z.number().int().min(0),
 })
 export type ExistingFile = z.infer<typeof existingFileSchema>
@@ -361,11 +359,10 @@ export const shareLinkSchema = z.object({
   maxDownloads: z.number().int().positive().nullable(),
   downloadCount: z.number().int().min(0),
   /**
-   * A file link serves the version current when it was made (§7.5): still
-   * the file's `current` one, an `earlier` one since the file was replaced,
-   * or `deleted`, and the link no longer works. `null` for a folder link.
+   * A file link whose file was replaced since it was made: it no longer
+   * works, and can't be changed (§7.5, D42). Always `false` for a folder link.
    */
-  version: z.enum(['current', 'earlier', 'deleted']).nullable(),
+  replaced: z.boolean(),
 })
 export type ShareLink = z.infer<typeof shareLinkSchema>
 export const shareLinkPageSchema = pageSchema(shareLinkSchema)
@@ -611,9 +608,9 @@ export const adminShareSchema = z.object({
   hasPassword: z.boolean(),
   maxDownloads: z.number().int().positive().nullable(),
   downloadCount: count,
-  /** A file link's version, as its owner's list says it (§7.5); `null` for a folder link. */
-  version: z.enum(['current', 'earlier', 'deleted']).nullable(),
-  state: z.enum(['active', 'expired', 'used_up', 'version_deleted']),
+  /** A file link whose file was replaced since it was made (§7.5, D42). */
+  replaced: z.boolean(),
+  state: z.enum(['active', 'expired', 'used_up', 'replaced']),
 })
 export type AdminShare = z.infer<typeof adminShareSchema>
 export const adminSharePageSchema = pageSchema(adminShareSchema)

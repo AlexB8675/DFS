@@ -357,7 +357,7 @@ async function explainError(): Promise<void> {
     report({ key: track.key, message: errorMessage(fresh), offer: 'none' })
     return
   }
-  // Replaced since it was queued: the new version, from where it was.
+  // Replaced since it was queued: the file as it is now, from where it was.
   if (
     fresh &&
     !(fresh instanceof ApiError) &&

@@ -253,20 +253,20 @@ export function uploadTests({ describe, it, expect, owner, target }: SuiteContex
       expect(taken).toMatchObject({
         ok: false,
         error: { code: 'file_exists' },
-        existing: { nodeId: first.nodeId, versions: 1, links: 0 },
+        existing: { nodeId: first.nodeId, links: 0 },
       })
       expect(fresh).toMatchObject({ ok: true, session: { isNewVersion: false } })
-      // Taken earlier in the same batch: by a file still uploading, no version yet.
+      // Taken earlier in the same batch: by a file still uploading.
       expect(again).toMatchObject({
         ok: false,
         error: { code: 'file_exists' },
-        existing: { nodeId: fresh?.ok ? fresh.session.nodeId : '', versions: 0 },
+        existing: { nodeId: fresh?.ok ? fresh.session.nodeId : '', links: 0 },
       })
-      // Nothing became a version of it.
+      // Nothing replaced it.
       const own = await client.fetch('GET', `/files/${first.nodeId}/content`)
       expect(await own.text()).toBe('one')
 
-      // Its working links are counted: they keep the file as it is now (§7.5).
+      // Its working links are counted: replacing it would turn them off (D42).
       await client.send('POST', '/shares', {
         json: { nodeId: first.nodeId, expiresAt: null, password: null, maxDownloads: null },
       })

@@ -45,49 +45,58 @@ export function shareTests({ describe, it, expect, owner, target }: SuiteContext
   }
 
   describe('share links (§7.5)', () => {
-    it('keeps a file link on its version when the file is replaced, and that version while the link works', async () => {
+    it('turns a file link off when the file is replaced, so it never shares what replaced it (D42)', async () => {
       const client = await owner()
       const root = await workspace(client)
       const before = await usedBytes(client)
       const first = await uploadFile(client, root.id, 'draft.txt', text('a'))
       const link = await share(client, first.nodeId)
-      expect(link.version).toBe('current')
-      await uploadFile(client, root.id, 'draft.txt', text('bb'))
-      await uploadFile(client, root.id, 'draft.txt', text('ccc'))
-      // The current 3 bytes and the first byte the link serves: the second went.
-      expect((await usedBytes(client)) - before).toBe(4)
-
+      expect(link.replaced).toBe(false)
       const { token, client: stranger } = visitor(link.url)
-      const opened = await stranger.call('GET', `/s/${token}`, publicShareSchema)
-      expect(opened).toMatchObject({ locked: false, root: { name: 'draft.txt', sizeBytes: 1 } })
       const served = await stranger.fetch('GET', `/s/${token}/files/${first.nodeId}/content`)
       expect(await served.text()).toBe('a')
+
+      await uploadFile(client, root.id, 'draft.txt', text('bb'))
+      // The file keeps only what replaced it, at once.
+      expect((await usedBytes(client)) - before).toBe(2)
+      for (const path of [`/s/${token}`, `/s/${token}/files/${first.nodeId}/content`]) {
+        expect(await stranger.error('GET', path)).toEqual({ status: 410, code: 'share_replaced' })
+      }
       const own = await client.fetch('GET', `/files/${first.nodeId}/content`)
-      expect(await own.text()).toBe('ccc')
-      expect(await listed(client, link.id)).toMatchObject({ version: 'earlier' })
+      expect(await own.text()).toBe('bb')
+      // Its owner sees why it stopped, and can't bring it back.
+      expect(await listed(client, link.id)).toMatchObject({ replaced: true })
+      expect(
+        await client.error('PATCH', `/shares/${link.id}`, { json: { maxDownloads: 5 } }),
+      ).toEqual({ status: 409, code: 'share_replaced' })
+      const count = await client.call('POST', '/shares/count', shareCountSchema, {
+        json: { ids: [first.nodeId] },
+      })
+      expect(count.links).toBe(0)
 
       // A new link shares the file as it is now.
-      expect(await share(client, first.nodeId)).toMatchObject({ version: 'current' })
-      // Once the old link is turned off, which deletes it, its version goes.
+      const again = await share(client, first.nodeId)
+      expect(again.replaced).toBe(false)
+      const fresh = visitor(again.url)
+      expect(await fresh.client.call('GET', `/s/${fresh.token}`, publicShareSchema)).toMatchObject({
+        locked: false,
+        root: { name: 'draft.txt', sizeBytes: 2 },
+      })
+      // Turning the old link off deletes it.
       await client.send('DELETE', `/shares/${link.id}`)
-      await target().settle()
-      expect((await usedBytes(client)) - before).toBe(3)
       expect(await listed(client, link.id)).toBe(undefined)
     })
 
-    it('ends a file link whose version was deleted, for good', async () => {
+    it('keeps a folder link sharing its files as they are, replaced ones included', async () => {
       const client = await owner()
-      const root = await workspace(client)
-      const first = await uploadFile(client, root.id, 'once.txt', text('one'))
-      const link = await share(client, first.nodeId, { maxDownloads: 1 })
+      const folder = await createFolder(client, (await workspace(client)).id, 'Notes')
+      const file = await uploadFile(client, folder.id, 'todo.txt', text('old'))
+      const link = await share(client, folder.id)
+      await uploadFile(client, folder.id, 'todo.txt', text('new list'))
       const { token, client: stranger } = visitor(link.url)
-      await stranger.fetch('GET', `/s/${token}/files/${first.nodeId}/content`)
-      // Used up, the link serves nothing, so replacing the file deletes the version.
-      await uploadFile(client, root.id, 'once.txt', text('two'))
-      expect(await listed(client, link.id)).toMatchObject({ version: 'deleted' })
-      expect(
-        await client.error('PATCH', `/shares/${link.id}`, { json: { maxDownloads: 5 } }),
-      ).toEqual({ status: 409, code: 'share_version_deleted' })
+      const served = await stranger.fetch('GET', `/s/${token}/files/${file.nodeId}/content`)
+      expect(await served.text()).toBe('new list')
+      expect(await listed(client, link.id)).toMatchObject({ replaced: false })
     })
 
     it('counts the links deleting would stop: to an item, inside a folder, in the trash', async () => {

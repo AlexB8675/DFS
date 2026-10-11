@@ -9,7 +9,7 @@ import {
   PostgresSampler,
   pruneJournal,
   pruneMetrics,
-  purgeUnneededVersions,
+  purgeEarlierVersions,
   QUEUES,
   sampleSystem,
   textArray,
@@ -211,8 +211,8 @@ export async function startLeaderWork(options: {
     repeat(JANITOR_EVERY_MS, log, 'dropping posted journal records', async () => {
       await pruneJournal(db)
     }),
-    repeat(JANITOR_EVERY_MS, log, 'deleting versions no link serves', async () => {
-      await dropUnneededVersions(db, staging)
+    repeat(JANITOR_EVERY_MS, log, 'deleting earlier versions left over', async () => {
+      await dropEarlierVersions(db, staging)
     }),
     repeat(JANITOR_EVERY_MS, log, 'emptying old trash', async () => {
       const items = await emptyOldTrash(db, staging, config.trashRetentionDays)
@@ -303,11 +303,11 @@ export async function giveUpIdleUploads(db: Database, staging: Staging): Promise
 }
 
 /**
- * Deletes earlier versions whose share links have all stopped working (§7.5),
- * and their staged frames.
+ * Deletes earlier versions left over, kept for share links before a replaced
+ * file's links were turned off instead (D42), and their staged frames.
  */
-export async function dropUnneededVersions(db: Database, staging: Staging): Promise<void> {
-  for (const versionId of await purgeUnneededVersions(db)) await staging.removeVersion(versionId)
+export async function dropEarlierVersions(db: Database, staging: Staging): Promise<void> {
+  for (const versionId of await purgeEarlierVersions(db)) await staging.removeVersion(versionId)
 }
 
 /**

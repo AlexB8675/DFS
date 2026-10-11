@@ -573,7 +573,7 @@ export const MONITORING_SECTIONS: DashboardSection[] = [
       },
       {
         title: 'Used space',
-        description: 'Bytes counted against quotas, versions and trash included.',
+        description: 'Bytes counted against quotas, trash included.',
         format: 'bytes',
         lines: [{ label: 'Used', color: 1, series: 'files.bytes:avg' }],
       },

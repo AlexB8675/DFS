@@ -154,13 +154,13 @@ const SELECT_SHARES = sql`
 interface ListedRow extends ShareRow {
   owner_username: string
   path: string
-  version: AdminShare['version']
+  replaced: boolean
   working: boolean
 }
 
 /**
  * Every link as the admin pages list it, `listed`: with its owner, the
- * folders its item is in, the version it serves, and whether it works. With
+ * folders its item is in, whether its file was replaced since, and whether it works. With
  * `q`, only links whose item, folder path or owner contains it.
  */
 function listedShares(q: string | undefined) {
@@ -185,13 +185,10 @@ function listedShares(q: string | undefined) {
         link.created_at::text AS created_at, link.expires_at::text AS expires_at,
         link.password_hash IS NOT NULL AS has_password, link.max_downloads,
         link.download_count,
-        CASE
-          WHEN node.kind = 'folder' THEN NULL
-          WHEN link.version_id IS NULL THEN 'deleted'
-          WHEN link.version_id = node.current_version_id THEN 'current'
-          ELSE 'earlier'
-        END AS version,
-        (${WORKING_LINK} AND (node.kind = 'folder' OR link.version_id IS NOT NULL)) AS working
+        (node.kind = 'file' AND link.version_id IS DISTINCT FROM node.current_version_id)
+          AS replaced,
+        (${WORKING_LINK} AND (node.kind = 'folder' OR link.version_id = node.current_version_id))
+          AS working
       FROM share_links link
       JOIN nodes node ON node.id = link.node_id
       JOIN users owner ON owner.id = node.owner_id
@@ -367,14 +364,13 @@ export async function cancelUploadAsAdmin(
 
 function toAdminShare(row: ListedRow): AdminShare {
   const now = Date.now()
-  const state =
-    row.version === 'deleted'
-      ? 'version_deleted'
-      : row.expires_at && Date.parse(row.expires_at) <= now
-        ? 'expired'
-        : row.max_downloads !== null && row.download_count >= row.max_downloads
-          ? 'used_up'
-          : 'active'
+  const state = row.replaced
+    ? 'replaced'
+    : row.expires_at && Date.parse(row.expires_at) <= now
+      ? 'expired'
+      : row.max_downloads !== null && row.download_count >= row.max_downloads
+        ? 'used_up'
+        : 'active'
   return {
     id: row.id,
     nodeId: row.node_id,
@@ -390,7 +386,7 @@ function toAdminShare(row: ListedRow): AdminShare {
     hasPassword: row.has_password,
     maxDownloads: row.max_downloads,
     downloadCount: row.download_count,
-    version: row.version,
+    replaced: row.replaced,
     state,
   }
 }

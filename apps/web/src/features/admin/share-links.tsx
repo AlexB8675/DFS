@@ -32,7 +32,7 @@ const SHARE_STATES: Record<AdminShare['state'], string> = {
   active: 'Active',
   expired: 'Expired',
   used_up: 'Used up',
-  version_deleted: 'Version deleted',
+  replaced: 'File replaced',
 }
 
 /** Groups open at first when there are this few, or when a search narrowed them. */
@@ -261,14 +261,6 @@ function OwnerLinks({
                             className="size-3.5 shrink-0 text-muted-foreground"
                             aria-label="Needs a password"
                           />
-                        )}
-                        {share.version === 'earlier' && (
-                          <span
-                            className="shrink-0 text-xs text-muted-foreground"
-                            title="The file was replaced since; the link shares the version it was made for."
-                          >
-                            earlier version
-                          </span>
                         )}
                       </span>
                       <span

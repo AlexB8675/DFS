@@ -12,7 +12,6 @@ import {
   nodes,
   purgeVersions,
   storageChannels,
-  unneededVersions,
   users,
   type Database,
 } from '@dfs/db'
@@ -358,7 +357,7 @@ describe('lock order (packages/db/src/locks.ts)', () => {
     // upload locks the earlier version, then purges it, which takes the pack.
     let storing = Promise.resolve(new Map<number, Error>())
     await db.transaction(async (tx) => {
-      expect(await unneededVersions(tx, [replaced])).toEqual([replaced])
+      await tx.execute(sql`SELECT id FROM file_versions WHERE id = ${replaced} FOR UPDATE`)
       storing = storeBlobs({ db, staging, store }, [packId])
       await waitingForALock(db, storing)
       await appendJournal(tx, await purgeVersions(tx, ownerId, [replaced]))

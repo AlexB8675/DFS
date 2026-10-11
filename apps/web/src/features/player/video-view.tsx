@@ -987,7 +987,7 @@ function ProblemPanel({
       return (
         <Trouble
           title="This file was replaced"
-          description="A new version was uploaded while it played."
+          description="Another file was uploaded in its place while it played."
           onDownload={onDownload}
         >
           <Button
@@ -995,7 +995,7 @@ function ProblemPanel({
               onPlayNew(problem.versionId)
             }}
           >
-            <Play /> Play the new version
+            <Play /> Play the new file
           </Button>
         </Trouble>
       )

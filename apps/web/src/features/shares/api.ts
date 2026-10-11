@@ -94,11 +94,11 @@ export function linkTerms(share: ShareLink): string {
     .join(' · ')
 }
 
-export type ShareStatus = 'active' | 'expired' | 'used-up' | 'version-deleted'
+export type ShareStatus = 'active' | 'expired' | 'used-up' | 'replaced'
 
 export function shareStatus(share: ShareLink, now: Date = new Date()): ShareStatus {
-  // The version a file link served was deleted: it works no more (§7.5).
-  if (share.version === 'deleted') return 'version-deleted'
+  // The file was replaced since the link was made: it works no more (§7.5, D42).
+  if (share.replaced) return 'replaced'
   if (share.expiresAt && new Date(share.expiresAt) <= now) return 'expired'
   if (share.maxDownloads !== null && share.downloadCount >= share.maxDownloads) return 'used-up'
   return 'active'

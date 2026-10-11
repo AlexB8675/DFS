@@ -118,10 +118,10 @@ const UNAVAILABLE: Record<string, { title: string; description: string }> = {
     title: 'This link has been used up',
     description: 'It reached its download limit. Ask the person who shared it for a new one.',
   },
-  share_version_deleted: {
-    title: 'This version is gone',
+  share_replaced: {
+    title: 'This file was replaced',
     description:
-      'The file was replaced, and the version this link shared was deleted. Ask the person who shared it for a new link.',
+      'It changed since this link was made, so the link no longer works. Ask the person who shared it for a new one.',
   },
   share_not_found: {
     title: 'This link doesn’t exist',

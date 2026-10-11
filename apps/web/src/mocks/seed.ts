@@ -540,7 +540,7 @@ export function createSeed(version: number): MockState {
       `Dump ${(1 + random() * 0.2).toFixed(1)} GB`,
     )
   }
-  log(12 * MINUTE, 'Demo User', 'upload.completed', 'Budget 2026.xlsx', '48 KB, new version')
+  log(12 * MINUTE, 'Demo User', 'upload.completed', 'Budget 2026.xlsx', '48 KB, replacing the file')
   log(40 * MINUTE, 'Demo User', 'node.purged', 'Old notes.txt', 'emptied the trash')
   log(3 * 60 * MINUTE, 'Demo User', 'node.trashed', 'Old notes.txt', null)
   log(26 * 60 * MINUTE, 'Demo User', 'upload.completed', 'Tram ride.mp4', '182 MB')

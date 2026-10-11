@@ -802,22 +802,20 @@ export class UploadEngine {
     // Its batch is answered: it may go back in line before the batch is done.
     this.preparingSessions.delete(job)
     if (job.drop.choice) {
-      this.decide(job, job.drop.choice, existing)
+      this.decide(job, job.drop.choice)
       return
     }
     const { base, extension } = splitExtension(job.file.name)
     job.status = 'conflict'
     job.conflict = {
-      versions: existing.versions,
       links: existing.links,
-      suggestedName: `${base} (${String(Math.max(1, existing.versions))})${extension}`,
+      suggestedName: `${base} (1)${extension}`,
     }
     this.publish(job)
   }
 
   /** Acts on a choice: back in line to replace or under a copy's name, or skipped. */
-  private decide(job: Job, choice: ConflictChoice, existing?: ExistingFile): void {
-    const versions = existing?.versions ?? job.conflict?.versions ?? 0
+  private decide(job: Job, choice: ConflictChoice): void {
     job.conflict = null
     if (choice.action === 'skip') {
       this.cancelJobs([job])
@@ -831,8 +829,8 @@ export class UploadEngine {
       job.name = choice.name
       job.copyNumber = null
     } else {
-      // Numbered from the file's versions, or on from a copy's name also taken.
-      const number = job.copyNumber === null ? Math.max(1, versions) : job.copyNumber + 1
+      // Numbered from 1, or on from a copy's name also taken.
+      const number = job.copyNumber === null ? 1 : job.copyNumber + 1
       const { base, extension } = splitExtension(job.file.name)
       job.copyNumber = number
       job.name = `${base} (${String(number)})${extension}`

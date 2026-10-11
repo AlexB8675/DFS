@@ -8,7 +8,7 @@ import {
   createDatabase,
   createPool,
   foldAllFolderStats,
-  purgeUnneededVersions,
+  purgeEarlierVersions,
   storageChannels,
   users,
   type Database,
@@ -278,9 +278,9 @@ async function useTheDrive(stack: Stack): Promise<void> {
   await updateNode(app, owner, notes.nodeId, { name: 'Notes 2024.txt' })
   await moveNodes(app, owner, [year.id], docs.id)
 
-  // Replaced with a link serving the first version, and without one.
+  // Replaced with a link, which stops working (D42), and without one.
   const report = await upload(stack, owner, docs.id, 'report.txt', bytes(3_000, 6))
-  const pinned = await createShare(app, owner, {
+  const reportLink = await createShare(app, owner, {
     nodeId: report.nodeId,
     expiresAt: null,
     password: null,
@@ -289,17 +289,18 @@ async function useTheDrive(stack: Stack): Promise<void> {
   await upload(stack, owner, docs.id, 'report.txt', bytes(3_500, 7))
   await upload(stack, owner, docs.id, 'draft.txt', bytes(1_000, 8))
   await upload(stack, owner, docs.id, 'draft.txt', bytes(1_100, 9))
-  const kept = await upload(stack, owner, docs.id, 'contract.txt', bytes(800, 10))
-  const keptLink = await createShare(app, owner, {
-    nodeId: kept.nodeId,
+  const contract = await upload(stack, owner, docs.id, 'contract.txt', bytes(800, 10))
+  const contractLink = await createShare(app, owner, {
+    nodeId: contract.nodeId,
     expiresAt: '2030-01-01T00:00:00.000Z',
     password: 'a link password',
     maxDownloads: null,
   })
+  await updateShare(app, owner, contractLink.id, { maxDownloads: 4 })
+  // Its link stays, working no more, as the journal says once replayed.
   await upload(stack, owner, docs.id, 'contract.txt', bytes(900, 11))
-  await updateShare(app, owner, keptLink.id, { maxDownloads: 4 })
-  // Turned off, the first link goes, and the version it kept goes with the janitor.
-  await deleteShare(app, owner, pinned.id)
+  // Turned off, the report's link goes.
+  await deleteShare(app, owner, reportLink.id)
   const folderLink = await createShare(app, owner, {
     nodeId: photos.id,
     expiresAt: null,
@@ -316,8 +317,7 @@ async function useTheDrive(stack: Stack): Promise<void> {
   await deleteForever(app, owner, archive.id)
 
   // Compaction (§6.6): both packs hold little, so they become one, the old
-  // ones going once the journal says so. The first report.txt moves with
-  // them, and goes later with the janitor, its link turned off.
+  // ones going once the journal says so.
   await settle(stack)
   const merged = await new Compactor({
     db: app.db,
@@ -331,6 +331,8 @@ async function useTheDrive(stack: Stack): Promise<void> {
   if (merged.groups !== 1 || merged.packs !== 2) {
     throw new Error(`Compaction merged ${JSON.stringify(merged)}, not two packs into one.`)
   }
+  // Replaced, report.txt's frame that compaction moved is purged after the move.
+  await upload(stack, owner, docs.id, 'report.txt', bytes(3_600, 14))
 
   // Another user: files, a link, an item removed by the admin with its link.
   const music = await createFolder(app, sam, root(sam), 'Music')
@@ -351,11 +353,11 @@ async function settle({ app, store }: Stack): Promise<void> {
   await settleBlobs({ db: app.db, staging: app.staging, store, sizes: app.config.sizes })
 }
 
-/** What the leading bot does over time: store blobs, drop what no link needs, delete released blobs, post the journal. */
+/** What the leading bot does over time: store blobs, drop earlier versions left over, delete released blobs, post the journal. */
 async function settleStack(stack: Stack): Promise<void> {
   const { app, store, journal } = stack
   await settle(stack)
-  for (const versionId of await purgeUnneededVersions(app.db)) {
+  for (const versionId of await purgeEarlierVersions(app.db)) {
     await app.staging.removeVersion(versionId)
   }
   // Small batches, so a record too large for one is cut into pieces. Released

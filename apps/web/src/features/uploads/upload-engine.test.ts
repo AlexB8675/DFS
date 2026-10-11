@@ -53,8 +53,8 @@ function fakeApi() {
     sent,
     streamed,
     attempts: new Map<string, number>(),
-    /** Names files in the folder already have, with their versions: an upload asking first is told. */
-    existing: new Map<string, number>(),
+    /** Names files in the folder already have: an upload asking first is told. */
+    existing: new Set<string>(),
   }
 
   const held = <T extends { release: () => void }>(
@@ -94,12 +94,11 @@ function fakeApi() {
     createSessions: vi.fn<UploadTransport['createSessions']>((uploads) =>
       Promise.resolve(
         uploads.map((upload) => {
-          const versions = api.existing.get(upload.name.toLowerCase())
-          if (versions !== undefined && upload.ifExists === 'ask') {
+          if (api.existing.has(upload.name.toLowerCase()) && upload.ifExists === 'ask') {
             return {
               ok: false as const,
               error: { code: 'file_exists', message: `“${upload.name}” already exists here.` },
-              existing: { nodeId: crypto.randomUUID(), versions, links: 1 },
+              existing: { nodeId: crypto.randomUUID(), links: 1 },
             }
           }
           const session = {
@@ -569,7 +568,12 @@ describe('UploadEngine', () => {
     const { transport } = fakeApi()
     const engine = new UploadEngine(transport)
     // `folder` is a row of `grandparent`'s subfolder listing, and may have been empty of folders.
-    const tree = ['nodes', 'grandparent', 'children', { kind: 'folder', sort: 'name', order: 'asc' }]
+    const tree = [
+      'nodes',
+      'grandparent',
+      'children',
+      { kind: 'folder', sort: 'name', order: 'asc' },
+    ]
     queryClient.setQueryData(tree, {
       pages: [{ items: [{ id: 'folder', kind: 'folder', hasChildFolders: false }] }],
       pageParams: [null],
@@ -864,13 +868,13 @@ describe('UploadEngine', () => {
 
     it('asks first, and replaces the file only when told to', async () => {
       const { api, transport } = fakeApi()
-      api.existing.set('report.pdf', 2)
+      api.existing.add('report.pdf')
       const engine = new UploadEngine(transport)
       await engine.enqueue('folder', [file('report.pdf', 10)])
       await vi.waitFor(() => {
         expect(item('report.pdf')).toMatchObject({
           status: 'conflict',
-          conflict: { versions: 2, links: 1, suggestedName: 'report (2).pdf' },
+          conflict: { links: 1, suggestedName: 'report (1).pdf' },
         })
       })
       expect(useUploadStore.getState().conflicts).toEqual([item('report.pdf').id])
@@ -885,8 +889,8 @@ describe('UploadEngine', () => {
 
     it('keeps both under the name chosen, or skips the file', async () => {
       const { api, transport } = fakeApi()
-      api.existing.set('notes.txt', 1)
-      api.existing.set('photo.jpg', 1)
+      api.existing.add('notes.txt')
+      api.existing.add('photo.jpg')
       const engine = new UploadEngine(transport)
       await engine.enqueue('folder', [file('notes.txt', 5), file('photo.jpg', 5)])
       await vi.waitFor(() => {
@@ -907,9 +911,9 @@ describe('UploadEngine', () => {
 
     it('answers the others of a drop with a choice made for all, numbering copies on', async () => {
       const { api, transport } = fakeApi()
-      api.existing.set('a.txt', 3)
-      api.existing.set('b.txt', 1)
-      api.existing.set('b (1).txt', 1)
+      api.existing.add('a.txt')
+      api.existing.add('b.txt')
+      api.existing.add('b (1).txt')
       const engine = new UploadEngine(transport)
       await engine.enqueue('folder', [file('a.txt', 1), file('b.txt', 1)])
       await vi.waitFor(() => {
@@ -919,7 +923,7 @@ describe('UploadEngine', () => {
       engine.resolveConflict(item('a.txt').id, { action: 'keep' }, true)
       await vi.waitFor(() => {
         expect(items().map((upload) => [upload.name, upload.status])).toEqual([
-          ['a (3).txt', 'done'],
+          ['a (1).txt', 'done'],
           // b (1).txt is taken too: the next number.
           ['b (2).txt', 'done'],
         ])

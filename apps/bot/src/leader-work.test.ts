@@ -10,7 +10,7 @@ import type pg from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, inject, it, vi } from 'vitest'
 import {
   cleanUp,
-  dropUnneededVersions,
+  dropEarlierVersions,
   emptyOldTrash,
   giveUpIdleUploads,
   onTheClock,
@@ -142,7 +142,7 @@ describe('cleanUp', () => {
     expect(owner[0]?.reserved).toBe(1000)
   })
 
-  it('deletes an earlier version once the last link serving it stops working', async () => {
+  it('deletes an earlier version left over, though a link still served it (D42)', async () => {
     const staging = new Staging(path.join(directory, 'staging'))
     const { ownerId, files } = await uploadedFiles(db, staging, [100, 200])
     const [first, second] = files
@@ -169,12 +169,8 @@ describe('cleanUp', () => {
       return rows[0]?.used
     }
 
-    await dropUnneededVersions(db, staging)
     expect(await used()).toBe(300)
-
-    await db.execute(sql`
-      UPDATE share_links SET expires_at = now() - interval '1 minute' WHERE id = ${link.id}`)
-    await dropUnneededVersions(db, staging)
+    await dropEarlierVersions(db, staging)
     expect(await used()).toBe(200)
     const { rows } = await db.execute<{ version_id: string | null }>(sql`
       SELECT version_id FROM share_links WHERE id = ${link.id}`)

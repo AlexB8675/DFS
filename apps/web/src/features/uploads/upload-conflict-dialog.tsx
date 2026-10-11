@@ -20,8 +20,8 @@ import { uploadEngine, type ConflictChoice } from './upload-engine'
 import { useUploadStore, type UploadEntry } from './upload-store'
 
 /**
- * Asks before an upload replaces a file of the same name (D20): replace it
- * with a new version, keep both under another name, or skip the upload.
+ * Asks before an upload replaces a file of the same name (D20): replace it,
+ * keep both under another name, or skip the upload.
  * One upload at a time, in the order they came; closing it skips the file.
  */
 export function UploadConflictDialog() {
@@ -96,8 +96,8 @@ function ConflictQuestion({
           {(forAll ? allLinks : conflict.links) > 0 && (
             <LinkWarning>
               {forAll
-                ? `These files have ${linkCount(allLinks)}. Replacing them won’t update the links: they keep sharing the versions you replace, which stay, counting toward your storage, until the links stop working.`
-                : `This file has ${linkCount(conflict.links)}. Replacing the file won’t update ${conflict.links === 1 ? 'the link: it keeps' : 'the links: they keep'} sharing the version you replace, which stays, counting toward your storage, until ${conflict.links === 1 ? 'the link stops' : 'they stop'} working.`}
+                ? `These files have ${linkCount(allLinks)}. Replacing them turns the links off: they stop working, and you can make new ones.`
+                : `This file has ${linkCount(conflict.links)}. Replacing it turns ${conflict.links === 1 ? 'the link off: it stops' : 'the links off: they stop'} working, and you can make ${conflict.links === 1 ? 'a new one' : 'new ones'}.`}
             </LinkWarning>
           )}
 

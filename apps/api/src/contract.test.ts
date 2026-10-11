@@ -1,7 +1,7 @@
 import { dataChannels, refreshBlobUrls, refreshedUrls } from '@dfs/bot/storage'
 import { settleBlobs } from '@dfs/bot/testing'
 import { defineContractSuite, type ContractTarget } from '@dfs/contract'
-import { foldAllFolderStats, liveBytesDrift, purgeUnneededVersions, storageChannels } from '@dfs/db'
+import { foldAllFolderStats, liveBytesDrift, purgeEarlierVersions, storageChannels } from '@dfs/db'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
 import { refreshUrlsSchema } from '@dfs/shared'
 import { DiscordBlobStore, LocalBlobStore, type BlobReader, type BlobStore } from '@dfs/storage'
@@ -80,7 +80,7 @@ for (const storage of ['local', 'discord'] as const) {
         origin: setup.config.publicBaseUrl,
         owner,
         settle: async () => {
-          for (const versionId of await purgeUnneededVersions(app.db)) {
+          for (const versionId of await purgeEarlierVersions(app.db)) {
             await app.staging.removeVersion(versionId)
           }
           await settleBlobs({ db: app.db, staging: app.staging, store, sizes: app.config.sizes })

@@ -7,8 +7,9 @@
 // blob), frames waiting for a pack, blobs (by id), the frames in them, the
 // user's row, dirty-folder markers (by id), and the journal lock last. The
 // packer and the garbage collector touch no version, so they start at the
-// frames and the blobs. A share link's version is pinned under its file's
-// lock, so a completion that prunes versions waits for it or is seen.
+// frames and the blobs. A file link takes its version under its file's
+// lock, so a completion that replaces the file waits for it, and turns it
+// off, or is seen.
 // Starting uploads takes a shared tree lock, then the user's row, and after it
 // only the key-share locks of foreign keys on nodes, which updates (such as
 // completing an upload) don't block.

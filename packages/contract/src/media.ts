@@ -274,12 +274,11 @@ export function mediaTests({
   })
 
   describe('audio and video through share links (§7.5, §10.4)', () => {
-    it('plays a file link’s own version after the file has a newer one, and never counts it as a download', async () => {
+    it('plays a file link’s video without counting it as a download, until the file is replaced', async () => {
       const client = await owner()
       const root = await workspace(client)
-      const first = await uploadFile(client, root.id, 'Pinned.mp4', text('first cut'))
+      const first = await uploadFile(client, root.id, 'Cut.mp4', text('first cut'))
       const link = await shareLink(client, first.nodeId, { maxDownloads: 1 })
-      const second = await uploadFile(client, root.id, 'Pinned.mp4', text('second cut'))
       const { token, client: viewer } = visitorOf(target(), link.url)
       const base = `/s/${token}/files/${first.nodeId}`
 
@@ -297,9 +296,6 @@ export function mediaTests({
       }
       const seek = await viewer.fetch('GET', content, { headers: { Range: 'bytes=0-4' } })
       expect(await seek.text()).toBe('first')
-      expect(
-        await viewer.error('GET', `${base}/content?version=${second.versionId}&preview=1`),
-      ).toEqual({ status: 412, code: 'version_changed' })
 
       // Playing took nothing from the link's one download, and the viewer's
       // reads are followed for their player's warning.
@@ -308,6 +304,12 @@ export function mediaTests({
       })
       const delivered = `${base}/media/${first.versionId}/delivery`
       expect((await viewer.call('GET', delivered, deliverySchema)).bytes).toBe(23)
+
+      // Replaced, the file is no longer what was shared: the link plays nothing (D42).
+      const second = await uploadFile(client, root.id, 'Cut.mp4', text('second cut'))
+      for (const path of [`${base}/playback`, content, `${base}/content?preview=1`]) {
+        expect(await viewer.error('GET', path)).toEqual({ status: 410, code: 'share_replaced' })
+      }
       // The owner plays the file as it is now.
       expect((await playback(client, first.nodeId)).versionId).toBe(second.versionId)
     })

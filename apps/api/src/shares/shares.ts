@@ -41,7 +41,7 @@ interface ShareRow extends Record<string, unknown> {
   max_downloads: number | null
   download_count: number
   version_id: string | null
-  version: ShareLink['version']
+  replaced: boolean
   token_sealed: Buffer | null
 }
 
@@ -64,7 +64,7 @@ export async function listShares(app: FastifyInstance, auth: Auth): Promise<Page
 /**
  * `POST /shares/count`: the caller's outstanding links to these items or
  * anything inside them, or to anything in the trash, so deleting them can
- * warn first. A file link whose version is gone no longer counts.
+ * warn first. A link to a file replaced since no longer counts (D42).
  */
 export async function countShareLinks(
   app: FastifyInstance,
@@ -86,7 +86,7 @@ export async function countShareLinks(
     SELECT count(*)::int AS links
     FROM share_links link JOIN nodes node ON node.id = link.node_id
     WHERE ${scope} AND ${WORKING_LINK}
-      AND (node.kind = 'folder' OR link.version_id IS NOT NULL)`)
+      AND (node.kind = 'folder' OR link.version_id = node.current_version_id)`)
   return { links: rows[0]?.links ?? 0 }
 }
 
@@ -104,8 +104,9 @@ export async function createShare(
   )
   const passwordHash = input.password === null ? null : await hashPassword(input.password)
   const share = await app.db.transaction(async (tx) => {
-    // A file link keeps the version current now. Read under the file's lock,
-    // so a completing upload's pruning sees this link, or comes first.
+    // A file link is made for the file as it is now, its current version. Read
+    // under the file's lock, so an upload replacing it completes before, or
+    // after, and turns this link off then (D42).
     const { rows } = await tx.execute<{ current_version_id: string | null }>(sql`
       SELECT current_version_id FROM nodes WHERE id = ${node.id} FOR SHARE`)
     const versionId = rows[0]?.current_version_id ?? null
@@ -146,18 +147,18 @@ export async function updateShare(
   changes: UpdateShareInput,
 ): Promise<ShareLink> {
   const current = await ownShare(app, auth, id)
-  if (current.version === 'deleted') throw versionGone()
+  if (current.replaced) throw replacedError()
   const passwordHash =
     changes.password === undefined || changes.password === null
       ? null
       : await hashPassword(changes.password)
   await app.db.transaction(async (tx) => {
-    // A link brought back to life (a later expiry, more downloads) must
-    // still have its version: hold it, so the janitor can't take it now.
+    // A file link changed must still have the file it was made for: hold
+    // its version, so a replace can't take it meanwhile (D42).
     if (current.version_id) {
       const { rows } = await tx.execute(sql`
         SELECT 1 FROM file_versions WHERE id = ${current.version_id} FOR KEY SHARE`)
-      if (rows.length === 0) throw versionGone()
+      if (rows.length === 0) throw replacedError()
     }
     const updated = await tx
       .update(shareLinks)
@@ -202,20 +203,15 @@ const SELECT_SHARE = sql`
     share.created_at::text AS created_at, share.expires_at::text AS expires_at,
     share.password_hash IS NOT NULL AS has_password, share.max_downloads, share.download_count,
     share.version_id, share.token_sealed,
-    CASE
-      WHEN node.kind = 'folder' THEN NULL
-      WHEN share.version_id IS NULL THEN 'deleted'
-      WHEN share.version_id = node.current_version_id THEN 'current'
-      ELSE 'earlier'
-    END AS version
+    (node.kind = 'file' AND share.version_id IS DISTINCT FROM node.current_version_id) AS replaced
   FROM share_links share JOIN nodes node ON node.id = share.node_id`
 
-/** A file link whose version was deleted: it serves nothing, and can't be brought back. */
-function versionGone(): ApiError {
+/** A link to a file replaced since: it serves nothing, and can't be brought back (D42). */
+function replacedError(): ApiError {
   return new ApiError(
     409,
-    'share_version_deleted',
-    'The version this link shared was deleted. Make a new link to share the file as it is now.',
+    'share_replaced',
+    'The file was replaced since this link was made, so it no longer works. Make a new link to share it as it is now.',
   )
 }
 
@@ -247,6 +243,6 @@ async function toShareLink(app: FastifyInstance, row: ShareRow): Promise<ShareLi
     hasPassword: row.has_password,
     maxDownloads: row.max_downloads,
     downloadCount: row.download_count,
-    version: row.version,
+    replaced: row.replaced,
   }
 }
