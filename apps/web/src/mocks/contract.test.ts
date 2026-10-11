@@ -2,7 +2,7 @@ import { defineContractSuite, type ContractTarget } from '@dfs/contract'
 import { setupServer } from 'msw/node'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
-// The contract suite (BACKEND.md §5) against the mock API, served by MSW in
+// The contract suite (DESIGN.md §17) against the mock API, served by MSW in
 // Node, so the mock and the real API answer the same.
 
 vi.hoisted(() => {

@@ -6,7 +6,7 @@ import { UploadEngine } from './upload-engine'
 import { useUploadStore, type UploadItem } from './upload-store'
 import { httpTransport } from './upload-transport'
 
-// The upload engine against a running stack (BACKEND.md §4.2): the real engine
+// The upload engine against a running stack (DESIGN.md §17): the real engine
 // and HTTP transport, with upload requests failing on the way, answers lost on
 // the way back, and an outage long enough to fail uploads, which are then
 // resumed. The bot stores blobs through the ChaosBlobStore, so syncing retries

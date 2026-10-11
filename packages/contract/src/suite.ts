@@ -9,7 +9,7 @@ import { treeTests } from './tree.ts'
 import { uploadTests } from './uploads.ts'
 
 // The contract between the web app and the API (DESIGN.md §9), run against
-// both the mock and the real API, so the two can't drift (BACKEND.md §5).
+// both the mock and the real API, so the two can't drift (DESIGN.md §17).
 // Tests make their own users and files: they don't rely on seed data. The mock
 // keeps one session at a time, like the browser it runs in, so a test signs
 // in again before it goes back to a user it switched away from.

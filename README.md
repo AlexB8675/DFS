@@ -10,8 +10,7 @@ durability (M4: the journal on Discord, `dfs recover` and a recovery drill that
 passed against production), previews of images, PDFs, text and code, and audio
 and video players, with other players reached through stream links. Left for
 later: nightly database snapshots and the scrubber.
-[docs/BACKEND.md](docs/BACKEND.md) is the build plan, and
-[docs/DEPLOY.md](docs/DEPLOY.md) the runbook for the server.
+[docs/DEPLOY.md](docs/DEPLOY.md) is the runbook for the server.
 
 ## Requirements
 
@@ -72,9 +71,11 @@ bot stops on purpose (another instance could take over); restart `pnpm dev` to
 bring it back. The database itself comes back on its own when Docker Desktop
 restarts.
 
-Set `VITE_API_MOCKS=off` in `apps/web/.env.local` to use the real API.
-See [docs/TESTING.md](docs/TESTING.md) for setup, browser checks, and the live
-end-to-end tests.
+`pnpm db:up` also starts the media service, which examines audio and video.
+Set `VITE_API_MOCKS=off` in `apps/web/.env.local` to use the real API, and on a
+fresh database make the first account with `pnpm dfs owner --username <name>`,
+which prints a temporary password. See [docs/TESTING.md](docs/TESTING.md) for
+setup, browser checks, and the live end-to-end tests.
 
 ## Scripts
 
@@ -90,8 +91,8 @@ Turborepo runs the build and check tasks across the workspace.
 | `pnpm lint`        | ESLint, including the React Compiler rules                                          |
 | `pnpm test`        | Unit and integration tests (Vitest); the latter need Docker                         |
 | `pnpm format`      | Formats with Prettier                                                               |
-| `pnpm db:up`       | Starts PostgreSQL 18 in Docker, on localhost only                                   |
-| `pnpm db:down`     | Stops it; the data stays in a Docker volume                                         |
+| `pnpm db:up`       | Starts PostgreSQL 18 and the media service in Docker, on localhost only             |
+| `pnpm db:down`     | Stops them; the data stays in a Docker volume                                       |
 | `pnpm db:migrate`  | Applies database migrations                                                         |
 | `pnpm dfs`         | Admin commands: `owner`, `setup`, `master-key`, `recover`, `drill`, `reset-storage` |
 | `docker/deploy.sh` | Sends the committed code to the VPS and restarts DFS there                          |
@@ -120,7 +121,6 @@ packages/contract the API's contract suite, run against the mock and the real AP
 docker/           production images, Compose, Caddyfile and deploy script; PostgreSQL for development
 tools/            scripts for the user's own machine: dfs-reencode, for videos that seek fast
 docs/DESIGN.md    design document
-docs/BACKEND.md   backend build plan
 docs/TESTING.md   testing locally
 docs/DEPLOY.md    the server: setup, deploying, looking after it
 ```

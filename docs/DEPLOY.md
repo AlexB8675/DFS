@@ -134,9 +134,9 @@ dropped columns and states, so code from before them can't. Nor can code from
 before chunks were sealed in segments (frame format 2, DESIGN D37): it can't
 read any file uploaded after it.
 
-The first deploy with the media service (DESIGN §6.7) builds its image too,
-`dfs-media`: about 1 GB, most of it ffmpeg's libraries, and a few minutes on
-the VPS. It needs no secret and no setting of its own, and has nothing to
+The media service (DESIGN §6.7) is built from its own image, `dfs-media`:
+about 1 GB, most of it ffmpeg's libraries, and a few minutes the first time
+on a server. It needs no secret and no setting of its own, and has nothing to
 back up: what it found about each file is in the database, and is found again
 if lost.
 
@@ -221,10 +221,14 @@ on would keep a same-server swap working, but leaves a permanent dependency on
 it. A new server and bot with a new database is the clean way: accounts,
 folders and links are made again.
 
-`docker/new-discord.sh` does steps 3 and 4 below, from the development PC in
-Git Bash, and asks before it deletes anything (`--check` only looks). It did
-the move of 2026-10-11, and its `OLD_BOT_ID` and `OLD_GUILD_ID` name that
-move's retired bot and server: set them to the ones being retired next time.
+`docker/new-discord.sh` does step 3 below, from the development PC in Git
+Bash, and asks for a phrase before it deletes anything (`--check` only looks).
+Its last step, if the new server answers, offers a second phrase to delete
+the `DFS`, `DFS Dev` and `DFS Review` categories and their channels in the
+old server, with the old bot: that ends the way back to the old data (step 4).
+`docker/new-discord.sh wipe-old` runs only that step, later. It did the move
+of 2026-10-11, and its `OLD_BOT_ID` and `OLD_GUILD_ID` name that move's
+retired bot and server: set them to the ones being retired next time.
 
 1. In Discord, on the account that should own everything: a private server, an
    application with a bot (no privileged intents), and an invite with the
@@ -247,5 +251,8 @@ move's retired bot and server: set them to the ones being retired next time.
    and `dfs drill` once the bot has posted the journal.
 4. Keep the old server and the master key until the new setup has run
    cleanly: the old journal and the key rebuild the old database with
-   `recover --into`. Then delete the old server, which is what makes its files
-   unreadable for good, and reset the old application's token.
+   `recover --into`. So decline the script's last step, and run `wipe-old`
+   once it has, if the old categories are to go. The old server itself, and
+   the old application's token, are yours to delete and reset in Discord: a
+   bot can't delete a server, and only that, or the script's wipe of its
+   categories, makes the old files unreadable for good.

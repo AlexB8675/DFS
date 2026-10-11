@@ -1,6 +1,6 @@
 /**
  * What the contract suite runs against: the mock API in Node or the real API
- * (BACKEND.md §5). Both answer the same HTTP calls; this covers the rest.
+ * (DESIGN.md §17). Both answer the same HTTP calls; this covers the rest.
  */
 export interface ContractTarget {
   name: 'mock' | 'api'

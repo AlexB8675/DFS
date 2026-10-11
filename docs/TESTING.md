@@ -178,6 +178,19 @@ Use disposable folders and files for these checks:
     Within 10 s it shows under Running now; Cancel query stops it (psql says
     `canceling statement due to user request`), and the audit log records it.
     The slowest statements list fills in as the app works.
+15. Open videos (the mock's sample plays in the mock; with the real API, upload
+    your own). An H.264 MP4 plays. A picture the browser can't decode (an AVI
+    with MPEG-4 Part 2) says why, with Open in… and Download. One whose sound it
+    can't decode (AC-3) plays, with a notice that it has no sound here. Try the
+    keys (Space, ← →, Shift+← →, F, C), subtitles beside a video and inside it,
+    leaving a video part-way and opening it again (it starts at the beginning,
+    offering Resume), and replacing a file while it plays (it says so). Full
+    screen, picture-in-picture, touch and Safari need a real browser and a
+    phone: an embedded or headless browser can't test them.
+16. Open audio files. Opening one queues its folder; reorder by dragging, try
+    Next and Previous, and a track the browser can't play (a WMA): the bar
+    stops with why, and Download. Signing out takes a drive's tracks out of the
+    queue and keeps a link's. On a phone, the slim bar opens a full view.
 
 For an exact round-trip comparison, compare the SHA-256 hashes of the original
 and downloaded files:
@@ -252,8 +265,8 @@ exception code such as `3221225477` (0xC0000005) or `3221225725` (0xC00000FD)
 means the Node.js process running the check crashed, not the stack it was
 checking. Run it again; uploads it left open are released after 24 hours. Run
 the checks through pnpm as shown: started directly from Git Bash, a crash
-loses that exit code. Record any such stop in
-[BACKEND.md §8.1](BACKEND.md#81-unexplained-failures-to-watch-for), which keeps
+loses that exit code. Note any such stop under
+[Unexplained failures](#unexplained-failures-to-watch-for) below, which keeps
 the failures nobody has explained yet.
 
 For the upload engine's fault check, set `BLOB_STORE=chaos` in the root `.env`,
@@ -328,3 +341,52 @@ end-to-end phases too. Higher concurrency can consume more memory and compete
 with filesystem and crypto work. Validate tuning on the target server and
 network before changing defaults. Browser profiling should use the production
 build and include scrolling a large upload queue, pause/resume, and an outage.
+
+## Unexplained failures to watch for
+
+Two failures of the end-to-end check could not be reproduced or explained.
+Neither touched the data: the API kept serving, and its quota totals stayed
+exact.
+
+**The client stopped without a message (2026-10-05).**
+
+- **What happened:** one `check:end-to-end` run, against a freshly started API
+  and bot on their own database, stopped about 0.3 s into "12 clients
+  uploading versions of the same names at once" and printed nothing more. It
+  left 24 upload sessions without parts (three batches of 8, created within
+  28 ms); the janitor releases them after 24 hours.
+- **Known:** the same API process served the next runs and logged nothing; no
+  Windows event log has an entry at that time; the client had been started from
+  Git Bash through `timeout … | grep | tail`, which loses a crashed process's
+  exit code, so there is none.
+- **Ruled out:** an error in the script or the contract client (every failure
+  path prints); an `await` that never settles (Node warns and exits with 13);
+  the output pipe breaking on its own (the step writes nothing until it ends);
+  the server.
+- **Not reproduced in:** 63 full runs afterwards (piped, to files, with the
+  servers restarted before each, each one's exit traced from inside the
+  process); 864,000 concurrent WebCrypto digests of one buffer; about 520,000
+  requests in the step's pattern against a trivial server; 60 rounds of a 1 GiB
+  download followed at once by the burst.
+- **Left:** a native crash of the client's `node.exe` (Node 24.14.1 on
+  Windows), or the process being ended from outside. Both leave no message and
+  no Windows event: Node turns off Windows crash reporting.
+- **If it happens again:** note the exit code pnpm reports (`ELIFECYCLE … exit
+  code 3221225477` is 0xC0000005, an access violation, as described above), the
+  step it stopped in, the Node version, and whether the API logged anything at
+  that moment. A Windows exception code points at Node itself (then try a newer
+  Node 24 release); any other code, at whatever ended the process.
+
+**The client's connection was reset (2026-10-04).**
+
+- **What happened:** once, against the `pnpm dev` stack, right after three
+  stress runs, the client failed with `read ECONNRESET` (errno -4077): the
+  connection it was reading was reset.
+- **Known:** the server's log had already scrolled out of view; Postgres
+  logged no error; five runs right after passed.
+- **Since:** it hasn't recurred in about 75 runs, on code that has changed a
+  lot since (among others, fixes for a late duplicate part racing completion
+  and for an unhandled error when a download's client disconnects).
+- **If it happens again:** the check now names the request that failed. Look in
+  the API's log at that moment for an aborted response or an error while
+  reading content.

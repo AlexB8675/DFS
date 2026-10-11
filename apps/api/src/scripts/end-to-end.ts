@@ -8,7 +8,7 @@ import {
   type UploadSession,
 } from '@dfs/shared'
 
-// The end-to-end check of BACKEND.md §4.2, against a running stack (`pnpm dev`):
+// The end-to-end check (DESIGN.md §17, docs/TESTING.md), against a running stack (`pnpm dev`):
 // 1,000 small files and a 1 GB file go up the way the web app sends them,
 // sync to storage, and come back byte for byte. Then many clients upload new
 // versions of the same names at once, which must all go through.

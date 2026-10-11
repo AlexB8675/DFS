@@ -14,7 +14,7 @@ import { testConfig } from './testing/config.ts'
 import { standInMediaFetch } from './testing/media-stand-in.ts'
 import { seedUser } from './testing/seed.ts'
 
-// The contract suite (BACKEND.md §5) against the real API, over real HTTP,
+// The contract suite (DESIGN.md §17) against the real API, over real HTTP,
 // once on local storage and once on Discord: a Discord in memory, with the
 // bot's uploader, its URL signing and the API's CDN reader, and a stand-in
 // for the media service. `settle` does what the bot would: delete versions no
