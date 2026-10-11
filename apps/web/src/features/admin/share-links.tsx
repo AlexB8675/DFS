@@ -32,7 +32,6 @@ const SHARE_STATES: Record<AdminShare['state'], string> = {
   active: 'Active',
   expired: 'Expired',
   used_up: 'Used up',
-  replaced: 'File replaced',
 }
 
 /** Groups open at first when there are this few, or when a search narrowed them. */

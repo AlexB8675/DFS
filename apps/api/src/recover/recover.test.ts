@@ -278,9 +278,9 @@ async function useTheDrive(stack: Stack): Promise<void> {
   await updateNode(app, owner, notes.nodeId, { name: 'Notes 2024.txt' })
   await moveNodes(app, owner, [year.id], docs.id)
 
-  // Replaced with a link, which stops working (D42), and without one.
+  // Replaced with links, which go with it (D42), and without.
   const report = await upload(stack, owner, docs.id, 'report.txt', bytes(3_000, 6))
-  const reportLink = await createShare(app, owner, {
+  await createShare(app, owner, {
     nodeId: report.nodeId,
     expiresAt: null,
     password: null,
@@ -297,10 +297,21 @@ async function useTheDrive(stack: Stack): Promise<void> {
     maxDownloads: null,
   })
   await updateShare(app, owner, contractLink.id, { maxDownloads: 4 })
-  // Its link stays, working no more, as the journal says once replayed.
   await upload(stack, owner, docs.id, 'contract.txt', bytes(900, 11))
-  // Turned off, the report's link goes.
-  await deleteShare(app, owner, reportLink.id)
+  // Links of a file not replaced: one stays, one is turned off.
+  await createShare(app, owner, {
+    nodeId: notes.nodeId,
+    expiresAt: null,
+    password: null,
+    maxDownloads: 10,
+  })
+  const dropped = await createShare(app, owner, {
+    nodeId: notes.nodeId,
+    expiresAt: null,
+    password: null,
+    maxDownloads: null,
+  })
+  await deleteShare(app, owner, dropped.id)
   const folderLink = await createShare(app, owner, {
     nodeId: photos.id,
     expiresAt: null,

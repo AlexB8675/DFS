@@ -3,6 +3,7 @@ import { queryClient } from '@/app/query-client'
 import { invalidateFolderRows, invalidateListings } from '@/features/drive/cache'
 import { markFresh } from '@/features/drive/list-motion'
 import { subscribeToResync, subscribeToSyncs } from '@/features/live-events/live-events'
+import { sharesQuery } from '@/features/shares/api'
 import { ApiError, errorMessage } from '@/lib/api/client'
 import type { PickedFile } from './picked-files'
 import { isRetryable, MAX_ATTEMPTS, retryDelayMs } from './retry'
@@ -674,6 +675,9 @@ export class UploadEngine {
       this.active = this.active.filter((candidate) => candidate !== job)
       this.publish(job)
       this.refreshFolder(job.parentId)
+      // A file replaced lost its share links (D42): the lists that show them ask again.
+      if (session.isNewVersion)
+        void queryClient.invalidateQueries({ queryKey: sharesQuery.queryKey })
       if (job.syncNeedsRefresh) {
         job.syncNeedsRefresh = false
         // An earlier event may have described the old current version. Check

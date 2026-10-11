@@ -1,7 +1,13 @@
 import { sql } from 'drizzle-orm'
 import type { Database } from './client.ts'
 import { uuidArray } from './folder-stats.ts'
-import { appendJournal, auditRecords, type Executor, type JournalRecord } from './journal.ts'
+import {
+  appendJournal,
+  auditRecords,
+  shareDeletedRecords,
+  type Executor,
+  type JournalRecord,
+} from './journal.ts'
 import { TREE_LOCK_NAMESPACE } from './locks.ts'
 import { auditLog } from './schema.ts'
 
@@ -79,12 +85,13 @@ export const WORKING_LINK = sql`(link.expires_at IS NULL OR link.expires_at > no
   AND (link.max_downloads IS NULL OR link.download_count < link.max_downloads)`
 
 /**
- * Purges earlier versions left over (§6.4): a file keeps only its current
- * version, as completing an upload that replaces it purges the one before
- * (D42), but versions kept for share links before then stayed. At most
- * `limit`, one owner per transaction; versions being purged right now wait
- * for the next round. Returns the versions whose staged frames the caller
- * removes, once committed.
+ * Purges earlier versions left over, and deletes the file links made for
+ * them (§6.4, §7.5): a file keeps only its current version, as completing an
+ * upload that replaces it purges the one before and deletes the file's
+ * links (D42), but before then versions were kept while a link served them,
+ * and a link outlived its version. At most `limit` versions, one owner per
+ * transaction; versions being purged right now wait for the next round.
+ * Returns the versions whose staged frames the caller removes, once committed.
  */
 export async function purgeEarlierVersions(db: Database, limit = 500): Promise<string[]> {
   const { rows: due } = await db.execute<{ id: string; owner_id: string }>(sql`
@@ -106,6 +113,15 @@ export async function purgeEarlierVersions(db: Database, limit = 500): Promise<s
     // Counted once committed: staged frames of a purge rolled back must stay.
     purged.push(...versionIds)
   }
+  // Their links, whose versions the purges cleared, and those of earlier purges.
+  await db.transaction(async (tx) => {
+    const { rows: links } = await tx.execute<{ id: string }>(sql`
+      DELETE FROM share_links link USING nodes node
+      WHERE node.id = link.node_id AND node.kind = 'file'
+        AND link.version_id IS DISTINCT FROM node.current_version_id
+      RETURNING link.id`)
+    await appendJournal(tx, shareDeletedRecords(links.map((link) => link.id)))
+  })
   return purged
 }
 

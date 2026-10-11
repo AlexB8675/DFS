@@ -142,7 +142,7 @@ describe('cleanUp', () => {
     expect(owner[0]?.reserved).toBe(1000)
   })
 
-  it('deletes an earlier version left over, though a link still served it (D42)', async () => {
+  it('deletes an earlier version left over, and the links made for it (D42)', async () => {
     const staging = new Staging(path.join(directory, 'staging'))
     const { ownerId, files } = await uploadedFiles(db, staging, [100, 200])
     const [first, second] = files
@@ -163,6 +163,13 @@ describe('cleanUp', () => {
       })
       .returning()
     if (!link) throw new Error('No test link.')
+    // A folder link has no version, and stays.
+    const { rows: parents } = await db.execute<{ parent_id: string }>(sql`
+      SELECT parent_id FROM nodes WHERE id = ${first.nodeId}`)
+    const [folderLink] = await db
+      .insert(shareLinks)
+      .values({ nodeId: parents[0]?.parent_id ?? '', tokenHash: randomBytes(32) })
+      .returning()
     const used = async () => {
       const { rows } = await db.execute<{ used: number }>(sql`
         SELECT used_bytes::float8 AS used FROM users WHERE id = ${ownerId}`)
@@ -172,10 +179,12 @@ describe('cleanUp', () => {
     expect(await used()).toBe(300)
     await dropEarlierVersions(db, staging)
     expect(await used()).toBe(200)
-    const { rows } = await db.execute<{ version_id: string | null }>(sql`
-      SELECT version_id FROM share_links WHERE id = ${link.id}`)
-    // The link knows its version is gone, and works no more (§7.5).
-    expect(rows).toEqual([{ version_id: null }])
+    const { rows } = await db.execute<{ id: string }>(sql`
+      SELECT id FROM share_links WHERE id IN (${link.id}, ${folderLink?.id ?? ''})`)
+    expect(rows).toEqual([{ id: folderLink?.id }])
+    const { rows: journaled } = await db.execute<{ record: { id: string } }>(sql`
+      SELECT record FROM journal WHERE kind = 'share.deleted'`)
+    expect(journaled.map((row) => row.record.id)).toContain(link.id)
     // Its staged frame went with it; the current version's stays.
     await expect(staging.read(staging.framePath(first.versionId, 0))).rejects.toThrow()
     await expect(staging.read(staging.framePath(second.versionId, 0))).resolves.toHaveLength(200)

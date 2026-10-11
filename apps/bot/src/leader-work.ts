@@ -211,7 +211,7 @@ export async function startLeaderWork(options: {
     repeat(JANITOR_EVERY_MS, log, 'dropping posted journal records', async () => {
       await pruneJournal(db)
     }),
-    repeat(JANITOR_EVERY_MS, log, 'deleting earlier versions left over', async () => {
+    repeat(JANITOR_EVERY_MS, log, 'deleting earlier versions and links left over', async () => {
       await dropEarlierVersions(db, staging)
     }),
     repeat(JANITOR_EVERY_MS, log, 'emptying old trash', async () => {
@@ -303,8 +303,8 @@ export async function giveUpIdleUploads(db: Database, staging: Staging): Promise
 }
 
 /**
- * Deletes earlier versions left over, kept for share links before a replaced
- * file's links were turned off instead (D42), and their staged frames.
+ * Deletes earlier versions left over from before a replace deleted them
+ * with the file's links (D42), those links, and their staged frames.
  */
 export async function dropEarlierVersions(db: Database, staging: Staging): Promise<void> {
   for (const versionId of await purgeEarlierVersions(db)) await staging.removeVersion(versionId)

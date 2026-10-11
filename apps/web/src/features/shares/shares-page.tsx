@@ -39,7 +39,6 @@ const STATUS_BADGES: Record<
   active: { label: 'Active', variant: 'default' },
   expired: { label: 'Expired', variant: 'secondary' },
   'used-up': { label: 'Limit reached', variant: 'secondary' },
-  replaced: { label: 'File replaced', variant: 'outline' },
 }
 
 /** `/shared`: the user's public share links (§7.5). */
@@ -177,23 +176,21 @@ export function SharesPage() {
                           {link.url ? 'Copy link' : 'Can’t be shown again'}
                         </TooltipContent>
                       </Tooltip>
-                      {status !== 'replaced' && (
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              variant="ghost"
-                              size="icon-sm"
-                              aria-label={`Edit link to “${link.nodeName}”`}
-                              onClick={() => {
-                                setEditing(link)
-                              }}
-                            >
-                              <Pencil />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Edit expiry, password and limit</TooltipContent>
-                        </Tooltip>
-                      )}
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            aria-label={`Edit link to “${link.nodeName}”`}
+                            onClick={() => {
+                              setEditing(link)
+                            }}
+                          >
+                            <Pencil />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Edit expiry, password and limit</TooltipContent>
+                      </Tooltip>
                       <Tooltip>
                         <TooltipTrigger asChild>
                           <Button

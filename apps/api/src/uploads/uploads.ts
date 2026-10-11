@@ -9,6 +9,8 @@ import {
   nodeRecords,
   nodes,
   purgeVersions,
+  shareDeletedRecords,
+  shareLinks,
   versionRecords,
   WORKING_LINK,
   QUEUES,
@@ -327,7 +329,7 @@ async function startUploads(
 
 /**
  * Answers each upload that asked first with the file its name matched, and
- * how many of its links work, which replacing it would turn off (D42).
+ * how many of its links work, which replacing it would delete (D42).
  */
 async function answerAsked(
   tx: Executor,
@@ -738,15 +740,23 @@ async function finishUpload(
     .set({ state: 'completed' })
     .where(eq(uploadSessions.id, upload.id))
 
-  // Earlier versions go, freeing their quota (D20, D24), and the file links
-  // that served them stop working (D42): a link never shares what replaced
-  // the file it was made for.
+  // Earlier versions go, freeing their quota (D20, D24), and the file's links
+  // with them (D42): a link never shares what replaced the file it was made
+  // for. A link being made waits on the file's row, updated above, and is
+  // made for this version then. After the versions, as locks.ts orders them.
   const { rows: earlier } = await tx.execute<{ id: string }>(sql`
     SELECT id FROM file_versions
     WHERE node_id = ${upload.node_id} AND id <> ${upload.version_id}
       AND state IN ('syncing', 'stored', 'failed')`)
   const prunedIds = earlier.map((row) => row.id)
   const pruneRecords = await purgeVersions(tx, auth.user.id, prunedIds)
+  const deletedLinks =
+    upload.version_no > 1
+      ? await tx
+          .delete(shareLinks)
+          .where(eq(shareLinks.nodeId, upload.node_id))
+          .returning({ id: shareLinks.id })
+      : []
 
   if (blobs.length > 0) {
     const jobs = blobs.map((blob) => ({ data: { blobId: blob.id } satisfies BlobUploadJob }))
@@ -761,16 +771,28 @@ async function finishUpload(
     WHERE id = ${auth.user.id}`)
   if (upload.parent_id) await markFoldersDirty(tx, [upload.parent_id])
   const size = formatBytes(upload.size_bytes)
+  const links = deletedLinks.length
   const audited = await audit(tx, {
     actorId: auth.user.id,
     action: 'upload.completed',
     target: node.name,
-    details: upload.version_no > 1 ? `${size}, replacing the file` : size,
+    details:
+      upload.version_no === 1
+        ? size
+        : links === 0
+          ? `${size}, replacing the file`
+          : `${size}, replacing the file · ${String(links)} share ${links === 1 ? 'link' : 'links'} deleted`,
     nodeId: node.id,
   })
   // An empty file is stored now, with no blob for the bot to journal it after.
   const stored = upload.chunk_count === 0 ? await versionRecords(tx, [upload.version_id]) : []
-  await appendJournal(tx, [...pruneRecords, ...nodeRecords([node]), ...stored, ...audited])
+  await appendJournal(tx, [
+    ...pruneRecords,
+    ...shareDeletedRecords(deletedLinks.map((link) => link.id)),
+    ...nodeRecords([node]),
+    ...stored,
+    ...audited,
+  ])
   return {
     pruned: prunedIds,
     completed: {

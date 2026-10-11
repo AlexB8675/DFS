@@ -266,7 +266,7 @@ export function uploadTests({ describe, it, expect, owner, target }: SuiteContex
       const own = await client.fetch('GET', `/files/${first.nodeId}/content`)
       expect(await own.text()).toBe('one')
 
-      // Its working links are counted: replacing it would turn them off (D42).
+      // Its working links are counted: replacing it deletes them (D42).
       await client.send('POST', '/shares', {
         json: { nodeId: first.nodeId, expiresAt: null, password: null, maxDownloads: null },
       })

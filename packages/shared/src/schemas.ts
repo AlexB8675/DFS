@@ -237,7 +237,7 @@ export const createUploadSchema = z.object({
 /** The file an upload's name matched, when it asked first (`ifExists: 'ask'`). */
 export const existingFileSchema = z.object({
   nodeId: id,
-  /** Its working share links, which stop working if it is replaced (§7.5, D42). */
+  /** Its working share links, which replacing it deletes (§7.5, D42). */
   links: z.number().int().min(0),
 })
 export type ExistingFile = z.infer<typeof existingFileSchema>
@@ -358,11 +358,6 @@ export const shareLinkSchema = z.object({
   hasPassword: z.boolean(),
   maxDownloads: z.number().int().positive().nullable(),
   downloadCount: z.number().int().min(0),
-  /**
-   * A file link whose file was replaced since it was made: it no longer
-   * works, and can't be changed (§7.5, D42). Always `false` for a folder link.
-   */
-  replaced: z.boolean(),
 })
 export type ShareLink = z.infer<typeof shareLinkSchema>
 export const shareLinkPageSchema = pageSchema(shareLinkSchema)
@@ -608,9 +603,7 @@ export const adminShareSchema = z.object({
   hasPassword: z.boolean(),
   maxDownloads: z.number().int().positive().nullable(),
   downloadCount: count,
-  /** A file link whose file was replaced since it was made (§7.5, D42). */
-  replaced: z.boolean(),
-  state: z.enum(['active', 'expired', 'used_up', 'replaced']),
+  state: z.enum(['active', 'expired', 'used_up']),
 })
 export type AdminShare = z.infer<typeof adminShareSchema>
 export const adminSharePageSchema = pageSchema(adminShareSchema)

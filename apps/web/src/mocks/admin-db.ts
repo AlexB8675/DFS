@@ -463,10 +463,8 @@ export class AdminMockDb extends MockDb {
             text.toLowerCase().includes(words),
           )
         if (!matches) return []
-        const replaced = this.replaced(share)
-        const state = replaced
-          ? 'replaced'
-          : share.expiresAt && Date.parse(share.expiresAt) <= now
+        const state =
+          share.expiresAt && Date.parse(share.expiresAt) <= now
             ? 'expired'
             : share.maxDownloads !== null && share.downloadCount >= share.maxDownloads
               ? 'used_up'
@@ -487,7 +485,6 @@ export class AdminMockDb extends MockDb {
             hasPassword: share.password !== null,
             maxDownloads: share.maxDownloads,
             downloadCount: share.downloadCount,
-            replaced,
             state,
           },
         ]

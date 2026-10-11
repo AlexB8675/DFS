@@ -31,7 +31,7 @@ export interface LiveShare extends Record<string, unknown> {
   download_count: number
   /** The file a file link was made for (§7.5): its version then; `null` for a folder link. */
   version_id: string | null
-  /** The file was replaced since the link was made: the link serves nothing (D42). */
+  /** The file was replaced since the link was made, which deletes it (D42): a link left over. */
   replaced: boolean
   shared_by: string
 }
@@ -79,9 +79,8 @@ async function liveShareWhere(
     SELECT ${NODE_COLUMNS} FROM nodes n ${NODE_JOINS} WHERE n.id = ${share.node_id}`)
   const [root] = roots
   if (!root) throw new ApiError(404, 'share_not_found', 'This link doesn’t exist.')
-  if (share.replaced) {
-    throw new ApiError(410, 'share_replaced', 'This file was replaced since it was shared.')
-  }
+  // Replacing a file deletes its links (D42); one left over from before is as deleted.
+  if (share.replaced) throw new ApiError(404, 'share_not_found', 'This link doesn’t exist.')
   return { share, root }
 }
 

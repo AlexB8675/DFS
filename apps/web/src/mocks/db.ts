@@ -116,8 +116,8 @@ export interface MockShare {
   maxDownloads: number | null
   downloadCount: number
   /**
-   * The file a file link was made for, its version then: the link works only
-   * while it is the file's (§7.5, D42). `null` for a folder link.
+   * The file a file link was made for, its version then (§7.5): replacing the
+   * file deletes the link (D42). `null` for a folder link.
    */
   versionNo: number | null
 }
@@ -219,7 +219,7 @@ export class MockFileExists extends MockApiError {
   }
 }
 
-const STATE_VERSION = 17
+const STATE_VERSION = 18
 const STORAGE_KEY = 'dfs.mock-db'
 /** `CHUNK_SIZE` at the 20 MiB attachment limit (§7.3). */
 export const CHUNK_SIZE = 20 * 1024 * 1024 - 128 * 1024
@@ -1013,10 +1013,8 @@ export class MockDb {
     const existing = this.childrenOf(parentId).find((node) => nameKey(node.name) === nameKey(name))
     if (existing?.kind === 'folder') throw nameConflict(name)
     if (existing && ifExists === 'ask') {
-      // Its working links, which replacing it would turn off (D42).
-      const links = this.state.shares.filter(
-        (share) => share.nodeId === existing.id && !this.replaced(share),
-      )
+      // Its working links, which replacing it deletes (D42).
+      const links = this.state.shares.filter((share) => share.nodeId === existing.id)
       throw new MockFileExists(name, {
         nodeId: existing.id,
         links: links.filter((share) => isWorking(share, Date.now())).length,
@@ -1142,9 +1140,13 @@ export class MockDb {
       throw new MockApiError(409, 'incomplete_upload', 'Some parts have not been uploaded yet.')
     }
     const node = this.state.nodes[upload.nodeId]
+    let deletedLinks = 0
     if (node) {
       if (upload.isNewVersion) {
-        // What it replaces goes, and the file links made for it stop working (D42).
+        // What it replaces goes, and the file's links with it (D42).
+        const before = this.state.shares.length
+        this.state.shares = this.state.shares.filter((share) => share.nodeId !== node.id)
+        deletedLinks = before - this.state.shares.length
         node.versionNo = (node.versionNo ?? 1) + 1
         node.sizeBytes = upload.sizeBytes
         node.mimeType = upload.mimeType
@@ -1158,10 +1160,15 @@ export class MockDb {
     upload.state = 'completed'
     if (node) {
       const size = formatBytes(upload.sizeBytes)
+      const links = `${String(deletedLinks)} share ${deletedLinks === 1 ? 'link' : 'links'} deleted`
       this.audit(
         'upload.completed',
         node.name,
-        upload.isNewVersion ? `${size}, replacing the file` : size,
+        !upload.isNewVersion
+          ? size
+          : deletedLinks === 0
+            ? `${size}, replacing the file`
+            : `${size}, replacing the file · ${links}`,
       )
     }
     const parts = this.receivedBytes.get(uploadId)
@@ -1244,7 +1251,7 @@ export class MockDb {
     const now = Date.now()
     const links = this.state.shares.filter((share) => {
       const node = this.state.nodes[share.nodeId]
-      return node !== undefined && inScope(node) && isWorking(share, now) && !this.replaced(share)
+      return node !== undefined && inScope(node) && isWorking(share, now)
     })
     return { links: links.length }
   }
@@ -1279,13 +1286,6 @@ export class MockDb {
 
   updateShare(id: string, changes: UpdateShareInput): ShareLink {
     const share = this.ownShare(id)
-    if (this.replaced(share)) {
-      throw new MockApiError(
-        409,
-        'share_replaced',
-        'The file was replaced since this link was made, so it no longer works. Make a new link to share it as it is now.',
-      )
-    }
     if (changes.expiresAt !== undefined) share.expiresAt = changes.expiresAt
     if (changes.maxDownloads !== undefined) share.maxDownloads = changes.maxDownloads
     if (changes.password !== undefined) {
@@ -1379,12 +1379,6 @@ export class MockDb {
     this.countDownload(this.liveShare(token).share)
   }
 
-  /** A file link whose file was replaced since it was made: it serves nothing (§7.5, D42). */
-  protected replaced(share: MockShare): boolean {
-    const node = this.state.nodes[share.nodeId]
-    return share.versionNo !== null && share.versionNo !== (node?.versionNo ?? 1)
-  }
-
   /** `GET /s/:token/archive?nodeId`: the shared folder, or a folder inside it, as a ZIP. */
   shareArchive(
     token: string,
@@ -1411,9 +1405,6 @@ export class MockDb {
     }
     if (share.maxDownloads !== null && share.downloadCount >= share.maxDownloads) {
       throw new MockApiError(410, 'share_used_up', 'This link has reached its download limit.')
-    }
-    if (this.replaced(share)) {
-      throw new MockApiError(410, 'share_replaced', 'This file was replaced since it was shared.')
     }
     if (requireUnlocked && share.password !== null && !this.unlockedShares.has(token)) {
       throw new MockApiError(403, 'share_locked', 'Enter the password to open this link.')
@@ -1621,7 +1612,6 @@ export class MockDb {
       nodeName: node?.name ?? 'Deleted item',
       nodeKind: node?.kind ?? 'file',
       url: `${window.location.origin}/s/${token}`,
-      replaced: this.replaced(share),
     }
   }
 

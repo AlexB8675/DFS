@@ -45,46 +45,41 @@ export function shareTests({ describe, it, expect, owner, target }: SuiteContext
   }
 
   describe('share links (§7.5)', () => {
-    it('turns a file link off when the file is replaced, so it never shares what replaced it (D42)', async () => {
+    it('deletes a file’s links when it is replaced, so they never share what replaced it (D42)', async () => {
       const client = await owner()
       const root = await workspace(client)
       const before = await usedBytes(client)
       const first = await uploadFile(client, root.id, 'draft.txt', text('a'))
       const link = await share(client, first.nodeId)
-      expect(link.replaced).toBe(false)
+      const other = await share(client, first.nodeId, { maxDownloads: 3 })
       const { token, client: stranger } = visitor(link.url)
       const served = await stranger.fetch('GET', `/s/${token}/files/${first.nodeId}/content`)
       expect(await served.text()).toBe('a')
 
       await uploadFile(client, root.id, 'draft.txt', text('bb'))
-      // The file keeps only what replaced it, at once.
+      // The file keeps only what replaced it, at once, and its links are gone.
       expect((await usedBytes(client)) - before).toBe(2)
       for (const path of [`/s/${token}`, `/s/${token}/files/${first.nodeId}/content`]) {
-        expect(await stranger.error('GET', path)).toEqual({ status: 410, code: 'share_replaced' })
+        expect(await stranger.error('GET', path)).toEqual({ status: 404, code: 'share_not_found' })
       }
       const own = await client.fetch('GET', `/files/${first.nodeId}/content`)
       expect(await own.text()).toBe('bb')
-      // Its owner sees why it stopped, and can't bring it back.
-      expect(await listed(client, link.id)).toMatchObject({ replaced: true })
+      expect(await listed(client, link.id)).toBe(undefined)
+      expect(await listed(client, other.id)).toBe(undefined)
       expect(
         await client.error('PATCH', `/shares/${link.id}`, { json: { maxDownloads: 5 } }),
-      ).toEqual({ status: 409, code: 'share_replaced' })
+      ).toMatchObject({ status: 404 })
       const count = await client.call('POST', '/shares/count', shareCountSchema, {
         json: { ids: [first.nodeId] },
       })
       expect(count.links).toBe(0)
 
       // A new link shares the file as it is now.
-      const again = await share(client, first.nodeId)
-      expect(again.replaced).toBe(false)
-      const fresh = visitor(again.url)
-      expect(await fresh.client.call('GET', `/s/${fresh.token}`, publicShareSchema)).toMatchObject({
+      const again = visitor((await share(client, first.nodeId)).url)
+      expect(await again.client.call('GET', `/s/${again.token}`, publicShareSchema)).toMatchObject({
         locked: false,
         root: { name: 'draft.txt', sizeBytes: 2 },
       })
-      // Turning the old link off deletes it.
-      await client.send('DELETE', `/shares/${link.id}`)
-      expect(await listed(client, link.id)).toBe(undefined)
     })
 
     it('keeps a folder link sharing its files as they are, replaced ones included', async () => {
@@ -96,7 +91,7 @@ export function shareTests({ describe, it, expect, owner, target }: SuiteContext
       const { token, client: stranger } = visitor(link.url)
       const served = await stranger.fetch('GET', `/s/${token}/files/${file.nodeId}/content`)
       expect(await served.text()).toBe('new list')
-      expect(await listed(client, link.id)).toMatchObject({ replaced: false })
+      expect(await listed(client, link.id)).toMatchObject({ id: link.id })
     })
 
     it('counts the links deleting would stop: to an item, inside a folder, in the trash', async () => {

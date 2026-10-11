@@ -154,13 +154,12 @@ const SELECT_SHARES = sql`
 interface ListedRow extends ShareRow {
   owner_username: string
   path: string
-  replaced: boolean
   working: boolean
 }
 
 /**
  * Every link as the admin pages list it, `listed`: with its owner, the
- * folders its item is in, whether its file was replaced since, and whether it works. With
+ * folders its item is in, and whether it works. With
  * `q`, only links whose item, folder path or owner contains it.
  */
 function listedShares(q: string | undefined) {
@@ -185,8 +184,6 @@ function listedShares(q: string | undefined) {
         link.created_at::text AS created_at, link.expires_at::text AS expires_at,
         link.password_hash IS NOT NULL AS has_password, link.max_downloads,
         link.download_count,
-        (node.kind = 'file' AND link.version_id IS DISTINCT FROM node.current_version_id)
-          AS replaced,
         (${WORKING_LINK} AND (node.kind = 'folder' OR link.version_id = node.current_version_id))
           AS working
       FROM share_links link
@@ -364,9 +361,8 @@ export async function cancelUploadAsAdmin(
 
 function toAdminShare(row: ListedRow): AdminShare {
   const now = Date.now()
-  const state = row.replaced
-    ? 'replaced'
-    : row.expires_at && Date.parse(row.expires_at) <= now
+  const state =
+    row.expires_at && Date.parse(row.expires_at) <= now
       ? 'expired'
       : row.max_downloads !== null && row.download_count >= row.max_downloads
         ? 'used_up'
@@ -386,7 +382,6 @@ function toAdminShare(row: ListedRow): AdminShare {
     hasPassword: row.has_password,
     maxDownloads: row.max_downloads,
     downloadCount: row.download_count,
-    replaced: row.replaced,
     state,
   }
 }

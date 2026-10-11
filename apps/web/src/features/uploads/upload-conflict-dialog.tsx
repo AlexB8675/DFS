@@ -96,8 +96,8 @@ function ConflictQuestion({
           {(forAll ? allLinks : conflict.links) > 0 && (
             <LinkWarning>
               {forAll
-                ? `These files have ${linkCount(allLinks)}. Replacing them turns the links off: they stop working, and you can make new ones.`
-                : `This file has ${linkCount(conflict.links)}. Replacing it turns ${conflict.links === 1 ? 'the link off: it stops' : 'the links off: they stop'} working, and you can make ${conflict.links === 1 ? 'a new one' : 'new ones'}.`}
+                ? `These files have ${linkCount(allLinks)}. Replacing them deletes the links; you can make new ones.`
+                : `This file has ${linkCount(conflict.links)}. Replacing it deletes ${conflict.links === 1 ? 'the link; you can make a new one' : 'the links; you can make new ones'}.`}
             </LinkWarning>
           )}
 

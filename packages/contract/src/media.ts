@@ -305,10 +305,10 @@ export function mediaTests({
       const delivered = `${base}/media/${first.versionId}/delivery`
       expect((await viewer.call('GET', delivered, deliverySchema)).bytes).toBe(23)
 
-      // Replaced, the file is no longer what was shared: the link plays nothing (D42).
+      // Replaced, the file is no longer what was shared: its link is deleted (D42).
       const second = await uploadFile(client, root.id, 'Cut.mp4', text('second cut'))
       for (const path of [`${base}/playback`, content, `${base}/content?preview=1`]) {
-        expect(await viewer.error('GET', path)).toEqual({ status: 410, code: 'share_replaced' })
+        expect(await viewer.error('GET', path)).toEqual({ status: 404, code: 'share_not_found' })
       }
       // The owner plays the file as it is now.
       expect((await playback(client, first.nodeId)).versionId).toBe(second.versionId)

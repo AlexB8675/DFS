@@ -160,6 +160,10 @@ export function adminTests({
     it('logs uploads, and moving to the trash, restoring and deleting for good (§7.5)', async () => {
       const { user, username, photo, notes } = await userWithFiles()
       const client = await signIn(username, chosenPassword(username))
+      await client.call('POST', '/shares', shareLinkSchema, {
+        json: { nodeId: notes.nodeId, expiresAt: null, password: null, maxDownloads: null },
+      })
+      // Replacing it deletes its link (D42).
       await uploadFile(client, user.rootFolderId, 'notes.txt', text('hello again'))
       await client.send('DELETE', `/nodes/${photo.nodeId}`)
       // Its name is taken by then, so it comes back renamed.
@@ -181,7 +185,7 @@ export function adminTests({
         ['node.restored', 'beach (1).jpg', 'renamed from beach.jpg'],
         ['upload.completed', 'beach.jpg', '3 B'],
         ['node.trashed', 'beach.jpg', null],
-        ['upload.completed', 'notes.txt', '11 B, replacing the file'],
+        ['upload.completed', 'notes.txt', '11 B, replacing the file · 1 share link deleted'],
         ['upload.completed', 'notes.txt', '2 B'],
         ['upload.completed', 'beach.jpg', '10 B'],
       ])
@@ -271,7 +275,6 @@ export function adminTests({
         id: link.id,
         path: 'Trips / Lisbon 2024',
         ownerUsername: username,
-        replaced: false,
         state: 'active',
       })
       expect((await owners('active=true')).find((entry) => entry.ownerId === user.id)).toEqual({
