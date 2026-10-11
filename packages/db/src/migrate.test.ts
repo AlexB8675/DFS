@@ -29,17 +29,35 @@ describe('migrations', () => {
           "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'",
         )
         const instance = await client.query<{ id: string }>('SELECT id FROM instance')
+        // Deleting a row makes Postgres look up what refers to it: without an
+        // index it reads the whole referring table, for every row deleted.
+        // Users and channels are few and hardly ever deleted.
+        const unindexed = await client.query<{ key: string }>(`
+          SELECT c.conrelid::regclass || '.' || a.attname AS key
+          FROM pg_constraint c
+          JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1]
+          WHERE c.contype = 'f' AND c.connamespace = 'public'::regnamespace
+            AND c.confrelid NOT IN ('users'::regclass, 'storage_channels'::regclass)
+            AND c.conrelid <> 'users'::regclass
+            AND NOT EXISTS (
+              SELECT 1 FROM pg_index i
+              WHERE i.indrelid = c.conrelid AND i.indkey[0] = c.conkey[1]
+                AND (i.indpred IS NULL
+                  OR pg_get_expr(i.indpred, i.indrelid) = '(' || a.attname || ' IS NOT NULL)'))
+          ORDER BY 1`)
         return {
           applied: Number(applied.rows[0]?.count),
           tables: Number(tables.rows[0]?.count),
           instance: instance.rows.map((row) => row.id),
+          unindexed: unindexed.rows.map((row) => row.key),
         }
       })
       // One instance ID, made once (DESIGN §4).
       expect(counts).toEqual({
-        applied: 27,
+        applied: 28,
         tables: 20,
         instance: [expect.stringMatching(/^[0-9a-f]{12}$/)],
+        unindexed: [],
       })
     } finally {
       await withAdmin(adminUrl, (admin) => admin.query(`DROP DATABASE ${name} WITH (FORCE)`))

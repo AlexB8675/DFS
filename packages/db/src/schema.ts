@@ -189,6 +189,12 @@ export const nodes = pgTable(
     index('nodes_trashed_via')
       .on(t.trashedVia)
       .where(sql`${t.trashedVia} IS NOT NULL`),
+    // For the checks Postgres makes when a node or a version is deleted (the
+    // listing indexes leave trashed nodes out), and for finding a version's file.
+    index('nodes_parent_id').on(t.parentId),
+    index('nodes_current_version_id')
+      .on(t.currentVersionId)
+      .where(sql`${t.currentVersionId} IS NOT NULL`),
     check('nodes_root_is_folder', sql`${t.parentId} IS NOT NULL OR ${t.kind} = 'folder'`),
   ],
 )
@@ -435,6 +441,9 @@ export const uploadSessions = pgTable(
     index('upload_sessions_idle')
       .on(t.aliveAt)
       .where(sql`${t.state} = 'receiving'`),
+    // For the checks Postgres makes when a node or a version is deleted.
+    index('upload_sessions_node_id').on(t.nodeId),
+    index('upload_sessions_version_id').on(t.versionId),
   ],
 )
 
