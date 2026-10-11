@@ -700,7 +700,9 @@ export function internalMediaRoutes(
       if (!token || !(await mediaTokenValid(app.keys, versionId, token))) {
         throw new ApiError(401, 'invalid_token', 'This needs a token for this file.')
       }
-      return sendFile(app, request, reply, await readableVersion(app.db, versionId))
+      return sendFile(app, request, reply, await readableVersion(app.db, versionId), {
+        forMediaService: true,
+      })
     },
   )
 

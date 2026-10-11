@@ -12,6 +12,17 @@ export interface DownloadableFile extends ReadableVersion {
   mime_type: string | null
 }
 
+export interface SendOptions {
+  /** Who reads it, whose player may ask how fast it goes (§10.4): a user, or a link's viewer. */
+  readerId?: string
+  /**
+   * The media service reads it (§6.7), not a browser or a player: its bytes
+   * count as `media.read_bytes`, and none of the downloads' figures (under
+   * way, first byte, waits, failures) count it (§16).
+   */
+  forMediaService?: boolean
+}
+
 /**
  * Sends a file, or the byte range asked for with `206 Partial Content`; a
  * browser that has this version gets `304 Not Modified` and no bytes.
@@ -21,8 +32,7 @@ export function sendFile(
   request: FastifyRequest,
   reply: FastifyReply,
   file: DownloadableFile,
-  /** Who reads it, whose player may ask how fast it goes (§10.4): a user, or a link's viewer. */
-  readerId?: string,
+  { readerId, forMediaService = false }: SendOptions = {},
 ): FastifyReply {
   void reply.header('etag', `"${file.version_id}"`).header('cache-control', 'private, no-cache')
   // Before the range: a browser that has the version needs none of it.
@@ -47,15 +57,22 @@ export function sendFile(
     reply.code(206).header('content-range', `bytes ${String(start)}-${String(end)}/${String(size)}`)
   void reply.header('content-length', String(end - start + 1))
   if (request.method === 'HEAD') return reply.send(nothing())
-  counted(app, reply)
+  if (!forMediaService) counted(app, reply)
   const stats = sendStats()
   const followed = readerId ? app.deliveries.follow(readerId, file.version_id, stats) : null
   reply.raw.once('close', () => {
     followed?.()
     logSent(request, reply, file.version_id, start, end, stats)
-    recordSent(app, stats)
+    if (!forMediaService) recordSent(app, stats)
   })
-  const pieces = readVersion(app, file, start, end, cancellation(reply.raw))
+  const pieces = readVersion(
+    app,
+    file,
+    start,
+    end,
+    cancellation(reply.raw),
+    forMediaService ? 'media.read_bytes' : 'downloads.bytes',
+  )
   return reply.send(Readable.from(paced(reply.raw, pieces, stats)))
 }
 

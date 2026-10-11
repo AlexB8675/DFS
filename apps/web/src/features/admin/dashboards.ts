@@ -449,6 +449,13 @@ export const MONITORING_SECTIONS: DashboardSection[] = [
         ],
       },
       {
+        title: 'Read by the media service',
+        description:
+          'Bytes per second of files the media service read from the API, inside the VPS: each audio or video upload is examined as it completes, which reads some of a long file and most of a short clip. Not sent to browsers.',
+        format: 'bytesPerSecond',
+        lines: [{ label: 'Read', color: 1, series: 'media.read_bytes:rate' }],
+      },
+      {
         title: 'Failures',
         description:
           'Per minute: asks the media service didn’t answer or failed, and files it examined and couldn’t read as audio or video.',

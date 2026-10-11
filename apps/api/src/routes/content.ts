@@ -32,7 +32,7 @@ export function contentRoutes(app: FastifyInstance, _options: object, done: () =
       // A player names the version it plays, so a replaced file never mixes with it (§10.4).
       const { version } = request.query
       if (version && version !== file.version_id) throw versionChanged()
-      return sendFile(app, request, reply, file, auth.user.id)
+      return sendFile(app, request, reply, file, { readerId: auth.user.id })
     },
   )
 

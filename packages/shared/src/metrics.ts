@@ -56,6 +56,7 @@ export const METRICS = {
   /** Checks with no answer in 5 s, or a server error. */
   'check.discord.failures': byApi('counter', 'count', 'Failed checks of Discord'),
   'check.internet.failures': byApi('counter', 'count', 'Failed checks of the internet'),
+  /** Files and ZIPs sent to browsers and players; what the media service reads isn't (`media.read_bytes`). */
   'downloads.bytes': byApi('counter', 'bytes', 'Sent to browsers'),
   /** Files and ZIPs being sent to browsers: the most at once since the last sample. */
   'downloads.active': byApi('gauge', 'count', 'Downloads under way (peak)'),
@@ -117,6 +118,12 @@ export const METRICS = {
   'media.failures': byApi('counter', 'count', 'Failed media service requests'),
   /** Files the media service examined and found no audio or video it reads. */
   'media.unreadable': byApi('counter', 'count', 'Files the media service couldn’t read'),
+  /**
+   * Bytes of files the media service read from the API, inside the VPS:
+   * examining each audio or video upload, extracting subtitles, copying out
+   * covers. Not downloads, so none of the `downloads.*` figures count them.
+   */
+  'media.read_bytes': byApi('counter', 'bytes', 'Read by the media service'),
   'events.streams': byApi('gauge', 'count', 'Open event streams'),
   'auth.sign_ins': byApi('counter', 'count', 'Sign-ins'),
   'auth.failed_sign_ins': byApi('counter', 'count', 'Failed sign-ins'),

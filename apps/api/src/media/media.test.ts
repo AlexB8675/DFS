@@ -708,9 +708,12 @@ describe('without a media service (§6.7)', () => {
 
 describe('the internal route the media service reads from (§6.7)', () => {
   let versionId: string
+  let nodeId: string
 
   beforeAll(async () => {
-    versionId = (await uploadFile(client, folderId, 'read.wav', text('RIFF and wave'))).versionId
+    const uploaded = await uploadFile(client, folderId, 'read.wav', text('RIFF and wave'))
+    versionId = uploaded.versionId
+    nodeId = uploaded.nodeId
   })
 
   it('serves a version with its token, with Range', async () => {
@@ -722,6 +725,37 @@ describe('the internal route the media service reads from (§6.7)', () => {
     })
     expect(response.status).toBe(206)
     expect(await response.text()).toBe('and ')
+  })
+
+  it('counts what it serves as the media service’s reads, not as downloads (§16)', async () => {
+    const record = vi.spyOn(app.metrics, 'record')
+    const time = vi.spyOn(app.metrics, 'time')
+    const enter = vi.spyOn(app.downloads, 'enter')
+    const recorded = (name: string) =>
+      record.mock.calls
+        .filter(([called]) => called === name)
+        .reduce((sum, [, value]) => sum + (value ?? 1), 0)
+    try {
+      const read = await fetch(`${apiUrl}/internal/media/${versionId}`, {
+        headers: { authorization: `Bearer ${await mediaToken(app.keys, versionId)}` },
+      })
+      expect(await read.text()).toBe('RIFF and wave')
+      // A browser's download of the same file after it: the only download counted.
+      const download = await client.fetch('GET', `/files/${nodeId}/content`)
+      expect(await download.text()).toBe('RIFF and wave')
+      await vi.waitFor(() => {
+        expect(time).toHaveBeenCalledWith('downloads.first_byte_ms', expect.any(Number))
+      })
+      expect(time.mock.calls.filter(([name]) => name === 'downloads.first_byte_ms')).toHaveLength(1)
+      expect(recorded('downloads.bytes')).toBe(13)
+      // At least this read's: the stand-in may still be examining what was uploaded.
+      expect(recorded('media.read_bytes')).toBeGreaterThanOrEqual(13)
+      expect(enter).toHaveBeenCalledTimes(1)
+    } finally {
+      record.mockRestore()
+      time.mockRestore()
+      enter.mockRestore()
+    }
   })
 
   it('serves nothing without a token for that version', async () => {

@@ -159,7 +159,7 @@ export function shareRoutes(app: FastifyInstance, _options: object, done: () => 
         (range === null || (range !== 'unsatisfiable' && range.start === 0))
       )
         await countDownload(app, share)
-      return sendFile(app, request, reply, file, linkReader(share.id, request.ip))
+      return sendFile(app, request, reply, file, { readerId: linkReader(share.id, request.ip) })
     },
   )
 

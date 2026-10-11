@@ -80,10 +80,14 @@ export class ContentError extends Error {
   }
 }
 
+/** What a read's bytes count as on the graphs (§16): sent to a browser, or read by the media service. */
+export type ReadCounter = 'downloads.bytes' | 'media.read_bytes'
+
 /**
- * Bytes `start` to `end` (inclusive) of a version, as plaintext. Once
- * `signal` aborts, the chunks being read are given up on, unless another
- * reader waits for them too, and the stream fails with its reason.
+ * Bytes `start` to `end` (inclusive) of a version, as plaintext, each piece
+ * counted as `counter` as it is handed on. Once `signal` aborts, the chunks
+ * being read are given up on, unless another reader waits for them too, and
+ * the stream fails with its reason.
  */
 export async function* readVersion(
   app: FastifyInstance,
@@ -91,6 +95,7 @@ export async function* readVersion(
   start: number,
   end: number,
   signal?: AbortSignal,
+  counter: ReadCounter = 'downloads.bytes',
 ): AsyncGenerator<Uint8Array> {
   if (end < start) return
   const { version_id: versionId, chunk_size: chunkSize } = version
@@ -149,7 +154,7 @@ export async function* readVersion(
       try {
         for await (const piece of current.read.pieces()) {
           sent += piece.length
-          app.metrics.record('downloads.bytes', piece.length)
+          app.metrics.record(counter, piece.length)
           yield piece
           if (ahead === 0 && sent >= readAheadAt) {
             ahead = 1

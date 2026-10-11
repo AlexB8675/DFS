@@ -45,6 +45,7 @@ const LEVELS: Partial<Record<MetricName, number>> = {
   'downloads.failures': 0.0005,
   'media.failures': 0.0003,
   'media.unreadable': 0.0002,
+  'media.read_bytes': 400 * 1024,
   'downloads.active': 4,
   'events.streams': 6,
   'auth.sign_ins': 0.004,
@@ -96,6 +97,7 @@ const MEDIANS: Partial<Record<MetricName, number>> = {
 /** Average amount per event, for reading counters as `events`. */
 const AMOUNTS: Partial<Record<MetricName, number>> = {
   'downloads.bytes': 512 * 1024,
+  'media.read_bytes': 256 * 1024,
   'uploads.bytes': 4 * MB,
   'cdn.reads': 4 * MB,
   'discord.posted': 9 * MB,
