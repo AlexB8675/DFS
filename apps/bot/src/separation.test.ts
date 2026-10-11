@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { createDatabase, createPool, storageChannels, type Database } from '@dfs/db'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
-import { channelsInCategory, DiscordBlobStore, Staging } from '@dfs/storage'
+import { CategoryChannels, channelsInCategory, DiscordBlobStore, Staging } from '@dfs/storage'
 import { FakeDiscord } from '@dfs/storage/testing'
 import { ChannelType } from '@discordjs/core'
 import { sql } from 'drizzle-orm'
@@ -51,7 +51,8 @@ async function environment(category: string, instance: string): Promise<Environm
 function storeFor(env: Environment): DiscordBlobStore {
   return new DiscordBlobStore({
     rest: discord,
-    channels: () => placeableChannels(env.db, discord, discord.guildId, env.category),
+    channels: () =>
+      placeableChannels(env.db, new CategoryChannels(discord, discord.guildId, env.category)),
     maxBytes: 4096,
     instanceId: () => instanceId(env.db),
     perChannel: 2,

@@ -5,7 +5,7 @@ import { instanceId, journalChannel } from '@dfs/bot/storage'
 import { journalBatchContext, openObject } from '@dfs/crypto'
 import { appendJournal, storageChannels } from '@dfs/db'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
-import { DiscordJournalStore } from '@dfs/storage'
+import { CategoryChannels, DiscordJournalStore } from '@dfs/storage'
 import { FakeDiscord } from '@dfs/storage/testing'
 import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
@@ -134,7 +134,8 @@ describe('the journal (§8)', () => {
       db: app.db,
       journal: new DiscordJournalStore({
         rest: discord,
-        channel: () => journalChannel(app.db, discord, discord.guildId, 'DFS Dev'),
+        channel: () =>
+          journalChannel(app.db, new CategoryChannels(discord, discord.guildId, 'DFS Dev')),
         instanceId: () => instanceId(app.db),
       }),
     })

@@ -3,6 +3,7 @@ import { ChannelType, OverwriteType, PermissionFlagsBits } from 'discord-api-typ
 import { describe, expect, it } from 'vitest'
 import {
   adoptChannel,
+  CategoryChannels,
   channelsInCategory,
   ChannelRefusedError,
   ensureDiscordLayout,
@@ -194,6 +195,34 @@ describe('adoptChannel and channelsInCategory (D25)', () => {
     expect(await channelsInCategory(discord, discord.guildId, 'DFS Dev')).toEqual(
       new Set([ours.id, voice.id]),
     )
+  })
+
+  it('keeps the listing, and lists again only for a channel not asked about before', async () => {
+    const { discord, ours, theirs, loose } = server()
+    const listings = () =>
+      discord.requests.filter((request) => request === `GET /guilds/${discord.guildId}/channels`)
+        .length
+    const category = new CategoryChannels(discord, discord.guildId, 'DFS Dev')
+    // Posts at the same time share one listing (Discord allows 10 a minute).
+    const asked = await Promise.all(
+      Array.from({ length: 12 }, () => category.inside([ours.id, theirs.id])),
+    )
+    expect(asked).toEqual(Array.from({ length: 12 }, () => new Set([ours.id])))
+    expect(listings()).toBe(1)
+    // Channels in the server at that listing are known, and so is one gone from it.
+    expect(await category.inside([loose.id, '100000000000000099'])).toEqual(new Set())
+    expect(listings()).toBe(2)
+    expect(await category.inside([ours.id, loose.id, '100000000000000099'])).toEqual(
+      new Set([ours.id]),
+    )
+    expect(listings()).toBe(2)
+    // One registered since: listed again, which also sees what moved meanwhile.
+    const added = discord.addTextChannel('storage-05', discord.channel(ours.id).parent_id)
+    discord.channel(theirs.id).parent_id = discord.channel(ours.id).parent_id
+    expect(await category.inside([ours.id, theirs.id, added.id])).toEqual(
+      new Set([ours.id, theirs.id, added.id]),
+    )
+    expect(listings()).toBe(3)
   })
 })
 

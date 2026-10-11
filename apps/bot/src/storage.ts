@@ -2,7 +2,7 @@ import { RESTEvents } from '@discordjs/rest'
 import type { Config } from '@dfs/config'
 import { bigintArray, type Database, type Metrics } from '@dfs/db'
 import {
-  channelsInCategory,
+  CategoryChannels,
   ChaosBlobStore,
   createDiscordRest,
   DiscordBlobStore,
@@ -13,7 +13,6 @@ import {
   type JournalChannel,
   type JournalStore,
   type CdnUrl,
-  type DiscordRest,
   type DiscordRestClient,
   type StorageChannel,
 } from '@dfs/storage'
@@ -46,16 +45,17 @@ export function botStorage(
     const { botToken, guildId, categoryName } = config.discord
     const rest = createDiscordRest(botToken ?? '', { timeoutMs: DISCORD_TIMEOUT_MS })
     if (metrics) countDiscordRequests(rest, metrics)
+    const category = new CategoryChannels(rest, guildId ?? '', categoryName)
     const store = new DiscordBlobStore({
       rest,
-      channels: () => placeableChannels(db, rest, guildId ?? '', categoryName, log),
+      channels: () => placeableChannels(db, category, log),
       maxBytes: config.sizes.blobMaxBytes,
       instanceId: () => instanceId(db),
       perChannel: config.uploadChannelConcurrency,
     })
     const journal = new DiscordJournalStore({
       rest,
-      channel: () => journalChannel(db, rest, guildId ?? '', categoryName),
+      channel: () => journalChannel(db, category),
       instanceId: () => instanceId(db),
     })
     return { store, journal, discord: rest }
@@ -74,14 +74,12 @@ export function botStorage(
  */
 export async function journalChannel(
   db: Database,
-  rest: DiscordRest,
-  guildId: string,
-  categoryName: string,
+  category: CategoryChannels,
 ): Promise<JournalChannel | null> {
   const { rows } = await db.execute<{ id: string; discord_channel_id: string }>(sql`
     SELECT id, discord_channel_id FROM storage_channels WHERE kind = 'journal' ORDER BY id`)
   if (rows.length === 0) return null
-  const inCategory = await channelsInCategory(rest, guildId, categoryName)
+  const inCategory = await category.inside(rows.map((row) => row.discord_channel_id))
   const row = rows.find((candidate) => inCategory.has(candidate.discord_channel_id))
   return row ? { id: row.id, discordChannelId: row.discord_channel_id } : null
 }
@@ -117,20 +115,16 @@ export async function instanceId(db: Database): Promise<string> {
  */
 export async function placeableChannels(
   db: Database,
-  rest: DiscordRest,
-  guildId: string,
-  categoryName: string,
+  category: CategoryChannels,
   log?: Pick<FastifyBaseLogger, 'warn'>,
 ): Promise<StorageChannel[]> {
-  const [registered, inside] = await Promise.all([
-    dataChannels(db),
-    channelsInCategory(rest, guildId, categoryName),
-  ])
+  const registered = await dataChannels(db)
+  const inside = await category.inside(registered.map((channel) => channel.discordChannelId))
   return registered.map((channel) => {
     const placeable = inside.has(channel.discordChannelId)
     if (channel.enabled && !placeable) {
       log?.warn(
-        { discordChannelId: channel.discordChannelId, categoryName },
+        { discordChannelId: channel.discordChannelId, categoryName: category.categoryName },
         'a registered channel is outside this environment’s category; it takes no new blobs',
       )
     }

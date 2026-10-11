@@ -251,6 +251,53 @@ export async function channelsInCategory(
   categoryName: string,
 ): Promise<Set<string>> {
   const channels = (await rest.get(Routes.guildChannels(guildId))) as Channel[]
+  return insideCategory(channels, categoryName)
+}
+
+/**
+ * `channelsInCategory`, kept for posting (D25). Discord lets a bot list a
+ * server's channels 10 times a minute, and channels move only when someone
+ * drags them by hand, so they are listed when first asked about, and again
+ * only for a channel not asked about before (one just registered). A channel
+ * dragged in or out of the category by hand counts from the bot's next start.
+ */
+export class CategoryChannels {
+  readonly #rest: DiscordRest
+  readonly #guildId: string
+  readonly categoryName: string
+  /** Every channel in the server at the last listing, and every one asked about by then. */
+  #known = new Set<string>()
+  #inside = new Set<string>()
+  #listing: Promise<void> | null = null
+
+  constructor(rest: DiscordRest, guildId: string, categoryName: string) {
+    this.#rest = rest
+    this.#guildId = guildId
+    this.categoryName = categoryName
+  }
+
+  /** Those of these channels inside the category. */
+  async inside(channelIds: readonly string[]): Promise<Set<string>> {
+    for (;;) {
+      const unknown = channelIds.filter((id) => !this.#known.has(id))
+      if (unknown.length === 0) return new Set(channelIds.filter((id) => this.#inside.has(id)))
+      // Askers at the same time share one listing; one that started before
+      // this channel was asked about may not answer for it, so look again.
+      this.#listing ??= this.#list(unknown).finally(() => {
+        this.#listing = null
+      })
+      await this.#listing
+    }
+  }
+
+  async #list(asked: readonly string[]): Promise<void> {
+    const channels = (await this.#rest.get(Routes.guildChannels(this.#guildId))) as Channel[]
+    this.#inside = insideCategory(channels, this.categoryName)
+    this.#known = new Set([...this.#known, ...asked, ...channels.map((channel) => channel.id)])
+  }
+}
+
+function insideCategory(channels: readonly Channel[], categoryName: string): Set<string> {
   const categories = new Set(
     channels
       .filter(

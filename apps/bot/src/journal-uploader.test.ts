@@ -10,7 +10,7 @@ import {
   type Database,
 } from '@dfs/db'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
-import { DiscordJournalStore, LocalJournalStore } from '@dfs/storage'
+import { CategoryChannels, DiscordJournalStore, LocalJournalStore } from '@dfs/storage'
 import { FakeDiscord } from '@dfs/storage/testing'
 import { ChannelType } from '@discordjs/core'
 import { sql } from 'drizzle-orm'
@@ -58,7 +58,7 @@ beforeEach(async () => {
 function store() {
   return new DiscordJournalStore({
     rest: discord,
-    channel: () => journalChannel(db, discord, discord.guildId, 'DFS Dev'),
+    channel: () => journalChannel(db, new CategoryChannels(discord, discord.guildId, 'DFS Dev')),
     instanceId: () => instanceId(db),
   })
 }
@@ -123,7 +123,8 @@ describe('posting the journal (§8)', () => {
     await staged(5)
     const elsewhere = new DiscordJournalStore({
       rest: discord,
-      channel: () => journalChannel(db, discord, discord.guildId, 'Another category'),
+      channel: () =>
+        journalChannel(db, new CategoryChannels(discord, discord.guildId, 'Another category')),
       instanceId: () => instanceId(db),
     })
     await expect(new JournalUploader({ db, journal: elsewhere }).run()).rejects.toThrow(
