@@ -1,6 +1,7 @@
 import type { SyncState } from '@dfs/shared'
 import { create } from 'zustand'
 import { createStore, type StoreApi } from 'zustand/vanilla'
+import type { Unreadable } from './picked-files'
 
 export type UploadStatus =
   | 'queued'
@@ -11,6 +12,11 @@ export type UploadStatus =
   | 'canceled'
   /** Its name is a file's in its folder: it waits for its user to choose (D20). */
   | 'conflict'
+  /**
+   * Dropped again, and the same file is already in its folder (the same size
+   * and modification date): nothing was sent (§6.1).
+   */
+  | 'unchanged'
 
 /** The file an upload's name matched, and what the dialog offers as the copy's name. */
 export interface UploadConflict {
@@ -63,15 +69,19 @@ interface UploadState {
   summary: UploadSummary
   /** Uploads waiting for their user to choose, in the order they came. */
   conflicts: string[]
+  /** What the browser wouldn't read in what was dropped or picked: never uploads, but in the report. */
+  unreadable: Unreadable[]
   /** Recent upload speed, for the time-left estimate. */
   bytesPerSecond: number
   /** Whether the panel shows; closed, the header's button brings it back. */
   open: boolean
   collapsed: boolean
   add: (items: UploadItem[]) => void
+  addUnreadable: (unreadable: readonly Unreadable[]) => void
   /** Applies a batch of changes from the engine in one render. */
   apply: (changes: ReadonlyMap<string, Partial<UploadItem>>, bytesPerSecond: number) => void
   remove: (ids: ReadonlySet<string>) => void
+  clearUnreadable: () => void
   setOpen: (open: boolean) => void
   setCollapsed: (collapsed: boolean) => void
 }
@@ -90,8 +100,11 @@ export function createUploadStore() {
     syncing: 0,
     failed: 0,
     notStored: 0,
+    unchanged: 0,
+    canceled: 0,
     remainingBytes: 0,
   }
+  let unreadable: Unreadable[] = []
   const summary = (): UploadSummary => ({
     total: entries.size,
     active: totals.active,
@@ -101,6 +114,9 @@ export function createUploadStore() {
     syncing: totals.syncing,
     failed: totals.failed,
     notStored: totals.notStored,
+    unchanged: totals.unchanged,
+    canceled: totals.canceled,
+    unreadable: unreadable.length,
     progress:
       totals.totalBytes === 0
         ? totals.active + totals.paused + totals.conflicts === 0
@@ -113,6 +129,7 @@ export function createUploadStore() {
     items: [],
     summary: summary(),
     conflicts: [],
+    unreadable: [],
     bytesPerSecond: 0,
     open: false,
     collapsed: false,
@@ -133,6 +150,11 @@ export function createUploadStore() {
           collapsed: false,
         }))
       }
+    },
+    addUnreadable: (more) => {
+      if (more.length === 0) return
+      unreadable = [...unreadable, ...more]
+      set({ unreadable, summary: summary(), open: true, collapsed: false })
     },
     apply: (changes, bytesPerSecond) => {
       let changed = false
@@ -177,6 +199,11 @@ export function createUploadStore() {
           conflicts: [...conflicts],
         }))
     },
+    clearUnreadable: () => {
+      if (unreadable.length === 0) return
+      unreadable = []
+      set({ unreadable, summary: summary() })
+    },
     setOpen: (open) => {
       set({ open })
     },
@@ -198,11 +225,21 @@ interface UploadTotals {
   syncing: number
   failed: number
   notStored: number
+  unchanged: number
+  canceled: number
   remainingBytes: number
 }
 
 function adjust(totals: UploadTotals, item: UploadItem, direction: 1 | -1): void {
-  if (item.status === 'canceled') return
+  // Neither sends anything: they count for themselves, not toward the progress.
+  if (item.status === 'canceled') {
+    totals.canceled += direction
+    return
+  }
+  if (item.status === 'unchanged') {
+    totals.unchanged += direction
+    return
+  }
   totals.totalBytes += direction * item.file.size
   totals.uploadedBytes += direction * item.uploadedBytes
   if (isActive(item.status)) totals.active += direction
@@ -250,13 +287,21 @@ export interface UploadSummary {
   failed: number
   /** Uploaded, but they couldn't be stored on Discord. */
   notStored: number
+  /** Already there when dropped again: nothing to send. */
+  unchanged: number
+  canceled: number
+  /** Left out: the browser wouldn't read them. */
+  unreadable: number
   /** 0–1 across all files that are not canceled. */
   progress: number
   /** Bytes still to send by unfinished uploads, for the time-left estimate. */
   remainingBytes: number
 }
 
-export function summarize(items: readonly UploadItem[]): UploadSummary {
+export function summarize(
+  items: readonly UploadItem[],
+  unreadable: readonly Unreadable[] = [],
+): UploadSummary {
   let totalBytes = 0
   let uploadedBytes = 0
   let active = 0
@@ -266,9 +311,18 @@ export function summarize(items: readonly UploadItem[]): UploadSummary {
   let syncing = 0
   let failed = 0
   let notStored = 0
+  let unchanged = 0
+  let canceled = 0
   let remainingBytes = 0
   for (const item of items) {
-    if (item.status === 'canceled') continue
+    if (item.status === 'canceled') {
+      canceled += 1
+      continue
+    }
+    if (item.status === 'unchanged') {
+      unchanged += 1
+      continue
+    }
     totalBytes += item.file.size
     uploadedBytes += item.uploadedBytes
     if (isActive(item.status)) active += 1
@@ -293,6 +347,9 @@ export function summarize(items: readonly UploadItem[]): UploadSummary {
     syncing,
     failed,
     notStored,
+    unchanged,
+    canceled,
+    unreadable: unreadable.length,
     progress,
     remainingBytes,
   }

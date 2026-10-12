@@ -219,6 +219,16 @@ export class MockFileExists extends MockApiError {
   }
 }
 
+/** An upload that asked first found the same file already uploaded under its name (§6.1). */
+export class MockAlreadyUploaded extends MockApiError {
+  readonly existing: ExistingFile
+
+  constructor(name: string, existing: ExistingFile) {
+    super(409, 'already_uploaded', `“${name}” is already uploaded here.`)
+    this.existing = existing
+  }
+}
+
 const STATE_VERSION = 18
 const STORAGE_KEY = 'dfs.mock-db'
 /** `CHUNK_SIZE` at the 20 MiB attachment limit (§7.3). */
@@ -973,6 +983,8 @@ export class MockDb {
 
   /** `POST /uploads/batch`: answers per upload, so one bad name doesn't sink the rest. */
   createUploads(inputs: CreateUploadInput[]): UploadBatchResult['results'] {
+    // Names this batch started uploads of: one asking first is asked about them.
+    const started = new Set<string>()
     return inputs.map((input) => {
       try {
         const session = this.createUpload(
@@ -982,6 +994,7 @@ export class MockDb {
           input.mimeType,
           input.modifiedAt,
           input.ifExists,
+          started,
         )
         return { ok: true as const, session }
       } catch (error) {
@@ -989,7 +1002,9 @@ export class MockDb {
         return {
           ok: false as const,
           error: { code: error.code, message: error.message },
-          ...(error instanceof MockFileExists && { existing: error.existing }),
+          ...((error instanceof MockFileExists || error instanceof MockAlreadyUploaded) && {
+            existing: error.existing,
+          }),
         }
       }
     })
@@ -1007,18 +1022,29 @@ export class MockDb {
     mimeType: string,
     modifiedAt?: string,
     ifExists: 'ask' | 'replace' = 'replace',
+    started = new Set<string>(),
   ): UploadSession {
     this.requireFolder(parentId)
     const name = checkedName(rawName)
     const existing = this.childrenOf(parentId).find((node) => nameKey(node.name) === nameKey(name))
     if (existing?.kind === 'folder') throw nameConflict(name)
-    if (existing && ifExists === 'ask') {
+    const key = `${parentId}/${nameKey(name)}`
+    // A file only being uploaded isn't asked about, unless this batch started it.
+    const uploaded = existing !== undefined && existing.syncState !== 'uploading'
+    if (existing && ifExists === 'ask' && (uploaded || started.has(key))) {
       // Its working links, which replacing it deletes (D42).
       const links = this.state.shares.filter((share) => share.nodeId === existing.id)
-      throw new MockFileExists(name, {
+      const found = {
         nodeId: existing.id,
         links: links.filter((share) => isWorking(share, Date.now())).length,
-      })
+      }
+      // The same size and modification date: dropped again, already here.
+      const same =
+        (existing.syncState === 'syncing' || existing.syncState === 'stored') &&
+        existing.sizeBytes === sizeBytes &&
+        modifiedAt !== undefined &&
+        Date.parse(existing.updatedAt) === Date.parse(modifiedAt)
+      throw same ? new MockAlreadyUploaded(name, found) : new MockFileExists(name, found)
     }
     const user = this.currentUser()
     if (this.usedBytes(user.id) + sizeBytes > user.quotaBytes) {
@@ -1049,6 +1075,7 @@ export class MockDb {
       state: 'receiving',
     }
     this.state.uploads[upload.id] = upload
+    started.add(key)
     this.changed()
     return this.uploadSession(upload)
   }

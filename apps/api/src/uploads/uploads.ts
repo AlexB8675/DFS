@@ -88,7 +88,9 @@ export async function createUploads(
       ? {
           ok: false,
           error: { code: outcome.code, message: outcome.message },
-          ...(outcome instanceof FileExists && { existing: outcome.existing }),
+          ...((outcome instanceof FileExists || outcome instanceof AlreadyUploaded) && {
+            existing: outcome.existing,
+          }),
         }
       : { ok: true, session: outcome },
   )
@@ -100,6 +102,20 @@ class FileExists extends ApiError {
 
   constructor(name: string, existing: ExistingFile) {
     super(409, 'file_exists', `“${name}” already exists here.`)
+    this.existing = existing
+  }
+}
+
+/**
+ * An upload that asked first found the same file already uploaded under its
+ * name: the same size and modification date. Dropping a folder again sends
+ * only what isn't there yet (§6.1).
+ */
+class AlreadyUploaded extends ApiError {
+  readonly existing: ExistingFile
+
+  constructor(name: string, existing: ExistingFile) {
+    super(409, 'already_uploaded', `“${name}” is already uploaded here.`)
     this.existing = existing
   }
 }
@@ -183,15 +199,17 @@ async function startUploads(
   const existing = await namesInFolders(tx, plans)
   const accepted: Plan[] = []
   // Uploads that asked first and found their name taken, by a file here or
-  // earlier in this batch: they get that file back, not a version of it.
-  const asked: { plan: Plan; fileId: string | null }[] = []
+  // earlier in this batch: they get that file back, not a version of it. A
+  // file only being uploaded isn't asked about: it isn't there yet, and the
+  // upload becomes another version of it (the one completed last stays).
+  const asked: { plan: Plan; fileId: string | null; same: boolean }[] = []
   const taken = new Set<string>()
   for (const plan of plans) {
     const found = existing.get(plan.key)
     if (found?.kind === 'folder') {
       fail(plan.index, nameConflict(plan.name))
-    } else if (plan.input.ifExists === 'ask' && (found || taken.has(plan.key))) {
-      asked.push({ plan, fileId: found?.id ?? null })
+    } else if (plan.input.ifExists === 'ask' && (found?.uploaded || taken.has(plan.key))) {
+      asked.push({ plan, fileId: found?.id ?? null, same: sameFile(found, plan.input) })
     } else if (plan.input.sizeBytes > free) {
       fail(
         plan.index,
@@ -246,7 +264,7 @@ async function startUploads(
   for (const plan of raced) {
     const fileId = fileOf.get(plan.key)
     if (plan.input.ifExists === 'ask' && fileId) {
-      asked.push({ plan, fileId })
+      asked.push({ plan, fileId, same: false })
       accepted.splice(accepted.indexOf(plan), 1)
     }
   }
@@ -329,11 +347,12 @@ async function startUploads(
 
 /**
  * Answers each upload that asked first with the file its name matched, and
- * how many of its links work, which replacing it would delete (D42).
+ * how many of its links work, which replacing it would delete (D42): already
+ * uploaded when it is the same file, otherwise there to ask about.
  */
 async function answerAsked(
   tx: Executor,
-  asked: { plan: Plan; fileId: string | null }[],
+  asked: { plan: Plan; fileId: string | null; same: boolean }[],
   fileOf: ReadonlyMap<string, string>,
   fail: (index: number, error: unknown) => void,
 ): Promise<void> {
@@ -348,24 +367,31 @@ async function answerAsked(
   const files = new Map(rows.map((row) => [row.id, row]))
   for (const upload of asked) {
     const file = files.get(fileIdOf(upload) ?? '')
+    const found = file && { nodeId: file.id, links: file.links }
     fail(
       upload.plan.index,
-      file
-        ? new FileExists(upload.plan.name, {
-            nodeId: file.id,
-            links: file.links,
-          })
+      found
+        ? upload.same
+          ? new AlreadyUploaded(upload.plan.name, found)
+          : new FileExists(upload.plan.name, found)
         : nameConflict(upload.plan.name),
     )
   }
 }
 
-/** What these uploads' names already are in their folders: a file, or a folder in the way. */
-async function namesInFolders(
-  tx: Executor,
-  plans: Plan[],
-): Promise<Map<string, { id: string; kind: 'file' | 'folder' }>> {
-  const found = new Map<string, { id: string; kind: 'file' | 'folder' }>()
+/** A name already in a folder: a file, or a folder in the way. */
+interface FoundName {
+  id: string
+  kind: 'file' | 'folder'
+  /** A file whose upload completed, not one only being uploaded. */
+  uploaded: boolean
+  /** Its current version's, while that is on its way to Discord or there. */
+  version: { sizeBytes: number; modifiedMs: number | null } | null
+}
+
+/** What these uploads' names already are in their folders. */
+async function namesInFolders(tx: Executor, plans: Plan[]): Promise<Map<string, FoundName>> {
+  const found = new Map<string, FoundName>()
   if (plans.length === 0) return found
   const distinct = [...new Map(plans.map((plan) => [plan.key, plan])).values()]
   const { rows } = await tx.execute<{
@@ -373,17 +399,44 @@ async function namesInFolders(
     kind: 'file' | 'folder'
     parent_id: string
     name_key: string
+    uploaded: boolean
+    size_bytes: number | null
+    modified_ms: number | null
   }>(sql`
-    SELECT n.id, n.kind, n.parent_id, n.name_key
+    SELECT n.id, n.kind, n.parent_id, n.name_key, n.current_version_id IS NOT NULL AS uploaded,
+      version.size_bytes::float8 AS size_bytes,
+      (extract(epoch FROM version.modified_at) * 1000)::float8 AS modified_ms
     FROM unnest(
       ${uuidArray(distinct.map((plan) => plan.input.parentId))},
       ${textArray(distinct.map((plan) => nameKey(plan.name)))}
     ) AS requested(parent_id, name_key)
     JOIN nodes n ON n.parent_id = requested.parent_id AND n.name_key = requested.name_key
+    LEFT JOIN file_versions version
+      ON version.id = n.current_version_id AND version.state IN ('syncing', 'stored')
     WHERE n.deleted_at IS NULL`)
-  for (const row of rows)
-    found.set(`${row.parent_id}/${row.name_key}`, { id: row.id, kind: row.kind })
+  for (const row of rows) {
+    found.set(`${row.parent_id}/${row.name_key}`, {
+      id: row.id,
+      kind: row.kind,
+      uploaded: row.uploaded,
+      version:
+        row.size_bytes === null ? null : { sizeBytes: row.size_bytes, modifiedMs: row.modified_ms },
+    })
+  }
   return found
+}
+
+/**
+ * Whether an upload is the file already there: the same size and its own
+ * modification date, the quick check of tools such as rsync. Without a date
+ * from the browser, it can't tell, and asks.
+ */
+function sameFile(found: FoundName | undefined, input: CreateUploadInput): boolean {
+  const version = found?.version
+  if (typeof version?.modifiedMs !== 'number' || !input.modifiedAt) return false
+  return (
+    version.sizeBytes === input.sizeBytes && version.modifiedMs === Date.parse(input.modifiedAt)
+  )
 }
 
 /** `GET /uploads/:id`: the parts already here, also after completion. */

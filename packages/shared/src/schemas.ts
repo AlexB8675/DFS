@@ -271,7 +271,10 @@ export const uploadBatchResultSchema = z.object({
       z.object({
         ok: z.literal(false),
         error: apiErrorSchema.shape.error,
-        /** With `file_exists`: the file the name matched. */
+        /**
+         * With `file_exists`, the file the name matched; with
+         * `already_uploaded`, the same file, already there (§6.1).
+         */
         existing: existingFileSchema.optional(),
       }),
     ]),

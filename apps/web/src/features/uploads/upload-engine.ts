@@ -298,6 +298,7 @@ export class UploadEngine {
       this.changes.delete(job.id)
     }
     useUploadStore.getState().remove(removed)
+    useUploadStore.getState().clearUnreadable()
   }
 
   /** Live events reported new sync states: stored on Discord, or failed or lost on the way. */
@@ -752,7 +753,8 @@ export class UploadEngine {
         const result = results[index]
         if (!result?.ok) {
           if (job.status !== 'queued') return
-          if (result?.existing) this.nameTaken(job, result.existing)
+          if (result?.error.code === 'already_uploaded') this.alreadyUploaded(job)
+          else if (result?.existing) this.nameTaken(job, result.existing)
           else this.fail(job, result?.error.message ?? 'Could not start.')
           return
         }
@@ -805,6 +807,17 @@ export class UploadEngine {
       void invalidateFolderRows([parentId])
     }
     return folderIds
+  }
+
+  /**
+   * Dropped again, and the same file is already in its folder (§6.1):
+   * nothing to send, so a folder dropped again sends only what isn't there.
+   */
+  private alreadyUploaded(job: Job): void {
+    // Its batch is answered: nothing more waits on it.
+    this.preparingSessions.delete(job)
+    job.status = 'unchanged'
+    this.publish(job)
   }
 
   /** Its name is a file's: answered by its drop's choice for all, or it waits for one. */
@@ -909,7 +922,7 @@ export class UploadEngine {
   private cancelJobs(jobs: Job[]): void {
     const canceled = new Set<Job>()
     for (const job of jobs) {
-      if (job.status === 'done' || job.status === 'canceled') continue
+      if (job.status === 'done' || job.status === 'canceled' || job.status === 'unchanged') continue
       this.abortRequests(job)
       this.clearRetry(job)
       this.clearPause(job)

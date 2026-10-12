@@ -2,6 +2,7 @@ import {
   ChevronDown,
   CircleAlert,
   CircleCheck,
+  ClipboardList,
   CloudUpload,
   Pause,
   Play,
@@ -17,8 +18,9 @@ import { Progress } from '@/components/ui/progress'
 import { VirtualList } from '@/components/virtual-list'
 import { formatBytes, formatCount, formatDuration } from '@/lib/format'
 import { cn } from '@/lib/utils'
-import { FailedUploadsDialog } from './failed-uploads-dialog'
 import { uploadEngine } from './upload-engine'
+import type { ReportKind } from './upload-report'
+import { UploadReportDialog } from './upload-report-dialog'
 import {
   isSettled,
   useUploadStore,
@@ -44,11 +46,12 @@ export function UploadPanel() {
   const collapsed = useUploadStore((state) => state.collapsed)
   const setCollapsed = useUploadStore((state) => state.setCollapsed)
   const pending = summary.active + summary.paused + summary.conflicts > 0
-  const wrong = summary.failed + summary.notStored
-  const [showingWrong, setShowingWrong] = useState(false)
+  const wrong = summary.failed + summary.notStored + summary.unreadable
+  // Open with where to start, or closed.
+  const [report, setReport] = useState<{ start?: ReportKind } | null>(null)
   useLeaveWarning(pending)
 
-  if (!open || items.length === 0) return null
+  if (!open || (items.length === 0 && summary.unreadable === 0)) return null
 
   return (
     <section
@@ -62,20 +65,30 @@ export function UploadPanel() {
             {subtitle(summary, bytesPerSecond)}
           </p>
         </div>
-        {wrong > 0 && (
+        {wrong > 0 ? (
           <Button
             variant="ghost"
             size="sm"
             className="animate-in text-destructive tabular-nums zoom-in-75 hover:text-destructive motion-bounce"
-            aria-label={`Show ${formatCount(wrong, 'upload')} that went wrong`}
+            aria-label={`Show ${formatCount(wrong, 'file')} that went wrong`}
             title="Show what went wrong"
             onClick={() => {
-              setShowingWrong(true)
+              setReport({
+                start: summary.failed + summary.notStored > 0 ? 'failed' : 'unreadable',
+              })
             }}
           >
             <CircleAlert />
             {wrong.toLocaleString()}
           </Button>
+        ) : (
+          <IconButton
+            icon={ClipboardList}
+            label="Upload report"
+            onClick={() => {
+              setReport({})
+            }}
+          />
         )}
         {summary.active > 0 && (
           <IconButton
@@ -152,7 +165,13 @@ export function UploadPanel() {
           )}
         </div>
       </div>
-      <FailedUploadsDialog open={showingWrong} onOpenChange={setShowingWrong} />
+      <UploadReportDialog
+        open={report !== null}
+        start={report?.start}
+        onOpenChange={(next) => {
+          if (!next) setReport(null)
+        }}
+      />
     </section>
   )
 }
@@ -174,7 +193,7 @@ function useLeaveWarning(pending: boolean) {
 /** The header's way back to the panel once it is closed, while it has something to show. */
 export function UploadsButton() {
   const open = useUploadStore((state) => state.open)
-  const count = useUploadStore((state) => state.items.length)
+  const count = useUploadStore((state) => state.items.length + state.unreadable.length)
   if (open || count === 0) return null
   return (
     <Button
@@ -198,7 +217,15 @@ function title(summary: UploadSummary): string {
     return `${formatCount(summary.conflicts, 'file')} already ${summary.conflicts === 1 ? 'exists' : 'exist'}`
   }
   if (summary.paused > 0) return `${formatCount(summary.paused, 'upload')} paused`
-  if (summary.failed > 0) return `${summary.done} uploaded, ${summary.failed} failed`
+  const wrong = summary.failed + summary.notStored + summary.unreadable
+  if (wrong > 0 || summary.unchanged > 0) {
+    const parts = [
+      `${(summary.done - summary.notStored).toLocaleString()} uploaded`,
+      summary.unchanged > 0 && `${summary.unchanged.toLocaleString()} already there`,
+      wrong > 0 && `${wrong.toLocaleString()} went wrong`,
+    ]
+    return parts.filter(Boolean).join(', ')
+  }
   if (summary.syncing > 0) return `Syncing ${formatCount(summary.syncing, 'file')} to Discord`
   return `${formatCount(summary.done, 'upload')} complete`
 }
@@ -214,6 +241,9 @@ function subtitle(summary: UploadSummary, bytesPerSecond: number): string {
   }
   if (summary.conflicts > 0) return `${percent} · waiting for your choice`
   if (summary.paused > 0) return `${percent} · paused`
+  if (summary.failed + summary.notStored + summary.unreadable > 0) {
+    return 'The report says what went wrong; drop the folder again to finish it.'
+  }
   if (summary.syncing > 0) return 'Uploaded. They reach Discord even if you close this page.'
   return 'Everything is stored on Discord.'
 }
@@ -368,6 +398,13 @@ function UploadRowActions({ item }: { item: UploadItem }) {
       )
     case 'conflict':
       return <div className="flex">{cancel}</div>
+    case 'unchanged':
+      return (
+        <CircleCheck
+          className="mx-1.5 size-4 animate-in text-muted-foreground zoom-in-0 motion-bounce"
+          aria-label="Already uploaded"
+        />
+      )
     case 'canceled':
       return null
   }
@@ -453,6 +490,8 @@ function statusText(item: UploadItem): string {
       return item.error ?? 'Upload failed'
     case 'conflict':
       return 'Already exists here · replace, keep both or skip?'
+    case 'unchanged':
+      return `${formatBytes(item.file.size)} · already uploaded`
     case 'canceled':
       return item.error ?? 'Canceled'
   }

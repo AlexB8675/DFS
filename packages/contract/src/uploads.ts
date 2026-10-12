@@ -274,6 +274,51 @@ export function uploadTests({ describe, it, expect, owner, target }: SuiteContex
       expect(linked).toMatchObject({ existing: { links: 1 } })
     })
 
+    it('knows a file dropped again: the same is already uploaded, a changed one asks', async () => {
+      const client = await owner()
+      const root = await workspace(client)
+      const modifiedAt = '2026-01-02T03:04:05.678Z'
+      const done = await uploadFile(client, root.id, 'Same.txt', text('abc'), { modifiedAt })
+      const pending = await startUpload(client, root.id, 'pending.bin', 3)
+      const ask = (name: string, sizeBytes: number, date?: string) => ({
+        parentId: root.id,
+        name,
+        sizeBytes,
+        mimeType: 'text/plain',
+        ifExists: 'ask' as const,
+        ...(date && { modifiedAt: date }),
+      })
+      const codes = async (upload: ReturnType<typeof ask>) => {
+        const { results } = await client.call('POST', '/uploads/batch', uploadBatchResultSchema, {
+          json: { uploads: [upload] },
+        })
+        const [result] = results
+        return result?.ok ? 'ok' : result?.error.code
+      }
+
+      // The same size and modification date: nothing to send.
+      const { results } = await client.call('POST', '/uploads/batch', uploadBatchResultSchema, {
+        json: { uploads: [ask('same.TXT', 3, modifiedAt)] },
+      })
+      expect(results).toMatchObject([
+        { ok: false, error: { code: 'already_uploaded' }, existing: { nodeId: done.nodeId } },
+      ])
+      // Another size, another date, or no date to compare: asked about.
+      expect(await codes(ask('Same.txt', 4, modifiedAt))).toBe('file_exists')
+      expect(await codes(ask('Same.txt', 3, '2026-01-02T03:04:06.000Z'))).toBe('file_exists')
+      expect(await codes(ask('Same.txt', 3))).toBe('file_exists')
+      // A file only being uploaded isn't there yet: it gets another version.
+      const { results: again } = await client.call(
+        'POST',
+        '/uploads/batch',
+        uploadBatchResultSchema,
+        { json: { uploads: [ask('pending.bin', 3, modifiedAt)] } },
+      )
+      expect(again).toMatchObject([
+        { ok: true, session: { nodeId: pending.nodeId, isNewVersion: true } },
+      ])
+    })
+
     it('makes one file of a name given twice in a batch, a version each', async () => {
       const client = await owner()
       const root = await workspace(client)

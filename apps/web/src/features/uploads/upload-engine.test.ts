@@ -55,6 +55,8 @@ function fakeApi() {
     attempts: new Map<string, number>(),
     /** Names files in the folder already have: an upload asking first is told. */
     existing: new Set<string>(),
+    /** Names whose same file is already there: an upload asking first is told so. */
+    uploaded: new Set<string>(),
   }
 
   const held = <T extends { release: () => void }>(
@@ -94,6 +96,16 @@ function fakeApi() {
     createSessions: vi.fn<UploadTransport['createSessions']>((uploads) =>
       Promise.resolve(
         uploads.map((upload) => {
+          if (api.uploaded.has(upload.name.toLowerCase()) && upload.ifExists === 'ask') {
+            return {
+              ok: false as const,
+              error: {
+                code: 'already_uploaded',
+                message: `“${upload.name}” is already uploaded here.`,
+              },
+              existing: { nodeId: crypto.randomUUID(), links: 0 },
+            }
+          }
           if (api.existing.has(upload.name.toLowerCase()) && upload.ifExists === 'ask') {
             return {
               ok: false as const,
@@ -966,6 +978,37 @@ describe('UploadEngine', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('sends nothing of a file already there, dropped again: it counts as such (§6.1)', async () => {
+    const { api, transport } = fakeApi()
+    api.uploaded.add('kept.txt')
+    const engine = new UploadEngine(transport)
+    await engine.enqueue('folder', [file('kept.txt', 3), file('new.txt', 3)])
+
+    await vi.waitFor(() => {
+      expect(item('new.txt').status).toBe('done')
+      expect(item('kept.txt').status).toBe('unchanged')
+    })
+    // No question, no part, no session to cancel.
+    expect(api.sent).toHaveLength(1)
+    expect(useUploadStore.getState().conflicts).toEqual([])
+    expect(useUploadStore.getState().summary).toMatchObject({ done: 1, unchanged: 1, failed: 0 })
+    expect(useUploadStore.getState().summary.progress).toBe(1)
+    engine.cancel(item('kept.txt').id)
+    expect(item('kept.txt').status).toBe('unchanged')
+    expect(transport.cancel).not.toHaveBeenCalled()
+  })
+
+  it('forgets what the browser couldn’t read once the finished uploads are cleared', () => {
+    const { transport } = fakeApi()
+    const engine = new UploadEngine(transport)
+    useUploadStore
+      .getState()
+      .addUnreadable([{ path: 'Trip/venv/lib64', operation: 'list the folder', reason: 'x' }])
+    expect(useUploadStore.getState().summary.unreadable).toBe(1)
+    engine.clearFinished()
+    expect(useUploadStore.getState()).toMatchObject({ unreadable: [], summary: { unreadable: 0 } })
   })
 
   it('fails only the uploads a batch rejected', async () => {

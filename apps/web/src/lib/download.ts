@@ -32,6 +32,15 @@ export function withTimeZone(path: string): string {
   return `${base}?${query.toString()}`
 }
 
+/** Saves what the page made itself, such as a report, as a file. */
+export function saveBlob(blob: Blob, fileName: string): void {
+  const objectUrl = URL.createObjectURL(blob)
+  saveAs(objectUrl, fileName)
+  window.setTimeout(() => {
+    URL.revokeObjectURL(objectUrl)
+  }, 10_000)
+}
+
 function saveAs(href: string, fileName: string): void {
   const link = document.createElement('a')
   link.href = href

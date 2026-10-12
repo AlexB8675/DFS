@@ -57,9 +57,13 @@ describe('summarize', () => {
     expect(summary).toMatchObject({ done: 3, syncing: 1, notStored: 1 })
   })
 
-  it('leaves canceled uploads out of the progress', () => {
-    const summary = summarize([item('done', 100, 100), item('canceled', 900, 10)])
-    expect(summary.progress).toBe(1)
+  it('leaves canceled uploads, and files already there, out of the progress', () => {
+    const summary = summarize([
+      item('done', 100, 100),
+      item('canceled', 900, 10),
+      item('unchanged', 500, 0),
+    ])
+    expect(summary).toMatchObject({ progress: 1, canceled: 1, unchanged: 1, done: 1 })
   })
 
   it('treats a batch of empty files as complete once nothing is pending', () => {
@@ -89,6 +93,8 @@ describe('upload store', () => {
       { status: 'done' as const, uploadedBytes: 100, syncState: 'syncing' as const },
       { syncState: 'stored' as const },
       { syncState: 'failed' as const },
+      { status: 'queued' as const, syncState: null, uploadedBytes: 0 },
+      { status: 'unchanged' as const },
       { status: 'canceled' as const },
     ]) {
       store.getState().apply(new Map([[first.id, change]]), 100)

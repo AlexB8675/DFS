@@ -3,6 +3,7 @@ import { errorMessage } from '@/lib/api/client'
 import type { Dropped } from './picked-files'
 import { reportUnreadable, tellNoFiles, whileWaiting } from './reading-feedback'
 import { enqueueUploads } from './upload-engine'
+import { useUploadStore } from './upload-store'
 
 /**
  * Reads what was dropped or picked, tells what it could not read, and queues
@@ -21,6 +22,8 @@ export async function startUploads(
       waiting.say(`Reading what you chose… ${found.toLocaleString()} files`)
     })
     reportUnreadable(unreadable, files.length)
+    // The panel's report keeps them, where the toast goes.
+    useUploadStore.getState().addUnreadable(unreadable)
     if (files.length === 0) {
       if (unreadable.length === 0) tellNoFiles('drop')
       return
