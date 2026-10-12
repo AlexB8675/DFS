@@ -35,9 +35,11 @@ export interface FlushLimits {
 }
 
 /**
- * Seals every record not yet flushed into batches. Returns the numbers of the
- * batches sealed, none if there was nothing to seal or another API instance
- * was flushing.
+ * Seals the records waiting into batches, as many as they fill. Records
+ * written while it seals wait for the next flush, so a flush adds one message
+ * to #dfs-journal unless more than a batch's worth was waiting. Returns the
+ * numbers of the batches sealed, none if there was nothing to seal or another
+ * API instance was flushing.
  */
 export async function flushJournal(
   app: FastifyInstance,
@@ -45,9 +47,9 @@ export async function flushJournal(
 ): Promise<number[]> {
   const sealed: number[] = []
   for (;;) {
-    const batches = await sealNext(app, limits)
-    if (batches.length === 0) return sealed
-    sealed.push(...batches)
+    const next = await sealNext(app, limits)
+    sealed.push(...next.sealed)
+    if (!next.more) return sealed
   }
 }
 
@@ -58,19 +60,26 @@ interface JournalRow extends Record<string, unknown> {
   created_at: string
 }
 
-/** Seals the next batch, or the pieces of a record too large for one, in one transaction. */
+/**
+ * Seals the next batch, or the pieces of a record too large for one, in one
+ * transaction. `more` says whether records were left that were already
+ * waiting: the batch was full.
+ */
 async function sealNext(
   app: FastifyInstance,
   { maxRecords = BATCH_RECORDS, maxBytes = BATCH_MAX_BYTES }: FlushLimits,
-): Promise<number[]> {
+): Promise<{ sealed: number[]; more: boolean }> {
   return app.db.transaction(async (tx) => {
+    const nothing = { sealed: [], more: false }
     const { rows: locked } = await tx.execute<{ locked: boolean }>(sql`
       SELECT pg_try_advisory_xact_lock(${LOCK_NAMESPACE}, ${LOCKS.journalFlush}) AS locked`)
-    if (!locked[0]?.locked) return []
-    const { rows } = await tx.execute<JournalRow>(sql`
+    if (!locked[0]?.locked) return nothing
+    // One more than a batch takes, to know whether it leaves any behind.
+    const { rows: waiting } = await tx.execute<JournalRow>(sql`
       SELECT id::float8 AS id, kind, record, created_at::text AS created_at FROM journal
-      WHERE batch_no IS NULL ORDER BY id LIMIT ${maxRecords}`)
-    if (rows.length === 0) return []
+      WHERE batch_no IS NULL ORDER BY id LIMIT ${maxRecords + 1}`)
+    const rows = waiting.slice(0, maxRecords)
+    if (rows.length === 0) return nothing
     const { rows: numbers } = await tx.execute<{ next: number }>(sql`
       SELECT coalesce(max(batch_no), 0)::float8 + 1 AS next FROM journal_batches`)
     const first = numbers[0]?.next ?? 1
@@ -143,7 +152,7 @@ async function sealNext(
     await tx.execute(sql`
       UPDATE journal SET batch_no = ${sealed.at(-1) ?? first}
       WHERE id = ANY(${`{${ids.join(',')}}`}::bigint[])`)
-    return sealed
+    return { sealed, more: ids.length < waiting.length }
   })
 }
 

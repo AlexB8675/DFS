@@ -9,7 +9,7 @@ import { CategoryChannels, DiscordJournalStore } from '@dfs/storage'
 import { FakeDiscord } from '@dfs/storage/testing'
 import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
-import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest'
 import { buildApp } from './app.ts'
 import { flushJournal, GZIP_FLAG } from './journal.ts'
 import { testConfig } from './testing/config.ts'
@@ -105,6 +105,44 @@ describe('the journal (§8)', () => {
     const { rows } = await app.db.execute<{ batch_no: number }>(sql`
       SELECT batch_no::float8 AS batch_no FROM journal WHERE id = ${bigId ?? 0}`)
     expect(rows[0]?.batch_no).toBe(sealed.at(-1))
+  })
+
+  it('leaves records written while it seals for the next flush, one batch a flush', async () => {
+    await journaled('node.upsert', [{ before: 1 }, { before: 2 }])
+    expect(await unflushed()).toBe(2)
+    // A completion commits while the batch is being sealed.
+    const wrapDek = app.keys.wrapDek.bind(app.keys)
+    const spy = vi.spyOn(app.keys, 'wrapDek').mockImplementationOnce(async (...args) => {
+      await journaled('node.upsert', [{ during: true }])
+      return wrapDek(...args)
+    })
+    try {
+      const sealed = await flushJournal(app)
+      expect(sealed).toHaveLength(1)
+      expect((await open(sealed[0] ?? 0)).records.map((entry) => entry.record)).toEqual([
+        { before: 1 },
+        { before: 2 },
+      ])
+    } finally {
+      spy.mockRestore()
+    }
+    expect(await unflushed()).toBe(1)
+    expect(await flushJournal(app)).toHaveLength(1)
+    expect(await unflushed()).toBe(0)
+  })
+
+  it('seals batch after batch while more than one batch’s worth was waiting', async () => {
+    await journaled(
+      'node.upsert',
+      Array.from({ length: 7 }, (_, n) => ({ n })),
+    )
+    expect(await flushJournal(app, { maxRecords: 3 })).toHaveLength(3)
+    expect(await unflushed()).toBe(0)
+    await journaled(
+      'node.upsert',
+      Array.from({ length: 3 }, (_, n) => ({ n })),
+    )
+    expect(await flushJournal(app, { maxRecords: 3 })).toHaveLength(1)
   })
 
   it('flushes once when two flush at the same time', async () => {
