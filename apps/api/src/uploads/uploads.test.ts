@@ -397,6 +397,41 @@ describe('receiving parts', () => {
   })
 })
 
+describe('completing (§6.1)', () => {
+  it('commits a completion without waiting for the disk, and nothing else so (D43)', async () => {
+    // Each change to a session's state, with the commit mode of its transaction.
+    await app.db.execute(sql`CREATE TABLE test_commit_modes (state text, mode text)`)
+    await app.db.execute(sql`
+      CREATE FUNCTION test_commit_mode() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        INSERT INTO test_commit_modes VALUES (NEW.state::text, current_setting('synchronous_commit'));
+        RETURN NEW;
+      END $$`)
+    await app.db.execute(sql`
+      CREATE TRIGGER test_commit_mode AFTER INSERT OR UPDATE OF state ON upload_sessions
+      FOR EACH ROW EXECUTE FUNCTION test_commit_mode()`)
+    try {
+      // A small file completes with its part; an empty one when asked to.
+      const small = await start(3)
+      await receivePart(app, auth, small.uploadId, 0, new Uint8Array([1, 2, 3]), undefined)
+      const empty = await start(0)
+      await completeUpload(app, auth, empty.uploadId)
+      const { rows } = await app.db.execute<{ state: string; mode: string }>(sql`
+        SELECT state, mode FROM test_commit_modes`)
+      expect(rows).toEqual([
+        { state: 'receiving', mode: 'on' },
+        { state: 'completed', mode: 'off' },
+        { state: 'receiving', mode: 'on' },
+        { state: 'completed', mode: 'off' },
+      ])
+    } finally {
+      await app.db.execute(sql`DROP TRIGGER test_commit_mode ON upload_sessions`)
+      await app.db.execute(sql`DROP FUNCTION test_commit_mode()`)
+      await app.db.execute(sql`DROP TABLE test_commit_modes`)
+    }
+  })
+})
+
 describe('uploads living in their page (§6.1)', () => {
   async function idle(...uploadIds: string[]) {
     await app.db.execute(sql`

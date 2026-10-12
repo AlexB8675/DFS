@@ -692,6 +692,12 @@ async function finishUpload(
   upload: UploadRow,
 ): Promise<Finished> {
   if (upload.state === 'completed') return { pruned: [], completed: null }
+  // Committed without waiting for the disk (D43): completions queue on the
+  // user's row and the journal lock until they commit, and each waited out
+  // the disk's flush while holding them. A crash of Postgres or the VPS can
+  // forget about the last second of completions, never part of one, and
+  // anything committed after them waits for the disk, which keeps them too.
+  await tx.execute(sql`SET LOCAL synchronous_commit = off`)
 
   const { rows: parts } = await tx.execute<{ plain_sha256: Buffer }>(sql`
     SELECT plain_sha256 FROM chunks WHERE version_id = ${upload.version_id} ORDER BY idx`)
