@@ -113,3 +113,44 @@ describe('API without a database', () => {
     expect(JSON.stringify(failure.body)).not.toContain('secret')
   })
 })
+
+describe('refusals in the log', () => {
+  it('says why a request was refused, by its code alone', async () => {
+    const lines: Record<string, unknown>[] = []
+    const stream = {
+      write: (line: string) => {
+        lines.push(JSON.parse(line) as Record<string, unknown>)
+      },
+    }
+    const { config } = await testConfig({ DATABASE_URL: 'postgres://dfs:dfs@127.0.0.1:1/dfs' })
+    const app = await buildApp({ config, logger: { level: 'info', stream } })
+    const open = { config: { access: 'public' as const } }
+    app.get('/api/test/conflict', open, () => {
+      throw new ApiError(409, 'upload_completed', 'A message that may hold what was asked.')
+    })
+    app.get('/api/test/busy', open, () => {
+      throw new ApiError(503, 'staging_full', 'Busy.')
+    })
+    try {
+      await app.inject({ method: 'GET', url: '/api/test/conflict' })
+      await app.inject({ method: 'GET', url: '/api/test/busy' })
+      await app.inject({
+        method: 'POST',
+        url: '/api/health',
+        payload: '{bad',
+        headers: { 'content-type': 'application/json' },
+      })
+    } finally {
+      await app.close()
+    }
+    const said = lines.filter(
+      (line) => line.msg === 'request refused' || line.msg === 'request failed',
+    )
+    expect(said.map(({ level, msg, code }) => ({ level, msg, code }))).toEqual([
+      { level: 30, msg: 'request refused', code: 'upload_completed' },
+      { level: 40, msg: 'request failed', code: 'staging_full' },
+      { level: 30, msg: 'request refused', code: 'invalid_request' },
+    ])
+    expect(JSON.stringify(lines)).not.toContain('may hold')
+  })
+})
