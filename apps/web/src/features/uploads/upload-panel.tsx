@@ -17,6 +17,7 @@ import { Progress } from '@/components/ui/progress'
 import { VirtualList } from '@/components/virtual-list'
 import { formatBytes, formatCount, formatDuration } from '@/lib/format'
 import { cn } from '@/lib/utils'
+import { FailedUploadsDialog } from './failed-uploads-dialog'
 import { uploadEngine } from './upload-engine'
 import {
   isSettled,
@@ -43,6 +44,8 @@ export function UploadPanel() {
   const collapsed = useUploadStore((state) => state.collapsed)
   const setCollapsed = useUploadStore((state) => state.setCollapsed)
   const pending = summary.active + summary.paused + summary.conflicts > 0
+  const wrong = summary.failed + summary.notStored
+  const [showingWrong, setShowingWrong] = useState(false)
   useLeaveWarning(pending)
 
   if (!open || items.length === 0) return null
@@ -59,6 +62,21 @@ export function UploadPanel() {
             {subtitle(summary, bytesPerSecond)}
           </p>
         </div>
+        {wrong > 0 && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="animate-in text-destructive tabular-nums zoom-in-75 hover:text-destructive motion-bounce"
+            aria-label={`Show ${formatCount(wrong, 'upload')} that went wrong`}
+            title="Show what went wrong"
+            onClick={() => {
+              setShowingWrong(true)
+            }}
+          >
+            <CircleAlert />
+            {wrong.toLocaleString()}
+          </Button>
+        )}
         {summary.active > 0 && (
           <IconButton
             icon={Pause}
@@ -134,6 +152,7 @@ export function UploadPanel() {
           )}
         </div>
       </div>
+      <FailedUploadsDialog open={showingWrong} onOpenChange={setShowingWrong} />
     </section>
   )
 }

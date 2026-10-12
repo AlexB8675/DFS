@@ -25,6 +25,12 @@ export interface UploadItem {
   file: File
   /** Folder the file is uploaded into. */
   parentId: string
+  /**
+   * Where the file was on disk, as far as the browser says: its path inside
+   * the folder dropped or picked (`Photos/2024/a.jpg`), or its name alone.
+   * Browsers never tell a page the rest.
+   */
+  path: string
   /** The name it is uploaded under: the file's own, or the one chosen for a copy. */
   name: string
   status: UploadStatus
@@ -83,6 +89,7 @@ export function createUploadStore() {
     done: 0,
     syncing: 0,
     failed: 0,
+    notStored: 0,
     remainingBytes: 0,
   }
   const summary = (): UploadSummary => ({
@@ -93,6 +100,7 @@ export function createUploadStore() {
     done: totals.done,
     syncing: totals.syncing,
     failed: totals.failed,
+    notStored: totals.notStored,
     progress:
       totals.totalBytes === 0
         ? totals.active + totals.paused + totals.conflicts === 0
@@ -189,6 +197,7 @@ interface UploadTotals {
   done: number
   syncing: number
   failed: number
+  notStored: number
   remainingBytes: number
 }
 
@@ -202,6 +211,7 @@ function adjust(totals: UploadTotals, item: UploadItem, direction: 1 | -1): void
   if (item.status === 'done') {
     totals.done += direction
     if (!isSettled(item.syncState)) totals.syncing += direction
+    if (item.syncState === 'failed') totals.notStored += direction
   }
   if (item.status === 'failed') totals.failed += direction
   if (isPending(item.status))
@@ -223,6 +233,11 @@ export function isSettled(syncState: SyncState | null): boolean {
   return syncState === 'stored' || syncState === 'failed'
 }
 
+/** It went wrong: it didn't upload, or it did but couldn't be stored on Discord. */
+export function wentWrong(item: UploadItem): boolean {
+  return item.status === 'failed' || (item.status === 'done' && item.syncState === 'failed')
+}
+
 export interface UploadSummary {
   total: number
   active: number
@@ -233,6 +248,8 @@ export interface UploadSummary {
   /** Uploaded, still on their way to Discord. */
   syncing: number
   failed: number
+  /** Uploaded, but they couldn't be stored on Discord. */
+  notStored: number
   /** 0–1 across all files that are not canceled. */
   progress: number
   /** Bytes still to send by unfinished uploads, for the time-left estimate. */
@@ -248,6 +265,7 @@ export function summarize(items: readonly UploadItem[]): UploadSummary {
   let done = 0
   let syncing = 0
   let failed = 0
+  let notStored = 0
   let remainingBytes = 0
   for (const item of items) {
     if (item.status === 'canceled') continue
@@ -259,6 +277,7 @@ export function summarize(items: readonly UploadItem[]): UploadSummary {
     if (item.status === 'done') {
       done += 1
       if (!isSettled(item.syncState)) syncing += 1
+      if (item.syncState === 'failed') notStored += 1
     }
     if (item.status === 'failed') failed += 1
     if (isPending(item.status)) remainingBytes += item.file.size - item.uploadedBytes
@@ -273,6 +292,7 @@ export function summarize(items: readonly UploadItem[]): UploadSummary {
     done,
     syncing,
     failed,
+    notStored,
     progress,
     remainingBytes,
   }

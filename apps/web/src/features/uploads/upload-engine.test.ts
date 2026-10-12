@@ -602,6 +602,9 @@ describe('UploadEngine', () => {
     })
     expect(item('photo.jpg').parentId).toBe('photos-folder')
     expect(item('loose.txt').parentId).toBe('folder')
+    // Where each was on disk, as far as the browser says.
+    expect(item('photo.jpg').path).toBe('photos/photo.jpg')
+    expect(item('loose.txt').path).toBe('loose.txt')
     expect(transport.createSessions).toHaveBeenCalledWith([
       expect.objectContaining({ name: 'photo.jpg', parentId: 'photos-folder' }),
       expect.objectContaining({ name: 'loose.txt', parentId: 'folder' }),

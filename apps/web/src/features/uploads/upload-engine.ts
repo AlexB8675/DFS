@@ -212,7 +212,13 @@ export class UploadEngine {
       }
       this.jobs.set(job.id, job)
       this.needSession.push(job)
-      items.push({ ...toItem(job), id: job.id, file, parentId: job.parentId })
+      items.push({
+        ...toItem(job),
+        id: job.id,
+        file,
+        parentId: job.parentId,
+        path: relativeDir ? `${relativeDir}/${file.name}` : file.name,
+      })
     }
     useUploadStore.getState().add(items)
     this.pump()
@@ -1027,7 +1033,7 @@ export class UploadEngine {
   }
 }
 
-function toItem(job: Job): Omit<UploadItem, 'id' | 'file' | 'parentId'> {
+function toItem(job: Job): Omit<UploadItem, 'id' | 'file' | 'parentId' | 'path'> {
   return {
     name: job.name,
     status: job.status,

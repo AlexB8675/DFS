@@ -12,6 +12,7 @@ function item(
     id: crypto.randomUUID(),
     file: new File([new Uint8Array(size)], 'file.bin'),
     parentId: 'folder',
+    path: 'file.bin',
     name: 'file.bin',
     status,
     uploadedBytes,
@@ -33,7 +34,14 @@ describe('summarize', () => {
       item('done', 200, 200),
       item('failed', 100, 30),
     ])
-    expect(summary).toMatchObject({ total: 5, active: 2, paused: 1, done: 1, failed: 1 })
+    expect(summary).toMatchObject({
+      total: 5,
+      active: 2,
+      paused: 1,
+      done: 1,
+      failed: 1,
+      notStored: 0,
+    })
     expect(summary.progress).toBeCloseTo(300 / 600)
     // Only unfinished uploads count toward the time left.
     expect(summary.remainingBytes).toBe(50 + 100 + 80)
@@ -46,7 +54,7 @@ describe('summarize', () => {
       // A sync that failed is over too; the panel shows the problem instead.
       item('done', 10, 10, 'failed'),
     ])
-    expect(summary).toMatchObject({ done: 3, syncing: 1 })
+    expect(summary).toMatchObject({ done: 3, syncing: 1, notStored: 1 })
   })
 
   it('leaves canceled uploads out of the progress', () => {

@@ -10,6 +10,7 @@ for (const count of [10_000, 100_000]) {
       id: String(index),
       file,
       parentId: 'folder',
+      path: 'file.bin',
       name: 'file.bin',
       status: 'uploading',
       uploadedBytes: 0,
