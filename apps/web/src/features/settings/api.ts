@@ -15,6 +15,12 @@ export function devicesQuery() {
 export function useRemoveDevice() {
   return useMutation({
     mutationFn: (id: string) => apiSend('DELETE', `/devices/${id}`),
-    onSettled: () => queryClient.invalidateQueries({ queryKey: ['devices'] }),
+    onSettled: () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['devices'] }),
+        // An admin's own device is also in Admin → Access, and removing it is in the audit log.
+        queryClient.invalidateQueries({ queryKey: ['admin', 'devices'] }),
+        queryClient.invalidateQueries({ queryKey: ['admin', 'audit'] }),
+      ]),
   })
 }

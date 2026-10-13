@@ -1,6 +1,6 @@
 import type { Device } from '@dfs/shared'
 import { formatDateInSentence, formatFullDate } from '@/lib/format'
-import { describeUserAgent } from '@/lib/user-agent'
+import { describeDeviceAgent } from './device-agent'
 
 /**
  * When a device was paired and last used, and from where (§7.6), in two lines
@@ -22,7 +22,7 @@ export function DeviceUsage({
           Last used{' '}
           <span title={formatFullDate(lastUsedAt)}>{formatDateInSentence(lastUsedAt)}</span>
           {lastAddress && ` from ${lastAddress}`}
-          {lastAgent && ` · ${describeUserAgent(lastAgent)}`}
+          {lastAgent && ` · ${describeDeviceAgent(lastAgent)}`}
         </span>
       ) : (
         <span>Not used yet</span>
