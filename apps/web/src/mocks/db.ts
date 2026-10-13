@@ -24,6 +24,10 @@ import {
   type ChangePasswordInput,
   type CreateUploadInput,
   type Delivery,
+  type Device,
+  type DeviceMe,
+  type DeviceToken,
+  type DeviceTokenRequest,
   type DriveNode,
   type ExistingFile,
   type FileMedia,
@@ -32,6 +36,8 @@ import {
   type NodeKind,
   type NodePath,
   type Page,
+  type PairDeviceInput,
+  type PairingCode,
   type PasswordChange,
   type PasswordResetRequest,
   type Playback,
@@ -162,6 +168,26 @@ export type MockUser = Omit<AdminUser, 'usedBytes' | 'fileCount'> & {
   password: string
 }
 
+/** A backup app's device (§7.6); the mock keeps its token in the clear, which the real API never does. */
+export interface MockDevice {
+  id: string
+  userId: string
+  name: string
+  token: string
+  createdAt: string
+  lastUsedAt: string | null
+  lastAddress: string | null
+  lastAgent: string | null
+}
+
+/** A code the page got for an app, until the app trades it for a token (kept in memory only). */
+interface MockPairing {
+  userId: string
+  name: string
+  challenge: string
+  expiresAt: number
+}
+
 export type MockChannel = Pick<
   StorageChannel,
   'id' | 'discordChannelId' | 'name' | 'enabled' | 'createdAt'
@@ -190,6 +216,8 @@ export interface MockState {
   audit: MockAuditEntry[]
   /** Where each user stopped a video, by `userId:nodeId` (§10.4). */
   positions?: Record<string, { versionId: string; positionMs: number }>
+  /** Backup apps' devices (§7.6), newest first. Optional so that older saved states still load. */
+  devices?: MockDevice[]
 }
 
 /** Live events (§6.1), as the SSE stream sends them. */
@@ -236,6 +264,14 @@ export const STAGING_MAX_BYTES = 100 * 1024 ** 3
 /** `CHUNK_SIZE` at the 20 MiB attachment limit (§7.3). */
 export const CHUNK_SIZE = 20 * 1024 * 1024 - 128 * 1024
 const CSRF_TOKEN = 'mock-csrf-token'
+/** A pairing code is good for a minute (§7.6). */
+const PAIRING_MS = 60_000
+/** `dfs_` and 32 random bytes in base64url (§7.6). */
+const DEVICE_TOKEN_PATTERN = /^dfs_[A-Za-z0-9_-]{43}$/
+/** Where the mock's requests come from, as the audit log and the device list show it. */
+const MOCK_ADDRESS = '127.0.0.1'
+/** Enough to tell programs apart, as for the real API's sessions. */
+const MAX_AGENT = 200
 /** Archive links from `POST /archive` work once, for a minute (§9). */
 const ARCHIVE_TICKET_MS = 60_000
 
@@ -257,6 +293,7 @@ export class MockDb {
   private derived: Derived | null = null
   private readonly listeners = new Set<(event: MockEvent) => void>()
   private readonly archiveTickets = new Map<string, { ids: string[]; expiresAt: number }>()
+  private readonly pairings = new Map<string, MockPairing>()
   /** Share tokens unlocked with their password; the real API uses a short-lived cookie. */
   private readonly unlockedShares = new Set<string>()
   /**
@@ -375,6 +412,7 @@ export class MockDb {
     user.temporaryPasswordExpiresAt = null
     user.passwordResetRequestedAt = null
     user.activatedAt ??= new Date().toISOString()
+    this.endDevices(user.id)
     this.audit('auth.password_changed', user.displayName)
     this.save()
     return this.session()
@@ -387,6 +425,124 @@ export class MockDb {
       csrfToken: CSRF_TOKEN,
       passwordChange: pendingPasswordChange(user),
     }
+  }
+
+  // ── Devices (§7.6) ─────────────────────────────────────────────────────────
+
+  protected get devices(): MockDevice[] {
+    return (this.state.devices ??= [])
+  }
+
+  /** `POST /devices/pair`: the signed-in user approves a backup app, which sent its PKCE challenge. */
+  pairDevice({ name, challenge }: PairDeviceInput): PairingCode {
+    const code = randomSecret()
+    this.pairings.set(code, {
+      userId: this.currentUser().id,
+      name,
+      challenge,
+      expiresAt: Date.now() + PAIRING_MS,
+    })
+    return { code }
+  }
+
+  /**
+   * `POST /devices/token`: trades a code and the verifier of its challenge for
+   * a token. The code is used up whatever the answer, so a wrong verifier gets
+   * no second guess.
+   */
+  async redeemPairing({ code, verifier }: DeviceTokenRequest): Promise<DeviceToken> {
+    const pairing = this.pairings.get(code)
+    this.pairings.delete(code)
+    const challenge = await challengeOf(verifier)
+    const user = this.state.users.find((candidate) => candidate.id === pairing?.userId)
+    if (
+      !pairing ||
+      !user ||
+      user.disabled ||
+      pairing.expiresAt <= Date.now() ||
+      pairing.challenge !== challenge
+    ) {
+      throw new MockApiError(
+        400,
+        'invalid_pairing',
+        'This pairing code is wrong or has expired. Pair the device again.',
+      )
+    }
+    const device: MockDevice = {
+      id: crypto.randomUUID(),
+      userId: user.id,
+      name: pairing.name,
+      token: `dfs_${randomSecret()}`,
+      createdAt: new Date().toISOString(),
+      lastUsedAt: null,
+      lastAddress: null,
+      lastAgent: null,
+    }
+    this.devices.unshift(device)
+    this.audit('device.paired', device.name, MOCK_ADDRESS, user.displayName)
+    this.save()
+    return { token: device.token, device: { id: device.id, name: device.name } }
+  }
+
+  /**
+   * `GET /devices/me`: who a token signs in as, from the `Authorization`
+   * header alone; the signed-in user doesn't matter to it.
+   */
+  deviceMe(authorization: string | null, agent: string | null): DeviceMe {
+    const token = /^Bearer (\S+)$/.exec(authorization ?? '')?.[1]
+    if (!token || !DEVICE_TOKEN_PATTERN.test(token)) {
+      throw new MockApiError(401, 'unauthenticated', 'This needs a device token.')
+    }
+    const device = this.devices.find((candidate) => candidate.token === token)
+    const user = this.state.users.find((candidate) => candidate.id === device?.userId)
+    if (!device || !user || user.disabled) {
+      throw new MockApiError(
+        401,
+        'invalid_token',
+        'This device’s token isn’t valid. Pair it again.',
+      )
+    }
+    device.lastUsedAt = new Date().toISOString()
+    device.lastAddress = MOCK_ADDRESS
+    device.lastAgent = agent?.slice(0, MAX_AGENT) ?? null
+    this.save()
+    return {
+      device: { id: device.id, name: device.name },
+      user: { id: user.id, username: user.username, displayName: user.displayName },
+    }
+  }
+
+  /** `GET /devices`: the signed-in user's devices, newest first. */
+  myDevices(): Device[] {
+    const { id } = this.currentUser()
+    return this.devices.filter((device) => device.userId === id).map(listedDevice)
+  }
+
+  /** `DELETE /devices/:id`: ends one of the signed-in user's own devices. */
+  removeDevice(id: string): void {
+    const user = this.currentUser()
+    const device = this.devices.find(
+      (candidate) => candidate.id === id && candidate.userId === user.id,
+    )
+    if (!device) throw new MockApiError(404, 'not_found', 'No such device.')
+    this.dropDevice(device)
+    this.audit('device.removed', device.name)
+    this.save()
+  }
+
+  protected dropDevice(device: MockDevice): void {
+    this.state.devices = this.devices.filter((candidate) => candidate !== device)
+  }
+
+  /**
+   * A password change, an admin's reset, disabling and signing out everywhere
+   * end the user's devices, and the codes not yet traded for one (§7.6).
+   */
+  protected endDevices(userId: string): void {
+    for (const [code, pairing] of this.pairings) {
+      if (pairing.userId === userId) this.pairings.delete(code)
+    }
+    this.state.devices = this.devices.filter((device) => device.userId !== userId)
   }
 
   protected currentUser(): MockUser {
@@ -428,6 +584,7 @@ export class MockDb {
     localStorage.removeItem(STORAGE_KEY)
     this.state = createSeed(STATE_VERSION)
     this.state.signedIn = true
+    this.pairings.clear()
     this.changed()
     this.scheduleSyncCompletions()
   }
@@ -1885,6 +2042,31 @@ function decodeCursor(cursor: string): string | null {
     // Fall through.
   }
   throw new MockApiError(400, 'invalid_cursor', 'Invalid pagination cursor.')
+}
+
+/** Base64url without padding, the form of PKCE (RFC 7636) and of device tokens. */
+function base64url(bytes: Uint8Array): string {
+  return btoa(String.fromCharCode(...bytes))
+    .replaceAll('+', '-')
+    .replaceAll('/', '_')
+    .replaceAll('=', '')
+}
+
+/** 32 random bytes: a pairing code, or the secret of a token (§7.6). */
+function randomSecret(): string {
+  return base64url(crypto.getRandomValues(new Uint8Array(32)))
+}
+
+/** RFC 7636 S256: the challenge a verifier makes. */
+async function challengeOf(verifier: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))
+  return base64url(new Uint8Array(digest))
+}
+
+/** A device as its owner's list shows it: never its token. */
+export function listedDevice(device: MockDevice): Device {
+  const { id, name, createdAt, lastUsedAt, lastAddress, lastAgent } = device
+  return { id, name, createdAt, lastUsedAt, lastAddress, lastAgent }
 }
 
 async function sha256Hex(data: ArrayBuffer): Promise<string> {

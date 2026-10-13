@@ -8,6 +8,7 @@ import {
   createUploadBatchSchema,
   createUploadSchema,
   createUserSchema,
+  deviceTokenRequestSchema,
   ensureFoldersSchema,
   adminTaskRequestSchema,
   auditQuerySchema,
@@ -20,6 +21,7 @@ import {
   nodeIdsSchema,
   nodeKindSchema,
   MAX_CONNECTION_TEST_BYTES,
+  pairDeviceSchema,
   playbackReportSchema,
   resetPasswordSchema,
   savePositionSchema,
@@ -157,6 +159,35 @@ export const handlers = [
       },
       { public: true },
     ),
+  ),
+
+  // ── Devices (§7.6) ─────────────────────────────────────────────────────────
+  http.post('/api/devices/pair', ({ request }) =>
+    respond(request, async () => db.pairDevice(pairDeviceSchema.parse(await request.json())), {
+      status: 201,
+    }),
+  ),
+  // The backup app has no session and no CSRF token: its code and verifier are the proof.
+  http.post('/api/devices/token', ({ request }) =>
+    respond(
+      request,
+      async () => db.redeemPairing(deviceTokenRequestSchema.parse(await request.json())),
+      { public: true, status: 201 },
+    ),
+  ),
+  // The token in the header is the whole credential: the signed-in user doesn't matter here.
+  http.get('/api/devices/me', ({ request }) =>
+    respond(
+      request,
+      () => db.deviceMe(request.headers.get('Authorization'), request.headers.get('User-Agent')),
+      { public: true },
+    ),
+  ),
+  http.get('/api/devices', ({ request }) => respond(request, () => db.myDevices())),
+  http.delete<Id>('/api/devices/:id', ({ request, params }) =>
+    respondEmpty(request, () => {
+      db.removeDevice(params.id)
+    }),
   ),
 
   // ── Browse ─────────────────────────────────────────────────────────────────
@@ -542,6 +573,16 @@ export const handlers = [
   http.post<Id>('/api/admin/users/:id/sign-out', ({ request, params }) =>
     respond(request, () => db.signOutUser(params.id)),
   ),
+  http.get('/api/admin/devices', ({ request }) =>
+    respond(request, () =>
+      db.adminDevices(readQuery(request, z.object({ userId: z.uuid().optional() })).userId),
+    ),
+  ),
+  http.delete<Id>('/api/admin/devices/:id', ({ request, params }) =>
+    respondEmpty(request, () => {
+      db.removeDeviceAsAdmin(params.id)
+    }),
+  ),
   http.get('/api/admin/shares/owners', ({ request }) =>
     respond(request, () => {
       const query = readQuery(request, adminShareQuerySchema.pick({ active: true, q: true }))
@@ -763,6 +804,13 @@ function respondEmpty(
 }
 
 function authorize(request: Request, limited: boolean): void {
+  // A device token and a session never stand in for each other (§7.6). The
+  // mock has one session for every request, not a cookie for each client, so
+  // a request that brings a token instead (the web app never does) is told
+  // apart as the real API tells one without a cookie.
+  if (request.headers.has('Authorization')) {
+    throw new MockApiError(401, 'unauthenticated', 'Sign in to continue.')
+  }
   if (!db.signedIn) throw new MockApiError(401, 'unauthenticated', 'Sign in to continue.')
   if (!limited && db.mustChangePassword) {
     throw new MockApiError(

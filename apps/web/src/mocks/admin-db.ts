@@ -1,5 +1,6 @@
 import {
   ADMIN_TASK_LABELS,
+  type AdminDevice,
   type AdminSession,
   type AdminShare,
   type AdminUpload,
@@ -38,6 +39,7 @@ import {
   isVisible,
   MockApiError,
   MockDb,
+  listedDevice,
   STAGING_MAX_BYTES,
   notFound,
   paginate,
@@ -155,6 +157,7 @@ export class AdminMockDb extends MockDb {
     user.password = temporaryPassword
     user.temporaryPasswordExpiresAt = temporaryPasswordExpiry(new Date())
     user.passwordResetRequestedAt = null
+    this.endDevices(user.id)
     this.audit('user.password_reset', user.displayName)
     this.save()
     return this.adminUser(user)
@@ -191,6 +194,7 @@ export class AdminMockDb extends MockDb {
     if (details.length > 0) this.audit('user.updated', user.displayName, details.join(', '))
     if (changes.disabled !== undefined && changes.disabled !== user.disabled) {
       user.disabled = changes.disabled
+      if (changes.disabled) this.endDevices(user.id)
       this.audit(changes.disabled ? 'user.disabled' : 'user.enabled', user.displayName)
     }
     this.save()
@@ -437,9 +441,47 @@ export class AdminMockDb extends MockDb {
     }
     const sessions = this.adminSessions(userId).filter((session) => !session.current)
     for (const session of sessions) this.signedOutSessions.add(session.key)
+    this.endDevices(user.id)
     this.audit('user.signed_out', user.displayName)
     this.save()
     return { ended: sessions.length }
+  }
+
+  /** `GET /admin/devices`: every user's devices, newest first; one user's with `userId`. */
+  adminDevices(userId?: string): AdminDevice[] {
+    const admin = this.requireAdmin()
+    return this.devices
+      .filter((device) => !userId || device.userId === userId)
+      .slice(0, 500)
+      .map((device) => {
+        const user = this.findUser(device.userId)
+        return {
+          ...listedDevice(device),
+          userId: user.id,
+          username: user.username,
+          displayName: user.displayName,
+          // As removeDeviceAsAdmin allows: the owner's only by the owner.
+          canRemove: !user.isOwner || admin.isOwner,
+        }
+      })
+  }
+
+  /** `DELETE /admin/devices/:id`: removes any user's device, which ends its token (§7.6). */
+  removeDeviceAsAdmin(id: string): void {
+    const admin = this.requireAdmin()
+    const device = this.devices.find((candidate) => candidate.id === id)
+    if (!device) throw new MockApiError(404, 'not_found', 'No such device.')
+    const user = this.findUser(device.userId)
+    if (user.isOwner && !admin.isOwner) {
+      throw new MockApiError(
+        409,
+        'owner_protected',
+        'Only the owner can remove the owner’s devices.',
+      )
+    }
+    this.dropDevice(device)
+    this.audit('device.removed', device.name, `@${user.username}`)
+    this.save()
   }
 
   /** Every link as the admin pages list it, newest first: with its owner, path and state. */

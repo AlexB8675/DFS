@@ -1,5 +1,13 @@
 import { splitExtension, type SyncState } from '@dfs/shared'
-import type { MockAuditEntry, MockChannel, MockNode, MockShare, MockState, MockUser } from './db'
+import type {
+  MockAuditEntry,
+  MockChannel,
+  MockDevice,
+  MockNode,
+  MockShare,
+  MockState,
+  MockUser,
+} from './db'
 
 // Builds a deterministic demo drive. It deliberately includes the edge cases
 // the UI must handle: a folder with 6,000 files, deep nesting, long names, an
@@ -547,6 +555,21 @@ export function createSeed(version: number): MockState {
   log(5 * DAY, 'Demo User', 'node.restored', 'Resume 2026.docx', null)
   audit.sort((a, b) => b.at.localeCompare(a.at))
 
+  // The demo owner's backup app (§7.6), drawn last so nothing above changes. The
+  // token is made up, as the demo drive is.
+  const devices: MockDevice[] = [
+    {
+      id: makeUuid(random),
+      userId: demoUserId,
+      name: 'Studio PC',
+      token: `dfs_${(makeUuid(random) + makeUuid(random)).replaceAll('-', '').slice(0, 43)}`,
+      createdAt: ago(21 * DAY),
+      lastUsedAt: ago(6 * MINUTE),
+      lastAddress: '192.168.1.24',
+      lastAgent: 'DFS Backup/1.0 (Windows 11)',
+    },
+  ]
+
   return {
     version,
     userId: demoUserId,
@@ -557,6 +580,7 @@ export function createSeed(version: number): MockState {
     uploads: {},
     channels,
     audit,
+    devices,
   }
 }
 
