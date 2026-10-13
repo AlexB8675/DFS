@@ -35,6 +35,7 @@ export async function createUser(tx: Executor, input: NewUser): Promise<UserRow>
   if (!user) throw new Error('Inserting a user returned nothing.')
 
   const [root] = await tx
+    // tree: drive, the default for a root
     .insert(nodes)
     .values({ ownerId: user.id, kind: 'folder', name: ROOT_NAME, nameKey: ROOT_NAME.toLowerCase() })
     .returning()

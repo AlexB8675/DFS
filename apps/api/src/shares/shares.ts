@@ -107,7 +107,7 @@ export async function createShare(
     // under the file's lock, so an upload replacing it completes before, or
     // after, and deletes this link then (D42).
     const { rows } = await tx.execute<{ current_version_id: string | null }>(sql`
-      SELECT current_version_id FROM nodes WHERE id = ${node.id} FOR SHARE`)
+      SELECT current_version_id FROM nodes /* tree: by id, gated */ WHERE id = ${node.id} FOR SHARE`)
     const versionId = rows[0]?.current_version_id ?? null
     if (node.kind === 'file' && versionId === null) {
       throw new ApiError(409, 'not_ready', 'This file hasn’t finished uploading.')

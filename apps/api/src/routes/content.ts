@@ -93,7 +93,7 @@ export async function downloadableFile(
     SELECT node.name, node.mime_type, node.kind, version.state::text AS state,
       version.id AS version_id, version.size_bytes::float8 AS size_bytes, version.chunk_size,
       version.chunk_count, version.wrapped_dek, version.key_id
-    FROM nodes node LEFT JOIN file_versions version
+    FROM nodes node /* tree: by id, gated */ LEFT JOIN file_versions version
       ON version.id = coalesce(${versionId}::uuid, node.current_version_id)
         AND version.node_id = node.id
     WHERE node.id = ${nodeId}`)

@@ -237,6 +237,7 @@ async function startUploads(
     firstOfKey.size === 0
       ? []
       : await tx
+          // tree: inherits
           .insert(nodes)
           .values(
             [...firstOfKey.values()].map(({ input, name }) => ({
@@ -369,7 +370,7 @@ async function answerAsked(
     SELECT node.id,
       (SELECT count(*) FROM share_links link
         WHERE link.version_id = node.current_version_id AND ${WORKING_LINK})::int AS links
-    FROM nodes node WHERE node.id = ANY(${uuidArray(ids)})`)
+    FROM nodes node /* tree: by id, gated */ WHERE node.id = ANY(${uuidArray(ids)})`)
   const files = new Map(rows.map((row) => [row.id, row]))
   for (const upload of asked) {
     const file = files.get(fileIdOf(upload) ?? '')
@@ -416,7 +417,7 @@ async function namesInFolders(tx: Executor, plans: Plan[]): Promise<Map<string, 
       ${uuidArray(distinct.map((plan) => plan.input.parentId))},
       ${textArray(distinct.map((plan) => nameKey(plan.name)))}
     ) AS requested(parent_id, name_key)
-    JOIN nodes n ON n.parent_id = requested.parent_id AND n.name_key = requested.name_key
+    JOIN nodes n /* tree: by parent */ ON n.parent_id = requested.parent_id AND n.name_key = requested.name_key
     LEFT JOIN file_versions version
       ON version.id = n.current_version_id AND version.state IN ('syncing', 'stored')
     WHERE n.deleted_at IS NULL`)
@@ -821,6 +822,7 @@ async function finishUpload(
     })
     .where(eq(fileVersions.id, upload.version_id))
   const [node] = await tx
+    // tree: by id, gated
     .update(nodes)
     .set({
       currentVersionId: upload.version_id,
@@ -935,7 +937,7 @@ async function findUpload(
       } AS received_hash
     FROM upload_sessions session
     JOIN file_versions version ON version.id = session.version_id
-    JOIN nodes node ON node.id = session.node_id
+    JOIN nodes node /* tree: by id, gated */ ON node.id = session.node_id
     WHERE session.id = ${uploadId} AND session.user_id = ${auth.user.id}
       AND session.expires_at > now()
     ${lock ? sql`FOR UPDATE OF session` : sql``}`)

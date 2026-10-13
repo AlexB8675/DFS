@@ -78,7 +78,7 @@ async function liveShareWhere(
     throw new ApiError(410, 'share_used_up', 'This link has reached its download limit.')
   }
   const { rows: roots } = await app.db.execute<NodeRow>(sql`
-    SELECT ${NODE_COLUMNS} FROM nodes n ${NODE_JOINS} WHERE n.id = ${share.node_id}`)
+    SELECT ${NODE_COLUMNS} FROM nodes n /* tree: by id, gated */ ${NODE_JOINS} WHERE n.id = ${share.node_id}`)
   const [root] = roots
   if (!root) throw new ApiError(404, 'share_not_found', 'This link doesn’t exist.')
   // Replacing a file deletes its links (D42); one left over from before is as deleted.

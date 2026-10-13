@@ -91,6 +91,7 @@ export async function ensureFolders(
           currentId = existing.id
         } else {
           const [folder] = await tx
+            // tree: inherits
             .insert(nodes)
             .values({ ownerId, parentId: currentId, kind: 'folder', name, nameKey: nameKey(name) })
             .onConflictDoNothing({
@@ -140,6 +141,7 @@ export async function updateNode(
 
     const [updated] = await guardName(name, () =>
       tx
+        // tree: by id, gated
         .update(nodes)
         .set({
           ...(changes.name !== undefined && { name, nameKey: nameKey(name) }),
@@ -175,7 +177,7 @@ export async function moveNodes(
 
     // Name the clash, if any; the unique index still guards against races.
     const { rows: clashes } = await tx.execute<{ name: string }>(sql`
-      SELECT name FROM nodes
+      SELECT name FROM nodes /* tree: by parent */
       WHERE parent_id = ${parentId} AND deleted_at IS NULL
         AND name_key = ANY(${textArray(moving.map((node) => nameKey(node.name)))})
       LIMIT 1`)
@@ -184,6 +186,7 @@ export async function moveNodes(
     const movingIds = moving.map((node) => node.id)
     const updated = await guardName(moving[0]?.name ?? '', () =>
       tx
+        // tree: by id, gated
         .update(nodes)
         .set({
           parentId,
@@ -238,17 +241,18 @@ export async function markTrashed(
   moderationReason: string | null = null,
 ): Promise<NodeState[]> {
   const updated = await tx
+    // tree: by id, gated
     .update(nodes)
     .set({ deletedAt: new Date(), moderationReason })
     .where(sql`${nodes.id} = ANY(${uuidArray(ids)})`)
     .returning()
   await tx.execute(sql`
     WITH RECURSIVE below AS (
-      SELECT id, id AS via FROM nodes WHERE id = ANY(${uuidArray(ids)})
+      SELECT id, id AS via FROM nodes /* tree: by id, gated */ WHERE id = ANY(${uuidArray(ids)})
       UNION ALL
-      SELECT child.id, below.via FROM nodes child JOIN below ON child.parent_id = below.id
+      SELECT child.id, below.via FROM nodes child /* tree: by parent */ JOIN below ON child.parent_id = below.id
     )
-    UPDATE nodes SET trashed_via = below.via
+    UPDATE nodes /* tree: by id, gated */ SET trashed_via = below.via
     FROM below
     WHERE nodes.id = below.id AND nodes.id <> below.via AND nodes.trashed_via IS NULL`)
   return updated
@@ -268,9 +272,9 @@ export async function restoreNode(
   if (!rootId) throw notFound()
   await app.db.transaction(async (tx) => {
     await lockDrive(tx, ownerId)
-    // tree: not vault
     const [node] = await tx
       .select()
+      // tree: not vault
       .from(nodes)
       .where(and(eq(nodes.id, id), ne(nodes.tree, 'vault')))
     if (!node?.deletedAt || node.ownerId !== ownerId || !node.parentId) throw notFound()
@@ -282,6 +286,7 @@ export async function restoreNode(
     const name = await freeName(tx, parentId, node.name)
 
     const [restored] = await tx
+      // tree: by id, gated
       .update(nodes)
       .set({
         parentId,
@@ -294,6 +299,7 @@ export async function restoreNode(
       .where(eq(nodes.id, id))
       .returning()
     if (!restored) throw notFound()
+    // tree: by id, gated
     await tx.update(nodes).set({ trashedVia: null }).where(eq(nodes.trashedVia, id))
     await markFoldersDirty(tx, [parentId])
     const audited = await audit(tx, {
@@ -353,6 +359,7 @@ async function insertFolder(
 ): Promise<NodeState> {
   const [folder] = await guardName(name, () =>
     tx
+      // tree: inherits
       .insert(nodes)
       .values({ ownerId, parentId, kind: 'folder', name, nameKey: nameKey(name) })
       .returning(),
@@ -364,6 +371,7 @@ async function insertFolder(
 async function childByName(tx: Executor, parentId: string, name: string) {
   const [child] = await tx
     .select({ id: nodes.id, kind: nodes.kind })
+    // tree: by parent
     .from(nodes)
     .where(
       sql`${nodes.parentId} = ${parentId} AND ${nodes.nameKey} = ${nameKey(name)} AND ${nodes.deletedAt} IS NULL`,
@@ -396,7 +404,7 @@ async function assertCanMove(
 async function freeName(tx: Executor, parentId: string, name: string): Promise<string> {
   const { base, extension } = splitExtension(name)
   const { rows } = await tx.execute<{ name_key: string }>(sql`
-    SELECT name_key FROM nodes
+    SELECT name_key FROM nodes /* tree: by parent */
     WHERE parent_id = ${parentId} AND deleted_at IS NULL
       AND name_key LIKE ${`${escapeLike(nameKey(base))}%`}`)
   const taken = new Set(rows.map((row) => row.name_key))

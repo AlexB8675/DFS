@@ -59,10 +59,10 @@ export async function audioQueue(
 ): Promise<AudioQueue> {
   const { rows } = await db.execute<QueuedFile & Record<string, unknown>>(sql`
     WITH RECURSIVE tree AS (
-      SELECT id, ARRAY[]::text[] AS path FROM nodes WHERE id = ${folderId}
+      SELECT id, ARRAY[]::text[] AS path FROM nodes /* tree: by id, gated */ WHERE id = ${folderId}
       UNION ALL
       SELECT child.id, tree.path || child.name
-      FROM nodes child JOIN tree ON child.parent_id = tree.id
+      FROM nodes child /* tree: by parent */ JOIN tree ON child.parent_id = tree.id
       WHERE ${deep}::boolean AND child.kind = 'folder' AND child.deleted_at IS NULL
         AND child.trashed_via IS NULL AND cardinality(tree.path) < ${MAX_DEPTH}
     )
@@ -70,7 +70,7 @@ export async function audioQueue(
       (info.info ->> 'durationMs')::float8 AS duration_ms, info.info -> 'tags' AS tags,
       (info.info ->> 'hasCover')::boolean AS has_cover,
       EXISTS (
-        SELECT 1 FROM nodes picture
+        SELECT 1 FROM nodes picture /* tree: by parent */
         JOIN file_versions shown ON shown.id = picture.current_version_id
         WHERE picture.parent_id = n.parent_id AND picture.kind = 'file'
           AND picture.deleted_at IS NULL AND picture.trashed_via IS NULL
@@ -78,7 +78,7 @@ export async function audioQueue(
           AND shown.size_bytes BETWEEN 1 AND ${MAX_COVER_BYTES}
           AND lower(picture.name) ~ ${COVER_NAME}) AS cover_beside
     FROM tree
-    JOIN nodes n ON n.parent_id = tree.id
+    JOIN nodes n /* tree: by parent */ ON n.parent_id = tree.id
     JOIN file_versions version ON version.id = n.current_version_id
     LEFT JOIN media_info info ON info.version_id = version.id
     WHERE n.kind = 'file' AND ${VISIBLE} AND version.state IN ('syncing', 'stored')
@@ -123,7 +123,7 @@ export async function coverBeside(
     SELECT n.name, n.mime_type,
       version.id AS version_id, version.size_bytes::float8 AS size_bytes, version.chunk_size,
       version.chunk_count, version.wrapped_dek, version.key_id
-    FROM nodes n JOIN file_versions version ON version.id = n.current_version_id
+    FROM nodes n /* tree: by parent */ JOIN file_versions version ON version.id = n.current_version_id
     WHERE n.parent_id = ${audio.parent_id} AND n.owner_id = ${audio.owner_id} AND n.kind = 'file'
       AND ${VISIBLE} AND version.state IN ('syncing', 'stored')
       AND version.size_bytes BETWEEN 1 AND ${MAX_COVER_BYTES}

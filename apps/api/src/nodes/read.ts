@@ -42,7 +42,7 @@ export const NODE_COLUMNS = sql`
     AS size_bytes,
   version.state::text AS version_state,
   (n.kind = 'folder' AND EXISTS (
-    SELECT 1 FROM nodes child
+    SELECT 1 FROM nodes child /* tree: by parent */
     WHERE child.parent_id = n.id AND child.kind = 'folder' AND child.deleted_at IS NULL
   )) AS has_child_folders`
 
@@ -130,10 +130,10 @@ export async function visibleFolder(db: Executor, ownerId: string, id: string): 
 export async function nodePath(db: Executor, id: string): Promise<NodePath> {
   const { rows } = await db.execute<{ id: string; name: string }>(sql`
     WITH RECURSIVE chain AS (
-      SELECT id, parent_id, name, 0 AS depth FROM nodes WHERE id = ${id}
+      SELECT id, parent_id, name, 0 AS depth FROM nodes /* tree: by id, gated */ WHERE id = ${id}
       UNION ALL
       SELECT parent.id, parent.parent_id, parent.name, chain.depth + 1
-      FROM nodes parent JOIN chain ON parent.id = chain.parent_id
+      FROM nodes parent /* tree: by id, gated */ JOIN chain ON parent.id = chain.parent_id
     )
     SELECT id, name FROM chain ORDER BY depth DESC`)
   return rows
@@ -151,10 +151,10 @@ export async function folderLocations(
   const { rows } = await db.execute<{ origin: string; location: string }>(sql`
     WITH RECURSIVE chain AS (
       SELECT id AS origin, id, parent_id, name, 0 AS depth
-      FROM nodes WHERE id = ANY(${uuidArray([...new Set(folderIds)])})
+      FROM nodes /* tree: by id, gated */ WHERE id = ANY(${uuidArray([...new Set(folderIds)])})
       UNION ALL
       SELECT chain.origin, parent.id, parent.parent_id, parent.name, chain.depth + 1
-      FROM nodes parent JOIN chain ON parent.id = chain.parent_id
+      FROM nodes parent /* tree: by id, gated */ JOIN chain ON parent.id = chain.parent_id
     )
     SELECT origin, string_agg(name, ' / ' ORDER BY depth DESC) AS location
     FROM chain GROUP BY origin`)
@@ -221,7 +221,7 @@ async function listSegment(
     : sql``
   const { rows } = await db.execute<NodeRow & { sort_value: string }>(sql`
     SELECT ${NODE_COLUMNS}, (${expression})::text AS sort_value
-    FROM nodes n ${NODE_JOINS}
+    FROM nodes n /* tree: by parent */ ${NODE_JOINS}
     WHERE n.parent_id = ${parentId} AND n.kind = ${kind} AND n.deleted_at IS NULL ${resume}
     ORDER BY ${expression} ${direction}, n.id ${direction}
     LIMIT ${limit}`)

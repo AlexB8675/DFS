@@ -786,7 +786,7 @@ async function readableVersion(db: Executor, versionId: string): Promise<Downloa
     SELECT node.name, node.mime_type,
       version.id AS version_id, version.size_bytes::float8 AS size_bytes, version.chunk_size,
       version.chunk_count, version.wrapped_dek, version.key_id
-    FROM file_versions version JOIN nodes node ON node.id = version.node_id
+    FROM file_versions version JOIN nodes node /* tree: by id, gated */ ON node.id = version.node_id
     WHERE version.id = ${versionId} AND version.state IN ('syncing', 'stored')`)
   const [file] = rows
   if (!file) throw new ApiError(404, 'not_found', 'This file no longer exists.')

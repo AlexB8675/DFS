@@ -29,7 +29,7 @@ export async function subtitleFilesBeside(db: Executor, video: Video): Promise<S
   if (!video.parent_id) return []
   const prefix = splitExtension(video.name).base.toLowerCase()
   const { rows } = await db.execute<{ id: string; name: string }>(sql`
-    SELECT n.id, n.name FROM nodes n JOIN file_versions version ON version.id = n.current_version_id
+    SELECT n.id, n.name FROM nodes n /* tree: by parent */ JOIN file_versions version ON version.id = n.current_version_id
     WHERE n.parent_id = ${video.parent_id} AND n.owner_id = ${video.owner_id} AND n.kind = 'file'
       AND ${VISIBLE} AND version.state IN ('syncing', 'stored')
       AND version.size_bytes <= ${MAX_SUBTITLE_FILE_BYTES}

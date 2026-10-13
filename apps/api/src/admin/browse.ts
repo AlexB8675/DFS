@@ -123,9 +123,9 @@ export async function adminNode(app: FastifyInstance, id: string): Promise<Drive
 function subtree(id: string) {
   return sql`(
     WITH RECURSIVE below AS (
-      SELECT id FROM nodes WHERE id = ${id}
+      SELECT id FROM nodes /* tree: by id, gated */ WHERE id = ${id}
       UNION ALL
-      SELECT child.id FROM nodes child JOIN below ON child.parent_id = below.id
+      SELECT child.id FROM nodes child /* tree: by parent */ JOIN below ON child.parent_id = below.id
     )
     SELECT id FROM below)`
 }
