@@ -1,11 +1,19 @@
 import {
   abandonUploads,
   appendJournal,
+  deviceTokens,
   shareDeletedRecords,
   shareLinks,
   WORKING_LINK,
 } from '@dfs/db'
-import type { AdminSession, AdminShare, AdminShareOwner, AdminUpload, Page } from '@dfs/shared'
+import type {
+  AdminDevice,
+  AdminSession,
+  AdminShare,
+  AdminShareOwner,
+  AdminUpload,
+  Page,
+} from '@dfs/shared'
 import { eq, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { audit, auditAlone } from '../audit.ts'
@@ -14,10 +22,11 @@ import { ApiError } from '../errors.ts'
 import { escapeLike } from '../nodes/write.ts'
 import { removeStagedVersions } from '../staging.ts'
 
-// Admin → Access (DESIGN.md §9): who is signed in, every share link, and the
-// uploads under way, each of which an admin can end. Sessions are named by
-// the start of their hash and shares by their ID: nothing here can sign in
-// or open a link (D4). The owner's sessions are the owner's to end.
+// Admin → Access (DESIGN.md §9): who is signed in, every backup app's device
+// (§7.6), every share link, and the uploads under way, each of which an admin
+// can end. Sessions are named by the start of their hash, devices and shares
+// by their ID: nothing here can sign in or open a link (D4). The owner's
+// sessions and devices are the owner's to end.
 
 /** How much of a session's hash names it. */
 const KEY_LENGTH = 16
@@ -125,6 +134,84 @@ export async function signOutUser(
     target: user.display_name,
   })
   return live[0]?.count ?? 0
+}
+
+/** `GET /admin/devices`: every user's devices, newest first; one user's with `userId`. */
+export async function listAdminDevices(
+  app: FastifyInstance,
+  admin: Auth,
+  userId: string | undefined,
+): Promise<AdminDevice[]> {
+  const { rows } = await app.db.execute<{
+    id: string
+    name: string
+    user_id: string
+    username: string
+    display_name: string
+    created_at: string
+    last_used_at: string | null
+    last_address: string | null
+    last_agent: string | null
+    can_remove: boolean
+  }>(sql`
+    SELECT device.id, device.name, device.user_id, account.username, account.display_name,
+      device.created_at::text AS created_at, device.last_used_at::text AS last_used_at,
+      device.last_address, device.last_agent,
+      -- As removeDeviceAsAdmin allows: the owner's only by the owner.
+      (NOT account.is_owner OR ${admin.user.isOwner}) AS can_remove
+    FROM device_tokens device JOIN users account ON account.id = device.user_id
+    ${userId ? sql`WHERE device.user_id = ${userId}` : sql``}
+    ORDER BY device.created_at DESC, device.id DESC LIMIT 500`)
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    userId: row.user_id,
+    username: row.username,
+    displayName: row.display_name,
+    createdAt: iso(row.created_at),
+    lastUsedAt: row.last_used_at ? iso(row.last_used_at) : null,
+    lastAddress: row.last_address,
+    lastAgent: row.last_agent,
+    canRemove: row.can_remove,
+  }))
+}
+
+/**
+ * `DELETE /admin/devices/:id`: removes any user's device, which ends its
+ * token (§7.6). An admin may remove their own: no session is lost with it.
+ */
+export async function removeDeviceAsAdmin(
+  app: FastifyInstance,
+  admin: Auth,
+  id: string,
+): Promise<void> {
+  // The removal and its audit entry stand or fall together, as for the user's own (§7.6).
+  await app.db.transaction(async (tx) => {
+    const { rows } = await tx.execute<{ name: string; username: string; is_owner: boolean }>(sql`
+      SELECT device.name, account.username, account.is_owner
+      FROM device_tokens device JOIN users account ON account.id = device.user_id
+      WHERE device.id = ${id}`)
+    const [device] = rows
+    if (!device) throw new ApiError(404, 'not_found', 'No such device.')
+    if (device.is_owner && !admin.user.isOwner) {
+      throw new ApiError(409, 'owner_protected', 'Only the owner can remove the owner’s devices.')
+    }
+    const removed = await tx
+      .delete(deviceTokens)
+      .where(eq(deviceTokens.id, id))
+      .returning({ id: deviceTokens.id })
+    // Removed by its user between the look and the delete: answered as if it were never there.
+    if (removed.length === 0) throw new ApiError(404, 'not_found', 'No such device.')
+    await appendJournal(
+      tx,
+      await audit(tx, {
+        actorId: admin.user.id,
+        action: 'device.removed',
+        target: device.name,
+        details: `@${device.username}`,
+      }),
+    )
+  })
 }
 
 interface ShareRow extends Record<string, unknown> {

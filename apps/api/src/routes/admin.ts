@@ -1,4 +1,5 @@
 import {
+  adminDeviceListSchema,
   adminSessionListSchema,
   adminShareOwnerListSchema,
   adminSharePageSchema,
@@ -43,11 +44,13 @@ import { adminNode, anyVisibleNode, linksToDelete, moderate, userUsage } from '.
 import {
   cancelUploadAsAdmin,
   endSessionAsAdmin,
+  listAdminDevices,
   listSessions,
   listShares,
   shareOwners,
   listUploads,
   deleteShareAsAdmin,
+  removeDeviceAsAdmin,
   signOutUser,
 } from '../admin/access.ts'
 import { databaseStatus, signalSession, vacuumTable } from '../admin/database.ts'
@@ -212,6 +215,27 @@ export function adminRoutes(app: FastifyInstance, _options: object, done: () => 
     },
     async (request, reply) => {
       await endSessionAsAdmin(app, requireAuth(request.auth), request.params.key)
+      return reply.code(204).send(null)
+    },
+  )
+
+  routes.get(
+    '/admin/devices',
+    {
+      config: admin,
+      schema: {
+        querystring: z.object({ userId: z.uuid().optional() }),
+        response: { 200: adminDeviceListSchema },
+      },
+    },
+    (request) => listAdminDevices(app, requireAuth(request.auth), request.query.userId),
+  )
+
+  routes.delete(
+    '/admin/devices/:id',
+    { config: admin, schema: { params: byId, response: noContent } },
+    async (request, reply) => {
+      await removeDeviceAsAdmin(app, requireAuth(request.auth), request.params.id)
       return reply.code(204).send(null)
     },
   )

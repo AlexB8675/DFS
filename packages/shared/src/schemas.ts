@@ -633,6 +633,17 @@ export const adminSessionSchema = z.object({
 export type AdminSession = z.infer<typeof adminSessionSchema>
 export const adminSessionListSchema = z.array(adminSessionSchema)
 
+/** Any user's device, as an admin sees it: never its token, which isn't kept (§7.6). */
+export const adminDeviceSchema = deviceSchema.extend({
+  userId: id,
+  username: z.string(),
+  displayName: z.string(),
+  /** Whether the admin asking may remove it: the owner's only when the owner asks. */
+  canRemove: z.boolean(),
+})
+export type AdminDevice = z.infer<typeof adminDeviceSchema>
+export const adminDeviceListSchema = z.array(adminDeviceSchema)
+
 /** Any user's share link, as an admin sees it: never its token or URL (D4). */
 export const adminShareSchema = z.object({
   id,
