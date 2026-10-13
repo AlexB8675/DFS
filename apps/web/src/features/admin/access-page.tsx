@@ -1,6 +1,6 @@
-import type { AdminSession, AdminUpload } from '@dfs/shared'
+import type { AdminDevice, AdminSession, AdminUpload } from '@dfs/shared'
 import { useQuery } from '@tanstack/react-query'
-import { KeyRound, LogOut, XCircle } from 'lucide-react'
+import { KeyRound, LogOut, Unplug, XCircle } from 'lucide-react'
 import { useState } from 'react'
 import { Link } from 'react-router'
 import { toast } from 'sonner'
@@ -18,16 +18,25 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 import { Skeleton } from '@/components/ui/skeleton'
+import { DeviceUsage } from '@/features/devices/device-usage'
 import { errorMessage } from '@/lib/api/client'
 import { formatBytes, formatDateInSentence, formatFullDate } from '@/lib/format'
 import { describeUserAgent } from '@/lib/user-agent'
-import { adminSessionsQuery, adminUploadsQuery, useCancelUploadAsAdmin, useEndSession } from './api'
+import {
+  adminDevicesQuery,
+  adminSessionsQuery,
+  adminUploadsQuery,
+  useCancelUploadAsAdmin,
+  useEndSession,
+  useRemoveAdminDevice,
+} from './api'
 import { AllClear, Section } from './section'
 import { ShareLinks, type Confirmation } from './share-links'
 
 /**
- * `/admin/access`: who is signed in, every share link and the uploads under
- * way, each of which an admin can end (§9). Links show no token (D4).
+ * `/admin/access`: who is signed in, the backup apps paired, every share link
+ * and the uploads under way, each of which an admin can end (§9). Links show
+ * no token (D4), and devices never do (§7.6).
  */
 export function AccessPage() {
   const [confirming, setConfirming] = useState<Confirmation | null>(null)
@@ -48,6 +57,7 @@ export function AccessPage() {
     <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto grid max-w-6xl gap-6 p-4 sm:p-6">
         <Sessions />
+        <Devices onConfirm={setConfirming} />
         <ShareLinks onConfirm={setConfirming} />
         <Uploads onConfirm={setConfirming} />
       </div>
@@ -169,6 +179,74 @@ export function SessionList({
         </li>
       ))}
     </ul>
+  )
+}
+
+/** Every user's paired backup apps, newest first (§7.6). */
+function Devices({ onConfirm }: { onConfirm: (confirmation: Confirmation) => void }) {
+  const devices = useQuery(adminDevicesQuery())
+  const remove = useRemoveAdminDevice()
+
+  return (
+    <Section
+      title="Devices"
+      description="Backup apps paired with someone’s account, newest first. Removing one stops it backing up until it is paired again."
+    >
+      {!devices.data ? (
+        <Skeleton className="h-16 rounded-lg" />
+      ) : devices.data.length === 0 ? (
+        <AllClear>No device is paired.</AllClear>
+      ) : (
+        <ul className="grid gap-2">
+          {devices.data.map((device) => (
+            <DeviceRow
+              key={device.id}
+              device={device}
+              onRemove={() => {
+                onConfirm({
+                  title: `Remove ${device.name}?`,
+                  description: `It stops backing up ${device.displayName}’s folders until it is paired again.`,
+                  action: 'Remove it',
+                  run: () => remove.mutateAsync(device.id),
+                  done: `Removed ${device.displayName}’s ${device.name}`,
+                })
+              }}
+            />
+          ))}
+        </ul>
+      )}
+    </Section>
+  )
+}
+
+function DeviceRow({ device, onRemove }: { device: AdminDevice; onRemove: () => void }) {
+  return (
+    <li className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+      <span className="grid min-w-0 flex-1 gap-0.5">
+        <span className="flex flex-wrap items-center gap-x-2">
+          <span className="font-medium">{device.name}</span>
+          <Link
+            to={`/admin/users/${device.userId}`}
+            className="text-muted-foreground underline-offset-4 hover:underline"
+          >
+            {device.displayName} <span className="font-mono text-xs">@{device.username}</span>
+          </Link>
+        </span>
+        <span className="flex flex-wrap gap-x-3 text-xs text-muted-foreground">
+          <DeviceUsage device={device} />
+        </span>
+      </span>
+      {/* The owner's are the owner's to remove. */}
+      <Button
+        variant="outline"
+        size="sm"
+        disabled={!device.canRemove}
+        title={device.canRemove ? undefined : 'Only the owner can remove the owner’s devices.'}
+        onClick={onRemove}
+      >
+        <Unplug /> Remove
+      </Button>
+    </li>
   )
 }
 

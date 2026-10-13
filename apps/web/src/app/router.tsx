@@ -133,6 +133,14 @@ export function createAppRouter() {
           ],
         },
         {
+          // A backup app sends the browser here to be allowed in (§7.6); the session check
+          // above signs a signed-out browser in and brings it back with its address.
+          path: 'devices/pair',
+          lazy: async () => ({
+            Component: (await import('@/features/devices/pair-page')).PairPage,
+          }),
+        },
+        {
           path: 'settings',
           lazy: async () => ({
             Component: (await import('@/features/settings/settings-page')).SettingsPage,

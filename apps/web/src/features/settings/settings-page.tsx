@@ -20,8 +20,9 @@ import { appRelease } from '@/lib/env'
 import { formatBytes, formatFullDate } from '@/lib/format'
 import { shake } from '@/lib/motion'
 import { useThemeStore, type Theme } from '@/lib/theme'
+import { DevicesCard } from './devices-card'
 
-/** `/settings`: profile, password, appearance and storage. */
+/** `/settings`: profile, password, appearance, storage and devices. */
 export function SettingsPage() {
   const user = useCurrentUser()
   const theme = useThemeStore((state) => state.theme)
@@ -94,6 +95,8 @@ export function SettingsPage() {
               </p>
             </CardContent>
           </Card>
+
+          <DevicesCard />
 
           <Card>
             <CardHeader>

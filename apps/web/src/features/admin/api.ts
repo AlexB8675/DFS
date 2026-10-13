@@ -1,4 +1,5 @@
 import {
+  adminDeviceListSchema,
   adminSessionListSchema,
   adminShareOwnerListSchema,
   adminSharePageSchema,
@@ -272,6 +273,17 @@ export function adminShareOwnersQuery({ active, q }: ShareFilter) {
   })
 }
 
+/** Paired backup apps (§7.6): everyone's, or one user's. */
+export function adminDevicesQuery(userId?: string) {
+  return queryOptions({
+    queryKey: ['admin', 'devices', userId ?? 'everyone'],
+    queryFn: ({ signal }) =>
+      apiGet('/admin/devices', adminDeviceListSchema, { query: { userId }, signal }),
+    // When a device was last used moves while the page is open.
+    refetchInterval: 30_000,
+  })
+}
+
 export const adminUploadsQuery = queryOptions({
   queryKey: ['admin', 'uploads'],
   queryFn: ({ signal }) => apiGet('/admin/uploads', adminUploadListSchema, { signal }),
@@ -290,6 +302,19 @@ export function useEndSession() {
   return useMutation({
     mutationFn: (key: string) => apiSend('DELETE', `/admin/sessions/${key}`),
     onSettled: () => afterAccessChange('sessions'),
+  })
+}
+
+/** Removes any user's device, which ends its token at once (§7.6). */
+export function useRemoveAdminDevice() {
+  return useMutation({
+    mutationFn: (id: string) => apiSend('DELETE', `/admin/devices/${id}`),
+    onSettled: () =>
+      Promise.all([
+        afterAccessChange('devices'),
+        // A device of the admin's own is also in Settings.
+        queryClient.invalidateQueries({ queryKey: ['devices'] }),
+      ]),
   })
 }
 
