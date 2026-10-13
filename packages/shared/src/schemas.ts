@@ -437,6 +437,51 @@ export const sharedFolderPageSchema = pageSchema(sharedNodeSchema).extend({
 })
 export type SharedFolderPage = z.infer<typeof sharedFolderPageSchema>
 
+// ── Device tokens (§7.6) ─────────────────────────────────────────────────────
+
+/** `POST /devices/pair`: a signed-in user approves a backup app, which sent its PKCE challenge (RFC 7636 S256). */
+export const pairDeviceSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+  challenge: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+})
+export type PairDeviceInput = z.infer<typeof pairDeviceSchema>
+
+/** A one-time code, good for a minute, that the page sends on to the app. */
+export const pairingCodeSchema = z.object({ code: z.string() })
+export type PairingCode = z.infer<typeof pairingCodeSchema>
+
+/** `POST /devices/token`, without a session: the code and the verifier its challenge came from. */
+export const deviceTokenRequestSchema = z.object({
+  code: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+  verifier: z.string().regex(/^[A-Za-z0-9._~-]{43,128}$/),
+})
+export type DeviceTokenRequest = z.infer<typeof deviceTokenRequestSchema>
+
+/** Answered once, when the device is made: the token is never shown again. */
+export const deviceTokenSchema = z.object({
+  token: z.string(),
+  device: z.object({ id, name: z.string() }),
+})
+export type DeviceToken = z.infer<typeof deviceTokenSchema>
+
+export const deviceSchema = z.object({
+  id,
+  name: z.string(),
+  createdAt: timestamp,
+  lastUsedAt: timestamp.nullable(),
+  lastAddress: z.string().nullable(),
+  lastAgent: z.string().nullable(),
+})
+export type Device = z.infer<typeof deviceSchema>
+export const deviceListSchema = z.array(deviceSchema)
+
+/** `GET /devices/me`: who a device token signs in as. */
+export const deviceMeSchema = z.object({
+  device: z.object({ id, name: z.string() }),
+  user: z.object({ id, username: z.string(), displayName: z.string() }),
+})
+export type DeviceMe = z.infer<typeof deviceMeSchema>
+
 // ── Admin (§9, read-only metadata per D4) ────────────────────────────────────
 
 const count = z.number().int().min(0)

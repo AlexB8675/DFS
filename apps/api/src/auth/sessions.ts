@@ -1,6 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import type { Config } from '@dfs/config'
-import { sessions, users, type Executor } from '@dfs/db'
+import { devicePairings, deviceTokens, sessions, users, type Executor } from '@dfs/db'
 import { and, eq, gt, isNull, ne, sql } from 'drizzle-orm'
 import type { FastifyReply } from 'fastify'
 
@@ -13,7 +13,7 @@ const FULL_SESSION_MS = 30 * DAY_MS
 const LIMITED_SESSION_MS = 15 * 60_000
 /** Sliding expiry, written at most daily rather than on every request. */
 const EXTEND_AFTER_MS = DAY_MS
-const LAST_SEEN_EVERY_MS = 5 * 60_000
+export const LAST_SEEN_EVERY_MS = 5 * 60_000
 /** Enough to tell browsers apart. */
 const MAX_USER_AGENT = 300
 
@@ -118,7 +118,13 @@ export async function endSession(db: Executor, sessionId: string): Promise<void>
   await db.delete(sessions).where(eq(sessions.id, sessionId))
 }
 
-/** Signs a user out everywhere, except perhaps the session making the change. */
+/**
+ * Signs a user out everywhere, except perhaps the session making the change.
+ * A password change, an admin's reset, disabling and signing out everywhere
+ * end the user's devices as they end sessions, and the one `except` spares
+ * is not a device's: a device token is a credential too, and a code not yet
+ * traded for one is a chance to get one (§7.6).
+ */
 export async function endUserSessions(
   db: Executor,
   userId: string,
@@ -127,6 +133,10 @@ export async function endUserSessions(
   await db
     .delete(sessions)
     .where(and(eq(sessions.userId, userId), except ? ne(sessions.id, except) : undefined))
+  // Codes first: a trade in progress holds its code's row until it has made
+  // its token, so the delete of tokens below sees that token (§7.6).
+  await db.delete(devicePairings).where(eq(devicePairings.userId, userId))
+  await db.delete(deviceTokens).where(eq(deviceTokens.userId, userId))
 }
 
 export function csrfMatches(auth: Auth, header: string | undefined): boolean {

@@ -1,4 +1,12 @@
-import type { FastifyInstance } from 'fastify'
+import type { FastifyInstance, FastifyRequest } from 'fastify'
+import { auditAlone } from '../audit.ts'
+import {
+  DEVICE_TOKEN_PATTERN,
+  findDevice,
+  tooManyDeviceTries,
+  touchDevice,
+  type DeviceAuth,
+} from '../devices/devices.ts'
 import { ApiError } from '../errors.ts'
 import {
   csrfMatches,
@@ -18,8 +26,9 @@ import {
  * - `limited`: any session, also one that must choose a password first.
  * - `user` (the default): a full session.
  * - `admin`: a full session of an admin.
+ * - `device`: a device token (§7.6), and nothing else: no cookie, no CSRF token.
  */
-export type Access = 'public' | 'limited' | 'user' | 'admin'
+export type Access = 'public' | 'limited' | 'user' | 'admin' | 'device'
 
 declare module 'fastify' {
   interface FastifyContextConfig {
@@ -27,6 +36,7 @@ declare module 'fastify' {
   }
   interface FastifyRequest {
     auth: Auth | null
+    device: DeviceAuth | null
   }
 }
 
@@ -34,10 +44,17 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 
 export function registerAccess(app: FastifyInstance): void {
   app.decorateRequest('auth', null)
+  app.decorateRequest('device', null)
 
   app.addHook('onRequest', async (request, reply) => {
     const access = request.is404 ? 'public' : (request.routeOptions.config.access ?? 'user')
     if (access === 'public') return
+    // A device token and a session never stand in for each other: this reads
+    // the header and never the cookie, and the routes below never the header.
+    if (access === 'device') {
+      request.device = await authenticateDevice(app, request)
+      return
+    }
 
     const token = request.cookies[sessionCookieName(app.config)]
     const auth = token ? await findSession(app.db, token) : null
@@ -70,4 +87,47 @@ export function registerAccess(app: FastifyInstance): void {
 export function requireAuth(auth: Auth | null): Auth {
   if (!auth) throw new ApiError(401, 'unauthenticated', 'Sign in to continue.')
   return auth
+}
+
+/** The device token's device, on a route that requires one. */
+export function requireDevice(device: DeviceAuth | null): DeviceAuth {
+  if (!device) throw new ApiError(401, 'unauthenticated', 'This needs a device token.')
+  return device
+}
+
+/**
+ * Who a `Bearer` token signs in (§7.6). Every failure after the header is
+ * well-formed counts against the address, as a wrong password does (§7.1), so
+ * a token can't be guessed; a missing header costs nothing, as a visitor
+ * without one is no guesser.
+ */
+async function authenticateDevice(
+  app: FastifyInstance,
+  request: FastifyRequest,
+): Promise<DeviceAuth> {
+  const token = /^Bearer (\S+)$/.exec(request.headers.authorization ?? '')?.[1]
+  if (!token) throw new ApiError(401, 'unauthenticated', 'This needs a device token.')
+
+  const wait = app.limits.deviceTokens.waitMs(request.ip)
+  if (wait > 0) throw tooManyDeviceTries(wait)
+
+  const device = await findDevice(app.db, token)
+  if (!device) {
+    app.limits.deviceTokens.hit(request.ip)
+    if (!DEVICE_TOKEN_PATTERN.test(token)) {
+      throw new ApiError(401, 'unauthenticated', 'This needs a device token.')
+    }
+    await auditAlone(app.db, {
+      actorId: null,
+      action: 'auth.device_failed',
+      target: 'a device token',
+      details: request.ip,
+    })
+    throw new ApiError(401, 'invalid_token', 'This device’s token isn’t valid. Pair it again.')
+  }
+  await touchDevice(app.db, device, {
+    ip: request.ip,
+    agent: request.headers['user-agent'] ?? null,
+  })
+  return device
 }

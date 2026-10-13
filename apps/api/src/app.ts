@@ -29,6 +29,7 @@ import { JobQueue } from './queue.ts'
 import { adminRoutes } from './routes/admin.ts'
 import { authRoutes } from './routes/auth.ts'
 import { contentRoutes } from './routes/content.ts'
+import { devicesRoutes } from './routes/devices.ts'
 import { eventRoutes } from './routes/events.ts'
 import { healthRoutes } from './routes/health.ts'
 import { internalMediaRoutes, mediaRoutes } from './routes/media.ts'
@@ -52,6 +53,7 @@ declare module 'fastify' {
       connectionTests: RateLimiter
       linkPlayReports: RateLimiter
       streamLinks: RateLimiter
+      deviceTokens: RateLimiter
     }
     /** Frames received but not yet stored (§6.1), and whether there is room for more. */
     staging: Staging
@@ -184,6 +186,8 @@ export async function buildApp({
     linkPlayReports: new RateLimiter(60, 10 * 60_000),
     // Stream links made per user or, through share links, per address (§6.7).
     streamLinks: new RateLimiter(30, 10 * 60_000),
+    // Device tokens that fail, and pairing codes that don't trade, per address (§7.6).
+    deviceTokens: new RateLimiter(30, 10 * 60_000),
   })
   app.decorate('staging', new Staging(config.stagingDir))
   app.decorate('stagingRoom', new StagingRoom(db, config.stagingMaxBytes))
@@ -267,6 +271,7 @@ export async function buildApp({
 
   await app.register(healthRoutes, { prefix: '/api' })
   await app.register(authRoutes, { prefix: '/api' })
+  await app.register(devicesRoutes, { prefix: '/api' })
   await app.register(adminRoutes, { prefix: '/api' })
   await app.register(nodeRoutes, { prefix: '/api' })
   await app.register(uploadRoutes, { prefix: '/api' })
