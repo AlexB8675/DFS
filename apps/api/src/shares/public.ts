@@ -8,6 +8,7 @@ import {
   NODE_COLUMNS,
   NODE_JOINS,
   nodePath,
+  NOT_VAULT,
   toDriveNode,
   VISIBLE,
   type NodeRow,
@@ -62,10 +63,11 @@ async function liveShareWhere(
       share.version_id, owner.display_name AS shared_by,
       (node.kind = 'file' AND share.version_id IS DISTINCT FROM node.current_version_id) AS replaced
     FROM share_links share
-    JOIN nodes node ON node.id = share.node_id
+    JOIN nodes node ON node.id = share.node_id /* tree: not vault */
     JOIN users owner ON owner.id = node.owner_id
     WHERE ${condition}
-      AND node.deleted_at IS NULL AND node.trashed_via IS NULL AND owner.disabled_at IS NULL`)
+      AND node.deleted_at IS NULL AND node.trashed_via IS NULL AND node.tree <> 'vault'
+      AND owner.disabled_at IS NULL`)
   const [share] = rows
   // A link turned off is deleted: it is gone, like one that never was.
   if (!share) throw new ApiError(404, 'share_not_found', 'This link doesn’t exist.')
@@ -181,7 +183,8 @@ export async function nodeInShare(
 ): Promise<NodeRow> {
   if (id === root.id) return root
   const { rows } = await app.db.execute<NodeRow>(sql`
-    SELECT ${NODE_COLUMNS} FROM nodes n ${NODE_JOINS} WHERE n.id = ${id} AND ${VISIBLE}`)
+    SELECT ${NODE_COLUMNS} FROM nodes n /* tree: not vault */ ${NODE_JOINS}
+    WHERE n.id = ${id} AND ${VISIBLE} AND ${NOT_VAULT}`)
   const [node] = rows
   if (!node) throw notFound()
   const path = await nodePath(app.db, id)

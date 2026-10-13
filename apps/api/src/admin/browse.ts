@@ -24,6 +24,7 @@ import { ApiError } from '../errors.ts'
 import {
   NODE_COLUMNS,
   NODE_JOINS,
+  NOT_VAULT,
   notFound,
   toDriveNode,
   VISIBLE,
@@ -106,7 +107,8 @@ export async function userUsage(
 /** Any user's node outside the trash, for the read-only browser. */
 export async function anyVisibleNode(db: Executor, id: string): Promise<NodeRow> {
   const { rows } = await db.execute<NodeRow>(sql`
-    SELECT ${NODE_COLUMNS} FROM nodes n ${NODE_JOINS} WHERE n.id = ${id} AND ${VISIBLE}`)
+    SELECT ${NODE_COLUMNS} FROM nodes n /* tree: not vault */ ${NODE_JOINS}
+    WHERE n.id = ${id} AND ${VISIBLE} AND ${NOT_VAULT}`)
   const [node] = rows
   if (!node) throw notFound()
   return node
@@ -153,7 +155,7 @@ export async function moderate(
 ): Promise<ModerationResult> {
   return app.db.transaction(async (tx) => {
     const { rows: owners } = await tx.execute<{ owner_id: string }>(sql`
-      SELECT owner_id FROM nodes WHERE id = ${id}`)
+      SELECT owner_id FROM nodes /* tree: by id, gated */ WHERE id = ${id}`)
     const [owner] = owners
     if (!owner) throw notFound()
     await lockDrive(tx, owner.owner_id)

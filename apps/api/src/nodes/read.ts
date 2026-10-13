@@ -53,6 +53,12 @@ export const NODE_JOINS = sql`
 /** Not in the trash, and not inside a trashed folder. */
 export const VISIBLE = sql`n.deleted_at IS NULL AND n.trashed_via IS NULL`
 
+/**
+ * Not in the vault (§7.7): only the vault's own code may reach its nodes, so
+ * every other gate and owner-wide query leaves them out. Assumes the alias `n`.
+ */
+export const NOT_VAULT = sql`n.tree <> 'vault'`
+
 export function toDriveNode(row: NodeRow): DriveNode {
   return {
     id: row.id,
@@ -91,8 +97,8 @@ function syncState(versionState: string | null): SyncState {
 /** One of the owner's nodes that is not in the trash, or a 404. */
 export async function visibleNode(db: Executor, ownerId: string, id: string): Promise<NodeRow> {
   const { rows } = await db.execute<NodeRow>(sql`
-    SELECT ${NODE_COLUMNS} FROM nodes n ${NODE_JOINS}
-    WHERE n.id = ${id} AND n.owner_id = ${ownerId} AND ${VISIBLE}`)
+    SELECT ${NODE_COLUMNS} FROM nodes n /* tree: not vault */ ${NODE_JOINS}
+    WHERE n.id = ${id} AND n.owner_id = ${ownerId} AND ${VISIBLE} AND ${NOT_VAULT}`)
   const [row] = rows
   if (!row) throw notFound()
   return row
@@ -105,8 +111,9 @@ export async function lookupNodes(
   ids: readonly string[],
 ): Promise<NodeRow[]> {
   const { rows } = await db.execute<NodeRow>(sql`
-    SELECT ${NODE_COLUMNS} FROM nodes n ${NODE_JOINS}
-    WHERE n.id = ANY(${uuidArray([...new Set(ids)])}) AND n.owner_id = ${ownerId} AND ${VISIBLE}`)
+    SELECT ${NODE_COLUMNS} FROM nodes n /* tree: not vault */ ${NODE_JOINS}
+    WHERE n.id = ANY(${uuidArray([...new Set(ids)])}) AND n.owner_id = ${ownerId}
+      AND ${VISIBLE} AND ${NOT_VAULT}`)
   return rows
 }
 

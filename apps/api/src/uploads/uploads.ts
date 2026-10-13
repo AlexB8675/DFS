@@ -36,7 +36,7 @@ import { fromDrizzle, type PgBoss } from 'pg-boss'
 import { audit } from '../audit.ts'
 import type { Auth } from '../auth/sessions.ts'
 import { ApiError } from '../errors.ts'
-import { notFound, VISIBLE } from '../nodes/read.ts'
+import { NOT_VAULT, notFound, VISIBLE } from '../nodes/read.ts'
 import { checkedName, lockDrive, nameConflict } from '../nodes/write.ts'
 import { removeStagedVersions } from '../staging.ts'
 import { framedBytes } from './framed-bytes.ts'
@@ -164,8 +164,9 @@ async function startUploads(
   // Validate every destination together, without fetching its stats or version.
   const parentIds = [...new Set(inputs.map((input) => input.parentId))]
   const { rows: destinations } = await tx.execute<{ id: string; kind: 'file' | 'folder' }>(sql`
-    SELECT n.id, n.kind FROM nodes n
-    WHERE n.id = ANY(${uuidArray(parentIds)}) AND n.owner_id = ${ownerId} AND ${VISIBLE}`)
+    SELECT n.id, n.kind FROM nodes n /* tree: not vault */
+    WHERE n.id = ANY(${uuidArray(parentIds)}) AND n.owner_id = ${ownerId}
+      AND ${VISIBLE} AND ${NOT_VAULT}`)
   const destinationKinds = new Map(destinations.map((folder) => [folder.id, folder.kind]))
   const folderProblems = new Map<string, ApiError | null>()
   for (const parentId of parentIds) {

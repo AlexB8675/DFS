@@ -5,7 +5,14 @@ import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import type { Auth } from '../auth/sessions.ts'
 import { ApiError } from '../errors.ts'
-import { NODE_COLUMNS, NODE_JOINS, VISIBLE, notFound, type NodeRow } from '../nodes/read.ts'
+import {
+  NODE_COLUMNS,
+  NODE_JOINS,
+  NOT_VAULT,
+  VISIBLE,
+  notFound,
+  type NodeRow,
+} from '../nodes/read.ts'
 import { PackWarmer } from './pack-warmer.ts'
 import { readVersion, type ReadableVersion } from './reader.ts'
 import type { ZipEntry } from './zip.ts'
@@ -92,7 +99,7 @@ export async function createArchiveTicket(
   let prefix = 'DFS'
   if (parentIds.size === 1 && parentId && parentId !== auth.user.rootNodeId) {
     const { rows } = await app.db.execute<{ name: string }>(
-      sql`SELECT name FROM nodes WHERE id = ${parentId}`,
+      sql`SELECT name FROM nodes /* tree: by id, gated */ WHERE id = ${parentId}`,
     )
     prefix = rows[0]?.name ?? prefix
   }
@@ -127,8 +134,9 @@ export async function redeemArchiveTicket(
 
 async function ownedVisible(db: Executor, ownerId: string, ids: string[]): Promise<NodeRow[]> {
   const { rows } = await db.execute<NodeRow>(sql`
-    SELECT ${NODE_COLUMNS} FROM nodes n ${NODE_JOINS}
-    WHERE n.id = ANY(${uuidArray([...new Set(ids)])}) AND n.owner_id = ${ownerId} AND ${VISIBLE}
+    SELECT ${NODE_COLUMNS} FROM nodes n /* tree: not vault */ ${NODE_JOINS}
+    WHERE n.id = ANY(${uuidArray([...new Set(ids)])}) AND n.owner_id = ${ownerId}
+      AND ${VISIBLE} AND ${NOT_VAULT}
     ORDER BY n.kind, n.name_key COLLATE "dfs_natural"`)
   return rows
 }
@@ -138,13 +146,14 @@ async function subtrees(db: Executor, rootIds: string[]): Promise<TreeRow[]> {
   const { rows } = await db.execute<TreeRow>(sql`
     WITH RECURSIVE tree AS (
       SELECT id AS root_id, id, kind, ''::text AS path, current_version_id, updated_at
-      FROM nodes WHERE id = ANY(${uuidArray(rootIds)}) AND deleted_at IS NULL AND trashed_via IS NULL
+      FROM nodes /* tree: by id, gated */
+      WHERE id = ANY(${uuidArray(rootIds)}) AND deleted_at IS NULL AND trashed_via IS NULL
       UNION ALL
       SELECT tree.root_id, child.id, child.kind,
         CASE WHEN tree.path = '' THEN child.name ELSE tree.path || '/' || child.name END,
         child.current_version_id,
         child.updated_at
-      FROM nodes child JOIN tree ON child.parent_id = tree.id
+      FROM nodes child /* tree: by parent */ JOIN tree ON child.parent_id = tree.id
       WHERE child.deleted_at IS NULL AND child.trashed_via IS NULL
     )
     SELECT tree.root_id, tree.path, tree.kind, tree.updated_at::text AS updated_at,

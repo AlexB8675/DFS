@@ -9,7 +9,7 @@ import {
   uuidArray,
   type Executor,
 } from '@dfs/db'
-import { eq, sql } from 'drizzle-orm'
+import { and, eq, ne, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { audit } from '../audit.ts'
 import type { Auth } from '../auth/sessions.ts'
@@ -268,11 +268,15 @@ export async function restoreNode(
   if (!rootId) throw notFound()
   await app.db.transaction(async (tx) => {
     await lockDrive(tx, ownerId)
-    const [node] = await tx.select().from(nodes).where(eq(nodes.id, id))
+    // tree: not vault
+    const [node] = await tx
+      .select()
+      .from(nodes)
+      .where(and(eq(nodes.id, id), ne(nodes.tree, 'vault')))
     if (!node?.deletedAt || node.ownerId !== ownerId || !node.parentId) throw notFound()
 
     const { rows: parents } = await tx.execute<{ id: string }>(sql`
-      SELECT id FROM nodes
+      SELECT id FROM nodes /* tree: by id, gated */
       WHERE id = ${node.parentId} AND deleted_at IS NULL AND trashed_via IS NULL`)
     const parentId = parents[0] ? node.parentId : rootId
     const name = await freeName(tx, parentId, node.name)
