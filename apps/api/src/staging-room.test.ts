@@ -50,7 +50,16 @@ afterEach(async () => {
   await app.db.execute(sql`
     UPDATE upload_sessions SET staging_reserved_bytes = 0, staging_reserved_at = NULL,
       staging_waiting_since = NULL, staging_waiting_seen_at = NULL, staging_wanted_bytes = 0`)
+  await app.db.execute(sql`DELETE FROM chunks`)
 })
+
+/** Puts `frameBytes` of a stream's frames in staging, as if it had sent a part. */
+async function stage(uploadId: string, frameBytes: number) {
+  await app.db.execute(sql`
+    INSERT INTO chunks (version_id, idx, plain_size, frame_size, plain_sha256, frame_sha256, staged_path)
+    SELECT version_id, 0, ${frameBytes}, ${frameBytes}, ${Buffer.alloc(32)}, ${Buffer.alloc(32)}, 'test'
+    FROM upload_sessions WHERE id = ${uploadId}`)
+}
 
 /** What streams have reserved and still renew, as the upload limit counts it. */
 async function reservedBytes(): Promise<number> {
@@ -146,6 +155,17 @@ describe('StagingRoom (§6.1, D38)', () => {
     expect(await reservedBytes()).toBe(0)
     // All of staging is free again, for a stream that needs every byte of it.
     expect(await room.admit(next, 1000)).toBe(true)
+  })
+
+  it('lets an upload that has started back in ahead of older waiting streams, so it can finish', async () => {
+    const room = new StagingRoom(app.db, 1000)
+    const [started, older] = [await stream(), await stream()]
+    // It sent 600 before its connection dropped and its reservation lapsed.
+    await stage(started, 600)
+    // A stream waits for 900, which can't fit while those 600 are staged.
+    expect(await room.admit(older, 900)).toBe(false)
+    // Its frames leave staging only once it completes: made to wait behind that stream, neither would ever move.
+    expect(await room.admit(started, 300)).toBe(true)
   })
 
   it('lets only one of two streams racing for the last room in', async () => {

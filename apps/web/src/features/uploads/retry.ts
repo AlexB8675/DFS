@@ -24,6 +24,15 @@ export function isRetryable(error: unknown): boolean {
 }
 
 /**
+ * Whether the server's staging is full (§6.1, D38). The server keeps the
+ * upload's turn for as long as it keeps asking, so this is waiting, not a
+ * failure, and never uses up its tries.
+ */
+export function isStagingFull(error: unknown): boolean {
+  return error instanceof ApiError && error.code === 'staging_full'
+}
+
+/**
  * How long to wait before attempt number `attempt` (1 = the first retry):
  * what the server asked for in `Retry-After`, otherwise exponential backoff
  * (1 s, 2 s, 4 s, … up to 30 s) with ±20% jitter, so many clients don't

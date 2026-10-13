@@ -256,25 +256,20 @@ describe('streamed uploads (§6.1)', () => {
     }
   })
 
-  it('holds nothing once a stream ends, whether it finished or broke off', async () => {
+  it('keeps a broken stream’s room for its resume, and holds nothing once a stream finishes', async () => {
     const owner = await signIn('owner')
     const size = resumableSize()
-    const admit = vi.spyOn(app.stagingRoom, 'admit')
-    try {
-      const broken = await startUpload(owner, size)
-      await stream(owner, broken, 0, cutShort(new Uint8Array(size), 5)).catch(() => undefined)
-      await vi.waitFor(async () => {
-        expect(await reserved(broken)).toBe(0)
-      })
-      const whole = await startUpload(owner, size)
-      expect((await stream(owner, whole, 0, new Uint8Array(size))).status).toBe(204)
-      expect(await reserved(whole)).toBe(0)
-      // Both had reserved room: what is 0 now was given back.
-      expect(admit).toHaveBeenCalledWith(broken.uploadId, framedBytes(size, broken.chunkSize))
-      expect(admit).toHaveBeenCalledWith(whole.uploadId, framedBytes(size, whole.chunkSize))
-    } finally {
-      admit.mockRestore()
-    }
+    const session = await startUpload(owner, size)
+    const data = new Uint8Array(size)
+    await stream(owner, session, 0, cutShort(data, session.chunkSize + 5)).catch(() => undefined)
+    await vi.waitFor(async () => {
+      expect(await received(owner, session)).toEqual([0])
+    })
+    // Given the time its handler takes to see the connection go, the room it still needs stays promised.
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    expect(await reserved(session)).toBe(framedBytes(size, session.chunkSize, 1))
+    expect((await stream(owner, session, 1, data.slice(session.chunkSize))).status).toBe(204)
+    expect(await reserved(session)).toBe(0)
   })
 
   it('never holds a stream to a completed upload', async () => {

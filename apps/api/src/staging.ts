@@ -94,7 +94,9 @@ export class StagingRoom {
   /**
    * Lets a stream in if staging has room for `needBytes` besides what it
    * holds, what others reserved and, when an older stream waits, that
-   * stream's need: then reserves it. Otherwise records that the stream
+   * stream's need, unless this upload has started: its frames leave staging
+   * only once it completes, so waiting behind a stream that can't fit while
+   * they're there would hold both for ever. Then reserves it. Otherwise records that the stream
    * waits, keeping its turn while its client keeps coming back. One short
    * transaction under a lock of its own, so streams on two API instances
    * can't both take the last room.
@@ -104,7 +106,10 @@ export class StagingRoom {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(${LOCK_NAMESPACE}, ${LOCKS.stagingRoom})`)
       const { rows } = await tx.execute<{ used: number; ahead: number }>(sql`
         SELECT (${stagedBytesSql()} + ${reservedStagingSql(uploadId)})::float8 AS used,
-          ${firstWaitingSql(uploadId)}::float8 AS ahead`)
+          CASE WHEN EXISTS (
+            SELECT 1 FROM chunks JOIN upload_sessions session ON session.version_id = chunks.version_id
+            WHERE session.id = ${uploadId}
+          ) THEN 0 ELSE ${firstWaitingSql(uploadId)} END::float8 AS ahead`)
       const room = rows[0]
       const admitted = room !== undefined && room.used + room.ahead + needBytes <= this.#maxBytes
       await tx.execute(

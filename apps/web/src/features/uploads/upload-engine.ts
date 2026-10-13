@@ -6,7 +6,7 @@ import { subscribeToResync, subscribeToSyncs } from '@/features/live-events/live
 import { sharesQuery } from '@/features/shares/api'
 import { ApiError, errorMessage } from '@/lib/api/client'
 import type { PickedFile } from './picked-files'
-import { isRetryable, MAX_ATTEMPTS, retryDelayMs } from './retry'
+import { isRetryable, isStagingFull, MAX_ATTEMPTS, retryDelayMs } from './retry'
 import {
   isActive,
   isSettled,
@@ -643,8 +643,9 @@ export class UploadEngine {
       return
     }
     const attempts = job.attempts + 1
-    if (isRetryable(error) && attempts <= MAX_ATTEMPTS) {
-      job.attempts = attempts
+    const waiting = isStagingFull(error)
+    if (waiting || (isRetryable(error) && attempts <= MAX_ATTEMPTS)) {
+      if (!waiting) job.attempts = attempts
       this.clearRetry(job)
       job.retryTimer = setTimeout(
         () => {
@@ -652,7 +653,7 @@ export class UploadEngine {
           this.publish(job)
           this.pump()
         },
-        retryDelayMs(attempts, error),
+        retryDelayMs(waiting ? 1 : attempts, error),
       )
       this.publish(job)
       return

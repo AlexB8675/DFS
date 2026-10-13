@@ -121,8 +121,11 @@ export function uploadStreamRoutes(app: FastifyInstance, _options: object, done:
           }
         } finally {
           clearInterval(renewal)
-          // What it didn't send goes back, however it ended.
-          if (reserving) {
+          // What it didn't send goes back once it ends. A stream cut off keeps
+          // it for its resume instead: its staged parts leave only once it
+          // completes, so it must not lose its room to a stream that would
+          // then wait on it. Unrenewed, the reservation lapses in 90 s.
+          if (reserving && !gone.signal.aborted) {
             await app.stagingRoom.release(uploadId).catch((error: unknown) => {
               request.log.warn(
                 { err: error, uploadId },

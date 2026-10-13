@@ -210,6 +210,7 @@ function stream(api: ReturnType<typeof fakeApi>['api']) {
 }
 
 const busy = () => new ApiError(503, 'staging_full', 'Staging is full', 0)
+const badGateway = () => new ApiError(502, 'bad_gateway', 'Bad gateway', 0)
 
 async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))
@@ -714,10 +715,29 @@ describe('UploadEngine', () => {
     expect(api.streamed.map((sent) => sent.from)).toEqual([0, 0, 0])
   })
 
+  it('keeps coming back while the server’s staging is full, without using up its tries (D38)', async () => {
+    const { api, transport } = fakeApi()
+    api.failStream = (_uploadId, attempt) => (attempt <= 10 ? busy() : null)
+    api.failPart = (_uploadId, _index, attempt) => (attempt <= 10 ? busy() : null)
+    const engine = new UploadEngine(transport)
+    await engine.enqueue('folder', [file('large.bin', 3 * CHUNK), file('small.txt', 3)])
+
+    await vi.waitFor(
+      () => {
+        expect(item('large.bin').status).toBe('done')
+        expect(item('small.txt').status).toBe('done')
+      },
+      { timeout: 3000 },
+    )
+    // Each kept its turn for as long as it kept asking: ten refusals, then room.
+    expect(api.streamed).toHaveLength(11)
+    expect(api.sent).toHaveLength(11)
+  })
+
   it('gives up after repeated failures, cancelling its session at once; Retry starts afresh', async () => {
     const { api, transport } = fakeApi()
     let broken = true
-    api.failStream = () => (broken ? busy() : null)
+    api.failStream = () => (broken ? badGateway() : null)
     const engine = new UploadEngine({
       ...transport,
       streamFile: (uploadId, from, body, signal, onProgress) => {
