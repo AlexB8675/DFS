@@ -262,15 +262,17 @@ export async function startLeaderWork(options: {
 }
 
 /**
- * Gives up uploads past their 24 hours, forgets ended sessions and audit
- * entries older than a year, and removes pack files a crash left before their
- * pack was recorded.
+ * Gives up uploads past their 24 hours, forgets ended sessions, expired
+ * pairings and audit entries older than a year, and removes pack files a
+ * crash left before their pack was recorded.
  */
 export async function cleanUp(db: Database, staging: Staging, now = Date.now()): Promise<void> {
   await db.execute(
     sql`DELETE FROM upload_sessions WHERE expires_at <= now() AND state = 'completed'`,
   )
   await db.execute(sql`DELETE FROM sessions WHERE expires_at <= now()`)
+  // A pairing's code is good for a minute (§7.6); past it, it can't be traded.
+  await db.execute(sql`DELETE FROM device_pairings WHERE expires_at < now()`)
   await db.execute(sql`DELETE FROM audit_log WHERE at < now() - interval '1 year'`)
   const versions = await db.transaction(async (tx) => {
     const { rows } = await tx.execute<{ id: string }>(sql`

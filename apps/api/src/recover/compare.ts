@@ -105,13 +105,16 @@ const TABLES: readonly TableSpec[] = [
  * Tables recovery leaves empty: sessions, uploads in progress, tickets,
  * graphs, the outbox, what examining audio and video found and the subtitles
  * taken from them, found again as they are played (§6.7), and where users
- * stopped them (§10.4).
+ * stopped them (§10.4). Device tokens and pairings aren't journaled either:
+ * devices pair again after a recovery (§7.6).
  */
 const NOT_RECOVERED = new Set([
   'media_info',
   'playback_positions',
   'media_subtitles',
   'sessions',
+  'device_tokens',
+  'device_pairings',
   'upload_sessions',
   'archive_tickets',
   'metrics',

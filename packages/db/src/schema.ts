@@ -129,6 +129,54 @@ export const sessions = pgTable(
   (t) => [index('sessions_user_id').on(t.userId), index('sessions_expires_at').on(t.expiresAt)],
 )
 
+/**
+ * A computer's backup app (§7.6): a credential found by the SHA-256 of its
+ * token, which is shown once and never kept. Not journaled, as sessions
+ * aren't: after a recovery, devices pair again.
+ */
+export const deviceTokens = pgTable(
+  'device_tokens',
+  {
+    id: uuidv7('id').primaryKey(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    tokenHash: bytea('token_hash').notNull(),
+    createdAt: timestamptz('created_at').notNull().defaultNow(),
+    /** Every 5 minutes at most, as sessions (§7.6). */
+    lastUsedAt: timestamptz('last_used_at'),
+    lastAddress: text('last_address'),
+    lastAgent: text('last_agent'),
+  },
+  (t) => [
+    uniqueIndex('device_tokens_token_hash').on(t.tokenHash),
+    index('device_tokens_user_id').on(t.userId),
+  ],
+)
+
+/**
+ * A pairing its signed-in user approved (§7.6): a one-time code, good for a
+ * minute, that the backup app trades with its PKCE verifier for a token.
+ */
+export const devicePairings = pgTable(
+  'device_pairings',
+  {
+    codeHash: bytea('code_hash').primaryKey(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    /** base64url(SHA-256(verifier)): RFC 7636's S256. */
+    challenge: text('challenge').notNull(),
+    expiresAt: timestamptz('expires_at').notNull(),
+  },
+  (t) => [
+    index('device_pairings_user_id').on(t.userId),
+    index('device_pairings_expires_at').on(t.expiresAt),
+  ],
+)
+
 // ── The file system (§5, §5.1) ───────────────────────────────────────────────
 
 export const nodes = pgTable(

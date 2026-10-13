@@ -2,7 +2,15 @@ import { randomBytes } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { auditLog, createDatabase, createPool, shareLinks, type Database } from '@dfs/db'
+import {
+  auditLog,
+  createDatabase,
+  createPool,
+  devicePairings,
+  shareLinks,
+  users,
+  type Database,
+} from '@dfs/db'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
 import { Staging } from '@dfs/storage'
 import { sql } from 'drizzle-orm'
@@ -191,6 +199,43 @@ describe('cleanUp', () => {
     const { rows: versions } = await db.execute<{ id: string }>(sql`
       SELECT id FROM file_versions WHERE node_id = ${first.nodeId}`)
     expect(versions.map((row) => row.id)).toEqual([second.versionId])
+  })
+
+  it('deletes pairings whose minute has passed, and keeps live ones', async () => {
+    const [user] = await db
+      .insert(users)
+      .values({
+        username: crypto.randomUUID(),
+        displayName: 'Pairing',
+        passwordHash: '-',
+        quotaBytes: 1,
+      })
+      .returning()
+    if (!user) throw new Error('No test user.')
+    // Ages by the database's clock, which the janitor goes by.
+    await db.insert(devicePairings).values([
+      {
+        codeHash: Buffer.alloc(32, 1),
+        userId: user.id,
+        name: 'Laptop',
+        challenge: 'c',
+        expiresAt: sql`now() - interval '1 second'`,
+      },
+      {
+        codeHash: Buffer.alloc(32, 2),
+        userId: user.id,
+        name: 'Desktop',
+        challenge: 'c',
+        expiresAt: sql`now() + interval '1 minute'`,
+      },
+    ])
+
+    await cleanUp(db, new Staging(path.join(directory, 'staging')))
+    const left = await db
+      .select({ codeHash: devicePairings.codeHash })
+      .from(devicePairings)
+      .where(sql`${devicePairings.userId} = ${user.id}`)
+    expect(left.map((row) => row.codeHash)).toEqual([Buffer.alloc(32, 2)])
   })
 
   it('keeps the audit log for a year', async () => {
