@@ -7,7 +7,7 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest'
 import { createDatabase, createPool, type Database } from './client.ts'
-import { auditRecords, shareRecords, type JournalRecord } from './journal.ts'
+import { auditRecords, nodeRecords, shareRecords, type JournalRecord } from './journal.ts'
 import { MIGRATIONS_DIR, runMigrations } from './migrate.ts'
 import { auditLog, fileVersions, nodes, shareLinks, users } from './schema.ts'
 import { createTestDatabase, databaseUrl, withAdmin, type TestDatabase } from './testing/index.ts'
@@ -54,7 +54,7 @@ describe('migrations', () => {
       })
       // One instance ID, made once (DESIGN §4).
       expect(counts).toEqual({
-        applied: 30,
+        applied: 31,
         tables: 22,
         instance: [expect.stringMatching(/^[0-9a-f]{12}$/)],
         unindexed: [],
@@ -273,6 +273,63 @@ describe('schema rules (DESIGN §5.1)', () => {
       db.insert(nodes).values({ ownerId: user.id, kind, name: 'Another', nameKey: 'another' })
     expect(await violated(root('folder'))).toBe('nodes_one_root_per_owner')
     expect(await violated(root('file'))).toBe('nodes_root_is_folder')
+  })
+
+  it('puts a child in its parent’s tree (§7.7)', async () => {
+    const { user, root } = await createUser('trees')
+    const [vault] = await db
+      .insert(nodes)
+      .values({ ownerId: user.id, kind: 'folder', name: 'Vault', nameKey: 'vault', tree: 'vault' })
+      .returning()
+    if (!vault) throw new Error('no vault')
+    const [folder] = await db
+      .insert(nodes)
+      .values({ ownerId: user.id, parentId: vault.id, kind: 'folder', name: 'A', nameKey: 'a' })
+      .returning()
+    if (!folder) throw new Error('no folder')
+    const [file] = await db
+      .insert(nodes)
+      .values({ ownerId: user.id, parentId: folder.id, kind: 'file', name: 'b', nameKey: 'b' })
+      .returning()
+    const [inDrive] = await db
+      .insert(nodes)
+      // A child is in its parent's tree whatever it is given.
+      .values({
+        ownerId: user.id,
+        parentId: root.id,
+        kind: 'folder',
+        name: 'C',
+        nameKey: 'c',
+        tree: 'vault',
+      })
+      .returning()
+    expect([root.tree, vault.tree, folder.tree, file?.tree, inDrive?.tree]).toEqual([
+      'drive',
+      'vault',
+      'vault',
+      'vault',
+      'drive',
+    ])
+  })
+
+  it('gives each user one root per tree (§7.7)', async () => {
+    const { user } = await createUser('tree-roots')
+    const root = (tree: 'drive' | 'backups' | 'vault') =>
+      db.insert(nodes).values({ ownerId: user.id, kind: 'folder', name: tree, nameKey: tree, tree })
+    await root('vault')
+    await root('backups')
+    expect(await violated(root('vault'))).toBe('nodes_one_root_per_owner')
+    expect(await violated(root('drive'))).toBe('nodes_one_root_per_owner')
+  })
+
+  it('leaves the tree out of the journal, as it is derived (§8)', async () => {
+    const { root } = await createUser('tree-journal')
+    const [row] = await db.select().from(nodes).where(eq(nodes.id, root.id))
+    if (!row) throw new Error('no row')
+    const [record] = nodeRecords([row])
+    expect(record?.kind).toBe('node.upsert')
+    expect(Object.keys(record?.record ?? {})).not.toContain('tree')
+    expect(Object.keys(record?.record ?? {})).toContain('ownerId')
   })
 
   it('backfills share links and audit entries as the API journals them (0016)', async () => {

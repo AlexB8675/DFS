@@ -42,6 +42,7 @@ const identity = (name: string) => bigint(name, { mode: 'number' }).generatedAlw
 
 export const roleEnum = pgEnum('role', ['admin', 'user'])
 export const nodeKindEnum = pgEnum('node_kind', ['folder', 'file'])
+export const nodeTreeEnum = pgEnum('node_tree', ['drive', 'backups', 'vault'])
 export const versionStateEnum = pgEnum('version_state', [
   'uploading',
   'syncing',
@@ -189,6 +190,12 @@ export const nodes = pgTable(
     /** `null` only for a user's root folder. */
     parentId: uuid('parent_id').references((): AnyPgColumn => nodes.id),
     kind: nodeKindEnum('kind').notNull(),
+    /**
+     * Which tree the node is in (§7.7): My drive, the Backups drive (§6.9) or
+     * the vault. Derived from its root, set by a trigger from its parent, so
+     * never journaled.
+     */
+    tree: nodeTreeEnum('tree').notNull().default('drive'),
     name: text('name').notNull(),
     /** NFC-normalized and case-folded name: what uniqueness and search use. */
     nameKey: text('name_key').notNull(),
@@ -227,8 +234,9 @@ export const nodes = pgTable(
     index('nodes_listing_by_size')
       .on(t.parentId, t.kind, t.sizeBytes, t.id)
       .where(sql`${t.deletedAt} IS NULL`),
+    // One root per tree: My drive, the Backups drive and the vault (§7.7).
     uniqueIndex('nodes_one_root_per_owner')
-      .on(t.ownerId)
+      .on(t.ownerId, t.tree)
       .where(sql`${t.parentId} IS NULL`),
     index('nodes_name_trgm').using('gin', t.nameKey.op('gin_trgm_ops')),
     index('nodes_trash')
