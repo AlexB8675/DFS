@@ -9,7 +9,13 @@ import { describe, expect, it } from 'vitest'
 // `// tree: …` on the line above a Drizzle call.
 const REPO = fileURLToPath(new URL('../../../', import.meta.url))
 const ROOTS = ['apps/api/src', 'packages/db/src', 'apps/bot/src']
-const STATEMENT = [/\b(FROM|JOIN|UPDATE|INTO)\s+nodes\b/i, /\.(from|update|insert|delete)\(nodes\b/]
+// Raw SQL, the table interpolated into SQL, Drizzle's builder and its query API.
+const STATEMENT = [
+  /\b(FROM|JOIN|UPDATE|INTO)\s+nodes\b/i,
+  /\b(FROM|JOIN|UPDATE|INTO)\s+\$\{nodes\}/i,
+  /\.(from|update|insert|delete)\(nodes\b/,
+  /\bquery\.nodes\b/,
+]
 const COMMENT_LINE = /^\s*(\*|\/\/|\/\*\*)/
 
 /** Source files, leaving out tests and their helpers, and migrations. */
