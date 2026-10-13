@@ -58,7 +58,7 @@ export async function storageCounts(
     blobs: number
     journal_records: number
   }>(sql`
-    SELECT (SELECT count(*) FROM nodes WHERE kind = 'file')::int AS files,
+    SELECT (SELECT count(*) FROM nodes /* tree: all trees: resetting storage deletes every file */ WHERE kind = 'file')::int AS files,
       (SELECT count(*) FROM file_versions)::int AS versions,
       (SELECT count(*) FROM blobs)::int AS blobs,
       (SELECT count(*) FROM journal)::int AS journal_records`)
@@ -98,13 +98,17 @@ export async function resetStorage(db: Database, options: ResetOptions): Promise
   const baseline = await db.transaction(async (tx) => {
     // Links to files serve versions that go; links to folders stay.
     await tx.execute(sql`
-      DELETE FROM share_links WHERE node_id IN (SELECT id FROM nodes WHERE kind = 'file')`)
+      DELETE FROM share_links WHERE node_id IN (SELECT id FROM nodes /* tree: all trees: resetting storage deletes every file */ WHERE kind = 'file')`)
     await tx.execute(sql`DELETE FROM upload_sessions`)
     await tx.execute(sql`DELETE FROM archive_tickets`)
-    await tx.execute(sql`UPDATE nodes SET current_version_id = NULL WHERE kind = 'file'`)
+    await tx.execute(
+      sql`UPDATE nodes /* tree: all trees: resetting storage deletes every file */ SET current_version_id = NULL WHERE kind = 'file'`,
+    )
     await tx.execute(sql`DELETE FROM chunks`)
     await tx.execute(sql`DELETE FROM file_versions`)
-    await tx.execute(sql`DELETE FROM nodes WHERE kind = 'file'`)
+    await tx.execute(
+      sql`DELETE FROM nodes /* tree: all trees: resetting storage deletes every file */ WHERE kind = 'file'`,
+    )
     await tx.execute(sql`DELETE FROM blobs`)
     await tx.execute(sql`DELETE FROM journal`)
     await tx.execute(sql`DELETE FROM journal_batches`)
@@ -130,13 +134,14 @@ export async function resetStorage(db: Database, options: ResetOptions): Promise
     const people = await tx.select().from(users).orderBy(asc(users.createdAt))
     const depths = await tx.execute<{ id: string }>(sql`
       WITH RECURSIVE tree (id, depth) AS (
-        SELECT id, 0 FROM nodes WHERE parent_id IS NULL
+        SELECT id, 0 FROM nodes /* tree: all trees: every root, so every tree */ WHERE parent_id IS NULL
         UNION ALL
-        SELECT child.id, tree.depth + 1 FROM nodes child JOIN tree ON child.parent_id = tree.id
+        SELECT child.id, tree.depth + 1 FROM nodes child /* tree: all trees: every root, so every tree */ JOIN tree ON child.parent_id = tree.id
       )
       SELECT id FROM tree ORDER BY depth, id`)
     const order = depths.rows.map((row) => row.id)
     const folders =
+      // tree: all trees: every root, so every tree
       order.length === 0 ? [] : await tx.select().from(nodes).where(inArray(nodes.id, order))
     const byId = new Map(folders.map((folder) => [folder.id, folder]))
     const sortedFolders = order.flatMap((id) => {

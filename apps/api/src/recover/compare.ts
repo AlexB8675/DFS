@@ -95,7 +95,7 @@ const TABLES: readonly TableSpec[] = [
       query: sql`
         SELECT node.id AS node_id, coalesce(t.file_count, 0) AS file_count,
           coalesce(t.total_bytes, 0) AS total_bytes
-        FROM nodes node LEFT JOIN folder_stats t ON t.node_id = node.id
+        FROM nodes node /* tree: all trees: the drill compares every row */ LEFT JOIN folder_stats t ON t.node_id = node.id
         WHERE node.kind = 'folder' ORDER BY node.id`,
     },
   },

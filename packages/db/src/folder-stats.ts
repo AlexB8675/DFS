@@ -37,11 +37,11 @@ export async function foldFolderStats(db: Database, batch = 500): Promise<number
     // Each dirty folder and its ancestors, with their depth below the root.
     const closure = await tx.execute<{ id: string; depth: number }>(sql`
       WITH RECURSIVE up (id, parent_id, origin, distance) AS (
-        SELECT id, parent_id, id, 0 FROM nodes
+        SELECT id, parent_id, id, 0 FROM nodes /* tree: all trees: totals are kept in every tree */
         WHERE id = ANY(${uuidArray(taken.rows.map((row) => row.node_id))}) AND kind = 'folder'
         UNION ALL
         SELECT parent.id, parent.parent_id, up.origin, up.distance + 1
-        FROM nodes parent JOIN up ON parent.id = up.parent_id
+        FROM nodes parent /* tree: all trees: totals are kept in every tree */ JOIN up ON parent.id = up.parent_id
       ),
       ranked AS (
         SELECT id, max(distance) OVER (PARTITION BY origin) - distance AS depth FROM up
@@ -64,12 +64,12 @@ export async function foldFolderStats(db: Database, batch = 500): Promise<number
           now()
         FROM unnest(${uuidArray(byDepth.get(depth) ?? [])}) AS folder(id)
         CROSS JOIN LATERAL (
-          SELECT count(*) AS count, coalesce(sum(size_bytes), 0) AS bytes FROM nodes
+          SELECT count(*) AS count, coalesce(sum(size_bytes), 0) AS bytes FROM nodes /* tree: all trees: totals are kept in every tree */
           WHERE parent_id = folder.id AND kind = 'file' AND deleted_at IS NULL
         ) files
         CROSS JOIN LATERAL (
           SELECT sum(stats.file_count) AS count, sum(stats.total_bytes) AS bytes
-          FROM nodes child JOIN folder_stats stats ON stats.node_id = child.id
+          FROM nodes child /* tree: all trees: totals are kept in every tree */ JOIN folder_stats stats ON stats.node_id = child.id
           WHERE child.parent_id = folder.id AND child.kind = 'folder' AND child.deleted_at IS NULL
         ) subfolders
         ON CONFLICT (node_id) DO UPDATE SET

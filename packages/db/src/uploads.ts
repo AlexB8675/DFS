@@ -39,7 +39,7 @@ export async function abandonUploads(
     parent_id: string | null
     current_version_id: string | null
   }>(sql`
-    SELECT id, parent_id, current_version_id FROM nodes
+    SELECT id, parent_id, current_version_id FROM nodes /* tree: by id, gated */
     WHERE id = ANY(${uuidArray(nodeIds)}) ORDER BY id FOR NO KEY UPDATE`)
   const reservations = new Map<string, number>()
   for (const row of rows)
@@ -106,7 +106,7 @@ export async function abandonIdleUploads(
     const { rows } = await tx.execute<{ id: string; user_id: string; parent_id: string | null }>(
       sql`
         SELECT session.id, session.user_id, node.parent_id
-        FROM upload_sessions session JOIN nodes node ON node.id = session.node_id
+        FROM upload_sessions session JOIN nodes node /* tree: all trees: idle uploads are swept everywhere */ ON node.id = session.node_id
         WHERE session.state = 'receiving'
           AND session.alive_at < now() - make_interval(mins => ${idleMinutes}::int)
         ORDER BY session.id LIMIT ${limit}

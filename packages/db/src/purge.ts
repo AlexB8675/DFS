@@ -71,7 +71,7 @@ export async function purgeVersions(
   await tx.execute(sql`
     DELETE FROM upload_sessions WHERE version_id = ANY(${versions}) AND state = 'completed'`)
   await tx.execute(sql`
-    UPDATE nodes SET current_version_id = NULL WHERE current_version_id = ANY(${versions})`)
+    UPDATE nodes /* tree: by id, gated */ SET current_version_id = NULL WHERE current_version_id = ANY(${versions})`)
   await tx.execute(sql`DELETE FROM file_versions WHERE id = ANY(${versions})`)
   if (usedBytes > 0) {
     await tx.execute(sql`
@@ -96,7 +96,7 @@ export const WORKING_LINK = sql`(link.expires_at IS NULL OR link.expires_at > no
 export async function purgeEarlierVersions(db: Database, limit = 500): Promise<string[]> {
   const { rows: due } = await db.execute<{ id: string; owner_id: string }>(sql`
     SELECT version.id, node.owner_id FROM file_versions version
-    JOIN nodes node ON node.id = version.node_id
+    JOIN nodes node /* tree: all trees: purging needs no key, §7.7 */ ON node.id = version.node_id
     WHERE version.id <> node.current_version_id
       AND version.state IN ('syncing', 'stored', 'failed')
     ORDER BY version.id LIMIT ${limit}`)
@@ -143,9 +143,9 @@ export async function purgeSubtrees(
   if (rootIds.length === 0) return { versionIds: [], records: [] }
   const { rows: subtree } = await tx.execute<{ id: string }>(sql`
     WITH RECURSIVE below AS (
-      SELECT id FROM nodes WHERE id = ANY(${uuidArray(rootIds)}) AND owner_id = ${ownerId}
+      SELECT id FROM nodes /* tree: by id, gated */ WHERE id = ANY(${uuidArray(rootIds)}) AND owner_id = ${ownerId}
       UNION ALL
-      SELECT child.id FROM nodes child JOIN below ON child.parent_id = below.id
+      SELECT child.id FROM nodes child /* tree: by parent */ JOIN below ON child.parent_id = below.id
     )
     SELECT id FROM below`)
   const nodeIds = uuidArray(subtree.map((row) => row.id))
@@ -154,7 +154,9 @@ export async function purgeSubtrees(
   await tx.execute(sql`
     SELECT id FROM upload_sessions WHERE node_id = ANY(${nodeIds}) ORDER BY id FOR UPDATE`)
   // Nodes before the user's row, the order of locks.ts.
-  await tx.execute(sql`SELECT id FROM nodes WHERE id = ANY(${nodeIds}) ORDER BY id FOR UPDATE`)
+  await tx.execute(
+    sql`SELECT id FROM nodes /* tree: by id, gated */ WHERE id = ANY(${nodeIds}) ORDER BY id FOR UPDATE`,
+  )
 
   const { rows: uploads } = await tx.execute<{ reserved: number }>(sql`
     DELETE FROM upload_sessions WHERE node_id = ANY(${nodeIds})
@@ -171,7 +173,7 @@ export async function purgeSubtrees(
   // Markers before stats, as folding takes them.
   await tx.execute(sql`DELETE FROM folder_stats_dirty WHERE node_id = ANY(${nodeIds})`)
   await tx.execute(sql`DELETE FROM folder_stats WHERE node_id = ANY(${nodeIds})`)
-  await tx.execute(sql`DELETE FROM nodes WHERE id = ANY(${nodeIds})`)
+  await tx.execute(sql`DELETE FROM nodes /* tree: by id, gated */ WHERE id = ANY(${nodeIds})`)
   for (const id of rootIds) records.push({ kind: 'node.purge', record: { id } })
   return { versionIds, records }
 }

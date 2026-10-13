@@ -235,7 +235,7 @@ const SELECT_SHARES = sql`
     share.created_at::text AS created_at, share.expires_at::text AS expires_at,
     share.password_hash IS NOT NULL AS has_password, share.max_downloads, share.download_count
   FROM share_links share
-  JOIN nodes node ON node.id = share.node_id
+  JOIN nodes node /* tree: all trees: no link reaches the vault, §7.7 */ ON node.id = share.node_id
   JOIN users owner ON owner.id = node.owner_id`
 
 interface ListedRow extends ShareRow {
@@ -254,7 +254,7 @@ function listedShares(q: string | undefined) {
   return sql`
     WITH RECURSIVE chain AS (
       SELECT link.id AS share_id, node.parent_id AS next, ''::text AS path
-      FROM share_links link JOIN nodes node ON node.id = link.node_id
+      FROM share_links link JOIN nodes node /* tree: all trees: no link reaches the vault, §7.7 */ ON node.id = link.node_id
       UNION ALL
       -- Up to the top, leaving out the root, which every path starts in.
       SELECT chain.share_id, parent.parent_id,
@@ -263,7 +263,7 @@ function listedShares(q: string | undefined) {
           WHEN chain.path = '' THEN parent.name
           ELSE parent.name || ' / ' || chain.path
         END
-      FROM chain JOIN nodes parent ON parent.id = chain.next
+      FROM chain JOIN nodes parent /* tree: all trees: no link reaches the vault, §7.7 */ ON parent.id = chain.next
     ), listed AS (
       SELECT link.id, link.node_id, node.name AS node_name, node.kind AS node_kind,
         node.owner_id, owner.display_name AS owner_name, owner.username AS owner_username,
@@ -274,7 +274,7 @@ function listedShares(q: string | undefined) {
         (${WORKING_LINK} AND (node.kind = 'folder' OR link.version_id = node.current_version_id))
           AS working
       FROM share_links link
-      JOIN nodes node ON node.id = link.node_id
+      JOIN nodes node /* tree: all trees: no link reaches the vault, §7.7 */ ON node.id = link.node_id
       JOIN users owner ON owner.id = node.owner_id
       JOIN chain ON chain.share_id = link.id AND chain.next IS NULL
       ${
@@ -396,7 +396,7 @@ export async function listUploads(app: FastifyInstance): Promise<AdminUpload[]> 
       upload.created_at::text AS created_at, upload.expires_at::text AS expires_at
     FROM upload_sessions upload
     JOIN users account ON account.id = upload.user_id
-    JOIN nodes node ON node.id = upload.node_id
+    JOIN nodes node /* tree: all trees: no upload starts in the vault yet, §7.7 */ ON node.id = upload.node_id
     JOIN file_versions version ON version.id = upload.version_id
     WHERE upload.state = 'receiving' AND upload.expires_at > now()
     ORDER BY upload.created_at LIMIT 200`)
@@ -429,7 +429,7 @@ export async function cancelUploadAsAdmin(
     const { rows } = await tx.execute<{ file_name: string; user_name: string }>(sql`
       SELECT node.name AS file_name, account.display_name AS user_name
       FROM upload_sessions upload
-      JOIN nodes node ON node.id = upload.node_id
+      JOIN nodes node /* tree: all trees: no upload starts in the vault yet, §7.7 */ ON node.id = upload.node_id
       JOIN users account ON account.id = upload.user_id
       WHERE upload.id = ${id} AND upload.state = 'receiving'
       FOR UPDATE OF upload`)

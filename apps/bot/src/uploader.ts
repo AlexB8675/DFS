@@ -235,7 +235,7 @@ async function storeBlob(
         id: string
         parent_id: string
       }>(sql`
-        SELECT owner_id AS user_id, id, parent_id FROM nodes
+        SELECT owner_id AS user_id, id, parent_id FROM nodes /* tree: all trees: a stored file gets its event in any tree */
         WHERE current_version_id = ANY(${uuidArray(doneIds)}) AND parent_id IS NOT NULL`)
       files = shown.map((row) => ({ userId: row.user_id, id: row.id, parentId: row.parent_id }))
     }

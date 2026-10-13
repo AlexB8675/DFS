@@ -30,7 +30,7 @@ export interface WriteInput {
 /** Refuses a database that holds anything: recovery never writes over one in use. */
 export async function assertEmpty(db: Executor): Promise<void> {
   const { rows } = await db.execute<{ count: number }>(sql`
-    SELECT ((SELECT count(*) FROM users) + (SELECT count(*) FROM nodes))::int AS count`)
+    SELECT ((SELECT count(*) FROM users) + (SELECT count(*) FROM nodes /* tree: all trees: recovery needs an empty database */))::int AS count`)
   if ((rows[0]?.count ?? 0) > 0) {
     throw new RecoveryError(
       'The database to recover into isn’t empty. Recovery only writes into a new, migrated database.',
@@ -104,7 +104,7 @@ export async function writeRecovered(db: Database, input: WriteInput): Promise<v
       })),
     )
     await tx.execute(sql`
-      UPDATE nodes SET current_version_id = r.version_id
+      UPDATE nodes /* tree: all trees: recovery rebuilds every node */ SET current_version_id = r.version_id
       FROM jsonb_to_recordset(${JSON.stringify(
         nodes
           .filter((node) => node.currentVersionId)
@@ -213,11 +213,11 @@ export async function writeRecovered(db: Database, input: WriteInput): Promise<v
     await tx.execute(sql`
       UPDATE users SET used_bytes = coalesce((
         SELECT sum(version.size_bytes) FROM file_versions version
-        JOIN nodes node ON node.id = version.node_id
+        JOIN nodes node /* tree: all trees: recovery rebuilds every node */ ON node.id = version.node_id
         WHERE node.owner_id = users.id
           AND version.state IN ('syncing', 'stored', 'failed')), 0)`)
     await tx.execute(sql`
-      INSERT INTO folder_stats_dirty (node_id) SELECT id FROM nodes WHERE kind = 'folder'`)
+      INSERT INTO folder_stats_dirty (node_id) SELECT id FROM nodes /* tree: all trees: recovery recomputes every folder's totals */ WHERE kind = 'folder'`)
   })
   await foldAllFolderStats(db)
 }
