@@ -765,7 +765,12 @@ export class AdminMockDb extends MockDb {
           enabled: channel.enabled,
         })),
       },
-      staging: { dir: 'D:\\dfs\\.data\\staging', usedBytes: 0, maxBytes: STAGING_MAX_BYTES },
+      staging: {
+        dir: 'D:\\dfs\\.data\\staging',
+        usedBytes: 0,
+        reservedBytes: 0,
+        maxBytes: STAGING_MAX_BYTES,
+      },
       frameCache: {
         dir: 'D:\\dfs\\.data\\cache',
         usedBytes: this.cachedBytes,

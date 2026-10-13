@@ -343,6 +343,8 @@ export function adminTests({
       }
       expect(system.secrets.map((secret) => secret.key)).toContain('DATABASE_URL')
       expect(system.instanceId.length).toBeGreaterThan(0)
+      // Nothing is streaming: no room promised (D38).
+      expect(system.staging.reservedBytes).toBe(0)
 
       // A frame cache is cleared; local storage has none.
       const cleared = await admin.fetch('POST', '/admin/system/cache/clear')

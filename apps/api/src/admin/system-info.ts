@@ -1,5 +1,5 @@
 import { describeSettings, type SecretView, type SettingView } from '@dfs/config'
-import { stagedBytesSql } from '@dfs/db'
+import { reservedStagingSql, stagedBytesSql } from '@dfs/db'
 import { formatBytes, type SystemInfo } from '@dfs/shared'
 import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
@@ -40,7 +40,9 @@ export async function systemInfo(app: FastifyInstance): Promise<SystemInfo> {
     }>(sql`
       SELECT name, kind, discord_channel_id, enabled FROM storage_channels
       ORDER BY kind, name`),
-    app.db.execute<{ bytes: number }>(sql`SELECT ${stagedBytesSql()}::float8 AS bytes`),
+    app.db.execute<{ bytes: number; reserved: number }>(
+      sql`SELECT ${stagedBytesSql()}::float8 AS bytes, ${reservedStagingSql()}::float8 AS reserved`,
+    ),
     // The newest batch posted, read back from the end of the batches' key.
     app.db.execute<{
       last_batch: number | null
@@ -87,6 +89,7 @@ export async function systemInfo(app: FastifyInstance): Promise<SystemInfo> {
     staging: {
       dir: config.stagingDir,
       usedBytes: staged.rows[0]?.bytes ?? 0,
+      reservedBytes: staged.rows[0]?.reserved ?? 0,
       maxBytes: config.stagingMaxBytes,
     },
     frameCache: frameCache && {

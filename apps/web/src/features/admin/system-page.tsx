@@ -313,7 +313,11 @@ function DisksCard({ system }: { system: SystemInfo }) {
           dir={staging.dir}
           used={staging.usedBytes}
           max={staging.maxBytes}
-          note="Uploads not yet in Discord. Uploads pause when it is full."
+          note={
+            staging.reservedBytes > 0
+              ? `Uploads not yet in Discord, and ${formatBytes(staging.reservedBytes)} promised to uploads under way. Uploads wait when it is full.`
+              : 'Uploads not yet in Discord. Uploads wait when it is full.'
+          }
         />
         {frameCache ? (
           <div className="grid gap-2">

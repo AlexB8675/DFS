@@ -844,7 +844,13 @@ export const systemInfoSchema = z.object({
       }),
     ),
   }),
-  staging: z.object({ dir: z.string(), usedBytes: byteCount, maxBytes: byteCount }),
+  staging: z.object({
+    dir: z.string(),
+    usedBytes: byteCount,
+    /** Promised to streams under way, not on disk yet (D38). */
+    reservedBytes: byteCount,
+    maxBytes: byteCount,
+  }),
   /** This API instance's frame cache; `null` with local storage, which needs none. */
   frameCache: z
     .object({ dir: z.string(), usedBytes: byteCount, maxBytes: byteCount, frames: count })
