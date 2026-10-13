@@ -427,7 +427,7 @@ async function streamShare(
 ): Promise<{ id: string; passwordVersion: number; rootNodeId: string } | null> {
   const { rows } = await db.execute<{ id: string; password_version: number }>(sql`
     SELECT link.id, link.password_version
-    FROM share_links link JOIN nodes node ON node.id = link.node_id
+    FROM share_links link JOIN nodes node /* tree: by id, gated */ ON node.id = link.node_id
     WHERE link.node_id = ${nodeId} AND node.owner_id = ${userId}
       AND link.password_hash IS NULL AND link.version_id = node.current_version_id
       AND ${WORKING_LINK}

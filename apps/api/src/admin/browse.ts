@@ -71,7 +71,8 @@ export async function userUsage(
   }>(sql`
     SELECT lower(substring(name from '\\.[^.]*$')) AS extension, mime_type,
       count(*)::int AS count, sum(size_bytes)::float8 AS bytes
-    FROM nodes n WHERE owner_id = ${userId} AND kind = 'file' AND ${VISIBLE}
+    FROM nodes n /* tree: not vault */
+    WHERE owner_id = ${userId} AND kind = 'file' AND ${VISIBLE} AND ${NOT_VAULT}
     GROUP BY 1, 2`)
   const categories = new Map<UsageCategory, { bytes: number; count: number }>()
   let fileCount = 0
@@ -90,7 +91,7 @@ export async function userUsage(
         AND deleted_at IS NULL AND trashed_via IS NULL)::int AS folders,
       coalesce(sum(size_bytes) FILTER (WHERE kind = 'file'
         AND (deleted_at IS NOT NULL OR trashed_via IS NOT NULL)), 0)::float8 AS trash
-    FROM nodes WHERE owner_id = ${userId}`)
+    FROM nodes /* tree: not vault */ WHERE owner_id = ${userId} AND tree <> 'vault'`)
   await auditAlone(app.db, { actorId: admin.user.id, action: 'admin.viewed', target: user.name })
   return {
     usedBytes: user.used,

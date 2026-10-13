@@ -8,6 +8,7 @@ import {
   folderLocations,
   NODE_COLUMNS,
   NODE_JOINS,
+  NOT_VAULT,
   toDriveNode,
   VISIBLE,
   type NodeRow,
@@ -35,8 +36,9 @@ export async function searchNodes(
     : sql``
   const { rows } = await db.execute<NodeRow & { name_key: string }>(sql`
     SELECT ${NODE_COLUMNS}, n.name_key
-    FROM nodes n ${NODE_JOINS}
+    FROM nodes n /* tree: not vault */ ${NODE_JOINS}
     WHERE n.owner_id = ${auth.user.id} AND n.parent_id IS NOT NULL AND ${VISIBLE}
+      AND ${NOT_VAULT}
       AND n.name_key LIKE ${`%${escapeLike(needle)}%`}
       ${resume}
     ORDER BY n.name_key COLLATE "dfs_natural", n.id

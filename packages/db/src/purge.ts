@@ -189,7 +189,7 @@ export async function expireTrash(
 ): Promise<{ items: number; versionIds: string[] }> {
   const cutoff = sql`now() - make_interval(days => ${retentionDays}::int)`
   const { rows: due } = await db.execute<{ owner_id: string; id: string }>(sql`
-    SELECT owner_id, id FROM nodes
+    SELECT owner_id, id FROM nodes /* tree: all trees: the vault's trash expires too, §7.7 */
     WHERE deleted_at IS NOT NULL AND deleted_at < ${cutoff}
     ORDER BY deleted_at LIMIT ${limit}`)
   let items = 0
@@ -203,7 +203,8 @@ export async function expireTrash(
       // Its owner may have restored or emptied some meanwhile.
       const { rows: still } = await tx.execute<{ id: string; name: string; owner: string }>(sql`
         SELECT node.id, node.name, account.display_name AS owner
-        FROM nodes node JOIN users account ON account.id = node.owner_id
+        FROM nodes node /* tree: all trees: the vault's trash expires too, §7.7 */
+          JOIN users account ON account.id = node.owner_id
         WHERE node.id = ANY(${uuidArray(rows.map((row) => row.id))})
           AND node.owner_id = ${ownerId} AND node.deleted_at < ${cutoff}`)
       if (still.length === 0) return null

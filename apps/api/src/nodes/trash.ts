@@ -13,6 +13,7 @@ import {
   NODE_COLUMNS,
   NODE_JOINS,
   notFound,
+  NOT_VAULT,
   toDriveNode,
   type NodeRow,
 } from './read.ts'
@@ -40,8 +41,8 @@ export async function listTrash(
     : sql``
   const { rows } = await db.execute<NodeRow & { deleted_value: string }>(sql`
     SELECT ${NODE_COLUMNS}, n.deleted_at::text AS deleted_value
-    FROM nodes n ${NODE_JOINS}
-    WHERE n.owner_id = ${auth.user.id} AND n.deleted_at IS NOT NULL ${resume}
+    FROM nodes n /* tree: not vault */ ${NODE_JOINS}
+    WHERE n.owner_id = ${auth.user.id} AND n.deleted_at IS NOT NULL AND ${NOT_VAULT} ${resume}
     ORDER BY n.deleted_at DESC, n.id DESC
     LIMIT ${limit + 1}`)
 
@@ -71,8 +72,9 @@ export async function deleteForever(app: FastifyInstance, auth: Auth, id: string
   const staged = await app.db.transaction(async (tx) => {
     await lockDrive(tx, auth.user.id)
     const { rows } = await tx.execute<TrashedRow>(sql`
-      SELECT id, name FROM nodes
-      WHERE id = ${id} AND owner_id = ${auth.user.id} AND deleted_at IS NOT NULL`)
+      SELECT id, name FROM nodes /* tree: not vault */
+      WHERE id = ${id} AND owner_id = ${auth.user.id} AND deleted_at IS NOT NULL
+        AND tree <> 'vault'`)
     if (!rows[0]) throw notFound()
     const purged = await purgeSubtrees(tx, auth.user.id, [id])
     const audited = await audit(tx, purgedEntries(auth, rows, null))
@@ -87,7 +89,8 @@ export async function emptyTrash(app: FastifyInstance, auth: Auth): Promise<void
   const staged = await app.db.transaction(async (tx) => {
     await lockDrive(tx, auth.user.id)
     const { rows } = await tx.execute<TrashedRow>(sql`
-      SELECT id, name FROM nodes WHERE owner_id = ${auth.user.id} AND deleted_at IS NOT NULL`)
+      SELECT id, name FROM nodes /* tree: not vault */
+      WHERE owner_id = ${auth.user.id} AND deleted_at IS NOT NULL AND tree <> 'vault'`)
     const purged = await purgeSubtrees(
       tx,
       auth.user.id,

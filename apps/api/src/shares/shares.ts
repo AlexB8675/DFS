@@ -51,7 +51,7 @@ export function tokenHash(token: string): Buffer {
 export async function listShares(app: FastifyInstance, auth: Auth): Promise<Page<ShareLink>> {
   const { rows } = await app.db.execute<ShareRow>(sql`
     ${SELECT_SHARE}
-    WHERE node.owner_id = ${auth.user.id}
+    WHERE node.owner_id = ${auth.user.id} AND node.tree <> 'vault'
     ORDER BY share.created_at DESC, share.id DESC`)
   return {
     items: await Promise.all(rows.map((row) => toShareLink(app, row))),
@@ -73,17 +73,18 @@ export async function countShareLinks(
     'ids' in input
       ? sql`link.node_id IN (
           WITH RECURSIVE below AS (
-            SELECT id FROM nodes WHERE id = ANY(${uuidArray(input.ids)}) AND owner_id = ${auth.user.id}
+            SELECT id FROM nodes /* tree: not vault, the outer query filters */
+            WHERE id = ANY(${uuidArray(input.ids)}) AND owner_id = ${auth.user.id}
             UNION ALL
-            SELECT child.id FROM nodes child JOIN below ON child.parent_id = below.id
+            SELECT child.id FROM nodes child /* tree: by parent */ JOIN below ON child.parent_id = below.id
           )
           SELECT id FROM below)`
       : sql`node.owner_id = ${auth.user.id}
           AND (node.deleted_at IS NOT NULL OR node.trashed_via IS NOT NULL)`
   const { rows } = await app.db.execute<{ links: number }>(sql`
     SELECT count(*)::int AS links
-    FROM share_links link JOIN nodes node ON node.id = link.node_id
-    WHERE ${scope} AND ${WORKING_LINK}
+    FROM share_links link JOIN nodes node /* tree: not vault */ ON node.id = link.node_id
+    WHERE ${scope} AND node.tree <> 'vault' AND ${WORKING_LINK}
       AND (node.kind = 'folder' OR link.version_id = node.current_version_id)`)
   return { links: rows[0]?.links ?? 0 }
 }
@@ -193,11 +194,11 @@ const SELECT_SHARE = sql`
     share.created_at::text AS created_at, share.expires_at::text AS expires_at,
     share.password_hash IS NOT NULL AS has_password, share.max_downloads, share.download_count,
     share.token_sealed
-  FROM share_links share JOIN nodes node ON node.id = share.node_id`
+  FROM share_links share JOIN nodes node /* tree: not vault, each use filters */ ON node.id = share.node_id`
 
 async function ownShare(app: FastifyInstance, auth: Auth, id: string): Promise<ShareRow> {
   const { rows } = await app.db.execute<ShareRow>(sql`
-    ${SELECT_SHARE} WHERE share.id = ${id} AND node.owner_id = ${auth.user.id}`)
+    ${SELECT_SHARE} WHERE share.id = ${id} AND node.owner_id = ${auth.user.id} AND node.tree <> 'vault'`)
   const [share] = rows
   if (!share) throw new ApiError(404, 'not_found', 'This link no longer exists.')
   return share
