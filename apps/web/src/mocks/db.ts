@@ -231,6 +231,8 @@ export class MockAlreadyUploaded extends MockApiError {
 
 const STATE_VERSION = 18
 const STORAGE_KEY = 'dfs.mock-db'
+/** `STAGING_MAX_BYTES`: the mock's staging, and the most a file may be (D38). */
+export const STAGING_MAX_BYTES = 100 * 1024 ** 3
 /** `CHUNK_SIZE` at the 20 MiB attachment limit (§7.3). */
 export const CHUNK_SIZE = 20 * 1024 * 1024 - 128 * 1024
 const CSRF_TOKEN = 'mock-csrf-token'
@@ -1049,6 +1051,14 @@ export class MockDb {
     const user = this.currentUser()
     if (this.usedBytes(user.id) + sizeBytes > user.quotaBytes) {
       throw new MockApiError(507, 'quota_exceeded', `Not enough storage left for “${rawName}”.`)
+    }
+    // The real API counts the file's frames (D38); a little over the file's size, which no test sits between.
+    if (sizeBytes > STAGING_MAX_BYTES) {
+      throw new MockApiError(
+        413,
+        'file_too_large',
+        `“${rawName}” is larger than ${formatBytes(STAGING_MAX_BYTES)}, the most a file can be.`,
+      )
     }
     const node =
       existing ??

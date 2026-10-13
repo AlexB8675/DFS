@@ -231,6 +231,26 @@ export function uploadTests({ describe, it, expect, owner, target }: SuiteContex
       ])
     })
 
+    it('refuses a file larger than staging before anything is sent (D38)', async () => {
+      const client = await owner()
+      const root = await workspace(client)
+      const { results } = await client.call('POST', '/uploads/batch', uploadBatchResultSchema, {
+        json: {
+          uploads: [
+            {
+              parentId: root.id,
+              name: 'film.mkv',
+              sizeBytes: target().stagingMaxBytes + 1,
+              mimeType: 'video/x-matroska',
+            },
+          ],
+        },
+      })
+      expect(results.map((result) => (result.ok ? 'ok' : result.error.code))).toEqual([
+        'file_too_large',
+      ])
+    })
+
     it('asks before replacing: a name a file has answers file_exists, with that file (D20)', async () => {
       const client = await owner()
       const root = await workspace(client)

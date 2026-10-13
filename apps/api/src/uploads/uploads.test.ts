@@ -2,7 +2,7 @@ import { readdir } from 'node:fs/promises'
 import path from 'node:path'
 import { nodes, users } from '@dfs/db'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
-import { nameKey, type CreateUploadInput } from '@dfs/shared'
+import { formatBytes, nameKey, type CreateUploadInput } from '@dfs/shared'
 import { eq, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import pg from 'pg'
@@ -612,5 +612,24 @@ describe('upload batches', () => {
       'not_found',
       'not_a_folder',
     ])
+  })
+})
+
+describe('the cap on a file (D38)', () => {
+  it('refuses a file whose frames would take more than staging, naming the limit', async () => {
+    if (!auth.user.rootNodeId) throw new Error('Missing root folder.')
+    const limit = app.config.stagingMaxBytes
+    const [tooLarge, fits] = await createUploads(app, auth, [
+      // Its frames are larger than the file itself, so one the size of staging can't fit.
+      { ...input(auth.user.rootNodeId, `${crypto.randomUUID()}.bin`), sizeBytes: limit },
+      {
+        ...input(auth.user.rootNodeId, `${crypto.randomUUID()}.bin`),
+        sizeBytes: 2 * app.config.sizes.chunkSize,
+      },
+    ])
+    expect(tooLarge).toMatchObject({ ok: false, error: { code: 'file_too_large' } })
+    expect(tooLarge?.ok === false && tooLarge.error.message).toContain(formatBytes(limit))
+    if (!fits?.ok) throw new Error('The smaller file should have started.')
+    await cancelUpload(app, auth, fits.session.uploadId)
   })
 })

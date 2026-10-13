@@ -9,6 +9,8 @@ export interface ContractTarget {
   origin: string
   /** An owner account that is ready to use (no temporary password). */
   owner: { username: string; password: string }
+  /** The most a file's frames may take (`STAGING_MAX_BYTES`, D38): a larger file is refused. */
+  stagingMaxBytes: number
   /** Lets background work finish: syncing files to storage, folder sizes. */
   settle: () => Promise<void>
 }

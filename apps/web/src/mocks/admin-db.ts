@@ -38,6 +38,7 @@ import {
   isVisible,
   MockApiError,
   MockDb,
+  STAGING_MAX_BYTES,
   notFound,
   paginate,
   passwordProblem,
@@ -57,7 +58,6 @@ export const MOCK_RELEASE: Release = { version: 'dev', deployedAt: null }
 /** `DEFAULT_QUOTA_BYTES` and `TEMP_PASSWORD_DAYS` (§15). */
 const DEFAULT_QUOTA_BYTES = 100 * GB
 const TEMP_PASSWORD_DAYS = 7
-const STAGING_MAX_BYTES = 100 * GB
 const CACHE_MAX_BYTES = 5 * GB
 /** How the seeded data is spread over the seeded channels, by name. */
 const CHANNEL_SHARES: Record<string, number> = {

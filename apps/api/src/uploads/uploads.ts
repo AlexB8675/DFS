@@ -39,6 +39,7 @@ import { ApiError } from '../errors.ts'
 import { notFound, VISIBLE } from '../nodes/read.ts'
 import { checkedName, lockDrive, nameConflict } from '../nodes/write.ts'
 import { removeStagedVersions } from '../staging.ts'
+import { framedBytes } from './framed-bytes.ts'
 import { stageFrame } from './stage-frame.ts'
 
 // Multipart uploads (DESIGN.md §6.1). A session reserves quota and creates a
@@ -215,6 +216,10 @@ async function startUploads(
         plan.index,
         new ApiError(507, 'quota_exceeded', `Not enough storage left for “${plan.name}”.`),
       )
+    } else if (
+      framedBytes(plan.input.sizeBytes, app.config.sizes.chunkSize) > app.config.stagingMaxBytes
+    ) {
+      fail(plan.index, fileTooLarge(plan.name, app.config.stagingMaxBytes))
     } else {
       free -= plan.input.sizeBytes
       accepted.push(plan)
@@ -546,6 +551,18 @@ export function stagingFull(): ApiError {
   return new ApiError(503, 'staging_full', 'The server is busy storing files. Try again shortly.', {
     'retry-after': String(STAGING_RETRY_AFTER_SECONDS),
   })
+}
+
+/**
+ * D38: an upload's frames wait in staging until it completes, so a file
+ * whose frames couldn't all fit there at once could never complete.
+ */
+function fileTooLarge(name: string, limit: number): ApiError {
+  return new ApiError(
+    413,
+    'file_too_large',
+    `“${name}” is larger than ${formatBytes(limit)}, the most a file can be.`,
+  )
 }
 
 /** A part has an index of the upload, and exactly the size of that part. */

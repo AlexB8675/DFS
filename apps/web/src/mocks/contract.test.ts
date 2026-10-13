@@ -1,6 +1,7 @@
 import { defineContractSuite, type ContractTarget } from '@dfs/contract'
 import { setupServer } from 'msw/node'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { STAGING_MAX_BYTES } from './db.ts'
 
 // The contract suite (DESIGN.md §17) against the mock API, served by MSW in
 // Node, so the mock and the real API answer the same.
@@ -38,6 +39,7 @@ const target: ContractTarget = {
   baseUrl: 'http://localhost',
   origin: 'http://localhost',
   owner: { username: demoOwner.username, password: demoOwner.password },
+  stagingMaxBytes: STAGING_MAX_BYTES,
   settle: () => {
     db.finishSyncs()
     return Promise.resolve()

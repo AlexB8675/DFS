@@ -79,6 +79,7 @@ for (const storage of ['local', 'discord'] as const) {
         baseUrl: address,
         origin: setup.config.publicBaseUrl,
         owner,
+        stagingMaxBytes: setup.config.stagingMaxBytes,
         settle: async () => {
           for (const versionId of await purgeEarlierVersions(app.db)) {
             await app.staging.removeVersion(versionId)
