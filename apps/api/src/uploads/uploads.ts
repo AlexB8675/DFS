@@ -504,7 +504,7 @@ export async function receivePart(
       throw new ApiError(400, 'hash_mismatch', 'The part was corrupted in transit.')
     }
   }
-  await storePart(app, auth, upload, index, body, plainHash)
+  await storePart(app, auth, upload, index, body, plainHash, { reserved: false })
 }
 
 /**
@@ -516,16 +516,32 @@ export async function streamStart(
   auth: Auth,
   uploadId: string,
   from: number,
-): Promise<{ chunkSize: number; chunkCount: number; bytes: number; completed: boolean }> {
+): Promise<{
+  chunkSize: number
+  chunkCount: number
+  bytes: number
+  completed: boolean
+  /** The frames of the parts from `from` not received yet: what to reserve in staging (D38). */
+  needBytes: number
+}> {
   const upload = await findUpload(app.db, auth, uploadId)
   if (!Number.isInteger(from) || from < 0 || from >= upload.chunk_count) {
     throw new ApiError(400, 'invalid_part', 'The stream starts past the end of the file.')
+  }
+  const completed = upload.state === 'completed'
+  let needBytes = 0
+  if (!completed) {
+    const { rows } = await app.db.execute<{ bytes: number }>(sql`
+      SELECT coalesce(sum(frame_size), 0)::float8 AS bytes FROM chunks
+      WHERE version_id = ${upload.version_id} AND idx >= ${from}`)
+    needBytes = framedBytes(upload.size_bytes, upload.chunk_size, from) - (rows[0]?.bytes ?? 0)
   }
   return {
     chunkSize: upload.chunk_size,
     chunkCount: upload.chunk_count,
     bytes: upload.size_bytes - from * upload.chunk_size,
-    completed: upload.state === 'completed',
+    completed,
+    needBytes,
   }
 }
 
@@ -543,7 +559,7 @@ export async function receiveStreamedPart(
 ): Promise<void> {
   const upload = await findUpload(app.db, auth, uploadId, { partIndex: index })
   checkPart(upload, index, body)
-  await storePart(app, auth, upload, index, body, await sha256(body))
+  await storePart(app, auth, upload, index, body, await sha256(body), { reserved: true })
 }
 
 /** Staging backpressure (§6.1): a `503` the client waits out. */
@@ -586,6 +602,7 @@ async function storePart(
   index: number,
   body: Uint8Array,
   plainHash: Uint8Array,
+  { reserved }: { reserved: boolean },
 ): Promise<void> {
   const uploadId = upload.id
   // A retry of an acknowledged part needs no encryption, fsync or staging space.
@@ -596,7 +613,8 @@ async function storePart(
     return
   }
   if (upload.state === 'completed') throw uploadCompleted()
-  if (await app.stagingRoom.isFull()) throw stagingFull()
+  // A streamed part had its room reserved before it was sent (D38); one on its own takes its turn.
+  if (!reserved && (await app.stagingRoom.isFull())) throw stagingFull()
 
   const versionId = upload.version_id
   const key = await app.dataKeys.get(versionId, () =>
@@ -629,10 +647,12 @@ async function storePart(
             ${Buffer.from(frameHash)}, ${stagedPath})
           ON CONFLICT (version_id, idx) DO NOTHING RETURNING idx`)
         attempt.published = inserted.rows.length > 0
-        // A part arriving is as good as its page saying it is open.
+        // A part arriving is as good as its page saying it is open, and its
+        // frame now counts in staging itself, out of its stream's reservation.
         if (attempt.published) {
           await tx.execute(sql`
-            UPDATE upload_sessions SET alive_at = now(), expires_at = ${extendedExpiry}
+            UPDATE upload_sessions SET alive_at = now(), expires_at = ${extendedExpiry},
+              staging_reserved_bytes = greatest(0, staging_reserved_bytes - ${frame.length})
             WHERE id = ${uploadId}`)
         }
       }

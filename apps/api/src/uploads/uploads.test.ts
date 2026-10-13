@@ -20,6 +20,7 @@ import {
   createUploads,
   keepUploadsAlive,
   receivePart,
+  receiveStreamedPart,
 } from './uploads.ts'
 
 /** The frame of the 3-byte parts these tests send. */
@@ -393,6 +394,29 @@ describe('receiving parts', () => {
       release.resolve(undefined)
       await received
       spy.mockRestore()
+    }
+  })
+
+  it('counts a part out of its stream’s reservation as it arrives, and lets it in while staging is full', async () => {
+    // Two parts: a whole one, then the last of 3 bytes, whose frame is PART_FRAME.
+    const session = await start(app.config.sizes.chunkSize + 3)
+    await app.db.execute(sql`
+      UPDATE upload_sessions SET staging_reserved_bytes = 1000000, staging_reserved_at = now()
+      WHERE id = ${session.uploadId}`)
+    const full = vi.spyOn(app.stagingRoom, 'isFull').mockResolvedValue(true)
+    try {
+      // Reserved before it was sent: no room to check.
+      await receiveStreamedPart(app, auth, session.uploadId, 1, new Uint8Array([1, 2, 3]))
+      expect(full).not.toHaveBeenCalled()
+      const { rows } = await app.db.execute<{ reserved: number }>(sql`
+        SELECT staging_reserved_bytes::float8 AS reserved FROM upload_sessions WHERE id = ${session.uploadId}`)
+      expect(rows[0]?.reserved).toBe(1000000 - PART_FRAME)
+      // A part sent on its own takes its turn.
+      await expect(
+        receivePart(app, auth, session.uploadId, 0, new Uint8Array(session.chunkSize), undefined),
+      ).rejects.toMatchObject({ status: 503, code: 'staging_full' })
+    } finally {
+      full.mockRestore()
     }
   })
 })

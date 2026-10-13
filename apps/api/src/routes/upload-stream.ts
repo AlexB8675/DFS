@@ -9,7 +9,9 @@ import { receiveStreamedPart, stagingFull, streamStart } from '../uploads/upload
 // carries every part from `from` to the end. The API cuts the body into parts
 // as it arrives and stores each as `PUT /uploads/:id/parts/:index` would,
 // one part at a time while the next arrives. Whatever was stored when the
-// stream breaks stays, and `GET /uploads/:id` says where to start again.
+// stream breaks stays, and `GET /uploads/:id` says where to start again. A
+// stream reserves room in staging for every part it will send before it
+// reads one (D38), and gives back what it didn't use when it stops.
 
 const params = z.object({ id: z.uuid() })
 const query = z.object({ from: z.coerce.number().int().min(0).default(0) })
@@ -21,6 +23,8 @@ const query = z.object({ from: z.coerce.number().int().min(0).default(0) })
  */
 const STAGING_WAIT_MS = 45_000
 const STAGING_POLL_MS = 2_000
+/** A stream renews its reservation this often; one not renewed for 90 s stops counting (D38). */
+const RESERVATION_RENEW_MS = 30_000
 
 /** Its own plugin, so its body stays a stream: the other upload routes read theirs whole. */
 export function uploadStreamRoutes(app: FastifyInstance, _options: object, done: () => void): void {
@@ -69,38 +73,63 @@ export function uploadStreamRoutes(app: FastifyInstance, _options: object, done:
         let filled = 0
         // The part being stored while the next one arrives.
         let storing: Promise<void> | null = null
+        // Room for every part still to come, reserved before reading a byte (D38).
+        const reserving = !start.completed && start.needBytes > 0
+        let renewal: NodeJS.Timeout | undefined
         try {
-          if (!start.completed) await roomInStaging(app, gone.signal)
-          for (let next = await read(); !next.done; next = await read()) {
-            const data = next.value
-            for (let offset = 0; offset < data.length;) {
-              if (index >= start.chunkCount) {
-                throw new ApiError(400, 'invalid_part', 'The stream is longer than the file.')
-              }
-              const taken = data.copy(part, filled, offset)
-              filled += taken
-              offset += taken
-              if (filled < part.length) continue
-              await storing
-              if (!start.completed) await roomInStaging(app, gone.signal)
-              storing = store(app, auth, uploadId, index, part)
-              index += 1
-              if (index < start.chunkCount) {
-                part = Buffer.allocUnsafe(partSize(index))
-                filled = 0
+          try {
+            if (reserving) {
+              await reserveRoom(app, uploadId, start.needBytes, gone.signal)
+              renewal = setInterval(() => {
+                app.stagingRoom.renew(uploadId).catch((error: unknown) => {
+                  request.log.warn(
+                    { err: error, uploadId },
+                    'could not renew a staging reservation',
+                  )
+                })
+              }, RESERVATION_RENEW_MS)
+            }
+            for (let next = await read(); !next.done; next = await read()) {
+              const data = next.value
+              for (let offset = 0; offset < data.length;) {
+                if (index >= start.chunkCount) {
+                  throw new ApiError(400, 'invalid_part', 'The stream is longer than the file.')
+                }
+                const taken = data.copy(part, filled, offset)
+                filled += taken
+                offset += taken
+                if (filled < part.length) continue
+                await storing
+                storing = store(app, auth, uploadId, index, part)
+                index += 1
+                if (index < start.chunkCount) {
+                  part = Buffer.allocUnsafe(partSize(index))
+                  filled = 0
+                }
               }
             }
+            await storing
+          } catch (error) {
+            // Its staged file is cleaned up, or kept, before the answer.
+            await storing?.catch(() => undefined)
+            // The rest of the body isn't wanted: the connection goes with the answer.
+            if (!body.complete) reply.header('connection', 'close')
+            if (!gone.signal.aborted) throw error
+            // No answer reaches a client that left, and Fastify logs none: say where it stopped.
+            request.log.info({ uploadId, from, parts: index - from }, 'upload stream cut off')
+            throw interrupted()
           }
-          await storing
-        } catch (error) {
-          // Its staged file is cleaned up, or kept, before the answer.
-          await storing?.catch(() => undefined)
-          // The rest of the body isn't wanted: the connection goes with the answer.
-          if (!body.complete) reply.header('connection', 'close')
-          if (!gone.signal.aborted) throw error
-          // No answer reaches a client that left, and Fastify logs none: say where it stopped.
-          request.log.info({ uploadId, from, parts: index - from }, 'upload stream cut off')
-          throw interrupted()
+        } finally {
+          clearInterval(renewal)
+          // What it didn't send goes back, however it ended.
+          if (reserving) {
+            await app.stagingRoom.release(uploadId).catch((error: unknown) => {
+              request.log.warn(
+                { err: error, uploadId },
+                'could not give back a staging reservation',
+              )
+            })
+          }
         }
         if (index < start.chunkCount) {
           throw new ApiError(400, 'invalid_part', 'The stream ended before the file did.')
@@ -126,10 +155,19 @@ function store(
   return stored
 }
 
-/** Holds the stream, unread, until staging has room (§6.1): the browser's sending pauses with it. */
-async function roomInStaging(app: FastifyInstance, signal: AbortSignal): Promise<void> {
+/**
+ * Holds the stream, unread, until staging has room for all it will send
+ * (§6.1, D38): the browser's sending pauses with it. Each try keeps the
+ * stream's turn; past `STAGING_WAIT_MS`, a 503 its client waits out.
+ */
+async function reserveRoom(
+  app: FastifyInstance,
+  uploadId: string,
+  needBytes: number,
+  signal: AbortSignal,
+): Promise<void> {
   const giveUpAt = Date.now() + STAGING_WAIT_MS
-  while (await app.stagingRoom.isFull()) {
+  while (!(await app.stagingRoom.admit(uploadId, needBytes))) {
     if (Date.now() >= giveUpAt) throw stagingFull()
     await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, STAGING_POLL_MS)

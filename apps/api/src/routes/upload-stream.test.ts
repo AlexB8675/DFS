@@ -1,5 +1,6 @@
 import { readdir } from 'node:fs/promises'
 import path from 'node:path'
+import { chunkFrameLength } from '@dfs/crypto'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
 import {
   sessionSchema,
@@ -7,11 +8,13 @@ import {
   uploadStatusSchema,
   type UploadSession,
 } from '@dfs/shared'
+import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest'
 import { buildApp } from '../app.ts'
 import { testConfig } from '../testing/config.ts'
 import { seedUser } from '../testing/seed.ts'
+import { framedBytes } from '../uploads/framed-bytes.ts'
 
 // A file streamed in one request (DESIGN.md §6.1), over real HTTP: a stream
 // can break off partway, which `app.inject` can't do.
@@ -97,6 +100,12 @@ async function received(headers: Record<string, string>, session: UploadSession)
   return uploadStatusSchema.parse(await response.json()).receivedParts
 }
 
+async function reserved(session: UploadSession): Promise<number> {
+  const { rows } = await app.db.execute<{ bytes: number }>(sql`
+    SELECT staging_reserved_bytes::float8 AS bytes FROM upload_sessions WHERE id = ${session.uploadId}`)
+  return rows[0]?.bytes ?? -1
+}
+
 async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))
   return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('')
@@ -116,6 +125,9 @@ function cutShort(data: Uint8Array, bytes: number): ReadableStream<Uint8Array> {
     },
   })
 }
+
+/** A file of two whole parts and a little more, so a stream can resume after the first. */
+const resumableSize = () => 2 * app.config.sizes.chunkSize + 10
 
 describe('streamed uploads (§6.1)', () => {
   it('keeps the whole parts of a stream that broke off, and resumes after them', async () => {
@@ -181,19 +193,102 @@ describe('streamed uploads (§6.1)', () => {
     expect(await response.json()).toMatchObject({ error: { code: 'upload_not_found' } })
   })
 
-  it('holds a stream, unread, while staging is full, and takes it once there is room', async () => {
+  it('holds a stream, unread, until staging has room for all it will send', async () => {
     const owner = await signIn('owner')
     const session = await startUpload(owner, 10)
-    const full = vi.spyOn(app.stagingRoom, 'isFull').mockResolvedValueOnce(true)
+    const admit = vi.spyOn(app.stagingRoom, 'admit').mockResolvedValueOnce(false)
     try {
       const started = performance.now()
       const response = await stream(owner, session, 0, new Uint8Array(10))
       expect(response.status).toBe(204)
-      // It looked again a poll later, and found room.
+      // It asked again a poll later, and got in.
       expect(performance.now() - started).toBeGreaterThanOrEqual(1500)
+      expect(admit).toHaveBeenCalledTimes(2)
+      expect(admit).toHaveBeenLastCalledWith(session.uploadId, framedBytes(10, session.chunkSize))
       expect(await received(owner, session)).toEqual([0])
     } finally {
-      full.mockRestore()
+      admit.mockRestore()
+    }
+  })
+
+  it('reserves only what is left to send when a stream resumes', async () => {
+    const owner = await signIn('owner')
+    const size = resumableSize()
+    const session = await startUpload(owner, size)
+    const data = new Uint8Array(size).fill(7)
+    // The first part arrives whole, then the connection drops.
+    await stream(owner, session, 0, cutShort(data, session.chunkSize + 5)).catch(() => undefined)
+    await vi.waitFor(async () => {
+      expect(await received(owner, session)).toEqual([0])
+    })
+    const admit = vi.spyOn(app.stagingRoom, 'admit')
+    try {
+      const response = await stream(owner, session, 1, data.slice(session.chunkSize))
+      expect(response.status).toBe(204)
+      expect(admit).toHaveBeenCalledWith(session.uploadId, framedBytes(size, session.chunkSize, 1))
+    } finally {
+      admit.mockRestore()
+    }
+  })
+
+  it('reserves nothing for a later part that already arrived on its own', async () => {
+    const owner = await signIn('owner')
+    const size = resumableSize()
+    const session = await startUpload(owner, size)
+    const data = new Uint8Array(size).fill(4)
+    const last = data.slice(2 * session.chunkSize)
+    const sent = await fetch(`${base}/api/uploads/${session.uploadId}/parts/2`, {
+      method: 'PUT',
+      headers: { ...owner, 'content-type': 'application/octet-stream' },
+      body: last,
+    })
+    expect(sent.status).toBe(204)
+    const admit = vi.spyOn(app.stagingRoom, 'admit')
+    try {
+      // The whole file streams, the last part again, but only the first two need room.
+      expect((await stream(owner, session, 0, data)).status).toBe(204)
+      expect(admit).toHaveBeenCalledWith(
+        session.uploadId,
+        framedBytes(size, session.chunkSize) - chunkFrameLength(last.length),
+      )
+    } finally {
+      admit.mockRestore()
+    }
+  })
+
+  it('holds nothing once a stream ends, whether it finished or broke off', async () => {
+    const owner = await signIn('owner')
+    const size = resumableSize()
+    const admit = vi.spyOn(app.stagingRoom, 'admit')
+    try {
+      const broken = await startUpload(owner, size)
+      await stream(owner, broken, 0, cutShort(new Uint8Array(size), 5)).catch(() => undefined)
+      await vi.waitFor(async () => {
+        expect(await reserved(broken)).toBe(0)
+      })
+      const whole = await startUpload(owner, size)
+      expect((await stream(owner, whole, 0, new Uint8Array(size))).status).toBe(204)
+      expect(await reserved(whole)).toBe(0)
+      // Both had reserved room: what is 0 now was given back.
+      expect(admit).toHaveBeenCalledWith(broken.uploadId, framedBytes(size, broken.chunkSize))
+      expect(admit).toHaveBeenCalledWith(whole.uploadId, framedBytes(size, whole.chunkSize))
+    } finally {
+      admit.mockRestore()
+    }
+  })
+
+  it('never holds a stream to a completed upload', async () => {
+    const owner = await signIn('owner')
+    const session = await startUpload(owner, 10)
+    const data = new Uint8Array(10).fill(3)
+    // A file of one part completes as its part arrives.
+    expect((await stream(owner, session, 0, data)).status).toBe(204)
+    const admit = vi.spyOn(app.stagingRoom, 'admit')
+    try {
+      expect((await stream(owner, session, 0, data)).status).toBe(204)
+      expect(admit).not.toHaveBeenCalled()
+    } finally {
+      admit.mockRestore()
     }
   })
 })
