@@ -129,7 +129,7 @@ function store(
 /** Holds the stream, unread, until staging has room (§6.1): the browser's sending pauses with it. */
 async function roomInStaging(app: FastifyInstance, signal: AbortSignal): Promise<void> {
   const giveUpAt = Date.now() + STAGING_WAIT_MS
-  while (await app.stagingLimit.isFull()) {
+  while (await app.stagingRoom.isFull()) {
     if (Date.now() >= giveUpAt) throw stagingFull()
     await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, STAGING_POLL_MS)

@@ -596,7 +596,7 @@ async function storePart(
     return
   }
   if (upload.state === 'completed') throw uploadCompleted()
-  if (await app.stagingLimit.isFull()) throw stagingFull()
+  if (await app.stagingRoom.isFull()) throw stagingFull()
 
   const versionId = upload.version_id
   const key = await app.dataKeys.get(versionId, () =>

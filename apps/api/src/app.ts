@@ -36,7 +36,7 @@ import { nodeRoutes } from './routes/nodes.ts'
 import { shareRoutes } from './routes/shares.ts'
 import { uploadStreamRoutes } from './routes/upload-stream.ts'
 import { uploadRoutes } from './routes/uploads.ts'
-import { StagingLimit } from './staging.ts'
+import { StagingRoom } from './staging.ts'
 import { UnderWay } from './under-way.ts'
 
 declare module 'fastify' {
@@ -55,7 +55,7 @@ declare module 'fastify' {
     }
     /** Frames received but not yet stored (§6.1), and whether there is room for more. */
     staging: Staging
-    stagingLimit: StagingLimit
+    stagingRoom: StagingRoom
     /** The master keys, and data keys unwrapped with them lately (§7.3). */
     keys: MasterKeys
     dataKeys: DataKeyCache
@@ -186,7 +186,7 @@ export async function buildApp({
     streamLinks: new RateLimiter(30, 10 * 60_000),
   })
   app.decorate('staging', new Staging(config.stagingDir))
-  app.decorate('stagingLimit', new StagingLimit(db, config.stagingMaxBytes))
+  app.decorate('stagingRoom', new StagingRoom(db, config.stagingMaxBytes))
   app.decorate('keys', await loadMasterKeys(config, app.log))
   app.decorate('dataKeys', new DataKeyCache())
   app.decorate('queue', queue)

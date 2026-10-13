@@ -23,6 +23,25 @@ export function stagedBytesSql(): SQL {
   )`
 }
 
+/** How long a stream's staging reservation counts without being renewed (§6.1, D38). */
+export const STAGING_RESERVATION_SECONDS = 90
+/** How long a stream waiting for room keeps its turn without coming back (§6.1). */
+export const STAGING_TURN_SECONDS = 120
+
+/**
+ * Staging promised to streams under way and not used yet (D38): reservations
+ * renewed in the last `STAGING_RESERVATION_SECONDS`, but `exceptUploadId`'s.
+ * Room promised, not disk used: the staging alert and graph leave it out.
+ */
+export function reservedStagingSql(exceptUploadId?: string): SQL {
+  return sql`(
+    SELECT coalesce(sum(staging_reserved_bytes), 0) FROM upload_sessions
+    WHERE staging_reserved_bytes > 0
+      AND staging_reserved_at > now() - make_interval(secs => ${STAGING_RESERVATION_SECONDS}::int)
+      ${exceptUploadId === undefined ? sql`` : sql`AND id <> ${exceptUploadId}`}
+  )`
+}
+
 /** The pass over `blobs`: what is stored, and what waits to be stored or deleted. */
 export interface StorageTotals {
   /** Stored blobs, how many of them are packs, their bytes and how many of those are still used. */

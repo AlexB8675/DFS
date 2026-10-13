@@ -36,6 +36,12 @@ export const LOCKS = {
    * flushes at a time. Never `journal`: every journaled write takes that one.
    */
   journalFlush: 6,
+  /**
+   * Taken while a stream is let into staging (§6.1, D38), so streams on two
+   * API instances can't both take the last room. Its transaction touches
+   * only the stream's own session after it.
+   */
+  stagingRoom: 7,
 } as const
 
 /**

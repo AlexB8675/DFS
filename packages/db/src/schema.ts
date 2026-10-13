@@ -434,6 +434,20 @@ export const uploadSessions = pgTable(
      * upload lives in its page (§6.1): one silent for long is given up.
      */
     aliveAt: timestamptz('alive_at').notNull().defaultNow(),
+    /**
+     * Staging promised to this upload's stream for the parts it has yet to
+     * send (§6.1, D38): each part counts itself out as it arrives, and the
+     * stream gives back the rest when it stops. It counts only while the
+     * stream renews it (`stagingReservedAt`), so one whose API died lapses.
+     */
+    stagingReservedBytes: bytes('staging_reserved_bytes').notNull().default(0),
+    stagingReservedAt: timestamptz('staging_reserved_at'),
+    /** Since when its stream has waited for room: its turn, oldest first (§6.1). */
+    stagingWaitingSince: timestamptz('staging_waiting_since'),
+    /** When its client last came back for room; the turn lapses soon after it stops. */
+    stagingWaitingSeenAt: timestamptz('staging_waiting_seen_at'),
+    /** The room it waits for. */
+    stagingWantedBytes: bytes('staging_wanted_bytes').notNull().default(0),
   },
   (t) => [
     index('upload_sessions_user_id').on(t.userId),
@@ -444,6 +458,13 @@ export const uploadSessions = pgTable(
     // For the checks Postgres makes when a node or a version is deleted.
     index('upload_sessions_node_id').on(t.nodeId),
     index('upload_sessions_version_id').on(t.versionId),
+    // Staging's room is counted from the few sessions holding or wanting some.
+    index('upload_sessions_staging_reserved')
+      .on(t.stagingReservedAt)
+      .where(sql`${t.stagingReservedBytes} > 0`),
+    index('upload_sessions_staging_waiting')
+      .on(t.stagingWaitingSince)
+      .where(sql`${t.stagingWaitingSince} IS NOT NULL`),
   ],
 )
 

@@ -239,7 +239,7 @@ describe('receiving parts', () => {
     const bytes = new Uint8Array(session.chunkSize).fill(9)
     await receivePart(app, auth, session.uploadId, 0, bytes, undefined)
     const write = vi.spyOn(app.staging, 'write')
-    const full = vi.spyOn(app.stagingLimit, 'isFull').mockResolvedValue(true)
+    const full = vi.spyOn(app.stagingRoom, 'isFull').mockResolvedValue(true)
     try {
       await receivePart(app, auth, session.uploadId, 0, bytes, undefined)
       expect(write).not.toHaveBeenCalled()

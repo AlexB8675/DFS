@@ -184,7 +184,7 @@ describe('streamed uploads (§6.1)', () => {
   it('holds a stream, unread, while staging is full, and takes it once there is room', async () => {
     const owner = await signIn('owner')
     const session = await startUpload(owner, 10)
-    const full = vi.spyOn(app.stagingLimit, 'isFull').mockResolvedValueOnce(true)
+    const full = vi.spyOn(app.stagingRoom, 'isFull').mockResolvedValueOnce(true)
     try {
       const started = performance.now()
       const response = await stream(owner, session, 0, new Uint8Array(10))
