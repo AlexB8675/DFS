@@ -2,14 +2,16 @@
 // (DESIGN.md §10.4). Firefox's cache for a `<video src>` drops to 32 MB on
 // mobile data, about 2 s of a 120 Mbit/s phone video, and thrashes there. Media
 // Source keeps up to about 150 MB that DFS fills itself, so the player reads the
-// file's bytes, lets mp4box split them into fragments and appends those. This
-// opens the video: it finds the index, checks the codecs and gives the browser
-// the init segments. The samples are streamed after that.
+// file's bytes, lets mp4box split them into fragments and appends those. It
+// opens the video first: it finds the index, checks the codecs and gives the
+// browser the init segments. Then it streams the rest of the file, holding the
+// reading back while enough is buffered ahead of the playhead, dropping what
+// was played to make room, and opening the stream again where it broke off.
 
 import { createFile, MP4BoxBuffer, type ISOFile, type Movie, type Track } from 'mp4box'
 import { AppendQueue } from './append-queue'
 import { mediaLayout, type MediaLayout } from './boxes'
-import { mimeOf, samplesPerSegment } from './tracks'
+import { aheadSeconds, bufferTargets, mimeOf, samplesPerSegment } from './tracks'
 
 export interface BufferedStats {
   phase: 'opening' | 'buffering' | 'ended' | 'failed'
@@ -54,6 +56,10 @@ interface StreamContext {
   queues: AppendQueue[]
   stats: BufferedStats
   emit: () => void
+  /** Ends the play with `message` shown. */
+  fail: (message: string) => void
+  /** What the queues call when a buffer is full. `streamSamples` puts its handling in `handle`. */
+  quota: { handle: () => void }
 }
 
 /** How much of the file is read first, to find the index and learn the file's size. */
@@ -63,6 +69,24 @@ const HEAD_BYTES = 64 * 1024
 const READY_TIMEOUT_MS = 15_000
 
 const STATS_INTERVAL_MS = 500
+
+/** The most bytes queued for the buffers and not yet appended while reading goes on. */
+const MAX_PENDING_BYTES = 32 * 1024 * 1024
+
+/** How long a held-back reading waits before it looks again, if no `timeupdate` comes first. */
+const HOLD_RECHECK_MS = 250
+
+/** What was played is dropped at most this often. */
+const TRIM_INTERVAL_MS = 1000
+
+/** How long after a quota error the full buffers are tried again, if no `timeupdate` comes first. */
+const QUOTA_RETRY_MS = 500
+
+/** How long to wait before the stream is opened again after it broke off. */
+const REOPEN_WAIT_MS = 1000
+
+/** How many times in a row the stream is opened again with no bytes coming in between. */
+const MAX_REOPENS = 5
 
 /**
  * How much of a track goes in each segment. Segments are cut by sample count,
@@ -123,6 +147,7 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
     error: null,
   }
   const emit = (): void => {
+    stats.aheadSeconds = aheadSeconds(video.buffered, video.currentTime)
     options.onStats({ ...stats })
   }
 
@@ -244,9 +269,12 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
     // mp4box wants the same sample count for every track. The picture's sets it,
     // and the sound's segments, with their small samples, come out shorter.
     const nbSamples = samplesPerSegment(first, SEGMENT_SECONDS)
+    // The queues are made before the streaming is, which fills in what happens on a full buffer.
+    const quota = { handle: (): void => undefined }
     const queues = played.map((track) => {
       const queue = new AppendQueue(mediaSource.addSourceBuffer(mimeOf(track)), () => {
         stats.quotaErrors += 1
+        quota.handle()
       })
       // Samples, not keyframes, decide where a segment ends (see SEGMENT_SECONDS).
       file.setSegmentOptions(track.id, queue, { nbSamples, rapAlignement: false })
@@ -282,6 +310,8 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
       queues,
       stats,
       emit,
+      fail,
+      quota,
     })
     // Everything is appended by now, unless the play was stopped meanwhile.
     if (!over()) {
@@ -299,9 +329,206 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
 }
 
 /**
- * Streams the rest of the file to mp4box and on to the buffers, and resolves
- * once all of it is appended (§10.4). Not written yet: the next step fills it in.
+ * Resolves after `ms`, or sooner: at once when `signal` aborts, or when `wake`
+ * is fired at its `target`.
  */
-function streamSamples(_context: StreamContext): Promise<void> {
-  return Promise.resolve()
+function pause(
+  ms: number,
+  signal: AbortSignal,
+  wake?: { target: EventTarget; event: string },
+): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve()
+      return
+    }
+    const listening = new AbortController()
+    const done = (): void => {
+      clearTimeout(timer)
+      listening.abort()
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    signal.addEventListener('abort', done, { signal: listening.signal })
+    wake?.target.addEventListener(wake.event, done, { signal: listening.signal })
+  })
+}
+
+/** Resolves once `signal` has aborted. */
+function whenAborted(signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const done = (): void => {
+      resolve()
+    }
+    if (signal.aborted) done()
+    else signal.addEventListener('abort', done, { once: true })
+  })
+}
+
+/** Stops a stream's connection, whatever state it is in. */
+function release(stream: { cancel(): Promise<void> }): void {
+  stream.cancel().catch(() => undefined)
+}
+
+/**
+ * Holds the reading back while enough is buffered, and handles a full buffer
+ * (§10.4). `roomToRead()` resolves once the playhead has less than the target
+ * buffered ahead and few enough bytes are waiting to be appended. The target
+ * is how far ahead to buffer for this file's bit rate, and a quota error lowers
+ * it. This puts its handling of a quota error in `context.quota`.
+ */
+function createBufferGate(context: StreamContext): { roomToRead: () => Promise<void> } {
+  const { options, signal, queues, stats } = context
+  const { video } = options
+  const targets = bufferTargets(context.fileSize / context.durationSeconds)
+  let target = targets.aheadSeconds
+  stats.targetAheadSeconds = target
+  let trimmedAt = Number.NEGATIVE_INFINITY
+  let retrying = false
+
+  const ahead = (): number => aheadSeconds(video.buffered, video.currentTime)
+  const hasRoom = (): boolean => {
+    const pending = queues.reduce((sum, queue) => sum + queue.pendingBytes, 0)
+    return ahead() < target && pending < MAX_PENDING_BYTES
+  }
+  /** Drops what was played, further back than is kept, at most once a second. */
+  const makeRoomBehind = (): void => {
+    const before = video.currentTime - targets.behindSeconds
+    if (before <= 0 || performance.now() - trimmedAt < TRIM_INTERVAL_MS) return
+    trimmedAt = performance.now()
+    for (const queue of queues) queue.removeBefore(before)
+  }
+  /** Waits for the playhead to move, a little while or the end of the play. */
+  const wait = (ms: number): Promise<void> =>
+    pause(ms, signal, { target: video, event: 'timeupdate' })
+
+  // A full buffer: buffer less ahead from now on, drop all but a second of what
+  // was played, and try the held segments again in a moment. Both buffers may
+  // hit it at once, and then one retry is enough.
+  context.quota.handle = () => {
+    target = Math.max(2, ahead() * 0.8)
+    stats.targetAheadSeconds = target
+    for (const queue of queues) queue.removeBefore(video.currentTime - 1)
+    if (retrying) return
+    retrying = true
+    void wait(QUOTA_RETRY_MS).then(() => {
+      retrying = false
+      if (signal.aborted) return
+      for (const queue of queues) queue.retry()
+    })
+  }
+
+  return {
+    roomToRead: async () => {
+      makeRoomBehind()
+      while (!hasRoom() && !signal.aborted) {
+        const began = performance.now()
+        await wait(HOLD_RECHECK_MS)
+        stats.heldMs += performance.now() - began
+        makeRoomBehind()
+      }
+    },
+  }
+}
+
+/** A stream's reader, with the bytes as the exact pieces the connection sent. */
+type StreamReader = ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>
+
+/**
+ * Opens the file's bytes from `offset` to the end of what is streamed, and
+ * gives the reader, or the message to fail with when the server didn't answer
+ * with that part of the file.
+ */
+async function openStream(context: StreamContext, offset: number): Promise<StreamReader | string> {
+  const range = `bytes=${offset}-${context.layout.stream.to - 1}`
+  const response = await fetch(context.options.url, {
+    headers: { Range: range },
+    signal: context.signal,
+  })
+  const answered = response.headers.get('Content-Range') ?? ''
+  if (response.status !== 206 || !answered.startsWith(`bytes ${offset}-`)) {
+    void response.body?.cancel()
+    return 'The server sent another part of the file.'
+  }
+  if (!response.body) return 'The server sent no data.'
+  return response.body.getReader()
+}
+
+/**
+ * Streams the rest of the file to mp4box and on to the buffers, and resolves
+ * once all of it is appended and the stream is ended (§10.4). It reads only
+ * while the buffer ahead of the playhead is under its target, so a long video
+ * is never held in memory whole. A connection that breaks off is opened again
+ * from the bytes already received; an answer for another part of the file, or
+ * a connection that keeps breaking, fails the play. An error from mp4box
+ * or a buffer isn't about the connection, and ends the play through the caller.
+ */
+async function streamSamples(context: StreamContext): Promise<void> {
+  const { signal, file, layout, queues, mediaSource, stats, emit } = context
+  const gate = createBufferGate(context)
+  // A function, or TypeScript takes `signal.aborted` to stay false across an await.
+  const over = (): boolean => signal.aborted
+
+  let offset = layout.stream.from
+  let reader: StreamReader | null = null
+  let brokenInARow = 0
+  try {
+    while (offset < layout.stream.to && !over()) {
+      // Held here while enough is buffered. Not in the try below: an error from the
+      // buffers while making room is no fault of the connection.
+      await gate.roomToRead()
+      if (over()) return
+
+      // Only the network is retried: opening the stream and reading from it.
+      let piece: Uint8Array<ArrayBuffer> | undefined
+      const began = performance.now()
+      try {
+        if (!reader) {
+          const opened = await openStream(context, offset)
+          if (typeof opened === 'string') {
+            context.fail(opened)
+            return
+          }
+          reader = opened
+        }
+        const { done, value } = await reader.read()
+        // A stream that ends before the part asked for has broken off too.
+        if (!done) piece = value
+      } catch {
+        // An abort isn't a broken connection, and ends the play.
+        if (over()) return
+      }
+      stats.readingMs += performance.now() - began
+
+      if (!piece) {
+        if (over()) return
+        if (reader) release(reader)
+        reader = null
+        if (brokenInARow >= MAX_REOPENS) {
+          context.fail('The connection kept breaking off.')
+          return
+        }
+        brokenInARow += 1
+        stats.reopens += 1
+        emit()
+        await pause(REOPEN_WAIT_MS, signal)
+        continue
+      }
+
+      brokenInARow = 0
+      // Not retried: a parse error here is the file's, not the connection's.
+      file.appendBuffer(MP4BoxBuffer.fromArrayBuffer(exactBuffer(piece), offset))
+      offset += piece.byteLength
+      stats.bytesReceived += piece.byteLength
+    }
+  } finally {
+    if (reader) release(reader)
+  }
+  if (over()) return
+
+  // All the file is with mp4box: it gives the last segments, which the buffers then take.
+  file.flush()
+  await Promise.race([Promise.all(queues.map((queue) => queue.drained())), whenAborted(signal)])
+  if (over()) return
+  if (mediaSource.readyState === 'open') mediaSource.endOfStream()
 }
