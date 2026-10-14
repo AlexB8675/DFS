@@ -138,6 +138,42 @@ describe('pacing a download by its client (§6.2)', () => {
     expect(stats.sourceMs).toBeLessThan(stats.clientMs)
   })
 
+  it('counts the time a piece is held by the stream as waiting for the client (§16)', async () => {
+    // A socket that always takes what it is given, so no drain is ever awaited:
+    // the wait is all in the stream holding the piece, as when the pipe is paused.
+    const response = new Writable({
+      write(_piece: Uint8Array, _encoding, callback) {
+        callback()
+      },
+    })
+    async function* immediate() {
+      for (let index = 0; index < 3; index += 1) {
+        await setImmediate()
+        yield new Uint8Array(16).fill(index)
+      }
+    }
+    const stats = {
+      startedAt: performance.now(),
+      bytes: 0,
+      firstPieceMs: null,
+      sourceMs: 0,
+      clientMs: 0,
+    }
+    const pieces = paced(response, immediate(), stats)
+    // Takes a piece, then keeps it 50 ms before asking for the next.
+    let count = 0
+    for (;;) {
+      const next = await pieces.next()
+      if (next.done) break
+      count += 1
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    expect(count).toBe(3)
+    expect(stats.bytes).toBe(48)
+    expect(stats.clientMs).toBeGreaterThanOrEqual(100)
+    expect(stats.sourceMs).toBeLessThan(50)
+  })
+
   it('ends the source when the response closes before it has sent a piece', async () => {
     const { state, pieces } = counted()
     const { response } = slowResponse()

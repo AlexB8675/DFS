@@ -84,7 +84,10 @@ export interface SendStats {
   firstPieceMs: number | null
   /** Time waiting for the source: the reader, from the cache, staging or Discord. */
   sourceMs: number
-  /** Time waiting for the client to take what was sent: the socket to drain. */
+  /**
+   * Time waiting for the client to take what was sent: the stream holding a
+   * piece while the socket is full, and the socket to drain.
+   */
   clientMs: number
   /** The source failed while the response was open: not a client that left. */
   failed?: boolean
@@ -216,8 +219,13 @@ export async function* paced(
         stats.bytes += next.value.length
         stats.firstPieceMs ??= performance.now() - stats.startedAt
       }
+      // The stream holds the piece, not asking for the next, while the pipe to
+      // a full socket is paused: that wait is the client's, and counted here.
+      at = performance.now()
       yield next.value
+      if (stats) stats.clientMs += performance.now() - at
       if (response.destroyed) return
+      // After the stream resumed us, so not overlapping the wait above.
       if (response.writableNeedDrain) {
         at = performance.now()
         const drainedNow = await drained(response)
