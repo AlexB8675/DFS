@@ -8,6 +8,12 @@ import {
   generateVaultKey,
   generateVaultSalt,
   normalizeRecoveryKey,
+  openVaultKeyFromSession,
+  sealVaultKeyForSession,
+  unwrapVaultKeyByCode,
+  unwrapVaultKeyByRecovery,
+  wrapVaultKeyByCode,
+  wrapVaultKeyByRecovery,
 } from './vault.ts'
 
 describe('deriving from a master key (§7.7)', () => {
@@ -95,5 +101,106 @@ describe('vault keys and salts (§7.7)', () => {
 
   it('makes a 16-byte salt', () => {
     expect(generateVaultSalt()).toHaveLength(16)
+  })
+})
+
+describe('wrapping the vault key (§7.7)', { timeout: 30_000 }, () => {
+  const userId = '0192f3a4-5b6c-7d8e-9f00-112233445566'
+  const otherUserId = '0192f3a4-5b6c-7d8e-9f00-112233445567'
+  const code = '123456'
+
+  let dir: string
+  let keys: MasterKeys
+  let otherKeys: MasterKeys
+  const vaultKey = generateVaultKey()
+  const salt = generateVaultSalt()
+  const recoveryKey = generateRecoveryKey()
+  let codeWrap: Uint8Array
+  let recoveryWrap: Uint8Array
+
+  beforeAll(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'dfs-vault-wrap-'))
+    await MasterKeys.createFile(path.join(dir, 'a.json'))
+    await MasterKeys.createFile(path.join(dir, 'b.json'))
+    keys = await MasterKeys.fromFile(path.join(dir, 'a.json'))
+    otherKeys = await MasterKeys.fromFile(path.join(dir, 'b.json'))
+    codeWrap = await wrapVaultKeyByCode(keys, vaultKey, code, salt, userId)
+    recoveryWrap = await wrapVaultKeyByRecovery(vaultKey, recoveryKey, userId)
+  })
+
+  afterAll(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('unwraps a code wrap with the same code, and starts it with the master key ID', async () => {
+    expect(codeWrap[0]).toBe(2)
+    expect(new TextDecoder().decode(codeWrap.subarray(1, 3))).toBe(keys.currentId)
+    expect(keys.currentId).toBe('k1')
+    expect(await unwrapVaultKeyByCode(keys, codeWrap, code, salt, userId)).toEqual(vaultKey)
+  })
+
+  it('gives null for a wrong code', async () => {
+    expect(await unwrapVaultKeyByCode(keys, codeWrap, '654321', salt, userId)).toBeNull()
+  })
+
+  it('gives null for another salt or another user', async () => {
+    expect(await unwrapVaultKeyByCode(keys, codeWrap, code, generateVaultSalt(), userId)).toBeNull()
+    expect(await unwrapVaultKeyByCode(keys, codeWrap, code, salt, otherUserId)).toBeNull()
+  })
+
+  it('gives null with another master key of the same ID', async () => {
+    expect(otherKeys.currentId).toBe(keys.currentId)
+    expect(await unwrapVaultKeyByCode(otherKeys, codeWrap, code, salt, userId)).toBeNull()
+  })
+
+  it('reads the code as NFC', async () => {
+    const wrapped = await wrapVaultKeyByCode(keys, vaultKey, 'café123', salt, userId)
+    expect(await unwrapVaultKeyByCode(keys, wrapped, 'café123', salt, userId)).toEqual(vaultKey)
+  })
+
+  it('gives null for a truncated or empty code wrap', async () => {
+    expect(await unwrapVaultKeyByCode(keys, codeWrap.subarray(0, 5), code, salt, userId)).toBeNull()
+    expect(await unwrapVaultKeyByCode(keys, new Uint8Array(0), code, salt, userId)).toBeNull()
+  })
+
+  it('unwraps a recovery wrap with the key as shown, lowercased, or with spaces for dashes', async () => {
+    expect(await unwrapVaultKeyByRecovery(recoveryWrap, recoveryKey, userId)).toEqual(vaultKey)
+    expect(await unwrapVaultKeyByRecovery(recoveryWrap, recoveryKey.toLowerCase(), userId)).toEqual(
+      vaultKey,
+    )
+    expect(
+      await unwrapVaultKeyByRecovery(recoveryWrap, recoveryKey.replaceAll('-', ' '), userId),
+    ).toEqual(vaultKey)
+  })
+
+  it('gives null for another recovery key, another user, or something that is no key', async () => {
+    expect(await unwrapVaultKeyByRecovery(recoveryWrap, generateRecoveryKey(), userId)).toBeNull()
+    expect(await unwrapVaultKeyByRecovery(recoveryWrap, recoveryKey, otherUserId)).toBeNull()
+    expect(await unwrapVaultKeyByRecovery(recoveryWrap, 'too short', userId)).toBeNull()
+  })
+
+  it('refuses to wrap under something that is no recovery key', async () => {
+    await expect(wrapVaultKeyByRecovery(vaultKey, 'nope', userId)).rejects.toThrow()
+  })
+
+  it("does not read a code wrap's bytes as a recovery wrap", async () => {
+    expect(await unwrapVaultKeyByRecovery(codeWrap.subarray(3), recoveryKey, userId)).toBeNull()
+  })
+
+  it('seals the vault key for a session, and opens it only with that token and session', async () => {
+    const token = 'a'.repeat(43)
+    const sessionId = 'f'.repeat(64)
+    const sealed = await sealVaultKeyForSession(vaultKey, token, sessionId)
+    expect(await openVaultKeyFromSession(sealed, token, sessionId)).toEqual(vaultKey)
+    expect(await openVaultKeyFromSession(sealed, 'b'.repeat(43), sessionId)).toBeNull()
+    expect(await openVaultKeyFromSession(sealed, token, 'e'.repeat(64))).toBeNull()
+  })
+
+  it('seals the same key differently each time', async () => {
+    const token = 'a'.repeat(43)
+    const sessionId = 'f'.repeat(64)
+    const first = await sealVaultKeyForSession(vaultKey, token, sessionId)
+    const second = await sealVaultKeyForSession(vaultKey, token, sessionId)
+    expect(second).not.toEqual(first)
   })
 })
