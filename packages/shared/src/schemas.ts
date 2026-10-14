@@ -92,6 +92,11 @@ export const sessionSchema = z.object({
    * choose a new one, and every other route answers `403 password_change_required`.
    */
   passwordChange: passwordChangeSchema.nullable(),
+  /**
+   * When an asked-for reset empties the vault, unless it is opened first; the
+   * app says so on every sign-in until then (§7.7).
+   */
+  vaultResetAt: timestamp.nullable(),
 })
 export type Session = z.infer<typeof sessionSchema>
 

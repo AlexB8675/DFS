@@ -1,6 +1,8 @@
 import {
   changeVaultCodeSchema,
   createVaultSchema,
+  recoveryKeySchema,
+  resetVaultSchema,
   unlockVaultSchema,
   vaultCreatedSchema,
   vaultStateSchema,
@@ -11,7 +13,7 @@ import { z } from 'zod'
 import { requireAuth } from '../auth/access.ts'
 import { sessionCookieName } from '../auth/sessions.ts'
 import { ApiError } from '../errors.ts'
-import { changeVaultCode } from '../vault/manage.ts'
+import { changeVaultCode, replaceRecoveryKey, requestVaultReset } from '../vault/manage.ts'
 import { createVault, lockVault, unlockVault, vaultState } from '../vault/vault.ts'
 
 /** `/api/vault…` (DESIGN.md §7.7): a full session's own vault; never a device token's. */
@@ -45,6 +47,26 @@ export function vaultRoutes(app: FastifyInstance, _options: object, done: () => 
     { schema: { body: changeVaultCodeSchema, response: { 200: vaultStateSchema } } },
     (request) =>
       changeVaultCode(app, requireAuth(request.auth), sessionToken(app, request), request.body),
+  )
+
+  // Shown this once, like the first: no copy for a cache to keep.
+  routes.post(
+    '/vault/recovery-key',
+    { schema: { response: { 200: recoveryKeySchema } } },
+    async (request, reply) => {
+      const created = await replaceRecoveryKey(
+        app,
+        requireAuth(request.auth),
+        sessionToken(app, request),
+      )
+      return reply.header('cache-control', 'no-store').send(created)
+    },
+  )
+
+  routes.post(
+    '/vault/reset',
+    { schema: { body: resetVaultSchema, response: { 200: vaultStateSchema } } },
+    (request) => requestVaultReset(app, requireAuth(request.auth), request.body),
   )
 
   routes.post(

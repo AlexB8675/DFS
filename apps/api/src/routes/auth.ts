@@ -91,7 +91,12 @@ function clientOf(request: FastifyRequest): SessionClient {
 }
 
 function toSession(user: UserRow, csrfToken: string): Session {
-  return { user: toUserDto(user), csrfToken, passwordChange: pendingPasswordChange(user) }
+  return {
+    user: toUserDto(user),
+    csrfToken,
+    passwordChange: pendingPasswordChange(user),
+    vaultResetAt: user.vaultResetAt?.toISOString() ?? null,
+  }
 }
 
 /** Accepts only requests from DFS's own pages (§7.1, §7.5). */

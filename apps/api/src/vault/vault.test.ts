@@ -38,6 +38,8 @@ beforeAll(async () => {
     'frank',
     'gina',
     'hana',
+    'ivan',
+    'judy',
     'limited',
   ]) {
     await seedUser(app.db, { username, password: `the-${username}-password` })
@@ -61,6 +63,8 @@ interface Browser {
   token: string
   cookie: string
   csrfToken: string
+  /** What the sign-in's answer said about a pending reset (§7.7). */
+  vaultResetAt: string | null
 }
 
 async function signIn(username: string): Promise<Browser> {
@@ -72,12 +76,17 @@ async function signIn(username: string): Promise<Browser> {
   })
   expect(response.statusCode).toBe(200)
   const cookie = response.cookies.find((c) => c.name === sessionCookieName(app.config))
-  const body = response.json<{ csrfToken: string; user: { id: string } }>()
+  const body = response.json<{
+    csrfToken: string
+    user: { id: string }
+    vaultResetAt: string | null
+  }>()
   return {
     userId: body.user.id,
     token: cookie?.value ?? '',
     cookie: `${sessionCookieName(app.config)}=${cookie?.value ?? ''}`,
     csrfToken: body.csrfToken,
+    vaultResetAt: body.vaultResetAt,
   }
 }
 
@@ -612,6 +621,135 @@ describe('changing the code (§7.7)', { timeout: 60_000 }, () => {
       'nope-nope',
       ...hanaRecoveryKey.split('-'),
     ]
+    const rows = await app.db.select().from(auditLog)
+    expect(rows.length).toBeGreaterThan(0)
+    for (const row of rows) {
+      const text = JSON.stringify(row.meta)
+      for (const secret of secrets) expect(text).not.toContain(secret)
+    }
+  })
+})
+
+function newRecoveryKey(browser: Browser) {
+  return asBrowser(browser, 'POST', '/api/vault/recovery-key')
+}
+
+function askForReset(browser: Browser, password: string) {
+  return asBrowser(browser, 'POST', '/api/vault/reset', { payload: { password } })
+}
+
+async function meOf(browser: Browser) {
+  const response = await asBrowser(browser, 'GET', '/api/auth/me')
+  expect(response.statusCode).toBe(200)
+  return response.json<{ vaultResetAt: string | null }>()
+}
+
+describe('a new recovery key, and asking for a reset (§7.7)', { timeout: 60_000 }, () => {
+  let ivan: Browser
+  let judy: Browser
+  let oldKey = ''
+  let newKey = ''
+  let resetAt = ''
+
+  it('needs the vault open to make a new recovery key', async () => {
+    ivan = await signIn('ivan')
+    oldKey = await makeVault(ivan)
+    expect((await asBrowser(ivan, 'POST', '/api/vault/lock')).statusCode).toBe(204)
+
+    const response = await newRecoveryKey(ivan)
+    expect(response.statusCode).toBe(403)
+    expect(response.json()).toMatchObject({ error: { code: 'vault_locked' } })
+    expect(await auditRows(ivan.userId, 'vault.recovery_key_replaced')).toHaveLength(0)
+  })
+
+  it('makes a new recovery key while the vault is open, and the old one stops working', async () => {
+    expect((await unlock(ivan, '123456')).statusCode).toBe(200)
+
+    const response = await newRecoveryKey(ivan)
+    expect(response.statusCode).toBe(200)
+    expect(response.headers['cache-control']).toBe('no-store')
+    newKey = response.json<{ recoveryKey: string }>().recoveryKey
+    expect(newKey).toMatch(RECOVERY_KEY)
+    expect(newKey).not.toBe(oldKey)
+    expect(await auditRows(ivan.userId, 'vault.recovery_key_replaced')).toHaveLength(1)
+
+    const row = await userOf(ivan.userId)
+    const wrapped = row.vaultKeyByRecovery ?? new Uint8Array()
+    expect(await unwrapVaultKeyByRecovery(wrapped, newKey, ivan.userId)).toHaveLength(32)
+    expect(await unwrapVaultKeyByRecovery(wrapped, oldKey, ivan.userId)).toBeNull()
+
+    const withOld = await changeCode(ivan, { recoveryKey: oldKey, newCode: '777777' })
+    expect(withOld.statusCode).toBe(403)
+    expect(withOld.json()).toMatchObject({ error: { code: 'wrong_recovery_key' } })
+    const withNew = await changeCode(ivan, { recoveryKey: newKey, newCode: '777777' })
+    expect(withNew.statusCode).toBe(200)
+  })
+
+  it('refuses a reset with the wrong password, and asks for nothing', async () => {
+    judy = await signIn('judy')
+    await makeVault(judy)
+
+    const response = await askForReset(judy, 'not-the-password')
+    expect(response.statusCode).toBe(403)
+    expect(response.json()).toMatchObject({ error: { code: 'wrong_password' } })
+    expect((await userOf(judy.userId)).vaultResetAt).toBeNull()
+    expect(await auditRows(judy.userId, 'vault.reset_requested')).toHaveLength(0)
+  })
+
+  it('asks for a reset with the password, seven days away, and says so on the session', async () => {
+    const response = await askForReset(judy, 'the-judy-password')
+    expect(response.statusCode).toBe(200)
+    const body = response.json<VaultBody>()
+    expect(body).toMatchObject({ exists: true, open: true })
+    resetAt = body.resetAt ?? ''
+    const inMs = new Date(resetAt).getTime() - Date.now()
+    expect(Math.abs(inMs - 7 * 24 * 60 * MINUTE)).toBeLessThan(MINUTE)
+    expect(await auditRows(judy.userId, 'vault.reset_requested')).toHaveLength(1)
+    expect((await userOf(judy.userId)).vaultResetAt?.toISOString()).toBe(resetAt)
+    expect((await meOf(judy)).vaultResetAt).toBe(resetAt)
+  })
+
+  it('keeps the first date when asked again', async () => {
+    const response = await askForReset(judy, 'the-judy-password')
+    expect(response.statusCode).toBe(200)
+    expect(response.json<VaultBody>().resetAt).toBe(resetAt)
+    expect(await auditRows(judy.userId, 'vault.reset_requested')).toHaveLength(1)
+  })
+
+  it('is cancelled by opening the vault again', async () => {
+    expect((await asBrowser(judy, 'POST', '/api/vault/lock')).statusCode).toBe(204)
+    const response = await unlock(judy, '123456')
+    expect(response.statusCode).toBe(200)
+    expect(response.json<VaultBody>().resetAt).toBeNull()
+    expect((await meOf(judy)).vaultResetAt).toBeNull()
+    expect(await auditRows(judy.userId, 'vault.reset_cancelled')).toHaveLength(1)
+  })
+
+  it('answers a fresh sign-in with the date of a reset asked for', async () => {
+    const asked = await askForReset(judy, 'the-judy-password')
+    expect(asked.statusCode).toBe(200)
+    const date = asked.json<VaultBody>().resetAt
+    expect(date).not.toBeNull()
+
+    const again = await signIn('judy')
+    expect(again.vaultResetAt).toBe(date)
+  })
+
+  it('has nothing to reset or replace without a vault', async () => {
+    const bob = await signIn('bob')
+    expect(bob.vaultResetAt).toBeNull()
+
+    const reset = await askForReset(bob, 'the-bob-password')
+    expect(reset.statusCode).toBe(404)
+    expect(reset.json()).toMatchObject({ error: { code: 'no_vault' } })
+
+    const key = await newRecoveryKey(bob)
+    expect(key.statusCode).toBe(403)
+    expect(key.json()).toMatchObject({ error: { code: 'vault_locked' } })
+  })
+
+  it('audits none of the passwords or recovery keys', async () => {
+    const secrets = ['not-the-password', 'the-judy-password', '777777', ...newKey.split('-')]
     const rows = await app.db.select().from(auditLog)
     expect(rows.length).toBeGreaterThan(0)
     for (const row of rows) {

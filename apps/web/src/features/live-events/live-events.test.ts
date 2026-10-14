@@ -145,6 +145,7 @@ describe('startLiveEvents', () => {
     queryClient.setQueryData<Session>(['session'], {
       csrfToken: 'token',
       passwordChange: null,
+      vaultResetAt: null,
       user: {
         id: crypto.randomUUID(),
         username: 'demo',

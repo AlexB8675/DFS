@@ -424,6 +424,7 @@ export class MockDb {
       user: this.publicUser(user),
       csrfToken: CSRF_TOKEN,
       passwordChange: pendingPasswordChange(user),
+      vaultResetAt: null,
     }
   }
 
