@@ -39,8 +39,8 @@ const AUTO_REPORT_MS = 60_000
 /**
  * Runs the trial: Start plays the version through `playBuffered`, the video's
  * events and a timer keep its numbers, and the report goes to the API on
- * `send('button')`, when the page is hidden or left, and once 60 s after the
- * first frame.
+ * `send('button')`, when the page is hidden or left (closed, or left inside
+ * the app), and once 60 s after the first frame.
  */
 function useBufferedLab(
   videoRef: RefObject<HTMLVideoElement | null>,
@@ -114,6 +114,8 @@ function useBufferedLab(
     window.addEventListener('pagehide', onPageHide)
     const timer = window.setInterval(refresh, NUMBERS_MS)
     return () => {
+      // The page left inside the app: no pagehide comes, and the play is stopped next.
+      send('left')
       window.clearInterval(timer)
       window.clearTimeout(autoTimer)
       video.removeEventListener('loadeddata', onFirstFrame)
@@ -137,7 +139,12 @@ function useBufferedLab(
     }
   }, [videoRef])
 
-  /** Called by the Start button, whose click is the gesture autoplay needs. */
+  /**
+   * Called by the Start button. Its click gives the page the user activation
+   * autoplay needs, but it can't play the video at once: `playBuffered` sets
+   * the source a moment later, and setting the source cancels a pending play.
+   * So the video plays once the source has its metadata.
+   */
   const start = () => {
     const video = videoRef.current
     if (!video || versionId === null || playing.current) return
@@ -145,6 +152,13 @@ function useBufferedLab(
     playing.current = controller
     trace.current.startedAt = performance.now()
     setStats(OPENING_STATS)
+    video.addEventListener(
+      'loadedmetadata',
+      () => {
+        void video.play().catch(() => undefined)
+      },
+      { once: true, signal: controller.signal },
+    )
     void playBuffered({
       video,
       url: contentUrl(place, versionId),
@@ -154,7 +168,6 @@ function useBufferedLab(
         setStats(next)
       },
     })
-    void video.play().catch(() => undefined)
   }
 
   const send = (reason: SentReason) => {

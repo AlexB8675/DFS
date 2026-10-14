@@ -159,6 +159,15 @@ describe('buildLabReport', () => {
     expect(buildLabReport(input({ trace })).outcome).toBe('left')
   })
 
+  it('says why it was sent in the lab line, a page left inside the app among them', () => {
+    for (const reason of ['button', 'auto', 'hidden', 'left'] as const) {
+      const lab = JSON.parse(buildLabReport(input({ reason })).lab ?? '{}') as {
+        sentReason: string
+      }
+      expect(lab.sentReason).toBe(reason)
+    }
+  })
+
   it('puts the trial’s numbers and why it was sent in the lab line', () => {
     const report = buildLabReport(input({ reason: 'auto' }))
     const lab = JSON.parse(report.lab ?? '{}') as Record<string, unknown>

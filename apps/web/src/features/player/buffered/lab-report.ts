@@ -7,7 +7,7 @@ import type { BufferedStats } from './buffered-player'
 // as plain functions so they can be tested without a browser.
 
 /** What made a report go, kept in its `lab` line so the log tells them apart. */
-export type SentReason = 'button' | 'auto' | 'hidden'
+export type SentReason = 'button' | 'auto' | 'hidden' | 'left'
 
 /** When things happened to the video, in `performance.now()` milliseconds, and its stalls so far. */
 export interface LabTrace {
