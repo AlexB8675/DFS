@@ -166,9 +166,12 @@ function exactBuffer(bytes: Uint8Array<ArrayBuffer>): ArrayBuffer {
   return buffer.slice(byteOffset, byteOffset + byteLength)
 }
 
-/** The queue given to `setSegmentOptions`, which mp4box hands back as an `unknown` user. */
-function queueOf(user: unknown): AppendQueue {
-  return user as AppendQueue
+/**
+ * The queue given to `setSegmentOptions`, which mp4box hands back as an `unknown`
+ * user; `null` for a track that isn't played, which was given no queue.
+ */
+function queueOf(user: unknown): AppendQueue | null {
+  return user instanceof AppendQueue ? user : null
 }
 
 /**
@@ -195,12 +198,14 @@ async function fetchRange(url: string, start: number, end: number, signal: Abort
  *   never used stay for good: a keyframe gap's worth of the file for each seek.
  * - It releases samples counting up from the last one released and doesn't go
  *   back, so after a seek back the samples of the first segment would stay in memory.
+ *   That holds for every track mp4box segments, `segmented`, played or not.
  * Sound alone has no keyframes and is placed at `time`, held to the end of the
  * sound: mp4box places no track past its end, and then none at all.
  */
 function placeAt(
   file: ISOFile,
   played: readonly Track[],
+  segmented: readonly Track[],
   keyframes: readonly number[],
   time: number,
 ): number | null {
@@ -210,7 +215,7 @@ function placeAt(
       : Math.min(time, ...played.map((track) => file.getTrackDuration(file.getTrackById(track.id))))
   const { offset } = file.seek(target, true)
   if (!Number.isFinite(offset)) return null
-  for (const track of played) {
+  for (const track of segmented) {
     const trak = file.getTrackById(track.id)
     trak.lastValidSample = Math.min(trak.lastValidSample || 0, trak.nextSample)
   }
@@ -375,28 +380,41 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
     const nbSamples = samplesPerSegment(first, SEGMENT_SECONDS)
     // The queues are made before the streaming is, which fills in what happens on a full buffer.
     const quota = { handle: (): void => undefined }
-    const queues = played.map((track) => {
-      const queue = new AppendQueue(mediaSource.addSourceBuffer(mimeOf(track)), () => {
-        stats.quotaErrors += 1
-        quota.handle()
+    const queueOfTrack = new Map(
+      played.map((track) => [
+        track.id,
+        new AppendQueue(mediaSource.addSourceBuffer(mimeOf(track)), () => {
+          stats.quotaErrors += 1
+          quota.handle()
+        }),
+      ]),
+    )
+    const queues = [...queueOfTrack.values()]
+    // Every track is segmented, not only the played ones: mp4box frees a fed buffer only once
+    // every byte in it was used, and a track nobody segments never has its samples read. Its
+    // bytes would stay for good, and over a long video that is the whole file. An unplayed track
+    // (a metadata track, sound the browser rejects) gets no queue, and its segments are dropped.
+    // Samples, not keyframes, decide where a segment ends (see SEGMENT_SECONDS).
+    for (const track of info.tracks) {
+      file.setSegmentOptions(track.id, queueOfTrack.get(track.id) ?? null, {
+        nbSamples,
+        rapAlignement: false,
       })
-      // Samples, not keyframes, decide where a segment ends (see SEGMENT_SECONDS).
-      file.setSegmentOptions(track.id, queue, { nbSamples, rapAlignement: false })
-      return queue
-    })
+    }
 
-    // 8. The init segments.
+    // 8. The init segments, of the played tracks.
     file.onSegment = (id, user, buffer, nextSample) => {
       try {
-        queueOf(user).append(buffer)
+        const queue = queueOf(user)
+        queue?.append(buffer)
         file.releaseUsedSamples(id, nextSample)
-        stats.segments += 1
+        if (queue) stats.segments += 1
       } catch (error) {
         fail(error instanceof Error ? error.message : String(error))
       }
     }
     for (const { user, buffer } of file.initializeSegmentation('per-track')) {
-      queueOf(user).append(buffer)
+      queueOf(user)?.append(buffer)
     }
 
     // 9. Where mp4box and the stream begin: the first samples, or the keyframe before
@@ -406,7 +424,7 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
     let startedAt: number | null = null
     const startAt = Math.min(options.startAt ?? 0, durationSeconds)
     if (startAt > 0) {
-      const offset = placeAt(file, played, keyframes, startAt)
+      const offset = placeAt(file, played, info.tracks, keyframes, startAt)
       if (offset !== null) {
         firstOffset = offset
         startedAt = startAt
@@ -443,20 +461,31 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
     // segments are appended, long after `streamSamples` has put `context.restart` in place.
     const onSeeking = (): void => {
       if (over()) return
-      const time = video.currentTime
-      const first = startedAt
-      startedAt = null
-      if (first !== null && Math.abs(time - first) < SAME_START_SECONDS) return
-      if (aheadSeconds(video.buffered, time) > 0) return
-      const offset = placeAt(file, played, keyframes, time)
-      if (offset === null) return
-      stats.seeks += 1
-      // A queue cancels only an append under way; a removal under way ends first.
-      for (const queue of queues) queue.reset(mediaSource.duration)
-      // A small file may be held by mp4box whole, and then no piece is left to come that
-      // would make it give the segments of the samples it holds.
-      file.start()
-      context.restart(offset)
+      // A queue's reset can throw (a buffer that was detached refuses `remove()`); the play
+      // then fails and shows it, instead of stalling with no word.
+      try {
+        const time = video.currentTime
+        const first = startedAt
+        startedAt = null
+        if (first !== null && Math.abs(time - first) < SAME_START_SECONDS) return
+        // While a reset runs, `video.buffered` still shows the old position's ranges until its
+        // removal ends. A quick second seek into them isn't to a time that is buffered: it would
+        // do nothing, and the removal would clear the very part it needs, never to be fetched.
+        if (queues.every((queue) => !queue.resetting) && aheadSeconds(video.buffered, time) > 0) {
+          return
+        }
+        const offset = placeAt(file, played, info.tracks, keyframes, time)
+        if (offset === null) return
+        stats.seeks += 1
+        // A queue cancels only an append under way; a removal under way ends first.
+        for (const queue of queues) queue.reset(mediaSource.duration)
+        // A small file may be held by mp4box whole, and then no piece is left to come that
+        // would make it give the segments of the samples it holds.
+        file.start()
+        context.restart(offset)
+      } catch (error) {
+        fail(error instanceof Error ? error.message : String(error))
+      }
     }
     video.addEventListener('seeking', onSeeking, { signal: seekListening.signal })
     await streamSamples(context)
