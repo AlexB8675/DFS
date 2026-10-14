@@ -6,14 +6,14 @@ import {
 } from '@dfs/crypto'
 import { auditLog, nodes, sessions, users } from '@dfs/db'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
-import { and, eq } from 'drizzle-orm'
+import { and, eq, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest'
 import { buildApp } from '../app.ts'
 import { findSession, sessionCookieName } from '../auth/sessions.ts'
 import { testConfig } from '../testing/config.ts'
 import { seedUser } from '../testing/seed.ts'
-import { slideBelowSeconds, vaultKeyOf } from './vault.ts'
+import { openInSession, slideBelowSeconds, vaultKeyOf } from './vault.ts'
 
 // Making the vault and asking for its state (DESIGN.md §7.7), against a real
 // database.
@@ -40,6 +40,8 @@ beforeAll(async () => {
     'hana',
     'ivan',
     'judy',
+    'kate',
+    'liam',
     'limited',
   ]) {
     await seedUser(app.db, { username, password: `the-${username}-password` })
@@ -755,6 +757,136 @@ describe('a new recovery key, and asking for a reset (§7.7)', { timeout: 60_000
     for (const row of rows) {
       const text = JSON.stringify(row.meta)
       for (const secret of secrets) expect(text).not.toContain(secret)
+    }
+  })
+})
+
+/** The vault key of a user's vault, taken from the database with the code it was made under. */
+async function vaultKeyByCodeOf(userId: string, code = '123456'): Promise<Uint8Array> {
+  const row = await userOf(userId)
+  const key = await unwrapVaultKeyByCode(
+    app.keys,
+    row.vaultKeyByCode ?? new Uint8Array(),
+    code,
+    row.vaultSalt ?? new Uint8Array(),
+    userId,
+  )
+  if (!key) throw new Error('The code doesn’t open the vault.')
+  return key
+}
+
+describe('opening, against a reset racing it (§7.7)', { timeout: 30_000 }, () => {
+  it('clears a reset in the journal too, whenever it opens the vault', async () => {
+    const kate = await signIn('kate')
+    await makeVault(kate)
+    expect((await asBrowser(kate, 'POST', '/api/vault/lock')).statusCode).toBe(204)
+    const vaultKey = await vaultKeyByCodeOf(kate.userId)
+    const auth = await findSession(app.db, kate.token)
+    if (!auth) throw new Error('The session is gone.')
+
+    // A reset asked for in another browser while she typed her code: it is
+    // journaled with its date, and the opening below didn't see it.
+    const asked = await askForReset(await signIn('kate'), 'the-kate-password')
+    expect(asked.statusCode).toBe(200)
+    expect((await userOf(kate.userId)).vaultResetAt).not.toBeNull()
+    expect(await journaledResetAt(kate.userId)).not.toBeNull()
+
+    await openInSession(app, auth, kate.token, vaultKey, false)
+
+    expect((await userOf(kate.userId)).vaultResetAt).toBeNull()
+    expect(await journaledResetAt(kate.userId)).toBeNull()
+  })
+
+  it('doesn’t open a vault that a reset emptied meanwhile', async () => {
+    const liam = await signIn('liam')
+    await makeVault(liam)
+    expect((await asBrowser(liam, 'POST', '/api/vault/lock')).statusCode).toBe(204)
+    const vaultKey = await vaultKeyByCodeOf(liam.userId)
+    const auth = await findSession(app.db, liam.token)
+    if (!auth) throw new Error('The session is gone.')
+
+    // The bot's reset leaves the account like this.
+    await app.db.execute(sql`
+      UPDATE users
+      SET vault_root_id = NULL, vault_salt = NULL, vault_key_by_code = NULL, vault_key_by_recovery = NULL
+      WHERE id = ${liam.userId}`)
+
+    await expect(openInSession(app, auth, liam.token, vaultKey, false)).rejects.toMatchObject({
+      status: 404,
+      code: 'no_vault',
+    })
+    expect((await sessionOf(liam))?.vaultKeySealed).toBeNull()
+  })
+})
+
+/** The reset date in the latest journaled row of the user, as the journal would bring it back. */
+async function journaledResetAt(userId: string): Promise<string | null> {
+  const { rows } = await app.db.execute<{ reset_at: string | null }>(sql`
+    SELECT record->>'vaultResetAt' AS reset_at FROM journal
+    WHERE kind = 'user.upsert' AND record->>'id' = ${userId}
+    ORDER BY id DESC LIMIT 1`)
+  if (rows.length !== 1) throw new Error('The user was never journaled.')
+  return rows[0]?.reset_at ?? null
+}
+
+describe('the vault in the log (§7.7)', { timeout: 30_000 }, () => {
+  it('never holds a code or a recovery key', async () => {
+    const lines: Record<string, unknown>[] = []
+    const stream = {
+      write: (line: string) => {
+        lines.push(JSON.parse(line) as Record<string, unknown>)
+      },
+    }
+    const setup = await testConfig({ DATABASE_URL: database.url })
+    const logged = await buildApp({ config: setup.config, logger: { level: 'info', stream } })
+    try {
+      await seedUser(logged.db, { username: 'mona', password: 'the-mona-password' })
+      const login = await logged.inject({
+        method: 'POST',
+        url: '/api/auth/login',
+        headers: { origin: setup.config.publicBaseUrl },
+        payload: { username: 'mona', password: 'the-mona-password' },
+      })
+      expect(login.statusCode).toBe(200)
+      const cookie = login.cookies.find((c) => c.name === sessionCookieName(logged.config))
+      const headers = {
+        cookie: `${sessionCookieName(logged.config)}=${cookie?.value ?? ''}`,
+        'x-csrf-token': login.json<{ csrfToken: string }>().csrfToken,
+      }
+      const send = (method: 'POST' | 'PUT', url: string, payload: object) =>
+        logged.inject({ method, url, headers, payload })
+
+      expect((await send('POST', '/api/vault', { code: '12345' })).statusCode).toBe(400)
+      const made = await send('POST', '/api/vault', { code: 'secret-code-9' })
+      expect(made.statusCode).toBe(201)
+      const recoveryKey = made.json<{ recoveryKey: string }>().recoveryKey
+      expect(recoveryKey).toMatch(RECOVERY_KEY)
+      expect((await send('POST', '/api/vault/lock', {})).statusCode).toBe(204)
+      expect((await send('POST', '/api/vault/unlock', { code: 'wrong-code-77' })).statusCode).toBe(
+        403,
+      )
+      const changed = await send('PUT', '/api/vault/code', {
+        recoveryKey: 'ZZZZ-ZZZZ-ZZZZ-ZZZZ-ZZZZ-ZZZZ',
+        newCode: 'other-code-55',
+      })
+      expect(changed.statusCode).toBe(403)
+
+      const text = JSON.stringify(lines)
+      expect(text).toContain('request refused')
+      for (const secret of [
+        '12345',
+        'secret-code-9',
+        'wrong-code-77',
+        'other-code-55',
+        'ZZZZ-ZZZZ',
+        recoveryKey,
+        recoveryKey.replaceAll('-', ''),
+      ]) {
+        expect(text).not.toContain(secret)
+      }
+    } finally {
+      await logged.close()
+      await setup.cleanup()
     }
   })
 })

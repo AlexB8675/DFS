@@ -232,8 +232,10 @@ export async function unlockVault(
 
 /**
  * Opens the vault in this session once its key is known: seals it into the
- * session, forgets the wrong codes and cancels a pending reset (§7.7). The
- * reset date is journaled; the counters aren't.
+ * session, forgets the wrong codes and cancels a pending reset (§7.7). A
+ * reset that emptied the vault meanwhile leaves nothing to open. The user's
+ * row is journaled on every opening, so a reset cleared by it is cleared in
+ * the journal too; the counters themselves aren't journaled.
  */
 export async function openInSession(
   app: FastifyInstance,
@@ -247,9 +249,9 @@ export async function openInSession(
     const [user] = await tx
       .update(users)
       .set({ failedVaultUnlocks: 0, vaultUnlockLockedUntil: null, vaultResetAt: null })
-      .where(eq(users.id, auth.user.id))
+      .where(and(eq(users.id, auth.user.id), isNotNull(users.vaultRootId)))
       .returning()
-    if (!user) throw new Error('The account is gone.')
+    if (!user) throw new ApiError(404, 'no_vault', 'You have no vault yet.')
 
     await tx
       .update(sessions)
@@ -271,10 +273,7 @@ export async function openInSession(
           ]
         : []),
     ]
-    await appendJournal(tx, [
-      ...(cancelsReset ? [userRecord(user)] : []),
-      ...(await audit(tx, entries)),
-    ])
+    await appendJournal(tx, [userRecord(user), ...(await audit(tx, entries))])
   })
 }
 
