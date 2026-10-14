@@ -6,12 +6,21 @@
 // opens the video first: it finds the index, checks the codecs and gives the
 // browser the init segments. Then it streams the rest of the file, holding the
 // reading back while enough is buffered ahead of the playhead, dropping what
-// was played to make room, and opening the stream again where it broke off.
+// was played, only at a keyframe, to make room, and opening the stream again
+// where it broke off.
 
 import { createFile, MP4BoxBuffer, type ISOFile, type Movie, type Track } from 'mp4box'
 import { AppendQueue } from './append-queue'
 import { mediaLayout, type MediaLayout } from './boxes'
-import { aheadSeconds, bufferTargets, mimeOf, samplesPerSegment } from './tracks'
+import {
+  aheadSeconds,
+  bufferTargets,
+  keyframeAtOrBefore,
+  keyframeTimes,
+  longestKeyframeGap,
+  mimeOf,
+  samplesPerSegment,
+} from './tracks'
 
 export interface BufferedStats {
   phase: 'opening' | 'buffering' | 'ended' | 'failed'
@@ -26,6 +35,8 @@ export interface BufferedStats {
   heldMs: number
   aheadSeconds: number
   targetAheadSeconds: number
+  /** The longest stretch of the video without a keyframe; 0 until known. */
+  keyframeGapSeconds: number
   quotaErrors: number
   /** Times the stream was opened again after it broke off. */
   reopens: number
@@ -51,6 +62,12 @@ interface StreamContext {
   layout: MediaLayout
   fileSize: number
   durationSeconds: number
+  /** Whether only sound is played, which can be cut anywhere. */
+  soundOnly: boolean
+  /** The video's keyframes in seconds, ascending; empty when only sound is played. */
+  keyframes: readonly number[]
+  /** The longest stretch of the video without a keyframe; 1 when only sound is played. */
+  keyframeGapSeconds: number
   mediaSource: MediaSource
   /** One for each track played, the video's first. */
   queues: AppendQueue[]
@@ -78,6 +95,9 @@ const HOLD_RECHECK_MS = 250
 
 /** What was played is dropped at most this often. */
 const TRIM_INTERVAL_MS = 1000
+
+/** How much earlier than a keyframe a cut is made (see `makeRoomBehind`). */
+const CUT_MARGIN_SECONDS = 0.1
 
 /** How long after a quota error the full buffers are tried again, if no `timeupdate` comes first. */
 const QUOTA_RETRY_MS = 500
@@ -148,6 +168,7 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
     heldMs: 0,
     aheadSeconds: 0,
     targetAheadSeconds: 0,
+    keyframeGapSeconds: 0,
     quotaErrors: 0,
     reopens: 0,
     segments: 0,
@@ -265,14 +286,18 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
     }
 
     // 7. The MediaSource, whose duration is set before any buffer is made.
+    const durationSeconds = info.duration / info.timescale
     const mediaSource = new MediaSource()
     const opened = new Promise<Event>((resolve) => {
       mediaSource.addEventListener('sourceopen', resolve, { once: true })
     })
     video.src = URL.createObjectURL(mediaSource)
     if (!(await until(opened))) return
-    const durationSeconds = info.duration / info.timescale
     mediaSource.duration = durationSeconds
+    // The picture can only be cut at a keyframe. Sound alone can be cut anywhere.
+    const keyframes = videoTrack ? keyframeTimes(file.getTrackSamplesInfo(videoTrack.id)) : []
+    const keyframeGapSeconds = videoTrack ? longestKeyframeGap(keyframes, durationSeconds) : 1
+    stats.keyframeGapSeconds = keyframeGapSeconds
     // mp4box wants the same sample count for every track. The picture's sets it,
     // and the sound's segments, with their small samples, come out shorter.
     const nbSamples = samplesPerSegment(first, SEGMENT_SECONDS)
@@ -313,6 +338,9 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
       layout,
       fileSize,
       durationSeconds,
+      soundOnly: videoTrack === undefined,
+      keyframes,
+      keyframeGapSeconds,
       mediaSource,
       queues,
       stats,
@@ -380,42 +408,60 @@ function release(stream: { cancel(): Promise<void> }): void {
 /**
  * Holds the reading back while enough is buffered, and handles a full buffer
  * (§10.4). `roomToRead()` resolves once the playhead has less than the target
- * buffered ahead and few enough bytes are waiting to be appended. The target
- * is how far ahead to buffer for this file's bit rate, and a quota error lowers
- * it. This puts its handling of a quota error in `context.quota`.
+ * buffered ahead, counting the bytes waiting to be appended as buffered, and
+ * few enough of them wait. The target is how far ahead to buffer for this
+ * file's bit rate and keyframe gap, and a quota error lowers it. What was
+ * played is dropped only at a keyframe. This puts its handling of a quota error
+ * in `context.quota`.
  */
 function createBufferGate(context: StreamContext): { roomToRead: () => Promise<void> } {
-  const { options, signal, queues, stats } = context
+  const { options, signal, queues, stats, soundOnly, keyframes } = context
   const { video } = options
-  const targets = bufferTargets(context.fileSize / context.durationSeconds, 1)
+  const bytesPerSecond = context.fileSize / context.durationSeconds
+  const targets = bufferTargets(bytesPerSecond, context.keyframeGapSeconds)
   let target = targets.aheadSeconds
   stats.targetAheadSeconds = target
   let trimmedAt = Number.NEGATIVE_INFINITY
   let retrying = false
 
   const ahead = (): number => aheadSeconds(video.buffered, video.currentTime)
+  /** What is queued will be buffered, so it counts as buffered now. */
   const hasRoom = (): boolean => {
     const pending = queues.reduce((sum, queue) => sum + queue.pendingBytes, 0)
-    return ahead() < target && pending < MAX_PENDING_BYTES
+    return ahead() + pending / bytesPerSecond < target && pending < MAX_PENDING_BYTES
   }
-  /** Drops what was played, further back than is kept, at most once a second. */
+  /**
+   * Where to cut to drop what was played before `time`: just before the last
+   * keyframe at or before it, or at `time` for sound alone. With no keyframe
+   * known for a video the cut is at 0 or less, and nothing is dropped.
+   */
+  const cutBefore = (time: number): number =>
+    soundOnly ? time : keyframeAtOrBefore(keyframes, time) - CUT_MARGIN_SECONDS
+  /**
+   * Drops what was played, further back than is kept, at most once a second.
+   * Media Source drops the frames that depend on what is removed, up to the next
+   * keyframe, so a cut just before a keyframe drops nothing that is still
+   * needed. The margin covers an edit list shifting the times slightly.
+   */
   const makeRoomBehind = (): void => {
-    const before = video.currentTime - targets.behindSeconds
-    if (before <= 0 || performance.now() - trimmedAt < TRIM_INTERVAL_MS) return
+    const cut = cutBefore(video.currentTime - targets.behindSeconds)
+    if (cut <= 0 || performance.now() - trimmedAt < TRIM_INTERVAL_MS) return
     trimmedAt = performance.now()
-    for (const queue of queues) queue.removeBefore(before)
+    for (const queue of queues) queue.removeBefore(cut)
   }
   /** Waits for the playhead to move, a little while or the end of the play. */
   const wait = (ms: number): Promise<void> =>
     pause(ms, signal, { target: video, event: 'timeupdate' })
 
-  // A full buffer: buffer less ahead from now on, drop all but a second of what
-  // was played, and try the held segments again in a moment. Both buffers may
-  // hit it at once, and then one retry is enough.
+  // A full buffer: buffer less ahead from now on, drop all that was played
+  // before the group of frames being played (all but a second, for sound
+  // alone), and try the held segments again in a moment. Both buffers may hit
+  // it at once, and then one retry is enough.
   context.quota.handle = () => {
     target = Math.max(2, ahead() * 0.8)
     stats.targetAheadSeconds = target
-    for (const queue of queues) queue.removeBefore(video.currentTime - 1)
+    const cut = soundOnly ? video.currentTime - 1 : cutBefore(video.currentTime)
+    if (cut > 0) for (const queue of queues) queue.removeBefore(cut)
     if (retrying) return
     retrying = true
     void wait(QUOTA_RETRY_MS).then(() => {

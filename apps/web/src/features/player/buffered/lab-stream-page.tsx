@@ -248,6 +248,7 @@ export function LabStreamPage() {
             <Line label="ahead s / target s">
               {fixed(numbers.aheadSeconds)} / {fixed(shown.targetAheadSeconds)}
             </Line>
+            <Line label="keyframe gap s">{fixed(shown.keyframeGapSeconds)}</Line>
             <Line label="played s / duration s">
               {fixed(numbers.playedSeconds)} / {fixed(numbers.durationSeconds)}
             </Line>
