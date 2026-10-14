@@ -11,6 +11,7 @@ import {
   pruneMetrics,
   purgeEarlierVersions,
   QUEUES,
+  resetDueVaults,
   sampleSystem,
   textArray,
   type AdminTaskJob,
@@ -218,6 +219,10 @@ export async function startLeaderWork(options: {
       const items = await emptyOldTrash(db, staging, config.trashRetentionDays)
       if (items > 0) log.info({ items }, 'emptied items kept their days in the trash')
     }),
+    repeat(JANITOR_EVERY_MS, log, 'emptying vaults whose reset is due', async () => {
+      const vaults = await emptyResetVaults(db, staging)
+      if (vaults > 0) log.info({ vaults }, 'emptied vaults whose reset was due')
+    }),
   ]
   // The leader alone samples them, so the figures aren't counted once per bot.
   if (metrics) {
@@ -324,6 +329,16 @@ export async function emptyOldTrash(
   const { items, versionIds } = await expireTrash(db, retentionDays)
   for (const versionId of versionIds) await staging.removeVersion(versionId)
   return items
+}
+
+/**
+ * Empties the vaults whose reset is due (§7.7), and the staged frames of what
+ * was in them. Returns how many vaults went.
+ */
+export async function emptyResetVaults(db: Database, staging: Staging): Promise<number> {
+  const { vaults, versionIds } = await resetDueVaults(db)
+  for (const versionId of versionIds) await staging.removeVersion(versionId)
+  return vaults
 }
 
 /**

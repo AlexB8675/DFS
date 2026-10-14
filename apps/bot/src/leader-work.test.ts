@@ -7,6 +7,8 @@ import {
   createDatabase,
   createPool,
   devicePairings,
+  nodes,
+  sessions,
   shareLinks,
   users,
   type Database,
@@ -20,6 +22,7 @@ import {
   cleanUp,
   dropEarlierVersions,
   emptyOldTrash,
+  emptyResetVaults,
   giveUpIdleUploads,
   onTheClock,
 } from './leader-work.ts'
@@ -117,6 +120,131 @@ describe('cleanUp', () => {
     expect(journaled[0]?.count).toBe(1)
     // Nothing else is due.
     expect(await emptyOldTrash(db, staging, 30)).toBe(0)
+  })
+
+  /** An owner whose one file is moved into a vault of theirs, made by hand, with an open session. */
+  async function vaultWithAFile(staging: Staging, resetAt: ReturnType<typeof sql.raw>) {
+    const { ownerId, files } = await uploadedFiles(db, staging, [100])
+    const file = files[0]
+    if (!file) throw new Error('No test file.')
+    const [vault] = await db
+      .insert(nodes)
+      .values({ ownerId, kind: 'folder', name: 'Vault', nameKey: 'vault', tree: 'vault' })
+      .returning()
+    if (!vault) throw new Error('No test vault.')
+    // The trigger fills the tree on insert only, so a move says it.
+    await db.execute(
+      sql`UPDATE nodes SET parent_id = ${vault.id}, tree = 'vault' WHERE id = ${file.nodeId}`,
+    )
+    await db.execute(sql`
+      UPDATE users SET vault_root_id = ${vault.id}, vault_salt = decode('00', 'hex'),
+        vault_key_by_code = decode('01', 'hex'), vault_key_by_recovery = decode('02', 'hex'),
+        vault_reset_at = ${resetAt}
+      WHERE id = ${ownerId}`)
+    const sessionId = randomBytes(16).toString('hex')
+    await db.insert(sessions).values({
+      id: sessionId,
+      userId: ownerId,
+      csrfToken: 'csrf',
+      expiresAt: new Date(Date.now() + 3_600_000),
+      vaultKeySealed: Buffer.from('sealed'),
+      vaultLocksAt: new Date(Date.now() + 600_000),
+    })
+    return { ownerId, vaultId: vault.id, nodeId: file.nodeId, versionId: file.versionId, sessionId }
+  }
+
+  it('leaves a vault alone until its reset is due', async () => {
+    const staging = new Staging(path.join(directory, 'staging'))
+    const { vaultId, nodeId } = await vaultWithAFile(staging, sql.raw(`now() + interval '1 day'`))
+
+    expect(await emptyResetVaults(db, staging)).toBe(0)
+    const { rows: left } = await db.execute<{ id: string }>(sql`
+      SELECT id FROM nodes WHERE id = ANY(ARRAY[${vaultId}, ${nodeId}]::uuid[])`)
+    expect(left.map((row) => row.id).sort()).toEqual([vaultId, nodeId].sort())
+  })
+
+  it('empties a vault whose reset is due, as the system, and lets its owner make a new one', async () => {
+    const staging = new Staging(path.join(directory, 'staging'))
+    const { ownerId, vaultId, nodeId, versionId, sessionId } = await vaultWithAFile(
+      staging,
+      sql.raw(`now() - interval '1 minute'`),
+    )
+
+    expect(await emptyResetVaults(db, staging)).toBe(1)
+    // The vault and its file are gone; the drive stays.
+    const { rows: left } = await db.execute<{ id: string }>(sql`
+      SELECT id FROM nodes WHERE id = ANY(ARRAY[${vaultId}, ${nodeId}]::uuid[])`)
+    expect(left).toEqual([])
+    const { rows: drive } = await db.execute<{ count: number }>(sql`
+      SELECT count(*)::int AS count FROM nodes
+      WHERE owner_id = ${ownerId} AND parent_id IS NULL AND tree = 'drive'`)
+    expect(drive[0]?.count).toBe(1)
+    await expect(staging.read(staging.framePath(versionId, 0))).rejects.toThrow()
+
+    const { rows: owner } = await db.execute<{
+      used: number
+      vault_root_id: string | null
+      vault_salt: Buffer | null
+      vault_key_by_code: Buffer | null
+      vault_key_by_recovery: Buffer | null
+      vault_reset_at: Date | null
+    }>(sql`
+      SELECT used_bytes::float8 AS used, vault_root_id, vault_salt, vault_key_by_code,
+        vault_key_by_recovery, vault_reset_at
+      FROM users WHERE id = ${ownerId}`)
+    expect(owner).toEqual([
+      {
+        used: 0,
+        vault_root_id: null,
+        vault_salt: null,
+        vault_key_by_code: null,
+        vault_key_by_recovery: null,
+        vault_reset_at: null,
+      },
+    ])
+    // An open session no longer holds the key of a vault that is gone.
+    const { rows: session } = await db.execute<{
+      vault_key_sealed: Buffer | null
+      vault_locks_at: Date | null
+    }>(sql`SELECT vault_key_sealed, vault_locks_at FROM sessions WHERE id = ${sessionId}`)
+    expect(session).toEqual([{ vault_key_sealed: null, vault_locks_at: null }])
+
+    const { rows: logged } = await db.execute<{ user_id: string | null }>(sql`
+      SELECT user_id FROM audit_log WHERE action = 'vault.reset'`)
+    expect(logged).toEqual([{ user_id: null }])
+    const { rows: journaled } = await db.execute<{ kind: string; vault_key: string | null }>(sql`
+      SELECT kind, record->>'vaultKeyByCode' AS vault_key FROM journal
+      WHERE (kind = 'node.purge' AND record->>'id' = ${vaultId})
+        OR (kind = 'user.upsert' AND record->>'id' = ${ownerId})
+      ORDER BY id`)
+    expect(journaled.map((row) => row.kind)).toEqual(['node.purge', 'user.upsert'])
+    expect(journaled[1]?.vault_key).toBeNull()
+
+    // The owner can make a new one: the tree's root is free again.
+    await db.insert(nodes).values({
+      ownerId,
+      kind: 'folder',
+      name: 'Vault',
+      nameKey: 'vault',
+      tree: 'vault',
+    })
+    // Nothing else is due.
+    expect(await emptyResetVaults(db, staging)).toBe(0)
+  })
+
+  it('keeps a vault its owner opened meanwhile', async () => {
+    const staging = new Staging(path.join(directory, 'staging'))
+    const { ownerId, vaultId, nodeId } = await vaultWithAFile(
+      staging,
+      sql.raw(`now() - interval '1 minute'`),
+    )
+    // As opening the vault clears the date.
+    await db.execute(sql`UPDATE users SET vault_reset_at = NULL WHERE id = ${ownerId}`)
+
+    expect(await emptyResetVaults(db, staging)).toBe(0)
+    const { rows: left } = await db.execute<{ id: string }>(sql`
+      SELECT id FROM nodes WHERE id = ANY(ARRAY[${vaultId}, ${nodeId}]::uuid[])`)
+    expect(left.map((row) => row.id).sort()).toEqual([vaultId, nodeId].sort())
   })
 
   it('gives up uploads whose page went quiet for ten minutes, and keeps those it hears of', async () => {
