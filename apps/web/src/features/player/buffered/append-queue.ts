@@ -41,11 +41,21 @@ export class AppendQueue {
   #held = false
   /** While stopped: how many removals were queued ahead of the held segment. */
   #madeRoom = 0
+  /** What the target was last handed and has not ended; `reset()` cancels only an append. */
+  #inFlight: 'append' | 'remove' | null = null
+  /** Whether `#inFlight` is a seek's removal. */
+  #seekInFlight = false
 
   constructor(target: BufferTarget, onQuotaExceeded: () => void) {
     this.#target = target
     this.#onQuotaExceeded = onQuotaExceeded
     target.addEventListener('updateend', () => {
+      // An operation cancelled or ended earlier may report its end after the next has
+      // begun; that one is still under way.
+      if (!target.updating) {
+        this.#inFlight = null
+        this.#seekInFlight = false
+      }
       this.#run()
     })
   }
@@ -88,6 +98,17 @@ export class AppendQueue {
     return this.#held
   }
 
+  /**
+   * Whether a seek's removal is queued or under way, so that what the target
+   * reports as buffered is still the old position's.
+   */
+  get resetting(): boolean {
+    return (
+      this.#seekInFlight ||
+      this.#operations.some((operation) => operation.kind === 'remove' && operation.seek)
+    )
+  }
+
   /** After a quota error: tries the held segment again (a `hold()` still stands). */
   retry(): void {
     this.#stopped = false
@@ -112,18 +133,23 @@ export class AppendQueue {
   /**
    * For a seek: drops every operation queued (a segment held for lack of room
    * too, and the stop with it), cancels the append under way, and clears what's
-   * buffered before `clearTo`, in seconds. That removal runs even while held;
-   * nothing after it does until `release()`.
+   * buffered before `clearTo`, in seconds. That removal runs even while held, and
+   * `resetting` is true until it ends; nothing after it runs until `release()`.
+   * A removal already under way is left to finish: it can't be cancelled.
    */
   reset(clearTo: number): void {
     this.#operations.length = 0
     this.#stopped = false
     this.#madeRoom = 0
     if (clearTo > 0) this.#operations.push({ kind: 'remove', before: clearTo, seek: true })
-    // Only an operation under way needs cancelling. Otherwise there is nothing to
-    // cancel, and abort() throws once the MediaSource has ended (a seek back after
-    // the whole video loaded); the removal below reopens it.
-    if (this.#target.updating) this.#target.abort()
+    // Only an append under way is cancelled. With nothing under way there is nothing to
+    // cancel, and abort() throws once the MediaSource has ended (a seek back after the
+    // whole video loaded); the removal below reopens it. It throws while a removal runs
+    // too, and that one ends on its own, before the removal queued here starts.
+    if (this.#target.updating && this.#inFlight === 'append') {
+      this.#target.abort()
+      this.#inFlight = null
+    }
     this.#run()
   }
 
@@ -145,7 +171,11 @@ export class AppendQueue {
         if (this.#held && !(next.kind === 'remove' && next.seek)) break
         if (next.kind === 'remove') {
           this.#operations.shift()
-          if (next.before > 0) this.#target.remove(0, next.before)
+          if (next.before > 0) {
+            this.#target.remove(0, next.before)
+            this.#inFlight = 'remove'
+            this.#seekInFlight = next.seek
+          }
           continue
         }
         try {
@@ -161,6 +191,8 @@ export class AppendQueue {
           this.#onQuotaExceeded()
           return
         }
+        this.#inFlight = 'append'
+        this.#seekInFlight = false
         this.#operations.shift()
       }
     } finally {

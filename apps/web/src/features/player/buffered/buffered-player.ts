@@ -451,17 +451,8 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
       const offset = placeAt(file, played, keyframes, time)
       if (offset === null) return
       stats.seeks += 1
-      for (const queue of queues) {
-        try {
-          queue.reset(mediaSource.duration)
-        } catch (error) {
-          // A buffer can't be aborted while it removes. The queue is reset by then, and
-          // goes on with its seek removal once the one under way ends.
-          if (!(error instanceof DOMException && error.name === 'InvalidStateError')) {
-            fail(error instanceof Error ? error.message : String(error))
-          }
-        }
-      }
+      // A queue cancels only an append under way; a removal under way ends first.
+      for (const queue of queues) queue.reset(mediaSource.duration)
       // A small file may be held by mp4box whole, and then no piece is left to come that
       // would make it give the segments of the samples it holds.
       file.start()

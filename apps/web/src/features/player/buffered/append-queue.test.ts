@@ -8,6 +8,8 @@ class FakeBuffer extends EventTarget implements BufferTarget {
   removed: [number, number][] = []
   /** How many times the queue cancelled what was under way. */
   aborted = 0
+  /** Whether what is under way is a removal, which stays so until `finish()`. */
+  removing = false
   /** Throws QuotaExceededError on the next appends while this is above 0. */
   fullFor = 0
   /** Throws this on the next append, whatever the buffer holds. */
@@ -27,20 +29,23 @@ class FakeBuffer extends EventTarget implements BufferTarget {
   }
   remove(start: number, end: number): void {
     this.updating = true
+    this.removing = true
     this.removed.push([start, end])
   }
   /**
    * Cancels an operation under way: the browser stops updating at once. With
-   * nothing under way it throws, as it does once the MediaSource has ended.
+   * nothing under way it throws, as it does once the MediaSource has ended, and
+   * while a removal runs.
    */
   abort(): void {
-    if (!this.updating) throw new DOMException('not open', 'InvalidStateError')
+    if (!this.updating || this.removing) throw new DOMException('not open', 'InvalidStateError')
     this.aborted += 1
     this.updating = false
   }
   /** What the browser does when an operation ends. */
   finish(): void {
     this.updating = false
+    this.removing = false
     this.dispatchEvent(new Event('updateend'))
   }
 }
@@ -350,6 +355,117 @@ describe('AppendQueue (§10.4)', () => {
       }).not.toThrow()
       expect(fake.aborted).toBe(0)
       expect(fake.removed).toEqual([[0, 10]])
+    })
+
+    it('leaves a removal under way to finish, and runs the seek removal after it', () => {
+      const { fake, queue } = setup()
+      queue.append(new ArrayBuffer(3))
+      queue.removeBefore(10)
+      fake.finish()
+      expect(fake.removed).toEqual([[0, 10]])
+      expect(fake.updating).toBe(true)
+      expect(() => {
+        queue.reset(30)
+      }).not.toThrow()
+      expect(fake.aborted).toBe(0)
+      expect(fake.removed).toEqual([[0, 10]])
+      expect(queue.pendingBytes).toBe(0)
+      fake.finish()
+      expect(fake.removed).toEqual([
+        [0, 10],
+        [0, 30],
+      ])
+      expect(fake.aborted).toBe(0)
+    })
+
+    it('leaves a seek removal under way to finish when it is reset again', () => {
+      const { fake, queue } = setup()
+      queue.reset(10)
+      expect(() => {
+        queue.reset(20)
+      }).not.toThrow()
+      expect(fake.aborted).toBe(0)
+      fake.finish()
+      expect(fake.removed).toEqual([
+        [0, 10],
+        [0, 20],
+      ])
+    })
+
+    it('says it is resetting from a reset until its seek removal ends', () => {
+      const { fake, queue } = setup()
+      expect(queue.resetting).toBe(false)
+      queue.reset(10)
+      expect(queue.resetting).toBe(true)
+      fake.finish()
+      expect(queue.resetting).toBe(false)
+    })
+
+    it('says it is resetting while the seek removal waits for a removal under way', () => {
+      const { fake, queue } = setup()
+      queue.removeBefore(5)
+      queue.reset(10)
+      expect(queue.resetting).toBe(true)
+      fake.finish()
+      expect(fake.removed).toEqual([
+        [0, 5],
+        [0, 10],
+      ])
+      expect(queue.resetting).toBe(true)
+      fake.finish()
+      expect(queue.resetting).toBe(false)
+    })
+
+    it('goes on resetting until the latest seek removal ends', () => {
+      const { fake, queue } = setup()
+      queue.reset(10)
+      queue.reset(20)
+      expect(queue.resetting).toBe(true)
+      fake.finish()
+      expect(queue.resetting).toBe(true)
+      fake.finish()
+      expect(queue.resetting).toBe(false)
+    })
+
+    it('does not say it is resetting when there is nothing to remove', () => {
+      const { fake, queue } = setup()
+      queue.append(new ArrayBuffer(3))
+      queue.reset(0)
+      expect(queue.resetting).toBe(false)
+      fake.finish()
+      expect(queue.resetting).toBe(false)
+    })
+
+    it('says it is resetting while held', () => {
+      const { fake, queue } = setup()
+      queue.hold()
+      queue.reset(10)
+      expect(queue.resetting).toBe(true)
+      fake.finish()
+      expect(queue.resetting).toBe(false)
+    })
+
+    it('is not ended by the late updateend of a cancelled append while the seek removal runs', () => {
+      const { fake, queue } = setup()
+      queue.append(new ArrayBuffer(3))
+      queue.reset(30)
+      expect(fake.aborted).toBe(1)
+      expect(fake.removed).toEqual([[0, 30]])
+      // The browser reports the cancelled append's end after the removal has begun.
+      fake.dispatchEvent(new Event('updateend'))
+      expect(queue.resetting).toBe(true)
+      expect(() => {
+        queue.reset(40)
+      }).not.toThrow()
+      expect(fake.aborted).toBe(1)
+      fake.finish()
+      expect(fake.removed).toEqual([
+        [0, 30],
+        [0, 40],
+      ])
+      expect(queue.resetting).toBe(true)
+      fake.finish()
+      expect(queue.resetting).toBe(false)
     })
 
     it('queues no removal when there is nothing before the time', () => {
