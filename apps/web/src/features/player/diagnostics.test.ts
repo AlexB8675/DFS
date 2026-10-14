@@ -5,6 +5,7 @@ import {
   decodingConfiguration,
   formatBitRate,
   playbackNotices,
+  reportLab,
   waitingForData,
   type PlaybackSignals,
 } from './diagnostics'
@@ -211,6 +212,19 @@ describe('telling a wait for data from other waits', () => {
     expect(waitingForData({ paused: false, ended: true, readyState: HAVE_METADATA }, true)).toBe(
       false,
     )
+  })
+})
+
+describe('the report’s line on how it played', () => {
+  it('passes the player’s line through, up to the most the report holds', () => {
+    expect(reportLab(() => '{"player":"direct"}')).toBe('{"player":"direct"}')
+    expect(reportLab(() => 'x'.repeat(2000))).toBe('x'.repeat(2000))
+  })
+
+  it('leaves it out when there is none, or it is too long', () => {
+    expect(reportLab(undefined)).toBeUndefined()
+    expect(reportLab(() => undefined)).toBeUndefined()
+    expect(reportLab(() => 'x'.repeat(2001))).toBeUndefined()
   })
 })
 

@@ -284,6 +284,30 @@ export default function VideoView({
   const stopped = shown !== null
   const visible = awake || state.paused || menuOpen
 
+  // How it played, for the play's report (§10.4): read when the report goes, so kept in a ref.
+  const played = useRef({ buffered, stats: bufferedStats })
+  useEffect(() => {
+    played.current = { buffered, stats: bufferedStats }
+  })
+  const howItPlayed = useCallback(() => {
+    const { buffered: own, stats } = played.current
+    if (!own) return '{"player":"direct"}'
+    return JSON.stringify({
+      player: 'buffered',
+      phase: stats?.phase,
+      bytesReceived: stats?.bytesReceived,
+      readingMs: stats?.readingMs,
+      heldMs: stats?.heldMs,
+      holdMs: stats?.holdMs,
+      holds: stats?.holds,
+      seeks: stats?.seeks,
+      targetAheadSeconds: stats?.targetAheadSeconds,
+      keyframeGapSeconds: stats?.keyframeGapSeconds,
+      quotaErrors: stats?.quotaErrors,
+      reopens: stats?.reopens,
+    })
+  }, [])
+
   // Why it may be slow, as far as the player can tell, and the play's report when it ends.
   const decoding = useQuery(decodingQuery(base, source?.versionId ?? null, info)).data ?? null
   const signals = usePlaybackStats(
@@ -296,6 +320,7 @@ export default function VideoView({
       problem: shown && { text: problemText(shown), kind: problemKind(shown) },
     },
     active,
+    howItPlayed,
   )
   const notices = playbackNotices({
     unplayable,

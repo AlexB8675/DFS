@@ -112,6 +112,15 @@ export interface Arrival {
   clientMs: number
 }
 
+/** The most a report's `lab` line may hold: the schema's limit. */
+const LAB_MAX_LENGTH = 2000
+
+/** The report's `lab` line (§10.4): the player's own, left out when it gives none or too long a one. */
+export function reportLab(read: (() => string | undefined) | undefined): string | undefined {
+  const lab = read?.()
+  return lab !== undefined && lab.length <= LAB_MAX_LENGTH ? lab : undefined
+}
+
 /**
  * Follows a play as it goes, for the player's warnings, and reports it to
  * the API once, when the player closes, moves on, or the page is hidden.
@@ -124,6 +133,11 @@ export function usePlaybackStats(
   facts: PlaybackFacts,
   /** `false` once the viewer starts closing: the report goes then, not when it has faded. */
   active: boolean,
+  /**
+   * How the video played, in one line for the report's `lab`, read when the report
+   * goes. Stable: a new one ends the follow and starts another.
+   */
+  lab?: () => string | undefined,
 ): PlaybackSignals {
   const [signals, setSignals] = useState<PlaybackSignals>(IDLE)
   const latest = useRef(facts)
@@ -282,6 +296,7 @@ export function usePlaybackStats(
       const error = video.error
         ? video.error.message || `media error ${String(video.error.code)}`
         : null
+      const labLine = reportLab(lab)
       const body: PlaybackReport = {
         versionId,
         outcome:
@@ -300,6 +315,7 @@ export function usePlaybackStats(
         decoding,
         problem: (problem?.text ?? error)?.slice(0, 300) ?? null,
         problemKind: problem?.kind ?? (video.error ? errorKind(video.error) : null),
+        ...(labLine !== undefined && { lab: labLine }),
       }
       void apiFetch(`${base}/playback-report`, {
         method: 'POST',
@@ -332,7 +348,7 @@ export function usePlaybackStats(
       sendReport.current = null
       report()
     }
-  }, [base, versionId, video])
+  }, [base, versionId, video, lab])
 
   return video ? signals : IDLE
 }
