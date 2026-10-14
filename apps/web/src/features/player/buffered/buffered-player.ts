@@ -387,7 +387,7 @@ function release(stream: { cancel(): Promise<void> }): void {
 function createBufferGate(context: StreamContext): { roomToRead: () => Promise<void> } {
   const { options, signal, queues, stats } = context
   const { video } = options
-  const targets = bufferTargets(context.fileSize / context.durationSeconds)
+  const targets = bufferTargets(context.fileSize / context.durationSeconds, 1)
   let target = targets.aheadSeconds
   stats.targetAheadSeconds = target
   let trimmedAt = Number.NEGATIVE_INFINITY
