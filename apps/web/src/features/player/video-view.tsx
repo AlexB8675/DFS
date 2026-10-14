@@ -15,6 +15,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useEffectEvent,
   useImperativeHandle,
   useMemo,
   useRef,
@@ -39,6 +40,8 @@ import { isEditable } from '@/lib/editable'
 import type { FilePlace } from '@/lib/file-place'
 import { cn } from '@/lib/utils'
 import { contentUrl, mediaQuery, playbackQuery } from './api'
+import { playsBuffered } from './buffered/choice'
+import { useBufferedPlay } from './buffered/use-buffered-play'
 import { browserCanPlayType, codecLabel, playability, playedStreams, unplayableOf } from './codecs'
 import { audioTracksOf, chooseAudioTrack } from './audio-tracks'
 import { Controls, type Chapter } from './controls'
@@ -65,10 +68,14 @@ import { useResume } from './use-resume'
 
 // The video player (DESIGN.md §10.4): direct play of the version the API
 // names, from the start, offering to resume where the viewer stopped, with
-// controls of its own over the picture. It starts at once, without waiting for the media info, which,
-// when it comes, says whether this browser decodes the picture and the
-// sound, and brings the chapters and the subtitles inside the file. The
-// same for a drive's file and a link's: its place says where to ask.
+// controls of its own over the picture. The media info, when it comes, says
+// whether this browser decodes the picture and the sound, and brings the
+// chapters and the subtitles inside the file. It also says how the video plays:
+// an MP4 or MOV with at most one sound track plays through the app's own buffer
+// (./buffered), which the element is given as a Media Source; the rest, and one
+// whose buffer fails before its first frame, play by the element itself from the
+// file's address. The same for a drive's file and a link's: its place says where
+// to ask.
 
 interface VideoViewProps {
   name: string
@@ -162,6 +169,10 @@ export default function VideoView({
   const [fading, setFading] = useState<ReadonlySet<string>>(new Set())
   /** Asked to play, and not playing yet nor refused: a spinner, not a play button. */
   const [starting, setStarting] = useState(true)
+  /** The version whose own buffer failed before its first frame: it plays by the element's. */
+  const [bufferFailedFor, setBufferFailedFor] = useState<string | null>(null)
+  /** How the start with this key plays, once decided: through the own buffer, or by the element. */
+  const [mode, setMode] = useState<{ key: string; buffered: boolean } | null>(null)
 
   const rootRef = useRef<HTMLDivElement | null>(null)
   const [root, setRoot] = useState<HTMLDivElement | null>(null)
@@ -179,14 +190,8 @@ export default function VideoView({
       const { volume, muted } = usePlayerPreferences.getState()
       element.volume = volume
       element.muted = muted
-      // Without a click first (an address opened or reloaded), the browser may refuse.
+      // It plays once it has a source: see `direct`, and `onCanPlay` for the own buffer.
       setStarting(true)
-      element
-        .play()
-        .catch(() => undefined)
-        .finally(() => {
-          setStarting(false)
-        })
     }
   }, [])
 
@@ -204,6 +209,63 @@ export default function VideoView({
 
   // What the media info says of this browser, once it comes, for the version playing.
   const info = source && media.data?.versionId === source.versionId ? media.data.info : null
+
+  // How a start plays (§10.4) is decided once, when the media info has come or failed, and kept
+  // while its element lives: a refetch of the info must not change a video that plays. Until
+  // then the element has no source. A new start (a retry, a new file, a fallback) decides again.
+  const sourceKey = source ? `${source.versionId}:${String(source.attempt)}` : ''
+  if (source && mode?.key !== sourceKey && (info !== null || !media.isFetching)) {
+    setMode({
+      key: sourceKey,
+      buffered:
+        info !== null &&
+        playsBuffered(info, typeof MediaSource !== 'undefined') &&
+        bufferFailedFor !== source.versionId,
+    })
+  }
+  const decided = mode?.key === sourceKey ? mode : null
+  const buffered = decided?.buffered === true
+  /** The element plays by its own source: the file's address. */
+  const direct = decided !== null && !decided.buffered
+  const { stats: bufferedStats } = useBufferedPlay({
+    video,
+    url: source ? contentUrl(place, source.versionId) : '',
+    enabled: buffered,
+    startAt: source?.startAt ?? 0,
+    autoplay: active,
+    onFailed: () => {
+      if (!source) return
+      // Before its first frame: the element plays the file by its address instead, anew.
+      setBufferFailedFor(source.versionId)
+      setSource((current) => current && { ...current, attempt: current.attempt + 1 })
+    },
+  })
+
+  // Asked to play, without a click first (an address opened or reloaded) the browser may refuse.
+  useEffect(() => {
+    if (!video || !direct) return
+    let current = true
+    video
+      .play()
+      .catch(() => undefined)
+      .finally(() => {
+        if (current) setStarting(false)
+      })
+    return () => {
+      current = false
+    }
+  }, [video, direct])
+
+  // After its first frame, a failed own-buffer play leaves the element as it is, with no error of
+  // its own: a read that broke off, the file replaced. It is a failed play all the same.
+  const playFailed = bufferedStats?.phase === 'failed'
+  const surfaceFailure = useEffectEvent(() => {
+    void handleError()
+  })
+  useEffect(() => {
+    if (playFailed) surfaceFailure()
+  }, [playFailed])
+
   const verdict = info ? playability(info, browserCanPlayType) : null
   const picture = verdict?.video
   const pictureFails =
@@ -544,6 +606,8 @@ export default function VideoView({
     const fresh = await queryClient
       .query({ ...playbackQuery(place), staleTime: 0 })
       .catch((reason: unknown) => (reason instanceof ApiError ? reason : null))
+    // Another element plays by now: an own-buffer play that failed before its first frame.
+    if (videoRef.current !== element) return
     // Gone, or its link ended: /playback's answer says so, in place of the player.
     if (fresh instanceof ApiError && fresh.status < 500) return
     if (fresh && !(fresh instanceof ApiError) && fresh.versionId !== playing.versionId) {
@@ -553,8 +617,9 @@ export default function VideoView({
     }
     setSource({ ...playing, startAt })
     const detail = error?.message ?? ''
-    if (error?.code === MediaError.MEDIA_ERR_NETWORK) setProblem({ kind: 'network' })
-    else if (error?.code === MediaError.MEDIA_ERR_DECODE) setProblem({ kind: 'decode', detail })
+    // No error of the element's own: the own buffer's play failed, on a read, most often.
+    if (!error || error.code === MediaError.MEDIA_ERR_NETWORK) setProblem({ kind: 'network' })
+    else if (error.code === MediaError.MEDIA_ERR_DECODE) setProblem({ kind: 'decode', detail })
     else setProblem({ kind: 'unsupported', detail })
   }
 
@@ -681,14 +746,19 @@ export default function VideoView({
         source && (
           <>
             <video
-              key={`${source.versionId}:${String(source.attempt)}`}
+              key={sourceKey}
               ref={attachVideo}
-              src={contentUrl(place, source.versionId, source.startAt)}
+              // The own buffer sets a source of its own; until the start is decided there is none.
+              src={direct ? contentUrl(place, source.versionId, source.startAt) : undefined}
               className="size-full object-contain"
               playsInline
               preload="auto"
               // The controls hide a while after it starts, as after a move.
               onPlaying={wake}
+              // The own buffer plays from its metadata, where a refusal isn't seen: it ends here.
+              onCanPlay={() => {
+                setStarting(false)
+              }}
               onLoadedMetadata={(event) => {
                 setBlank(event.currentTarget.videoWidth === 0)
               }}
@@ -730,7 +800,7 @@ export default function VideoView({
       )}
       {!shown && (
         <Center
-          loading={!source || starting || state.waiting}
+          loading={!source || starting || state.waiting || bufferedStats?.holding === true}
           paused={state.paused && source !== null && !starting}
           ended={state.ended}
           onPlay={togglePlay}
