@@ -120,7 +120,10 @@ export class AppendQueue {
     this.#stopped = false
     this.#madeRoom = 0
     if (clearTo > 0) this.#operations.push({ kind: 'remove', before: clearTo, seek: true })
-    this.#target.abort()
+    // Only an operation under way needs cancelling. Otherwise there is nothing to
+    // cancel, and abort() throws once the MediaSource has ended (a seek back after
+    // the whole video loaded); the removal below reopens it.
+    if (this.#target.updating) this.#target.abort()
     this.#run()
   }
 

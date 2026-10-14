@@ -29,8 +29,12 @@ class FakeBuffer extends EventTarget implements BufferTarget {
     this.updating = true
     this.removed.push([start, end])
   }
-  /** Cancels an operation under way: the browser stops updating at once. */
+  /**
+   * Cancels an operation under way: the browser stops updating at once. With
+   * nothing under way it throws, as it does once the MediaSource has ended.
+   */
   abort(): void {
+    if (!this.updating) throw new DOMException('not open', 'InvalidStateError')
     this.aborted += 1
     this.updating = false
   }
@@ -334,6 +338,18 @@ describe('AppendQueue (§10.4)', () => {
       fake.finish()
       expect(fake.appended).toEqual([3])
       expect(queue.idle).toBe(true)
+    })
+
+    it('cancels nothing when no operation is under way, and still clears the buffer', () => {
+      const { fake, queue } = setup()
+      queue.append(new ArrayBuffer(3))
+      fake.finish()
+      expect(fake.updating).toBe(false)
+      expect(() => {
+        queue.reset(10)
+      }).not.toThrow()
+      expect(fake.aborted).toBe(0)
+      expect(fake.removed).toEqual([[0, 10]])
     })
 
     it('queues no removal when there is nothing before the time', () => {
