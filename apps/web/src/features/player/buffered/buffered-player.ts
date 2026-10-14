@@ -11,19 +11,24 @@
 // stays open after the end of the file for that: the play lasts until the caller
 // aborts it or it fails. When the viewer seeks to a time that isn't buffered, the
 // player drops what it has and streams from the keyframe before that time; and
-// the play can begin at a time other than the start.
+// the play can begin at a time other than the start. The browser is not given
+// the segments as they come: they are held back until enough is queued to play
+// without stopping, at the start, after such a seek and after a stall, and then
+// let go all at once, as YouTube's player does.
 
 import { createFile, MP4BoxBuffer, type ISOFile, type Movie, type Track } from 'mp4box'
 import { AppendQueue } from './append-queue'
 import { mediaLayout, type MediaLayout } from './boxes'
 import {
   aheadSeconds,
+  bufferingGoal,
   bufferTargets,
   keyframeAtOrBefore,
   keyframeTimes,
   longestKeyframeGap,
   mimeOf,
   samplesPerSegment,
+  type HoldReason,
 } from './tracks'
 
 export interface BufferedStats {
@@ -46,6 +51,12 @@ export interface BufferedStats {
   reopens: number
   /** Seeks to a time that wasn't buffered, which started the stream again there. */
   seeks: number
+  /** Whether the segments are held back until enough is queued to play without stopping. */
+  holding: boolean
+  /** Holds that ended in playing: enough was queued, or the whole file was fed. */
+  holds: number
+  /** Time spent in the holds that ended. */
+  holdMs: number
   segments: number
   error: string | null
 }
@@ -73,6 +84,8 @@ interface StreamContext {
   layout: MediaLayout
   fileSize: number
   durationSeconds: number
+  /** The file's average rate. */
+  bytesPerSecond: number
   /** Whether only sound is played, which can be cut anywhere. */
   soundOnly: boolean
   /** File offset where the first run begins: the start of the samples, or the keyframe before `startAt`. */
@@ -84,6 +97,8 @@ interface StreamContext {
   mediaSource: MediaSource
   /** One for each track played, the video's first. */
   queues: AppendQueue[]
+  /** The wait for enough to be queued; it holds the queues. */
+  holds: Holds
   stats: BufferedStats
   emit: () => void
   /** Ends the play with `message` shown. */
@@ -111,6 +126,18 @@ const MAX_PENDING_BYTES = 32 * 1024 * 1024
 
 /** How long a held-back reading waits before it looks again, if no `timeupdate` comes first. */
 const HOLD_RECHECK_MS = 250
+
+/** A video element's `readyState` once it has the data for the frame at the playhead. */
+const HAVE_CURRENT_DATA = 2
+
+/** How long the file has been read before the link's speed is worked out from it. */
+const LINK_MIN_READING_MS = 500
+
+/**
+ * The most of the buffer's target that is waited for. Reading stops once the
+ * target is reached, so a goal at the target would be met only by chance.
+ */
+const GOAL_SHARE_OF_TARGET = 0.9
 
 /** What was played is dropped at most this often. */
 const TRIM_INTERVAL_MS = 1000
@@ -246,6 +273,9 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
     quotaErrors: 0,
     reopens: 0,
     seeks: 0,
+    holding: false,
+    holds: 0,
+    holdMs: 0,
     segments: 0,
     error: null,
   }
@@ -285,15 +315,22 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
     return part
   }
 
-  const interval = setInterval(emit, STATS_INTERVAL_MS)
+  // Whether the video has shown a frame yet, which a stall can only follow. `loadeddata` says so
+  // (`onLoadedData`); this catches it should that event have gone by.
+  let frameShown = false
+  const interval = setInterval(() => {
+    if (video.readyState >= HAVE_CURRENT_DATA) frameShown = true
+    emit()
+  }, STATS_INTERVAL_MS)
   const onVideoError = (): void => {
     // The message is often empty, and then nothing is said of what went wrong.
     const message = video.error?.message ?? ''
     fail(message.length > 0 ? message : 'The video element failed.')
   }
   video.addEventListener('error', onVideoError)
-  // Removes the `seeking` listener, which is added once the play is set up, on any way out.
-  const seekListening = new AbortController()
+  // Removes the listeners added once the play is set up (`seeking`, `waiting`, `loadeddata`)
+  // on any way out.
+  const listening = new AbortController()
 
   try {
     // 1. The head, which tells the file's size, and 2. where its index is.
@@ -390,6 +427,8 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
       ]),
     )
     const queues = [...queueOfTrack.values()]
+    const bytesPerSecond = fileSize / durationSeconds
+    const holds = createHolds({ video, queues, stats, bytesPerSecond, durationSeconds, emit })
     // Every track is segmented, not only the played ones: mp4box frees a fed buffer only once
     // every byte in it was used, and a track nobody segments never has its samples read. Its
     // bytes would stay for good, and over a long video that is the whole file. An unplayed track
@@ -416,6 +455,9 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
     for (const { user, buffer } of file.initializeSegmentation('per-track')) {
       queueOf(user)?.append(buffer)
     }
+    // Nothing else goes to the browser until enough is queued to play without stopping (§10.4).
+    // The init segments went first: the browser needs them to tell the video's size and length.
+    holds.start('start')
 
     // 9. Where mp4box and the stream begin: the first samples, or the keyframe before
     // `startAt`. mp4box is placed before `start()`, which gives out the samples it has already.
@@ -444,12 +486,14 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
       layout,
       fileSize,
       durationSeconds,
+      bytesPerSecond,
       soundOnly: videoTrack === undefined,
       firstOffset,
       keyframes,
       keyframeGapSeconds,
       mediaSource,
       queues,
+      holds,
       stats,
       emit,
       fail,
@@ -479,6 +523,9 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
         stats.seeks += 1
         // A queue cancels only an append under way; a removal under way ends first.
         for (const queue of queues) queue.reset(mediaSource.duration)
+        // As at the start, nothing is appended until enough is queued. Before `file.start()`,
+        // which may give segments out at once.
+        holds.start('start')
         // A small file may be held by mp4box whole, and then no piece is left to come that
         // would make it give the segments of the samples it holds.
         file.start()
@@ -487,7 +534,26 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
         fail(error instanceof Error ? error.message : String(error))
       }
     }
-    video.addEventListener('seeking', onSeeking, { signal: seekListening.signal })
+    video.addEventListener('seeking', onSeeking, { signal: listening.signal })
+    // The video ran out of data while playing: waits for more than a start does, so that a
+    // stall isn't followed at once by another. Not while paused, seeking (the seek holds), or
+    // before the first frame (the start holds), and not once everything is fed or ended: nothing
+    // more is coming, and a held queue would never be appended.
+    const onWaiting = (): void => {
+      if (over() || holds.holding || video.paused || video.seeking) return
+      if (stats.phase === 'ended' || !frameShown) return
+      try {
+        holds.start('stall')
+        holds.check()
+      } catch (error) {
+        fail(error instanceof Error ? error.message : String(error))
+      }
+    }
+    const onLoadedData = (): void => {
+      frameShown = true
+    }
+    video.addEventListener('waiting', onWaiting, { signal: listening.signal })
+    video.addEventListener('loadeddata', onLoadedData, { signal: listening.signal })
     await streamSamples(context)
   } catch (error) {
     // An abort, the caller's or fail()'s, isn't a failure to show.
@@ -495,7 +561,7 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
   } finally {
     clearInterval(interval)
     video.removeEventListener('error', onVideoError)
-    seekListening.abort()
+    listening.abort()
     signal.removeEventListener('abort', onAbort)
   }
 }
@@ -542,6 +608,107 @@ function release(stream: { cancel(): Promise<void> }): void {
   stream.cancel().catch(() => undefined)
 }
 
+/** The wait for enough to be queued before the video plays (see `createHolds`). */
+interface Holds {
+  /** Whether every queue is held, so that the browser is given nothing more. */
+  readonly holding: boolean
+  /**
+   * Holds every queue, for a start (the opening, or a seek) or a stall. Holding
+   * already, it only changes why: a seek during a stall waits as a start does.
+   * A stall is ignored once the run has fed everything, and a start begins a
+   * run that hasn't fed anything.
+   */
+  start: (reason: HoldReason) => void
+  /** Seconds to have queued before the queues are released, for what the hold is for. */
+  goalSeconds: () => number
+  /** Releases the queues if enough is queued; to be called whenever more may be. */
+  check: () => void
+  /** The run has fed all of the file to mp4box: releases, as waiting longer gains nothing. */
+  finish: () => void
+}
+
+/**
+ * Makes the queues wait until enough is queued to play without stopping, as
+ * YouTube's player does (§10.4): seconds enough for a start, more after a stall,
+ * and then they are all let go at once. The goal comes from `bufferingGoal`, with
+ * the link's speed as measured while reading, and is held under the buffer's
+ * target, which the gate keeps in `stats.targetAheadSeconds`. The browser waits
+ * meanwhile (a start) or has nothing more to play (a stall), so a pause doesn't
+ * end the wait, and the queued seconds alone do.
+ */
+function createHolds(input: {
+  video: HTMLVideoElement
+  queues: readonly AppendQueue[]
+  stats: BufferedStats
+  bytesPerSecond: number
+  durationSeconds: number
+  emit: () => void
+}): Holds {
+  const { video, queues, stats, bytesPerSecond, durationSeconds, emit } = input
+  let holding = false
+  let reason: HoldReason = 'start'
+  let since = 0
+  /** Whether the run under way has fed all of the file: no stall can wait for more. */
+  let fed = false
+
+  const goalSeconds = (): number => {
+    const target = stats.targetAheadSeconds
+    const linkBytesPerSecond =
+      stats.readingMs < LINK_MIN_READING_MS ? null : stats.bytesReceived / (stats.readingMs / 1000)
+    const goal = bufferingGoal({
+      reason,
+      linkBytesPerSecond,
+      bytesPerSecond,
+      targetAheadSeconds: target,
+      remainingSeconds: durationSeconds - video.currentTime,
+    })
+    return Math.min(goal, target * GOAL_SHARE_OF_TARGET)
+  }
+  /** Releases every queue: the video plays, or has all there is. */
+  const end = (): void => {
+    holding = false
+    stats.holding = false
+    stats.holds += 1
+    stats.holdMs += performance.now() - since
+    for (const queue of queues) queue.release()
+    emit()
+  }
+
+  return {
+    get holding() {
+      return holding
+    },
+    start: (why) => {
+      // A start comes with a run that has fed nothing yet.
+      if (why === 'start') fed = false
+      else if (fed) return
+      reason = why
+      if (holding) return
+      holding = true
+      since = performance.now()
+      stats.holding = true
+      for (const queue of queues) queue.hold()
+      emit()
+    },
+    goalSeconds,
+    check: () => {
+      if (!holding) return
+      const queued = queues.reduce((sum, queue) => sum + queue.pendingBytes, 0) / bytesPerSecond
+      // The gate stops reading once what is buffered and queued reaches the target. The goal is
+      // under the target, but not by what is already buffered: waiting for more than the gate lets
+      // in would be for ever, so that ends the hold too. While a seek's removal runs,
+      // `video.buffered` still shows the old position's ranges, which count for nothing.
+      const resetting = queues.some((queue) => queue.resetting)
+      const ahead = resetting ? 0 : aheadSeconds(video.buffered, video.currentTime)
+      if (queued >= goalSeconds() || ahead + queued >= stats.targetAheadSeconds) end()
+    },
+    finish: () => {
+      fed = true
+      if (holding) end()
+    },
+  }
+}
+
 /**
  * Holds the reading back while enough is buffered, and handles a full buffer
  * (§10.4). `roomToRead(within)` resolves once the playhead has less than the
@@ -549,15 +716,15 @@ function release(stream: { cancel(): Promise<void> }): void {
  * and few enough of them wait, or sooner, once `within` aborts: a run that is
  * replaced mustn't stay held. The target is how far ahead to buffer for this
  * file's bit rate and keyframe gap, and a quota error lowers it. What was
- * played is dropped only at a keyframe. This puts its handling of a quota error
- * in `context.quota`.
+ * played is dropped only at a keyframe. While the queues are held (see
+ * `createHolds`) more may be queued, up to the goal. This puts its handling of
+ * a quota error in `context.quota`.
  */
 function createBufferGate(context: StreamContext): {
   roomToRead: (within: AbortSignal) => Promise<void>
 } {
-  const { options, signal, queues, stats, soundOnly, keyframes } = context
+  const { options, signal, queues, stats, soundOnly, keyframes, bytesPerSecond, holds } = context
   const { video } = options
-  const bytesPerSecond = context.fileSize / context.durationSeconds
   const targets = bufferTargets(bytesPerSecond, context.keyframeGapSeconds)
   let target = targets.aheadSeconds
   stats.targetAheadSeconds = target
@@ -568,7 +735,11 @@ function createBufferGate(context: StreamContext): {
   /** What is queued will be buffered, so it counts as buffered now. */
   const hasRoom = (): boolean => {
     const pending = queues.reduce((sum, queue) => sum + queue.pendingBytes, 0)
-    return ahead() + pending / bytesPerSecond < target && pending < MAX_PENDING_BYTES
+    // The queued bytes don't play until the hold ends, so the goal has to fit.
+    const maxPending = holds.holding
+      ? Math.max(MAX_PENDING_BYTES, holds.goalSeconds() * bytesPerSecond + FEED_BYTES)
+      : MAX_PENDING_BYTES
+    return ahead() + pending / bytesPerSecond < target && pending < maxPending
   }
   /**
    * Where to cut to drop what was played before `time`: just before the last
@@ -614,11 +785,13 @@ function createBufferGate(context: StreamContext): {
   return {
     roomToRead: async (within) => {
       makeRoomBehind()
+      holds.check()
       while (!hasRoom() && !within.aborted) {
         const began = performance.now()
         await wait(HOLD_RECHECK_MS, within)
         stats.heldMs += performance.now() - began
         makeRoomBehind()
+        holds.check()
       }
     },
   }
@@ -715,7 +888,7 @@ async function streamRun(
   from: number,
   within: AbortSignal,
 ): Promise<boolean> {
-  const { layout, stats, emit } = context
+  const { layout, stats, emit, holds } = context
   // A function, or TypeScript takes `within.aborted` to stay false across an await.
   const over = (): boolean => within.aborted
 
@@ -754,6 +927,7 @@ async function streamRun(
       if (!piece) {
         // What was collected goes to mp4box now: the stream may be a while in coming back.
         feeder.feed()
+        holds.check()
         if (reader) release(reader)
         reader = null
         if (brokenInARow >= MAX_REOPENS) {
@@ -772,7 +946,10 @@ async function streamRun(
       offset += piece.byteLength
       stats.bytesReceived += piece.byteLength
       // Not retried: a parse error here is the file's, not the connection's.
-      if (feeder.size >= FEED_BYTES || offset >= layout.stream.to) feeder.feed()
+      if (feeder.size >= FEED_BYTES || offset >= layout.stream.to) {
+        feeder.feed()
+        holds.check()
+      }
     }
   } finally {
     if (reader) release(reader)
@@ -782,16 +959,20 @@ async function streamRun(
 
 /**
  * Ends a stream that reached the end of the file: all of it is with mp4box, which
- * gives the last segments, and the buffers take them. Then the media is ended and
- * the phase is 'ended'. A restart (`within` aborts) cuts this short and ends nothing.
+ * gives the last segments, and the buffers take them (released, if they were held
+ * for more to be queued). Then the media is ended and the phase is 'ended'. A
+ * restart (`within` aborts) cuts this short and ends nothing.
  */
 async function endStream(context: StreamContext, within: AbortSignal): Promise<void> {
-  const { file, queues, mediaSource, stats, emit } = context
+  const { file, queues, mediaSource, stats, emit, holds } = context
   // A function, or TypeScript takes `within.aborted` to stay false across an await.
   const over = (): boolean => within.aborted
   // A restart may come between the last piece and here.
   if (over()) return
   file.flush()
+  // All of it is with mp4box: nothing more can be queued, so waiting for more would be for
+  // ever, and the queues could not drain.
+  holds.finish()
   await Promise.race([Promise.all(queues.map((queue) => queue.drained())), whenAborted(within)])
   if (over()) return
   if (mediaSource.readyState === 'open') mediaSource.endOfStream()

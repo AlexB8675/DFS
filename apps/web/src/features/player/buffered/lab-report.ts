@@ -119,6 +119,9 @@ export const OPENING_STATS: BufferedStats = {
   quotaErrors: 0,
   reopens: 0,
   seeks: 0,
+  holding: false,
+  holds: 0,
+  holdMs: 0,
   segments: 0,
   error: null,
 }
