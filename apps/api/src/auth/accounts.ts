@@ -1,6 +1,6 @@
 import type { ChangePasswordInput, LoginInput, PasswordResetRequest } from '@dfs/shared'
 import { appendJournal, userRecord, users } from '@dfs/db'
-import { and, eq, isNull, lt, or, sql } from 'drizzle-orm'
+import { and, eq, isNull, lt, or, sql, type SQL } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { audit, auditAlone } from '../audit.ts'
 import { ApiError } from '../errors.ts'
@@ -214,6 +214,18 @@ export async function requestPasswordReset(
   })
 }
 
+/**
+ * When a run of `failures` wrong tries in a row (an SQL expression) makes the
+ * next one wait (§7.1): no wait for the first ten, then a minute, doubling to
+ * an hour. Sign-ins and the vault's codes (§7.7) count the same way.
+ */
+export function failureWait(failures: SQL): SQL {
+  return sql`CASE WHEN ${failures} >= ${FREE_FAILURES}
+    THEN now() + least(${MAX_LOCK_MS}, ${FIRST_LOCK_MS} *
+      power(2, least(${failures} - ${FREE_FAILURES}, ${MAX_LOCK_EXPONENT}))) * interval '1 millisecond'
+    ELSE NULL END`
+}
+
 async function recordFailure(app: FastifyInstance, user: UserRow): Promise<void> {
   // Derive both fields from the row being updated: simultaneous checks can
   // have read the same old count before password verification finished.
@@ -222,10 +234,7 @@ async function recordFailure(app: FastifyInstance, user: UserRow): Promise<void>
     .update(users)
     .set({
       failedSignIns: failures,
-      signInLockedUntil: sql`CASE WHEN ${failures} >= ${FREE_FAILURES}
-        THEN now() + least(${MAX_LOCK_MS}, ${FIRST_LOCK_MS} *
-          power(2, least(${failures} - ${FREE_FAILURES}, ${MAX_LOCK_EXPONENT}))) * interval '1 millisecond'
-        ELSE NULL END`,
+      signInLockedUntil: failureWait(failures),
     })
     .where(eq(users.id, user.id))
 }

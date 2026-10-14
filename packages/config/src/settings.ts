@@ -105,6 +105,9 @@ export function describeSettings(
       entry('Accounts', 'both', 'TRASH_RETENTION_DAYS', config.trashRetentionDays),
       // Trashing a large folder in the request, or as a job past it (§7.2).
       entry('Accounts', 'api', 'TRASH_SYNC_LIMIT', config.trashSyncLimit),
+      // The vault: only the API opens it and schedules its reset (§7.7).
+      entry('Accounts', 'api', 'LOCK_IDLE_MINUTES', config.lockIdleMinutes),
+      entry('Accounts', 'api', 'VAULT_RESET_DAYS', config.vaultResetDays),
       entry('Durability', 'both', 'SCRUB_REQUESTS_PER_HOUR', config.scrubRequestsPerHour),
       // The API flushes the journal: it needs the master key (§8).
       entry('Durability', 'api', 'JOURNAL_FLUSH_INTERVAL_MS', config.journalFlushIntervalMs),

@@ -65,6 +65,8 @@ describe('loadConfig', () => {
       masterKeyFile: path.join(root, '.data', 'master-key.json'),
       publicBaseUrl: 'http://localhost:5173',
       apiPort: 3000,
+      lockIdleMinutes: 15,
+      vaultResetDays: 7,
     })
   })
 

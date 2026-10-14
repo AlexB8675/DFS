@@ -482,6 +482,56 @@ export const deviceMeSchema = z.object({
 })
 export type DeviceMe = z.infer<typeof deviceMeSchema>
 
+// ── The vault (§7.7) ─────────────────────────────────────────────────────────
+
+/** A lock code being chosen: at least 6 characters, so a six-digit PIN will do. */
+export const vaultCodeSchema = z.string().min(6).max(200)
+
+/** A code typed to open the vault: a short one is just wrong, not malformed. */
+const typedVaultCode = z.string().min(1).max(200)
+
+/**
+ * `GET /vault`: whether the account has a vault, whether it is open in this
+ * browser and until when, when an asked-for reset empties it, and what it
+ * holds, which is all anyone sees of it while it is locked.
+ */
+export const vaultStateSchema = z.object({
+  exists: z.boolean(),
+  open: z.boolean(),
+  locksAt: timestamp.nullable(),
+  resetAt: timestamp.nullable(),
+  sizeBytes: byteCount,
+  fileCount: z.number().int().min(0),
+})
+export type VaultState = z.infer<typeof vaultStateSchema>
+
+/** `POST /vault`. */
+export const createVaultSchema = z.object({ code: vaultCodeSchema })
+export type CreateVaultInput = z.infer<typeof createVaultSchema>
+
+/** Answers `POST /vault`: the recovery key, shown this once, and the vault, open. */
+export const vaultCreatedSchema = z.object({ recoveryKey: z.string(), vault: vaultStateSchema })
+export type VaultCreated = z.infer<typeof vaultCreatedSchema>
+
+/** `POST /vault/unlock`. */
+export const unlockVaultSchema = z.object({ code: typedVaultCode })
+export type UnlockVaultInput = z.infer<typeof unlockVaultSchema>
+
+/** `PUT /vault/code`: a new code, with the current one or the recovery key. */
+export const changeVaultCodeSchema = z.union([
+  z.object({ currentCode: typedVaultCode, newCode: vaultCodeSchema }),
+  z.object({ recoveryKey: z.string().min(1).max(100), newCode: vaultCodeSchema }),
+])
+export type ChangeVaultCodeInput = z.infer<typeof changeVaultCodeSchema>
+
+/** Answers `POST /vault/recovery-key`: the new recovery key, shown this once. */
+export const recoveryKeySchema = z.object({ recoveryKey: z.string() })
+export type RecoveryKey = z.infer<typeof recoveryKeySchema>
+
+/** `POST /vault/reset`: the account's password. */
+export const resetVaultSchema = z.object({ password: z.string().min(1).max(PASSWORD_MAX_LENGTH) })
+export type ResetVaultInput = z.infer<typeof resetVaultSchema>
+
 // ── Admin (§9, read-only metadata per D4) ────────────────────────────────────
 
 const count = z.number().int().min(0)

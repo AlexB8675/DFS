@@ -49,6 +49,10 @@ export interface Config {
   trashSyncLimit: number
   defaultQuotaBytes: number
   tempPasswordDays: number
+  /** Minutes with nothing done inside before an open vault locks itself (§7.7). */
+  lockIdleMinutes: number
+  /** Days after a reset is asked for before it empties the vault, unless the user opens it first (§7.7). */
+  vaultResetDays: number
   internalRpcSecret: string
   botInternalUrl: string
   /**
@@ -179,6 +183,8 @@ const envSchema = z.object({
   TRASH_SYNC_LIMIT: integer(50_000, 1),
   DEFAULT_QUOTA_BYTES: byteSize(100 * GiB),
   TEMP_PASSWORD_DAYS: integer(7, 1),
+  LOCK_IDLE_MINUTES: integer(15, 1),
+  VAULT_RESET_DAYS: integer(7, 1),
   INTERNAL_RPC_SECRET: setting(z.string().optional()),
   BOT_INTERNAL_URL: setting(z.url().optional()),
   MEDIA_INTERNAL_URL: setting(z.url().optional()),
@@ -342,6 +348,8 @@ export function loadConfig(env: Record<string, string | undefined>, options: Loa
     trashSyncLimit: raw.TRASH_SYNC_LIMIT,
     defaultQuotaBytes: raw.DEFAULT_QUOTA_BYTES,
     tempPasswordDays: raw.TEMP_PASSWORD_DAYS,
+    lockIdleMinutes: raw.LOCK_IDLE_MINUTES,
+    vaultResetDays: raw.VAULT_RESET_DAYS,
     internalRpcSecret,
     botInternalUrl: raw.BOT_INTERNAL_URL ?? defaults.BOT_INTERNAL_URL,
     mediaInternalUrl:
