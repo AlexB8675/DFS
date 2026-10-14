@@ -89,6 +89,13 @@ const REOPEN_WAIT_MS = 1000
 const MAX_REOPENS = 5
 
 /**
+ * How many bytes are collected before they are given to mp4box: fewer, larger
+ * calls, as the connection hands out pieces of 16 to 64 KB, which would be
+ * hundreds of calls a second at 120 Mbit/s. A megabyte is under 0.1 s of such a video.
+ */
+const FEED_BYTES = 1024 * 1024
+
+/**
  * How much of a track goes in each segment. Segments are cut by sample count,
  * not at keyframes: half a second at 120 Mbit/s is 7.5 MB, which every Media
  * Source takes, whereas segments cut only at keyframes (5.6 s apart in some
@@ -431,6 +438,49 @@ function createBufferGate(context: StreamContext): { roomToRead: () => Promise<v
   }
 }
 
+/**
+ * Collects the pieces of the stream and gives them to mp4box in larger parts
+ * (see FEED_BYTES). Pieces must be added in file order, without a gap.
+ */
+function createFeeder(file: ISOFile) {
+  let pieces: Uint8Array<ArrayBuffer>[] = []
+  let size = 0
+  let from = 0
+  return {
+    /** Collects `piece`, which starts at file offset `at`. */
+    add(piece: Uint8Array<ArrayBuffer>, at: number): void {
+      if (pieces.length === 0) from = at
+      pieces.push(piece)
+      size += piece.byteLength
+    },
+    /** How many bytes are collected and not yet given to mp4box. */
+    get size(): number {
+      return size
+    },
+    /** Gives mp4box what is collected, as one buffer. */
+    feed(): void {
+      if (pieces.length === 0) return
+      const only = pieces.at(0)
+      let buffer: ArrayBuffer
+      if (only && pieces.length === 1) {
+        buffer = exactBuffer(only)
+      } else {
+        const joined = new Uint8Array(size)
+        let at = 0
+        for (const piece of pieces) {
+          joined.set(piece, at)
+          at += piece.byteLength
+        }
+        buffer = joined.buffer
+      }
+      const start = from
+      pieces = []
+      size = 0
+      file.appendBuffer(MP4BoxBuffer.fromArrayBuffer(buffer, start))
+    },
+  }
+}
+
 /** A stream's reader, with the bytes as the exact pieces the connection sent. */
 type StreamReader = ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>
 
@@ -458,14 +508,16 @@ async function openStream(context: StreamContext, offset: number): Promise<Strea
  * Streams the rest of the file to mp4box and on to the buffers, and resolves
  * once all of it is appended and the stream is ended (§10.4). It reads only
  * while the buffer ahead of the playhead is under its target, so a long video
- * is never held in memory whole. A connection that breaks off is opened again
- * from the bytes already received; an answer for another part of the file, or
+ * is never held in memory whole. The pieces are given to mp4box a megabyte at a
+ * time. A connection that breaks off is opened again from the bytes already
+ * received; an answer for another part of the file, or
  * a connection that keeps breaking, fails the play. An error from mp4box
  * or a buffer isn't about the connection, and ends the play through the caller.
  */
 async function streamSamples(context: StreamContext): Promise<void> {
   const { signal, file, layout, queues, mediaSource, stats, emit } = context
   const gate = createBufferGate(context)
+  const feeder = createFeeder(file)
   // A function, or TypeScript takes `signal.aborted` to stay false across an await.
   const over = (): boolean => signal.aborted
 
@@ -502,6 +554,8 @@ async function streamSamples(context: StreamContext): Promise<void> {
 
       if (!piece) {
         if (over()) return
+        // What was collected goes to mp4box now: the stream may be a while in coming back.
+        feeder.feed()
         if (reader) release(reader)
         reader = null
         if (brokenInARow >= MAX_REOPENS) {
@@ -516,10 +570,11 @@ async function streamSamples(context: StreamContext): Promise<void> {
       }
 
       brokenInARow = 0
-      // Not retried: a parse error here is the file's, not the connection's.
-      file.appendBuffer(MP4BoxBuffer.fromArrayBuffer(exactBuffer(piece), offset))
+      feeder.add(piece, offset)
       offset += piece.byteLength
       stats.bytesReceived += piece.byteLength
+      // Not retried: a parse error here is the file's, not the connection's.
+      if (feeder.size >= FEED_BYTES || offset >= layout.stream.to) feeder.feed()
     }
   } finally {
     if (reader) release(reader)
