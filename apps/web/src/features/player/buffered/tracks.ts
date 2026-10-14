@@ -85,6 +85,49 @@ export function bufferTargets(
   }
 }
 
+/**
+ * Seconds to queue at a start, or after a seek, before the video plays: little,
+ * so it begins quickly, as YouTube's does (§10.4).
+ */
+export const START_GOAL_SECONDS = 2
+
+/**
+ * Seconds to queue at least after a stall, before the video plays again: more
+ * than at a start, so one stall isn't followed at once by another (§10.4).
+ */
+export const STALL_GOAL_SECONDS = 4
+
+/** Why playback waits for data: its start (or after a seek), or a stall while playing. */
+export type HoldReason = 'start' | 'stall'
+
+/**
+ * Seconds to queue before letting the video play again (§10.4), as YouTube does.
+ * A start needs little. After a stall on a link slower than the video, it waits
+ * long enough to play to the end, or as long as the buffer allows.
+ */
+export function bufferingGoal(input: {
+  reason: HoldReason
+  /** How fast the link brought bytes while reading, or `null` before any were read. */
+  linkBytesPerSecond: number | null
+  bytesPerSecond: number
+  targetAheadSeconds: number
+  /** Seconds from the playhead to the end of the video. */
+  remainingSeconds: number
+}): number {
+  const { reason, linkBytesPerSecond, bytesPerSecond, targetAheadSeconds, remainingSeconds } = input
+  if (reason === 'start') {
+    return Math.max(0, Math.min(START_GOAL_SECONDS, targetAheadSeconds, remainingSeconds))
+  }
+  const floor = Math.min(STALL_GOAL_SECONDS, targetAheadSeconds)
+  if (linkBytesPerSecond === null || linkBytesPerSecond >= bytesPerSecond) {
+    return Math.max(0, Math.min(floor, remainingSeconds))
+  }
+  // The link is slower than the video: queue what the rest of the video will
+  // take from the link, as much as the buffer can hold.
+  const needed = remainingSeconds * (1 - linkBytesPerSecond / bytesPerSecond)
+  return Math.max(0, Math.min(remainingSeconds, clamp(needed, floor, targetAheadSeconds * 0.9)))
+}
+
 /** What these helpers need of an mp4box sample (mp4box's `Sample` has these fields). */
 export interface SampleShape {
   is_sync: boolean

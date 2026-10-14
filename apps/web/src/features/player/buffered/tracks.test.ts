@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
   BEHIND_BYTES,
+  START_GOAL_SECONDS,
+  STALL_GOAL_SECONDS,
   TOTAL_BYTES,
   aheadSeconds,
   bufferTargets,
+  bufferingGoal,
   keyframeAtOrBefore,
   keyframeTimes,
   longestKeyframeGap,
@@ -217,5 +220,124 @@ describe('bufferTargets (§10.4)', () => {
   it('falls back to the slow-file targets when the rate is 0 or less', () => {
     expect(bufferTargets(0, 1)).toEqual({ aheadSeconds: 60, behindSeconds: 10 })
     expect(bufferTargets(-5, 1)).toEqual({ aheadSeconds: 60, behindSeconds: 10 })
+  })
+})
+
+describe('bufferingGoal (§10.4)', () => {
+  const proofBytesPerSecond = 14.97e6
+
+  it('keeps the limits it is built on', () => {
+    expect(START_GOAL_SECONDS).toBe(2)
+    expect(STALL_GOAL_SECONDS).toBe(4)
+  })
+
+  it('waits for 2 seconds at a start', () => {
+    expect(
+      bufferingGoal({
+        reason: 'start',
+        linkBytesPerSecond: null,
+        bytesPerSecond: proofBytesPerSecond,
+        targetAheadSeconds: 6.3,
+        remainingSeconds: 60,
+      }),
+    ).toBe(2)
+  })
+
+  it('waits only for what is left of a video that is nearly over at a start', () => {
+    expect(
+      bufferingGoal({
+        reason: 'start',
+        linkBytesPerSecond: null,
+        bytesPerSecond: proofBytesPerSecond,
+        targetAheadSeconds: 6.3,
+        remainingSeconds: 1.5,
+      }),
+    ).toBe(1.5)
+  })
+
+  it('waits only for what the buffer can hold at a start', () => {
+    expect(
+      bufferingGoal({
+        reason: 'start',
+        linkBytesPerSecond: 1e6,
+        bytesPerSecond: proofBytesPerSecond,
+        targetAheadSeconds: 1,
+        remainingSeconds: 60,
+      }),
+    ).toBe(1)
+  })
+
+  it('waits for 4 seconds after a stall on a link faster than the video', () => {
+    expect(
+      bufferingGoal({
+        reason: 'stall',
+        linkBytesPerSecond: 20e6,
+        bytesPerSecond: 15e6,
+        targetAheadSeconds: 6.3,
+        remainingSeconds: 50,
+      }),
+    ).toBe(4)
+  })
+
+  it('waits as long as the buffer allows after a stall on a link slower than the proof video', () => {
+    // Playing the last 50 s at 9.5 MB/s of a 14.97 MB/s video needs 18.3 s queued,
+    // which the buffer can't hold: 90% of its 6.28 s target.
+    expect(
+      bufferingGoal({
+        reason: 'stall',
+        linkBytesPerSecond: 9.5e6,
+        bytesPerSecond: proofBytesPerSecond,
+        targetAheadSeconds: 6.28,
+        remainingSeconds: 50,
+      }),
+    ).toBeCloseTo(5.652, 2)
+  })
+
+  it('waits only for what is left of a video that is nearly over after a stall', () => {
+    expect(
+      bufferingGoal({
+        reason: 'stall',
+        linkBytesPerSecond: 9.5e6,
+        bytesPerSecond: proofBytesPerSecond,
+        targetAheadSeconds: 6.28,
+        remainingSeconds: 3,
+      }),
+    ).toBe(3)
+  })
+
+  it('waits for 4 seconds, or what the buffer holds, when the link was not measured', () => {
+    const input = {
+      reason: 'stall',
+      linkBytesPerSecond: null,
+      bytesPerSecond: proofBytesPerSecond,
+      remainingSeconds: 50,
+    } as const
+    expect(bufferingGoal({ ...input, targetAheadSeconds: 6.3 })).toBe(4)
+    expect(bufferingGoal({ ...input, targetAheadSeconds: 2 })).toBe(2)
+  })
+
+  it('waits for 4 seconds after a stall when the link nearly keeps up and needs less', () => {
+    // 30 s at 14 MB/s of a 15 MB/s video needs only 2 s queued, under the 4 s floor.
+    expect(
+      bufferingGoal({
+        reason: 'stall',
+        linkBytesPerSecond: 14e6,
+        bytesPerSecond: 15e6,
+        targetAheadSeconds: 6.3,
+        remainingSeconds: 30,
+      }),
+    ).toBe(4)
+  })
+
+  it('never waits for less than 0', () => {
+    expect(
+      bufferingGoal({
+        reason: 'stall',
+        linkBytesPerSecond: null,
+        bytesPerSecond: proofBytesPerSecond,
+        targetAheadSeconds: 6.3,
+        remainingSeconds: -1,
+      }),
+    ).toBe(0)
   })
 })
