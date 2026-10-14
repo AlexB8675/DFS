@@ -96,8 +96,13 @@ const HOLD_RECHECK_MS = 250
 /** What was played is dropped at most this often. */
 const TRIM_INTERVAL_MS = 1000
 
-/** How much earlier than a keyframe a cut is made (see `makeRoomBehind`). */
-const CUT_MARGIN_SECONDS = 0.1
+/**
+ * How much earlier than a keyframe a cut is made (see `makeRoomBehind`).
+ * B-frame composition delays and edit lists shift the presentation times by a
+ * few frames, so a keyframe sits a little earlier in Media Source than its time
+ * in the index. Half a second covers that, and only keeps a little more behind.
+ */
+const CUT_MARGIN_SECONDS = 0.5
 
 /** How long after a quota error the full buffers are tried again, if no `timeupdate` comes first. */
 const QUOTA_RETRY_MS = 500
@@ -441,7 +446,7 @@ function createBufferGate(context: StreamContext): { roomToRead: () => Promise<v
    * Drops what was played, further back than is kept, at most once a second.
    * Media Source drops the frames that depend on what is removed, up to the next
    * keyframe, so a cut just before a keyframe drops nothing that is still
-   * needed. The margin covers an edit list shifting the times slightly.
+   * needed. The margin covers the times being shifted a little.
    */
   const makeRoomBehind = (): void => {
     const cut = cutBefore(video.currentTime - targets.behindSeconds)
