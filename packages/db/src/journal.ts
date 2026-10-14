@@ -41,8 +41,9 @@ type ShareRow = typeof shareLinks.$inferSelect
 type AuditRow = typeof auditLog.$inferSelect
 
 /**
- * A user's state for recovery. Usage, reservations, sign-in counters and a
- * request for a new password are derived or transient, so they are left out (§8).
+ * A user's state for recovery. Usage, reservations, sign-in and vault-unlock
+ * counters and a request for a new password are derived or transient, so they
+ * are left out (§8). The vault's salt and wrapped keys go as hex (§7.7).
  */
 export function userRecord(user: UserRow): JournalRecord {
   const {
@@ -50,11 +51,24 @@ export function userRecord(user: UserRow): JournalRecord {
     reservedBytes: _reserved,
     failedSignIns: _failed,
     signInLockedUntil: _locked,
+    failedVaultUnlocks: _failedUnlocks,
+    vaultUnlockLockedUntil: _unlockLocked,
     lastSeenAt: _seen,
     passwordResetRequestedAt: _resetRequested,
+    vaultSalt,
+    vaultKeyByCode,
+    vaultKeyByRecovery,
     ...state
   } = user
-  return { kind: 'user.upsert', record: state }
+  return {
+    kind: 'user.upsert',
+    record: {
+      ...state,
+      vaultSalt: vaultSalt?.toString('hex') ?? null,
+      vaultKeyByCode: vaultKeyByCode?.toString('hex') ?? null,
+      vaultKeyByRecovery: vaultKeyByRecovery?.toString('hex') ?? null,
+    },
+  }
 }
 
 /**

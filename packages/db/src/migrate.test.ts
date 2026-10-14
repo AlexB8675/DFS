@@ -7,7 +7,13 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest'
 import { createDatabase, createPool, type Database } from './client.ts'
-import { auditRecords, nodeRecords, shareRecords, type JournalRecord } from './journal.ts'
+import {
+  auditRecords,
+  nodeRecords,
+  shareRecords,
+  userRecord,
+  type JournalRecord,
+} from './journal.ts'
 import { MIGRATIONS_DIR, runMigrations } from './migrate.ts'
 import { auditLog, fileVersions, nodes, shareLinks, users } from './schema.ts'
 import { createTestDatabase, databaseUrl, withAdmin, type TestDatabase } from './testing/index.ts'
@@ -54,7 +60,7 @@ describe('migrations', () => {
       })
       // One instance ID, made once (DESIGN §4).
       expect(counts).toEqual({
-        applied: 31,
+        applied: 32,
         tables: 22,
         instance: [expect.stringMatching(/^[0-9a-f]{12}$/)],
         unindexed: [],
@@ -330,6 +336,59 @@ describe('schema rules (DESIGN §5.1)', () => {
     expect(record?.kind).toBe('node.upsert')
     expect(Object.keys(record?.record ?? {})).not.toContain('tree')
     expect(Object.keys(record?.record ?? {})).toContain('ownerId')
+  })
+
+  it('keeps a vault’s salt and wrapped keys together (§7.7)', async () => {
+    const { user } = await createUser('vault-keys')
+    const set = (fields: Partial<typeof users.$inferInsert>) =>
+      db.update(users).set(fields).where(eq(users.id, user.id))
+    expect(await violated(set({ vaultSalt: Buffer.alloc(16, 1) }))).toBe(
+      'users_vault_keys_together',
+    )
+    await set({
+      vaultSalt: Buffer.alloc(16, 1),
+      vaultKeyByCode: Buffer.alloc(62, 2),
+      vaultKeyByRecovery: Buffer.alloc(60, 3),
+    })
+    await set({ vaultSalt: null, vaultKeyByCode: null, vaultKeyByRecovery: null })
+  })
+
+  it('clears the vault’s root when that folder goes (§7.7)', async () => {
+    const { user } = await createUser('vault-root')
+    const [vault] = await db
+      .insert(nodes)
+      .values({ ownerId: user.id, kind: 'folder', name: 'Vault', nameKey: 'vault', tree: 'vault' })
+      .returning()
+    if (!vault) throw new Error('no vault')
+    await db.update(users).set({ vaultRootId: vault.id }).where(eq(users.id, user.id))
+    await db.delete(nodes).where(eq(nodes.id, vault.id))
+    const [after] = await db.select().from(users).where(eq(users.id, user.id))
+    expect(after?.vaultRootId).toBeNull()
+  })
+
+  it('journals the vault’s keys as hex, and leaves its unlock counters out (§8)', async () => {
+    const { user } = await createUser('vault-journal')
+    const [row] = await db
+      .update(users)
+      .set({
+        vaultSalt: Buffer.from('00ff', 'hex'),
+        vaultKeyByCode: Buffer.from('0102', 'hex'),
+        vaultKeyByRecovery: Buffer.from('0304', 'hex'),
+        failedVaultUnlocks: 3,
+        vaultUnlockLockedUntil: new Date(),
+      })
+      .where(eq(users.id, user.id))
+      .returning()
+    if (!row) throw new Error('no row')
+    const { record } = userRecord(row)
+    expect(record).toMatchObject({
+      vaultSalt: '00ff',
+      vaultKeyByCode: '0102',
+      vaultKeyByRecovery: '0304',
+      vaultResetAt: null,
+    })
+    expect(Object.keys(record)).not.toContain('failedVaultUnlocks')
+    expect(Object.keys(record)).not.toContain('vaultUnlockLockedUntil')
   })
 
   it('backfills share links and audit entries as the API journals them (0016)', async () => {

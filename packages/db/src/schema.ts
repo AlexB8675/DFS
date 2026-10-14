@@ -97,6 +97,22 @@ export const users = pgTable(
      * sign-in page; until an admin sets one, or they sign in (§7.1).
      */
     passwordResetRequestedAt: timestamptz('password_reset_requested_at'),
+    /**
+     * The vault's root folder (§7.7). Cleared when a reset purges it; set by
+     * recovery after the nodes, as `root_node_id` is.
+     */
+    vaultRootId: uuid('vault_root_id').references((): AnyPgColumn => nodes.id, {
+      onDelete: 'set null',
+    }),
+    /** The salt of the vault's code key, and the vault key wrapped under the code and under the recovery key (§7.7). */
+    vaultSalt: bytea('vault_salt'),
+    vaultKeyByCode: bytea('vault_key_by_code'),
+    vaultKeyByRecovery: bytea('vault_key_by_recovery'),
+    /** Wrong codes or recovery keys in a row, and the wait they impose, as for sign-ins (§7.1, §7.7). */
+    failedVaultUnlocks: integer('failed_vault_unlocks').notNull().default(0),
+    vaultUnlockLockedUntil: timestamptz('vault_unlock_locked_until'),
+    /** When an asked-for reset empties the vault, unless the user opens it first (§7.7). */
+    vaultResetAt: timestamptz('vault_reset_at'),
     createdAt: timestamptz('created_at').notNull().defaultNow(),
     lastSeenAt: timestamptz('last_seen_at'),
   },
@@ -107,6 +123,12 @@ export const users = pgTable(
       .where(sql`${t.isOwner}`),
     check('users_username_lowercase', sql`${t.username} = lower(${t.username})`),
     check('users_owner_is_admin', sql`NOT ${t.isOwner} OR ${t.role} = 'admin'`),
+    // A vault has its salt and both wraps, or none of them (§7.7). Not its
+    // root: recovery sets that after the nodes.
+    check(
+      'users_vault_keys_together',
+      sql`num_nonnulls(${t.vaultSalt}, ${t.vaultKeyByCode}, ${t.vaultKeyByRecovery}) IN (0, 3)`,
+    ),
   ],
 )
 
@@ -126,6 +148,13 @@ export const sessions = pgTable(
     ip: text('ip'),
     userAgent: text('user_agent'),
     lastSeenAt: timestamptz('last_seen_at'),
+    /**
+     * While the vault is open in this browser: its key, sealed under a key
+     * from the cookie's token, which the table doesn't hold, and when it
+     * locks if nothing is done inside (§7.7).
+     */
+    vaultKeySealed: bytea('vault_key_sealed'),
+    vaultLocksAt: timestamptz('vault_locks_at'),
   },
   (t) => [index('sessions_user_id').on(t.userId), index('sessions_expires_at').on(t.expiresAt)],
 )
