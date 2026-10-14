@@ -118,6 +118,7 @@ export const OPENING_STATS: BufferedStats = {
   keyframeGapSeconds: 0,
   quotaErrors: 0,
   reopens: 0,
+  seeks: 0,
   segments: 0,
   error: null,
 }

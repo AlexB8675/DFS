@@ -9,7 +9,9 @@
 // was played, only at a keyframe, to make room, and opening the stream again
 // where it broke off. The stream can also start again from any byte offset, and
 // stays open after the end of the file for that: the play lasts until the caller
-// aborts it or it fails.
+// aborts it or it fails. When the viewer seeks to a time that isn't buffered, the
+// player drops what it has and streams from the keyframe before that time; and
+// the play can begin at a time other than the start.
 
 import { createFile, MP4BoxBuffer, type ISOFile, type Movie, type Track } from 'mp4box'
 import { AppendQueue } from './append-queue'
@@ -42,6 +44,8 @@ export interface BufferedStats {
   quotaErrors: number
   /** Times the stream was opened again after it broke off. */
   reopens: number
+  /** Seeks to a time that wasn't buffered, which started the stream again there. */
+  seeks: number
   segments: number
   error: string | null
 }
@@ -51,6 +55,8 @@ export interface BufferedPlayOptions {
   /** The file's bytes, from a route that answers `Range`: the content route. */
   url: string
   signal: AbortSignal
+  /** Seconds into the video to begin at; 0 or missing is the start. */
+  startAt?: number
   /**
    * Called with fresh numbers twice a second, and once more when the whole file
    * is appended or the play fails.
@@ -69,6 +75,8 @@ interface StreamContext {
   durationSeconds: number
   /** Whether only sound is played, which can be cut anywhere. */
   soundOnly: boolean
+  /** File offset where the first run begins: the start of the samples, or the keyframe before `startAt`. */
+  firstOffset: number
   /** The video's keyframes in seconds, ascending; empty when only sound is played. */
   keyframes: readonly number[]
   /** The longest stretch of the video without a keyframe; 1 when only sound is played. */
@@ -117,6 +125,18 @@ const CUT_MARGIN_SECONDS = 0.5
 
 /** How long after a quota error the full buffers are tried again, if no `timeupdate` comes first. */
 const QUOTA_RETRY_MS = 500
+
+/**
+ * How far past a keyframe's time mp4box is asked to seek, so that the rounding
+ * of a time can't put the seek before the keyframe, which is a group of frames early.
+ */
+const KEYFRAME_SLACK_SECONDS = 0.0005
+
+/**
+ * How near `startAt` the browser's first seek must be to count as that seek,
+ * which the stream is already on its way to, not as the viewer's.
+ */
+const SAME_START_SECONDS = 0.01
 
 /** How long to wait before the stream is opened again after it broke off. */
 const REOPEN_WAIT_MS = 1000
@@ -167,6 +187,37 @@ async function fetchRange(url: string, start: number, end: number, signal: Abort
 }
 
 /**
+ * Places mp4box so that its next segments start at the keyframe at or before
+ * `time`, and gives the file offset to read from; `null` when no track seeks
+ * there. mp4box does two things on its own that this makes up for:
+ * - Every track is placed at the keyframe, not at `time`. Sound placed at `time`
+ *   skips the samples between the two, and the buffers mp4box holds with bytes it
+ *   never used stay for good: a keyframe gap's worth of the file for each seek.
+ * - It releases samples counting up from the last one released and doesn't go
+ *   back, so after a seek back the samples of the first segment would stay in memory.
+ * Sound alone has no keyframes and is placed at `time`, held to the end of the
+ * sound: mp4box places no track past its end, and then none at all.
+ */
+function placeAt(
+  file: ISOFile,
+  played: readonly Track[],
+  keyframes: readonly number[],
+  time: number,
+): number | null {
+  const target =
+    keyframes.length > 0
+      ? keyframeAtOrBefore(keyframes, time) + KEYFRAME_SLACK_SECONDS
+      : Math.min(time, ...played.map((track) => file.getTrackDuration(file.getTrackById(track.id))))
+  const { offset } = file.seek(target, true)
+  if (!Number.isFinite(offset)) return null
+  for (const track of played) {
+    const trak = file.getTrackById(track.id)
+    trak.lastValidSample = Math.min(trak.lastValidSample || 0, trak.nextSample)
+  }
+  return offset
+}
+
+/**
  * Plays `url` in `video` through Media Source, buffering it itself (§10.4).
  * The play stays open after the whole file is appended, with the phase
  * 'ended', as the stream may start again from any point. It resolves only once
@@ -189,6 +240,7 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
     keyframeGapSeconds: 0,
     quotaErrors: 0,
     reopens: 0,
+    seeks: 0,
     segments: 0,
     error: null,
   }
@@ -235,6 +287,8 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
     fail(message.length > 0 ? message : 'The video element failed.')
   }
   video.addEventListener('error', onVideoError)
+  // Removes the `seeking` listener, which is added once the play is set up, on any way out.
+  const seekListening = new AbortController()
 
   try {
     // 1. The head, which tells the file's size, and 2. where its index is.
@@ -331,7 +385,7 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
       return queue
     })
 
-    // 8. The init segments, then the samples mp4box has already, which start with `start()`.
+    // 8. The init segments.
     file.onSegment = (id, user, buffer, nextSample) => {
       try {
         queueOf(user).append(buffer)
@@ -344,12 +398,28 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
     for (const { user, buffer } of file.initializeSegmentation('per-track')) {
       queueOf(user).append(buffer)
     }
+
+    // 9. Where mp4box and the stream begin: the first samples, or the keyframe before
+    // `startAt`. mp4box is placed before `start()`, which gives out the samples it has already.
+    let firstOffset = layout.stream.from
+    // The time the browser's own first seek will be to, which the stream is already on its way to.
+    let startedAt: number | null = null
+    const startAt = Math.min(options.startAt ?? 0, durationSeconds)
+    if (startAt > 0) {
+      const offset = placeAt(file, played, keyframes, startAt)
+      if (offset !== null) {
+        firstOffset = offset
+        startedAt = startAt
+      }
+      // Before the first frame this sets where the browser begins; it seeks there on its own.
+      video.currentTime = startAt
+    }
     file.start()
 
-    // 9. The rest of the file.
+    // 10. The rest of the file, and the viewer's seeks while it is read.
     stats.phase = 'buffering'
     emit()
-    await streamSamples({
+    const context: StreamContext = {
       options,
       signal,
       file,
@@ -357,6 +427,7 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
       fileSize,
       durationSeconds,
       soundOnly: videoTrack === undefined,
+      firstOffset,
       keyframes,
       keyframeGapSeconds,
       mediaSource,
@@ -366,13 +437,45 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
       fail,
       quota,
       restart: () => undefined,
-    })
+    }
+    // A time that isn't buffered is read on from its keyframe, and what was queued or
+    // buffered for the old position goes. The browser says `seeking` only once the init
+    // segments are appended, long after `streamSamples` has put `context.restart` in place.
+    const onSeeking = (): void => {
+      if (over()) return
+      const time = video.currentTime
+      const first = startedAt
+      startedAt = null
+      if (first !== null && Math.abs(time - first) < SAME_START_SECONDS) return
+      if (aheadSeconds(video.buffered, time) > 0) return
+      const offset = placeAt(file, played, keyframes, time)
+      if (offset === null) return
+      stats.seeks += 1
+      for (const queue of queues) {
+        try {
+          queue.reset(mediaSource.duration)
+        } catch (error) {
+          // A buffer can't be aborted while it removes. The queue is reset by then, and
+          // goes on with its seek removal once the one under way ends.
+          if (!(error instanceof DOMException && error.name === 'InvalidStateError')) {
+            fail(error instanceof Error ? error.message : String(error))
+          }
+        }
+      }
+      // A small file may be held by mp4box whole, and then no piece is left to come that
+      // would make it give the segments of the samples it holds.
+      file.start()
+      context.restart(offset)
+    }
+    video.addEventListener('seeking', onSeeking, { signal: seekListening.signal })
+    await streamSamples(context)
   } catch (error) {
     // An abort, the caller's or fail()'s, isn't a failure to show.
     if (!over()) fail(error instanceof Error ? error.message : String(error))
   } finally {
     clearInterval(interval)
     video.removeEventListener('error', onVideoError)
+    seekListening.abort()
     signal.removeEventListener('abort', onAbort)
   }
 }
@@ -679,14 +782,14 @@ async function endStream(context: StreamContext, within: AbortSignal): Promise<v
 /**
  * Streams the file to mp4box and on to the buffers, and stays open until the
  * play is over (§10.4). It does so in runs (see `streamRun`), the first from
- * the start of the samples. `context.restart(offset)` ends the run under way,
+ * `context.firstOffset`. `context.restart(offset)` ends the run under way,
  * or the wait after the end of the file, and a new run begins at `offset`. After
  * the end of the file the media is ended and the phase is 'ended' (`endStream`),
  * and a later restart sets it back to 'buffering'. Resolves once the play is
  * over: the caller aborted it, or it failed.
  */
 async function streamSamples(context: StreamContext): Promise<void> {
-  const { signal, layout, stats, emit } = context
+  const { signal, stats, emit } = context
   const gate = createBufferGate(context)
   const feeder = createFeeder(context.file)
   // A function, or TypeScript takes `signal.aborted` to stay false across an await.
@@ -708,7 +811,7 @@ async function streamSamples(context: StreamContext): Promise<void> {
     current.abort()
   }
 
-  let offset = layout.stream.from
+  let offset = context.firstOffset
   while (!over()) {
     // Taking the request and starting the next run is one step, so a restart
     // always finds the run it replaces.

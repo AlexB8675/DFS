@@ -30,6 +30,7 @@ function stats(overrides: Partial<BufferedStats> = {}): BufferedStats {
     keyframeGapSeconds: 5.6,
     quotaErrors: 0,
     reopens: 1,
+    seeks: 0,
     segments: 120,
     error: null,
     ...overrides,
