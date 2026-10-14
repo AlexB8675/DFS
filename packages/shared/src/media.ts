@@ -282,8 +282,9 @@ export const playbackReportSchema = z.object({
   /** The same, as a kind; a page loaded before it was asked sends none, counted as `other`. */
   problemKind: playProblemKindSchema.nullable().optional(),
   /**
-   * A trial player's own numbers, as one line of JSON for the log (the
-   * buffered-play proof, §10.4); the regular player sends none.
+   * The player's own numbers, as one line of JSON for the log: the buffered
+   * player's (§10.4, D45), or that the video played by `<video src>`, and why
+   * when buffered play fell back. The trial page sends its own too.
    */
   lab: z.string().max(2000).optional(),
 })
