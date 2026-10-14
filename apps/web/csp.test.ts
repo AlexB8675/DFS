@@ -17,4 +17,11 @@ describe('the Content-Security-Policy', () => {
       .digest('base64')
     expect(caddyfile).toContain(`'sha256-${hash}'`)
   })
+
+  it('lets players play from DFS and from their own Media Source', () => {
+    const caddyfile = readFileSync(new URL('../../docker/Caddyfile', import.meta.url), 'utf8')
+    const policy = /Content-Security-Policy "([^"]+)"/.exec(caddyfile)?.[1] ?? ''
+    const parts = policy.split(';').map((part) => part.trim())
+    expect(parts).toContain("media-src 'self' blob:")
+  })
 })
