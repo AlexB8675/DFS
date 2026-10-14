@@ -10,9 +10,10 @@ import { and, eq } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest'
 import { buildApp } from '../app.ts'
-import { sessionCookieName } from '../auth/sessions.ts'
+import { findSession, sessionCookieName } from '../auth/sessions.ts'
 import { testConfig } from '../testing/config.ts'
 import { seedUser } from '../testing/seed.ts'
+import { vaultKeyOf } from './vault.ts'
 
 // Making the vault and asking for its state (DESIGN.md §7.7), against a real
 // database.
@@ -28,7 +29,7 @@ beforeAll(async () => {
   cleanup = setup.cleanup
   origin = setup.config.publicBaseUrl
   app = await buildApp({ config: setup.config, logger: false })
-  for (const username of ['alice', 'bob', 'carol', 'limited']) {
+  for (const username of ['alice', 'bob', 'carol', 'dave', 'erin', 'frank', 'limited']) {
     await seedUser(app.db, { username, password: `the-${username}-password` })
   }
   // A session opened with a temporary password may only choose a new one.
@@ -92,8 +93,10 @@ function asBrowser(
 
 const RECOVERY_KEY = /^([0-9A-HJKMNP-TV-Z]{4}-){5}[0-9A-HJKMNP-TV-Z]{4}$/
 
+// Alice's browser, whose vault the first tests make and the later ones open and lock.
+let alice: Browser
+
 describe('making the vault (§7.7)', { timeout: 30_000 }, () => {
-  let alice: Browser
   let recoveryKey = ''
 
   it('says there is no vault until one is made', async () => {
@@ -245,5 +248,222 @@ describe('making the vault (§7.7)', { timeout: 30_000 }, () => {
       payload: { code: '123456' },
     })
     expect(post.statusCode).toBe(401)
+  })
+})
+
+/** Makes the browser's vault, open in its session, and gives back the recovery key. */
+async function makeVault(browser: Browser, code = '123456'): Promise<string> {
+  const response = await asBrowser(browser, 'POST', '/api/vault', { payload: { code } })
+  expect(response.statusCode).toBe(201)
+  return response.json<{ recoveryKey: string }>().recoveryKey
+}
+
+function unlock(browser: Browser, code: string) {
+  return asBrowser(browser, 'POST', '/api/vault/unlock', { payload: { code } })
+}
+
+interface VaultBody {
+  exists: boolean
+  open: boolean
+  locksAt: string | null
+  resetAt: string | null
+}
+
+async function vaultOf(browser: Browser): Promise<VaultBody> {
+  const response = await asBrowser(browser, 'GET', '/api/vault')
+  expect(response.statusCode).toBe(200)
+  return response.json<VaultBody>()
+}
+
+async function sessionOf(browser: Browser) {
+  const [session] = await app.db
+    .select()
+    .from(sessions)
+    .where(eq(sessions.id, createHash('sha256').update(browser.token).digest('hex')))
+  return session
+}
+
+async function userOf(userId: string) {
+  const [user] = await app.db.select().from(users).where(eq(users.id, userId))
+  if (!user) throw new Error('No such user.')
+  return user
+}
+
+async function auditRows(userId: string, action: string) {
+  return app.db
+    .select()
+    .from(auditLog)
+    .where(and(eq(auditLog.userId, userId), eq(auditLog.action, action)))
+}
+
+const MINUTE = 60_000
+
+describe('opening and locking the vault (§7.7)', { timeout: 60_000 }, () => {
+  it('locks the vault in this browser and opens it again with the code', async () => {
+    const lock = await asBrowser(alice, 'POST', '/api/vault/lock')
+    expect(lock.statusCode).toBe(204)
+    expect(await vaultOf(alice)).toMatchObject({ exists: true, open: false, locksAt: null })
+    const locked = await sessionOf(alice)
+    expect(locked?.vaultKeySealed).toBeNull()
+    expect(locked?.vaultLocksAt).toBeNull()
+
+    const response = await unlock(alice, '123456')
+    expect(response.statusCode).toBe(200)
+    const body = response.json<VaultBody>()
+    expect(body.open).toBe(true)
+    const locksInMs = new Date(body.locksAt ?? 0).getTime() - Date.now()
+    expect(locksInMs).toBeGreaterThan(14 * MINUTE)
+    expect(locksInMs).toBeLessThan(16 * MINUTE)
+    expect(await auditRows(alice.userId, 'vault.unlocked')).toHaveLength(1)
+    expect((await sessionOf(alice))?.vaultKeySealed).not.toBeNull()
+  })
+
+  it('refuses a wrong code, counts it, and forgets the count at the right one', async () => {
+    const wrong = await unlock(alice, '654321')
+    expect(wrong.statusCode).toBe(403)
+    expect(wrong.json()).toMatchObject({ error: { code: 'wrong_code' } })
+    expect(await auditRows(alice.userId, 'vault.unlock_failed')).toHaveLength(1)
+    expect((await userOf(alice.userId)).failedVaultUnlocks).toBe(1)
+
+    const right = await unlock(alice, '123456')
+    expect(right.statusCode).toBe(200)
+    expect((await userOf(alice.userId)).failedVaultUnlocks).toBe(0)
+    for (const row of await app.db.select().from(auditLog)) {
+      expect(JSON.stringify(row.meta)).not.toContain('654321')
+    }
+  })
+
+  it('says there is no vault to open when none was made', async () => {
+    const bob = await signIn('bob')
+    const response = await unlock(bob, '123456')
+    expect(response.statusCode).toBe(404)
+    expect(response.json()).toMatchObject({ error: { code: 'no_vault' } })
+  })
+
+  it('makes a wait after ten wrong codes in a row, even for the right one', async () => {
+    const carol = await signIn('carol')
+    await makeVault(carol)
+    for (let i = 0; i < 10; i += 1) {
+      const wrong = await unlock(carol, '000000')
+      expect(wrong.statusCode).toBe(403)
+    }
+    const eleventh = await unlock(carol, '000000')
+    expect(eleventh.statusCode).toBe(429)
+    expect(eleventh.json()).toMatchObject({ error: { code: 'rate_limited' } })
+    expect(Number(eleventh.headers['retry-after'])).toBeGreaterThanOrEqual(59)
+
+    expect((await unlock(carol, '123456')).statusCode).toBe(429)
+
+    await app.db
+      .update(users)
+      .set({ vaultUnlockLockedUntil: new Date(Date.now() - MINUTE) })
+      .where(eq(users.id, carol.userId))
+    expect((await unlock(carol, '123456')).statusCode).toBe(200)
+    expect((await userOf(carol.userId)).failedVaultUnlocks).toBe(0)
+  })
+
+  it('counts wrong codes sent at once before checking them', async () => {
+    const dave = await signIn('dave')
+    await makeVault(dave)
+    const responses = await Promise.all(Array.from({ length: 15 }, () => unlock(dave, '000000')))
+    const statuses = responses.map((response) => response.statusCode)
+    expect(statuses.filter((status) => status !== 429).length).toBeLessThanOrEqual(10)
+    expect(statuses).toContain(429)
+  })
+
+  describe('in more than one browser', () => {
+    let a: Browser
+    let b: Browser
+
+    it('is open in the browser that opened it and no other', async () => {
+      a = await signIn('erin')
+      await makeVault(a)
+      b = await signIn('erin')
+      expect((await vaultOf(b)).open).toBe(false)
+      expect((await unlock(b, '123456')).statusCode).toBe(200)
+      expect((await asBrowser(b, 'POST', '/api/vault/lock')).statusCode).toBe(204)
+      expect((await vaultOf(a)).open).toBe(true)
+      expect((await vaultOf(b)).open).toBe(false)
+    })
+
+    it('locks by itself after the idle time', async () => {
+      await app.db
+        .update(sessions)
+        .set({ vaultLocksAt: new Date(Date.now() - MINUTE) })
+        .where(eq(sessions.id, (await sessionOf(a))?.id ?? ''))
+      expect((await vaultOf(a)).open).toBe(false)
+
+      const auth = await findSession(app.db, a.token)
+      if (!auth) throw new Error('The session is gone.')
+      await expect(vaultKeyOf(app, auth, a.token)).rejects.toMatchObject({
+        status: 403,
+        code: 'vault_locked',
+      })
+      expect((await sessionOf(a))?.vaultKeySealed).toBeNull()
+    })
+
+    it('gives the key while open, and slides the lock forward at most once a minute', async () => {
+      expect((await unlock(a, '123456')).statusCode).toBe(200)
+      const auth = await findSession(app.db, a.token)
+      if (!auth) throw new Error('The session is gone.')
+
+      const user = await userOf(a.userId)
+      const expected = await unwrapVaultKeyByCode(
+        app.keys,
+        user.vaultKeyByCode ?? new Uint8Array(),
+        '123456',
+        user.vaultSalt ?? new Uint8Array(),
+        a.userId,
+      )
+      const key = await vaultKeyOf(app, auth, a.token)
+      expect(key).toHaveLength(32)
+      expect(key).toEqual(expected)
+
+      const before = (await sessionOf(a))?.vaultLocksAt
+      await vaultKeyOf(app, auth, a.token)
+      expect((await sessionOf(a))?.vaultLocksAt).toEqual(before)
+
+      await app.db
+        .update(sessions)
+        .set({ vaultLocksAt: new Date(Date.now() + 5 * MINUTE) })
+        .where(eq(sessions.id, auth.sessionId))
+      await vaultKeyOf(app, auth, a.token)
+      const locksInMs = ((await sessionOf(a))?.vaultLocksAt?.getTime() ?? 0) - Date.now()
+      expect(locksInMs).toBeGreaterThan(14 * MINUTE)
+      expect(locksInMs).toBeLessThan(16 * MINUTE)
+    })
+  })
+
+  describe('with a reset asked for', () => {
+    let frank: Browser
+
+    it('is cancelled by opening the vault', async () => {
+      frank = await signIn('frank')
+      await makeVault(frank)
+      expect((await asBrowser(frank, 'POST', '/api/vault/lock')).statusCode).toBe(204)
+      await app.db
+        .update(users)
+        .set({ vaultResetAt: new Date(Date.now() + 7 * 24 * 60 * MINUTE) })
+        .where(eq(users.id, frank.userId))
+
+      const response = await unlock(frank, '123456')
+      expect(response.statusCode).toBe(200)
+      expect(response.json()).toMatchObject({ open: true, resetAt: null })
+      expect(await auditRows(frank.userId, 'vault.reset_cancelled')).toHaveLength(1)
+      expect((await userOf(frank.userId)).vaultResetAt).toBeNull()
+    })
+
+    it('ends with the session, and the key sealed into it', async () => {
+      expect((await sessionOf(frank))?.vaultKeySealed).not.toBeNull()
+      const response = await asBrowser(frank, 'POST', '/api/auth/logout')
+      expect(response.statusCode).toBe(204)
+      expect(await sessionOf(frank)).toBeUndefined()
+    })
+  })
+
+  it('makes one vault for an account, before stretching a second code', async () => {
+    const again = await asBrowser(alice, 'POST', '/api/vault', { payload: { code: '123456' } })
+    expect(again.statusCode).toBe(409)
+    expect(again.json()).toMatchObject({ error: { code: 'vault_exists' } })
   })
 })
