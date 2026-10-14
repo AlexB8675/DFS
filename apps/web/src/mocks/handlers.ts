@@ -1,6 +1,7 @@
 import {
   aliveUploadsSchema,
   changePasswordSchema,
+  changeVaultCodeSchema,
   createChannelSchema,
   createFolderSchema,
   createShareSchema,
@@ -8,6 +9,7 @@ import {
   createUploadBatchSchema,
   createUploadSchema,
   createUserSchema,
+  createVaultSchema,
   deviceTokenRequestSchema,
   ensureFoldersSchema,
   adminTaskRequestSchema,
@@ -24,11 +26,13 @@ import {
   pairDeviceSchema,
   playbackReportSchema,
   resetPasswordSchema,
+  resetVaultSchema,
   savePositionSchema,
   sortFieldSchema,
   sortOrderSchema,
   streamLinkRequestSchema,
   unlockShareSchema,
+  unlockVaultSchema,
   updateChannelSchema,
   updateNodeSchema,
   updateShareSchema,
@@ -188,6 +192,35 @@ export const handlers = [
     respondEmpty(request, () => {
       db.removeDevice(params.id)
     }),
+  ),
+
+  // ── The vault (§7.7) ───────────────────────────────────────────────────────
+  http.get('/api/vault', ({ request }) => respond(request, () => db.vaultState())),
+  http.post('/api/vault', ({ request }) =>
+    respond(request, async () => db.createVault(createVaultSchema.parse(await request.json())), {
+      status: 201,
+    }),
+  ),
+  http.post('/api/vault/unlock', ({ request }) =>
+    respond(request, async () => db.unlockVault(unlockVaultSchema.parse(await request.json()))),
+  ),
+  http.post('/api/vault/lock', ({ request }) =>
+    respondEmpty(request, () => {
+      db.lockVault()
+    }),
+  ),
+  http.put('/api/vault/code', ({ request }) =>
+    respond(request, async () =>
+      db.changeVaultCode(changeVaultCodeSchema.parse(await request.json())),
+    ),
+  ),
+  http.post('/api/vault/recovery-key', ({ request }) =>
+    respond(request, () => db.replaceRecoveryKey()),
+  ),
+  http.post('/api/vault/reset', ({ request }) =>
+    respond(request, async () =>
+      db.requestVaultReset(resetVaultSchema.parse(await request.json())),
+    ),
   ),
 
   // ── Browse ─────────────────────────────────────────────────────────────────

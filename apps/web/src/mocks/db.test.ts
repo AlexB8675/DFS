@@ -415,6 +415,198 @@ describe('mock API database', () => {
     })
   })
 
+  describe('the vault (§7.7)', () => {
+    const MINUTE = 60_000
+    const noVault = {
+      exists: false,
+      open: false,
+      locksAt: null,
+      resetAt: null,
+      sizeBytes: 0,
+      fileCount: 0,
+    }
+
+    it('starts with no vault, and has nothing to unlock', () => {
+      expect(db.vaultState()).toEqual(noVault)
+      expect(apiError(() => db.unlockVault({ code: '123456' }))).toEqual({
+        status: 404,
+        code: 'no_vault',
+      })
+    })
+
+    it('makes a vault once, open for a quarter hour, with a recovery key shown this once', () => {
+      const created = db.createVault({ code: '123456' })
+      expect(created.recoveryKey).toMatch(/^([0-9A-HJKMNP-TV-Z]{4}-){5}[0-9A-HJKMNP-TV-Z]{4}$/)
+      expect(created.vault).toMatchObject({ exists: true, open: true, resetAt: null })
+      expect(Date.parse(created.vault.locksAt ?? '') - Date.now()).toBe(15 * MINUTE)
+      expect(db.vaultState()).toEqual(created.vault)
+
+      expect(apiError(() => db.createVault({ code: '654321' }))).toEqual({
+        status: 409,
+        code: 'vault_exists',
+      })
+    })
+
+    it('locks, refuses a wrong code and opens with the right one', () => {
+      db.createVault({ code: '123456' })
+      db.lockVault()
+      expect(db.vaultState()).toMatchObject({ exists: true, open: false, locksAt: null })
+
+      expect(apiError(() => db.unlockVault({ code: '000000' }))).toEqual({
+        status: 403,
+        code: 'wrong_code',
+      })
+      expect(db.vaultState().open).toBe(false)
+
+      expect(db.unlockVault({ code: '123456' })).toMatchObject({ open: true })
+      expect(db.vaultState().open).toBe(true)
+    })
+
+    it('is shut when the open time has passed', () => {
+      db.createVault({ code: '123456' })
+      vi.advanceTimersByTime(16 * MINUTE)
+      expect(db.vaultState()).toMatchObject({ exists: true, open: false, locksAt: null })
+    })
+
+    it('closes with the session, whether it ended or began again', () => {
+      db.createVault({ code: '123456' })
+      db.signOut()
+      db.signIn({ username: 'demo', password: 'demo-password' })
+      expect(db.vaultState()).toMatchObject({ exists: true, open: false, locksAt: null })
+    })
+
+    it('gives a new recovery key only while open, and the old one stops working', () => {
+      const { recoveryKey } = db.createVault({ code: '123456' })
+      db.lockVault()
+      expect(apiError(() => db.replaceRecoveryKey())).toEqual({ status: 403, code: 'vault_locked' })
+
+      db.unlockVault({ code: '123456' })
+      const replacement = db.replaceRecoveryKey()
+      expect(replacement.recoveryKey).toMatch(/^([0-9A-HJKMNP-TV-Z]{4}-){5}[0-9A-HJKMNP-TV-Z]{4}$/)
+      expect(replacement.recoveryKey).not.toBe(recoveryKey)
+
+      expect(apiError(() => db.changeVaultCode({ recoveryKey, newCode: 'another code' }))).toEqual({
+        status: 403,
+        code: 'wrong_recovery_key',
+      })
+      // The code stays as it was.
+      db.lockVault()
+      expect(db.unlockVault({ code: '123456' })).toMatchObject({ open: true })
+    })
+
+    it('changes the code with the current one or the recovery key, and keeps the recovery key', () => {
+      const { recoveryKey } = db.createVault({ code: '123456' })
+      db.lockVault()
+
+      expect(
+        apiError(() => db.changeVaultCode({ currentCode: 'nope nope', newCode: 'a new code' })),
+      ).toEqual({ status: 403, code: 'wrong_code' })
+      expect(
+        apiError(() =>
+          db.changeVaultCode({
+            recoveryKey: '0000-0000-0000-0000-0000-0000',
+            newCode: 'a new code',
+          }),
+        ),
+      ).toEqual({ status: 403, code: 'wrong_recovery_key' })
+
+      // Typed as people do: lowercase, with spaces, and I, L and O for 1 and 0.
+      const typed = recoveryKey.replaceAll('-', ' ').toLowerCase().replaceAll('1', 'l')
+      expect(db.changeVaultCode({ recoveryKey: typed, newCode: 'a new code' })).toMatchObject({
+        open: true,
+      })
+      db.lockVault()
+      expect(apiError(() => db.unlockVault({ code: '123456' }))).toEqual({
+        status: 403,
+        code: 'wrong_code',
+      })
+      expect(db.unlockVault({ code: 'a new code' })).toMatchObject({ open: true })
+
+      // The current code changes it too, and the recovery key is still the first one.
+      expect(db.changeVaultCode({ currentCode: 'a new code', newCode: 'newer code' }).open).toBe(
+        true,
+      )
+      expect(db.changeVaultCode({ recoveryKey, newCode: 'newest code' })).toMatchObject({
+        open: true,
+      })
+    })
+
+    it('has nothing to change without a vault', () => {
+      expect(
+        apiError(() => db.changeVaultCode({ currentCode: 'whatever', newCode: 'a new code' })),
+      ).toEqual({ status: 404, code: 'no_vault' })
+      expect(apiError(() => db.requestVaultReset({ password: 'demo-password' }))).toEqual({
+        status: 404,
+        code: 'no_vault',
+      })
+    })
+
+    it('asks for a reset in a week, which opening the vault cancels', () => {
+      db.createVault({ code: '123456' })
+      db.lockVault()
+
+      expect(apiError(() => db.requestVaultReset({ password: 'wrong' }))).toEqual({
+        status: 403,
+        code: 'wrong_password',
+      })
+      expect(db.vaultState().resetAt).toBeNull()
+
+      const asked = db.requestVaultReset({ password: 'demo-password' })
+      expect(Date.parse(asked.resetAt ?? '') - Date.now()).toBe(7 * DAY)
+      expect(db.session().vaultResetAt).toBe(asked.resetAt)
+
+      // A second ask keeps the first date.
+      vi.advanceTimersByTime(DAY)
+      expect(db.requestVaultReset({ password: 'demo-password' }).resetAt).toBe(asked.resetAt)
+
+      expect(db.unlockVault({ code: '123456' })).toMatchObject({ open: true, resetAt: null })
+      expect(db.session().vaultResetAt).toBeNull()
+    })
+
+    it('is cancelled by changing the code with the recovery key too', () => {
+      const { recoveryKey } = db.createVault({ code: '123456' })
+      db.lockVault()
+      db.requestVaultReset({ password: 'demo-password' })
+      expect(db.changeVaultCode({ recoveryKey, newCode: 'a new code' })).toMatchObject({
+        open: true,
+        resetAt: null,
+      })
+      expect(db.session().vaultResetAt).toBeNull()
+    })
+
+    it('writes what happened to the audit log as the API does, and never the code', () => {
+      db.createVault({ code: 'secret code' })
+      db.lockVault()
+      expect(apiError(() => db.unlockVault({ code: 'wrong code' })).code).toBe('wrong_code')
+      db.unlockVault({ code: 'secret code' })
+      db.changeVaultCode({ currentCode: 'secret code', newCode: 'other secret' })
+      const { recoveryKey } = db.replaceRecoveryKey()
+      db.lockVault()
+      db.requestVaultReset({ password: 'demo-password' })
+      db.requestVaultReset({ password: 'demo-password' })
+      db.changeVaultCode({ recoveryKey, newCode: 'third secret' })
+
+      const entries = db
+        .auditLog({ limit: 100, actions: ['vault.'] })
+        .items.slice()
+        .reverse()
+      expect(entries.map((entry) => entry.action)).toEqual([
+        'vault.created',
+        'vault.unlock_failed',
+        'vault.unlocked',
+        'vault.code_changed',
+        'vault.unlocked',
+        'vault.recovery_key_replaced',
+        'vault.reset_requested',
+        'vault.code_changed',
+        'vault.unlocked',
+        'vault.reset_cancelled',
+      ])
+      expect(new Set(entries.map((entry) => entry.target))).toEqual(new Set(['Demo User']))
+      expect(JSON.stringify(entries)).not.toMatch(/secret|third/)
+    })
+  })
+
   it('keeps at least one channel taking new blobs', () => {
     const enabled = db.channels().filter((channel) => channel.enabled)
     const last = enabled.pop()

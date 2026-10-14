@@ -22,7 +22,9 @@ import {
   type AudioTrack,
   type AuditEntry,
   type ChangePasswordInput,
+  type ChangeVaultCodeInput,
   type CreateUploadInput,
+  type CreateVaultInput,
   type Delivery,
   type Device,
   type DeviceMe,
@@ -41,6 +43,8 @@ import {
   type PasswordChange,
   type PasswordResetRequest,
   type Playback,
+  type RecoveryKey,
+  type ResetVaultInput,
   type PublicShare,
   type SearchResult,
   type Session,
@@ -57,11 +61,14 @@ import {
   type StorageChannel,
   type StreamLink,
   type TrashItem,
+  type UnlockVaultInput,
   type UpdateShareInput,
   type UploadBatchResult,
   type UploadSession,
   type UploadSessionStatus,
   type User,
+  type VaultCreated,
+  type VaultState,
 } from '@dfs/shared'
 import { previewKind } from '@/lib/preview-kind'
 import { SAMPLE_SUBTITLES, sampleMediaInfo } from './media'
@@ -166,6 +173,16 @@ interface MockUpload {
 export type MockUser = Omit<AdminUser, 'usedBytes' | 'fileCount'> & {
   /** In the clear because this is a mock; the real API keeps an argon2id hash (§7.1). */
   password: string
+  /** Optional, so that older saved states still load. */
+  vault?: MockVault
+}
+
+/** A user's vault (§7.7), in the clear because this is a mock: the real API keeps only wraps of its key. */
+interface MockVault {
+  code: string
+  /** The 24 canonical characters, without dashes. */
+  recoveryKey: string
+  resetAt: string | null
 }
 
 /** A backup app's device (§7.6); the mock keeps its token in the clear, which the real API never does. */
@@ -218,6 +235,8 @@ export interface MockState {
   positions?: Record<string, { versionId: string; positionMs: number }>
   /** Backup apps' devices (§7.6), newest first. Optional so that older saved states still load. */
   devices?: MockDevice[]
+  /** When the vault open in the current session locks; absent or null when it isn't open (§7.7). */
+  vaultLocksAt?: string | null
 }
 
 /** Live events (§6.1), as the SSE stream sends them. */
@@ -266,6 +285,12 @@ export const CHUNK_SIZE = 20 * 1024 * 1024 - 128 * 1024
 const CSRF_TOKEN = 'mock-csrf-token'
 /** A pairing code is good for a minute (§7.6). */
 const PAIRING_MS = 60_000
+/** The vault stays open a quarter hour (`LOCK_IDLE_MINUTES`, §7.7); the mock doesn't slide it. */
+const VAULT_OPEN_MS = 15 * 60_000
+/** An asked-for reset empties the vault after a week (`VAULT_RESET_DAYS`, §7.7). */
+const VAULT_RESET_MS = 7 * 24 * 60 * 60_000
+/** Recovery keys use these 32 characters: no I, L, O or U (§7.7). */
+const RECOVERY_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
 /** `dfs_` and 32 random bytes in base64url (§7.6). */
 const DEVICE_TOKEN_PATTERN = /^dfs_[A-Za-z0-9_-]{43}$/
 /** Where the mock's requests come from, as the audit log and the device list show it. */
@@ -370,6 +395,8 @@ export class MockDb {
     user.lastSeenAt = new Date().toISOString()
     // Back in: a request for a new password is moot.
     user.passwordResetRequestedAt = null
+    // A new session starts with the vault locked.
+    this.state.vaultLocksAt = null
     this.audit('auth.login', user.displayName)
     this.save()
     return this.session()
@@ -392,6 +419,7 @@ export class MockDb {
 
   signOut(): void {
     this.state.signedIn = false
+    this.state.vaultLocksAt = null
     this.save()
   }
 
@@ -424,7 +452,7 @@ export class MockDb {
       user: this.publicUser(user),
       csrfToken: CSRF_TOKEN,
       passwordChange: pendingPasswordChange(user),
-      vaultResetAt: null,
+      vaultResetAt: user.vault?.resetAt ?? null,
     }
   }
 
@@ -544,6 +572,120 @@ export class MockDb {
       if (pairing.userId === userId) this.pairings.delete(code)
     }
     this.state.devices = this.devices.filter((device) => device.userId !== userId)
+  }
+
+  // ── The vault (§7.7) ───────────────────────────────────────────────────────
+
+  /** `GET /vault`. Open means open in this session, and not yet locked again. */
+  vaultState(): VaultState {
+    const { vault } = this.currentUser()
+    const locksAt = this.state.vaultLocksAt ?? null
+    const open = vault !== undefined && locksAt !== null && Date.parse(locksAt) > Date.now()
+    return {
+      exists: vault !== undefined,
+      open,
+      locksAt: open ? locksAt : null,
+      resetAt: vault?.resetAt ?? null,
+      // Nothing can be put inside yet.
+      sizeBytes: 0,
+      fileCount: 0,
+    }
+  }
+
+  /** `POST /vault`: makes the user's vault, open, and shows its recovery key this once. */
+  createVault({ code }: CreateVaultInput): VaultCreated {
+    const user = this.currentUser()
+    if (user.vault) throw new MockApiError(409, 'vault_exists', 'You already have a vault.')
+    const recoveryKey = newRecoveryKey()
+    user.vault = { code, recoveryKey, resetAt: null }
+    this.state.vaultLocksAt = new Date(Date.now() + VAULT_OPEN_MS).toISOString()
+    this.audit('vault.created', user.displayName)
+    this.save()
+    return { recoveryKey: groupedRecoveryKey(recoveryKey), vault: this.vaultState() }
+  }
+
+  /** `POST /vault/unlock`: opens it for a quarter hour, which cancels a pending reset. */
+  unlockVault({ code }: UnlockVaultInput): VaultState {
+    const user = this.currentUser()
+    const vault = this.requireVault(user)
+    if (code !== vault.code) throw this.failedUnlock(user, 'wrong_code')
+    this.openVault(user, vault)
+    this.save()
+    return this.vaultState()
+  }
+
+  /** `POST /vault/lock`: locks it in this session only. */
+  lockVault(): void {
+    this.state.vaultLocksAt = null
+    this.save()
+  }
+
+  /** `PUT /vault/code`: a new code, with the current one or the recovery key. The recovery key stays. */
+  changeVaultCode(input: ChangeVaultCodeInput): VaultState {
+    const user = this.currentUser()
+    const vault = this.requireVault(user)
+    if ('currentCode' in input) {
+      if (input.currentCode !== vault.code) throw this.failedUnlock(user, 'wrong_code')
+    } else if (canonicalRecoveryKey(input.recoveryKey) !== vault.recoveryKey) {
+      throw this.failedUnlock(user, 'wrong_recovery_key')
+    }
+    vault.code = input.newCode
+    this.audit('vault.code_changed', user.displayName)
+    this.openVault(user, vault)
+    this.save()
+    return this.vaultState()
+  }
+
+  /** `POST /vault/recovery-key`: a new one, while the vault is open; the old one stops working. The code stays. */
+  replaceRecoveryKey(): RecoveryKey {
+    const user = this.currentUser()
+    if (!user.vault || !this.vaultState().open) {
+      throw new MockApiError(403, 'vault_locked', 'Open the vault first.')
+    }
+    user.vault.recoveryKey = newRecoveryKey()
+    this.audit('vault.recovery_key_replaced', user.displayName)
+    this.save()
+    return { recoveryKey: groupedRecoveryKey(user.vault.recoveryKey) }
+  }
+
+  /** `POST /vault/reset`: asks for the vault to be emptied in a week, with the account's password. */
+  requestVaultReset({ password }: ResetVaultInput): VaultState {
+    const user = this.currentUser()
+    if (password !== user.password) {
+      throw new MockApiError(403, 'wrong_password', 'Your password isn’t right.')
+    }
+    const vault = this.requireVault(user)
+    // Asking again keeps the first date.
+    if (vault.resetAt === null) {
+      vault.resetAt = new Date(Date.now() + VAULT_RESET_MS).toISOString()
+      this.audit('vault.reset_requested', user.displayName, vault.resetAt)
+      this.save()
+    }
+    return this.vaultState()
+  }
+
+  private requireVault(user: MockUser): MockVault {
+    if (!user.vault) throw new MockApiError(404, 'no_vault', 'You have no vault yet.')
+    return user.vault
+  }
+
+  /** Records a wrong code or recovery key in the audit log, and makes the error to throw. */
+  private failedUnlock(user: MockUser, code: 'wrong_code' | 'wrong_recovery_key'): MockApiError {
+    this.audit('vault.unlock_failed', user.displayName)
+    this.save()
+    return code === 'wrong_code'
+      ? new MockApiError(403, code, 'That code isn’t right.')
+      : new MockApiError(403, code, 'That recovery key isn’t right.')
+  }
+
+  /** Opens the vault in this session, which cancels a pending reset. */
+  private openVault(user: MockUser, vault: MockVault): void {
+    this.state.vaultLocksAt = new Date(Date.now() + VAULT_OPEN_MS).toISOString()
+    this.audit('vault.unlocked', user.displayName)
+    if (vault.resetAt !== null) {
+      vault.resetAt = null
+      this.audit('vault.reset_cancelled', user.displayName)
+    }
   }
 
   protected currentUser(): MockUser {
@@ -2051,6 +2193,23 @@ function base64url(bytes: Uint8Array): string {
     .replaceAll('+', '-')
     .replaceAll('/', '_')
     .replaceAll('=', '')
+}
+
+/** A recovery key: 24 characters of the alphabet, as 24 random bytes pick them. */
+function newRecoveryKey(): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(24)), (byte) =>
+    RECOVERY_ALPHABET.charAt(byte & 31),
+  ).join('')
+}
+
+/** A recovery key as it is shown: six groups of four. */
+function groupedRecoveryKey(recoveryKey: string): string {
+  return recoveryKey.match(/.{4}/g)?.join('-') ?? recoveryKey
+}
+
+/** A recovery key typed back, as the API reads it: no spaces or dashes, and O, I and L for 0 and 1. */
+function canonicalRecoveryKey(typed: string): string {
+  return typed.toUpperCase().replaceAll(/[\s-]/g, '').replaceAll('O', '0').replaceAll(/[IL]/g, '1')
 }
 
 /** 32 random bytes: a pairing code, or the secret of a token (§7.6). */
