@@ -141,6 +141,13 @@ export function createAppRouter() {
           }),
         },
         {
+          // A trial of buffered play (§10.4), reached only by its address: nothing links to it.
+          path: 'lab/stream/:nodeId',
+          lazy: async () => ({
+            Component: (await import('@/features/player/buffered/lab-stream-page')).LabStreamPage,
+          }),
+        },
+        {
           path: 'settings',
           lazy: async () => ({
             Component: (await import('@/features/settings/settings-page')).SettingsPage,
