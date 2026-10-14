@@ -13,7 +13,7 @@ import { buildApp } from '../app.ts'
 import { findSession, sessionCookieName } from '../auth/sessions.ts'
 import { testConfig } from '../testing/config.ts'
 import { seedUser } from '../testing/seed.ts'
-import { vaultKeyOf } from './vault.ts'
+import { slideBelowSeconds, vaultKeyOf } from './vault.ts'
 
 // Making the vault and asking for its state (DESIGN.md §7.7), against a real
 // database.
@@ -465,5 +465,13 @@ describe('opening and locking the vault (§7.7)', { timeout: 60_000 }, () => {
     const again = await asBrowser(alice, 'POST', '/api/vault', { payload: { code: '123456' } })
     expect(again.statusCode).toBe(409)
     expect(again.json()).toMatchObject({ error: { code: 'vault_exists' } })
+  })
+})
+
+describe('sliding the idle lock (§7.7)', () => {
+  it('slides once less than the idle time minus a minute, or minus half of it, remains', () => {
+    expect(slideBelowSeconds(15)).toBe(840)
+    expect(slideBelowSeconds(2)).toBe(60)
+    expect(slideBelowSeconds(1)).toBe(30)
   })
 })

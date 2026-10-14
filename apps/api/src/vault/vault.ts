@@ -287,6 +287,16 @@ export async function lockVault(app: FastifyInstance, auth: Auth): Promise<void>
 }
 
 /**
+ * How few seconds may remain before an open vault locks itself, before
+ * using it slides that forward (§7.7): a minute's worth less than the whole
+ * idle time, so the slide is written at most once a minute, but never more
+ * than half of it, so a short idle time slides too.
+ */
+export function slideBelowSeconds(idleMinutes: number): number {
+  return idleMinutes * 60 - Math.min(60, idleMinutes * 30)
+}
+
+/**
  * The open vault's key for this session, sliding when it locks forward
  * (§7.7), at most once a minute, as `touchSession` throttles its own
  * writes; `403 vault_locked` if the vault isn't open here.
@@ -301,7 +311,7 @@ export async function vaultKeyOf(
     .select({
       sealed: sessions.vaultKeySealed,
       expired: sql<boolean>`${sessions.vaultLocksAt} IS NULL OR ${sessions.vaultLocksAt} <= now()`,
-      slideDue: sql<boolean>`${sessions.vaultLocksAt} < now() + make_interval(mins => ${idle - 1}::int)`,
+      slideDue: sql<boolean>`${sessions.vaultLocksAt} < now() + make_interval(secs => ${slideBelowSeconds(idle)}::int)`,
     })
     .from(sessions)
     .where(eq(sessions.id, auth.sessionId))
