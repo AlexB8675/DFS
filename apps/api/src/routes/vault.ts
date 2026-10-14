@@ -1,4 +1,5 @@
 import {
+  changeVaultCodeSchema,
   createVaultSchema,
   unlockVaultSchema,
   vaultCreatedSchema,
@@ -10,6 +11,7 @@ import { z } from 'zod'
 import { requireAuth } from '../auth/access.ts'
 import { sessionCookieName } from '../auth/sessions.ts'
 import { ApiError } from '../errors.ts'
+import { changeVaultCode } from '../vault/manage.ts'
 import { createVault, lockVault, unlockVault, vaultState } from '../vault/vault.ts'
 
 /** `/api/vault…` (DESIGN.md §7.7): a full session's own vault; never a device token's. */
@@ -36,6 +38,13 @@ export function vaultRoutes(app: FastifyInstance, _options: object, done: () => 
     { schema: { body: unlockVaultSchema, response: { 200: vaultStateSchema } } },
     (request) =>
       unlockVault(app, requireAuth(request.auth), sessionToken(app, request), request.body),
+  )
+
+  routes.put(
+    '/vault/code',
+    { schema: { body: changeVaultCodeSchema, response: { 200: vaultStateSchema } } },
+    (request) =>
+      changeVaultCode(app, requireAuth(request.auth), sessionToken(app, request), request.body),
   )
 
   routes.post(

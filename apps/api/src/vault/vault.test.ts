@@ -29,7 +29,17 @@ beforeAll(async () => {
   cleanup = setup.cleanup
   origin = setup.config.publicBaseUrl
   app = await buildApp({ config: setup.config, logger: false })
-  for (const username of ['alice', 'bob', 'carol', 'dave', 'erin', 'frank', 'limited']) {
+  for (const username of [
+    'alice',
+    'bob',
+    'carol',
+    'dave',
+    'erin',
+    'frank',
+    'gina',
+    'hana',
+    'limited',
+  ]) {
     await seedUser(app.db, { username, password: `the-${username}-password` })
   }
   // A session opened with a temporary password may only choose a new one.
@@ -473,5 +483,140 @@ describe('sliding the idle lock (§7.7)', () => {
     expect(slideBelowSeconds(15)).toBe(840)
     expect(slideBelowSeconds(2)).toBe(60)
     expect(slideBelowSeconds(1)).toBe(30)
+  })
+})
+
+function changeCode(browser: Browser, payload: object) {
+  return asBrowser(browser, 'PUT', '/api/vault/code', { payload })
+}
+
+describe('changing the code (§7.7)', { timeout: 60_000 }, () => {
+  let gina: Browser
+  let hana: Browser
+  let hanaRecoveryKey = ''
+
+  it('changes it with the current code, keeping the recovery key', async () => {
+    gina = await signIn('gina')
+    await makeVault(gina)
+    const before = await userOf(gina.userId)
+
+    const response = await changeCode(gina, { currentCode: '123456', newCode: 'abcdef' })
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({ exists: true, open: true, resetAt: null })
+    expect(await auditRows(gina.userId, 'vault.code_changed')).toHaveLength(1)
+
+    const after = await userOf(gina.userId)
+    expect(after.vaultSalt).not.toEqual(before.vaultSalt)
+    expect(after.vaultKeyByCode).not.toEqual(before.vaultKeyByCode)
+    expect(after.vaultKeyByRecovery).toEqual(before.vaultKeyByRecovery)
+
+    expect((await asBrowser(gina, 'POST', '/api/vault/lock')).statusCode).toBe(204)
+    const old = await unlock(gina, '123456')
+    expect(old.statusCode).toBe(403)
+    expect(old.json()).toMatchObject({ error: { code: 'wrong_code' } })
+    expect((await unlock(gina, 'abcdef')).statusCode).toBe(200)
+  })
+
+  it('changes it with the recovery key, however it is typed, and the key keeps working', async () => {
+    hana = await signIn('hana')
+    hanaRecoveryKey = await makeVault(hana)
+    expect((await asBrowser(hana, 'POST', '/api/vault/lock')).statusCode).toBe(204)
+
+    const response = await changeCode(hana, {
+      recoveryKey: hanaRecoveryKey.toLowerCase().replaceAll('-', ' '),
+      newCode: 'zzzzzz',
+    })
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({ open: true })
+    expect((await sessionOf(hana))?.vaultKeySealed).not.toBeNull()
+
+    expect((await asBrowser(hana, 'POST', '/api/vault/lock')).statusCode).toBe(204)
+    expect((await unlock(hana, 'zzzzzz')).statusCode).toBe(200)
+    expect((await unlock(hana, '123456')).statusCode).toBe(403)
+
+    const row = await userOf(hana.userId)
+    const byRecovery = await unwrapVaultKeyByRecovery(
+      row.vaultKeyByRecovery ?? new Uint8Array(),
+      hanaRecoveryKey,
+      hana.userId,
+    )
+    expect(byRecovery).toHaveLength(32)
+    const byCode = await unwrapVaultKeyByCode(
+      app.keys,
+      row.vaultKeyByCode ?? new Uint8Array(),
+      'zzzzzz',
+      row.vaultSalt ?? new Uint8Array(),
+      hana.userId,
+    )
+    expect(byCode).toEqual(byRecovery)
+  })
+
+  it('counts a wrong code or recovery key as a wrong try, and changes nothing', async () => {
+    const before = await userOf(gina.userId)
+
+    const wrongCode = await changeCode(gina, { currentCode: 'nope-nope', newCode: '999999' })
+    expect(wrongCode.statusCode).toBe(403)
+    expect(wrongCode.json()).toMatchObject({ error: { code: 'wrong_code' } })
+    expect((await userOf(gina.userId)).failedVaultUnlocks).toBe(1)
+
+    const wrongKey = await changeCode(gina, {
+      recoveryKey: 'AAAA-AAAA-AAAA-AAAA-AAAA-AAAA',
+      newCode: '999999',
+    })
+    expect(wrongKey.statusCode).toBe(403)
+    expect(wrongKey.json()).toMatchObject({ error: { code: 'wrong_recovery_key' } })
+    expect((await userOf(gina.userId)).failedVaultUnlocks).toBe(2)
+
+    const malformed = await changeCode(gina, { recoveryKey: 'nope', newCode: '999999' })
+    expect(malformed.statusCode).toBe(403)
+    expect(malformed.json()).toMatchObject({ error: { code: 'wrong_recovery_key' } })
+
+    const after = await userOf(gina.userId)
+    expect(after.vaultSalt).toEqual(before.vaultSalt)
+    expect(after.vaultKeyByCode).toEqual(before.vaultKeyByCode)
+    expect((await unlock(gina, 'abcdef')).statusCode).toBe(200)
+    expect((await userOf(gina.userId)).failedVaultUnlocks).toBe(0)
+  })
+
+  it('refuses a new code that is too short', async () => {
+    const response = await changeCode(gina, { currentCode: 'abcdef', newCode: '12345' })
+    expect(response.statusCode).toBe(400)
+  })
+
+  it('cancels a pending reset, as opening does', async () => {
+    await app.db
+      .update(users)
+      .set({ vaultResetAt: new Date(Date.now() + 7 * 24 * 60 * MINUTE) })
+      .where(eq(users.id, hana.userId))
+
+    const response = await changeCode(hana, { currentCode: 'zzzzzz', newCode: 'yyyyyy' })
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({ open: true, resetAt: null })
+    expect((await userOf(hana.userId)).vaultResetAt).toBeNull()
+    expect(await auditRows(hana.userId, 'vault.reset_cancelled')).toHaveLength(1)
+  })
+
+  it('says there is no vault to change the code of when none was made', async () => {
+    const bob = await signIn('bob')
+    const response = await changeCode(bob, { currentCode: '123456', newCode: 'abcdef' })
+    expect(response.statusCode).toBe(404)
+    expect(response.json()).toMatchObject({ error: { code: 'no_vault' } })
+  })
+
+  it('audits none of the codes or the recovery key', async () => {
+    const secrets = [
+      'abcdef',
+      'zzzzzz',
+      'yyyyyy',
+      '999999',
+      'nope-nope',
+      ...hanaRecoveryKey.split('-'),
+    ]
+    const rows = await app.db.select().from(auditLog)
+    expect(rows.length).toBeGreaterThan(0)
+    for (const row of rows) {
+      const text = JSON.stringify(row.meta)
+      for (const secret of secrets) expect(text).not.toContain(secret)
+    }
   })
 })

@@ -26,7 +26,7 @@ import { Gate } from './gate.ts'
 
 // At most two codes are stretched at once in this process (§7.7): each takes
 // 64 MiB and a thread of the pool that staging and password hashing share.
-const stretching = new Gate(2)
+export const stretching = new Gate(2)
 
 /** Whether the account has a vault, and whether it is open in the caller's session, read fresh from the database. */
 export async function vaultState(app: FastifyInstance, auth: Auth): Promise<VaultState> {
