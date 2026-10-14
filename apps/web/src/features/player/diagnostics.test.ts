@@ -169,7 +169,7 @@ describe('the player’s warnings', () => {
     ])
     // With the side the server waited on.
     expect(notices({ signals: { ...slow, waitingOn: 'connection' } })).toEqual([
-      'Loading slowly: the video arrives at 2.7 Mbit/s and needs 24.3 Mbit/s, so it stops to load. The server has it ready and waits on this device’s connection.',
+      'Loading slowly: the video arrives at 2.7 Mbit/s and needs 24.3 Mbit/s, so it stops to load. The server has it ready and waits on this device to take it.',
     ])
     // Not yet: a moment's wait is normal.
     expect(notices({ signals: { ...slow, waitingForMs: 2000 } })).toEqual([])

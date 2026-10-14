@@ -71,6 +71,12 @@ export function useBufferedPlay(input: {
         reported = true
         failed(stats.error ?? 'Buffered play failed.')
       },
+    }).catch((error: unknown) => {
+      // A browser without what the play needs rejects it before it can report a failure itself.
+      if (signal.aborted || reported) return
+      if (frameShown || video.readyState >= 2) return
+      reported = true
+      failed(error instanceof Error ? error.message : String(error))
     })
 
     // Leaving stops the play and lets go of the object URL `playBuffered` gave the element.

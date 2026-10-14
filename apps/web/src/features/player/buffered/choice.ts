@@ -15,6 +15,21 @@ export function playsBuffered(info: MediaInfo, mediaSource: boolean): boolean {
   return pictures >= 1 && sounds <= 1
 }
 
+/** Whether this browser has what buffered play needs (§10.4): Media Source, `AbortSignal.any` and `Promise.withResolvers`. */
+export function bufferedPlayAvailable(
+  scope: {
+    MediaSource?: unknown
+    AbortSignal?: { any?: unknown }
+    Promise?: { withResolvers?: unknown }
+  } = globalThis,
+): boolean {
+  return (
+    scope.MediaSource !== undefined &&
+    typeof scope.AbortSignal?.any === 'function' &&
+    typeof scope.Promise?.withResolvers === 'function'
+  )
+}
+
 /**
  * Whether a file named `name` may play through the buffer: only an MP4 or MOV
  * can, and its name is all there is to go on before the media info has come, so

@@ -1,6 +1,6 @@
 import type { MediaInfo, MediaStream } from '@dfs/shared'
 import { describe, expect, it } from 'vitest'
-import { mayPlayBuffered, playsBuffered } from './choice'
+import { bufferedPlayAvailable, mayPlayBuffered, playsBuffered } from './choice'
 
 /** The proof file's picture: 4K HEVC. */
 const HEVC: MediaStream = {
@@ -101,6 +101,33 @@ describe('choosing a video’s own buffer', () => {
 
   it('leaves a file with no picture to the element', () => {
     expect(playsBuffered({ ...PROOF, streams: [AAC] }, true)).toBe(false)
+  })
+})
+
+describe('telling whether this browser can buffer', () => {
+  /** A scope with all that buffered play needs. */
+  const FULL = {
+    MediaSource: () => undefined,
+    AbortSignal: { any: () => undefined },
+    Promise: { withResolvers: () => undefined },
+  }
+
+  it('can where Media Source, AbortSignal.any and Promise.withResolvers exist', () => {
+    expect(bufferedPlayAvailable(FULL)).toBe(true)
+  })
+
+  it('cannot without Media Source', () => {
+    expect(bufferedPlayAvailable({ ...FULL, MediaSource: undefined })).toBe(false)
+  })
+
+  it('cannot without AbortSignal.any', () => {
+    expect(bufferedPlayAvailable({ ...FULL, AbortSignal: {} })).toBe(false)
+    expect(bufferedPlayAvailable({ ...FULL, AbortSignal: undefined })).toBe(false)
+  })
+
+  it('cannot without Promise.withResolvers', () => {
+    expect(bufferedPlayAvailable({ ...FULL, Promise: {} })).toBe(false)
+    expect(bufferedPlayAvailable({ ...FULL, Promise: undefined })).toBe(false)
   })
 })
 

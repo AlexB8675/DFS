@@ -489,7 +489,7 @@ export function playbackNotices(input: {
   ) {
     const why =
       signals.waitingOn === 'connection'
-        ? ' The server has it ready and waits on this device’s connection.'
+        ? ' The server has it ready and waits on this device to take it.'
         : signals.waitingOn === 'storage'
           ? ' The server waits on storage to read it.'
           : ''
