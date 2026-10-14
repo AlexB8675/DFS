@@ -169,8 +169,10 @@ export default function VideoView({
   const [fading, setFading] = useState<ReadonlySet<string>>(new Set())
   /** Asked to play, and not playing yet nor refused: a spinner, not a play button. */
   const [starting, setStarting] = useState(true)
-  /** The version whose own buffer failed before its first frame: it plays by the element's. */
-  const [bufferFailedFor, setBufferFailedFor] = useState<string | null>(null)
+  /** The version whose own buffer failed before its first frame, and why: the element plays it. */
+  const [bufferFailed, setBufferFailed] = useState<{ versionId: string; message: string } | null>(
+    null,
+  )
   /** How the start with this key plays, once decided: through the own buffer, or by the element. */
   const [mode, setMode] = useState<{ key: string; buffered: boolean } | null>(null)
 
@@ -223,7 +225,7 @@ export default function VideoView({
         mayBuffer &&
         info !== null &&
         playsBuffered(info, typeof MediaSource !== 'undefined') &&
-        bufferFailedFor !== source.versionId,
+        bufferFailed?.versionId !== source.versionId,
     })
   }
   const decided = mode?.key === sourceKey ? mode : null
@@ -237,10 +239,10 @@ export default function VideoView({
     enabled: buffered && problem === null,
     startAt: source?.startAt ?? 0,
     autoplay: active,
-    onFailed: () => {
+    onFailed: (message) => {
       if (!source) return
       // Before its first frame: the element plays the file by its address instead, anew.
-      setBufferFailedFor(source.versionId)
+      setBufferFailed({ versionId: source.versionId, message })
       setSource((current) => current && { ...current, attempt: current.attempt + 1 })
     },
   })
@@ -285,13 +287,20 @@ export default function VideoView({
   const visible = awake || state.paused || menuOpen
 
   // How it played, for the play's report (§10.4): read when the report goes, so kept in a ref.
-  const played = useRef({ buffered, stats: bufferedStats })
+  const fellBack =
+    source && bufferFailed?.versionId === source.versionId ? bufferFailed.message : null
+  const played = useRef({ buffered, stats: bufferedStats, fellBack })
   useEffect(() => {
-    played.current = { buffered, stats: bufferedStats }
+    played.current = { buffered, stats: bufferedStats, fellBack }
   })
   const howItPlayed = useCallback(() => {
-    const { buffered: own, stats } = played.current
-    if (!own) return '{"player":"direct"}'
+    const { buffered: own, stats, fellBack: why } = played.current
+    // Direct because its own buffer failed: the report says so, and why.
+    if (!own) {
+      return why === null
+        ? '{"player":"direct"}'
+        : JSON.stringify({ player: 'direct', fellBack: why.slice(0, 300) })
+    }
     return JSON.stringify({
       player: 'buffered',
       phase: stats?.phase,
