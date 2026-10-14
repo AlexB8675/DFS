@@ -37,6 +37,7 @@ import { nodeRoutes } from './routes/nodes.ts'
 import { shareRoutes } from './routes/shares.ts'
 import { uploadStreamRoutes } from './routes/upload-stream.ts'
 import { uploadRoutes } from './routes/uploads.ts'
+import { vaultRoutes } from './routes/vault.ts'
 import { StagingRoom } from './staging.ts'
 import { UnderWay } from './under-way.ts'
 
@@ -272,6 +273,7 @@ export async function buildApp({
   await app.register(healthRoutes, { prefix: '/api' })
   await app.register(authRoutes, { prefix: '/api' })
   await app.register(devicesRoutes, { prefix: '/api' })
+  await app.register(vaultRoutes, { prefix: '/api' })
   await app.register(adminRoutes, { prefix: '/api' })
   await app.register(nodeRoutes, { prefix: '/api' })
   await app.register(uploadRoutes, { prefix: '/api' })
