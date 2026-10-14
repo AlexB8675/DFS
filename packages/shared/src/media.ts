@@ -281,6 +281,11 @@ export const playbackReportSchema = z.object({
   problem: z.string().max(300).nullable(),
   /** The same, as a kind; a page loaded before it was asked sends none, counted as `other`. */
   problemKind: playProblemKindSchema.nullable().optional(),
+  /**
+   * A trial player's own numbers, as one line of JSON for the log (the
+   * buffered-play proof, §10.4); the regular player sends none.
+   */
+  lab: z.string().max(2000).optional(),
 })
 
 export type PlaybackReport = z.infer<typeof playbackReportSchema>
