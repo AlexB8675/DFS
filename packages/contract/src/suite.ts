@@ -8,6 +8,7 @@ import { shareTests } from './shares.ts'
 import type { ContractTarget, TestApi } from './target.ts'
 import { treeTests } from './tree.ts'
 import { uploadTests } from './uploads.ts'
+import { vaultTests } from './vault.ts'
 
 // The contract between the web app and the API (DESIGN.md §9), run against
 // both the mock and the real API, so the two can't drift (DESIGN.md §17).
@@ -25,4 +26,5 @@ export function defineContractSuite(t: TestApi, target: () => ContractTarget): v
   shareTests(context)
   adminTests(context)
   deviceTests(context)
+  vaultTests(context)
 }
