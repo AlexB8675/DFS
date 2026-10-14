@@ -14,3 +14,13 @@ export function playsBuffered(info: MediaInfo, mediaSource: boolean): boolean {
   const sounds = info.streams.filter((stream) => stream.type === 'audio').length
   return pictures >= 1 && sounds <= 1
 }
+
+/**
+ * Whether a file named `name` may play through the buffer: only an MP4 or MOV
+ * can, and its name is all there is to go on before the media info has come, so
+ * the video player waits for the info only for these (§10.4). The info
+ * (`playsBuffered`) has the last word.
+ */
+export function mayPlayBuffered(name: string): boolean {
+  return /\.(mp4|m4v|mov)$/i.test(name)
+}

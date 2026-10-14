@@ -1,6 +1,6 @@
 import type { MediaInfo, MediaStream } from '@dfs/shared'
 import { describe, expect, it } from 'vitest'
-import { playsBuffered } from './choice'
+import { mayPlayBuffered, playsBuffered } from './choice'
 
 /** The proof file's picture: 4K HEVC. */
 const HEVC: MediaStream = {
@@ -101,5 +101,27 @@ describe('choosing a video’s own buffer', () => {
 
   it('leaves a file with no picture to the element', () => {
     expect(playsBuffered({ ...PROOF, streams: [AAC] }, true)).toBe(false)
+  })
+})
+
+describe('telling by its name that a file may play through the buffer', () => {
+  it('allows MP4, M4V and MOV, whatever the case', () => {
+    expect(mayPlayBuffered('Clip.MP4')).toBe(true)
+    expect(mayPlayBuffered('b.m4v')).toBe(true)
+    expect(mayPlayBuffered('a.mov')).toBe(true)
+    expect(mayPlayBuffered('holiday.2024.Mov')).toBe(true)
+  })
+
+  it('leaves the other containers to the element', () => {
+    expect(mayPlayBuffered('film.mkv')).toBe(false)
+    expect(mayPlayBuffered('clip.webm')).toBe(false)
+    expect(mayPlayBuffered('old.avi')).toBe(false)
+  })
+
+  it('needs the extension to be the last part of the name', () => {
+    expect(mayPlayBuffered('noext')).toBe(false)
+    expect(mayPlayBuffered('x.mp4.part')).toBe(false)
+    expect(mayPlayBuffered('mp4')).toBe(false)
+    expect(mayPlayBuffered('movie')).toBe(false)
   })
 })

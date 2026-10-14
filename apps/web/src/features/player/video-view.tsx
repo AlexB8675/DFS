@@ -40,7 +40,7 @@ import { isEditable } from '@/lib/editable'
 import type { FilePlace } from '@/lib/file-place'
 import { cn } from '@/lib/utils'
 import { contentUrl, mediaQuery, playbackQuery } from './api'
-import { playsBuffered } from './buffered/choice'
+import { mayPlayBuffered, playsBuffered } from './buffered/choice'
 import { useBufferedPlay } from './buffered/use-buffered-play'
 import { browserCanPlayType, codecLabel, playability, playedStreams, unplayableOf } from './codecs'
 import { audioTracksOf, chooseAudioTrack } from './audio-tracks'
@@ -70,12 +70,12 @@ import { useResume } from './use-resume'
 // names, from the start, offering to resume where the viewer stopped, with
 // controls of its own over the picture. The media info, when it comes, says
 // whether this browser decodes the picture and the sound, and brings the
-// chapters and the subtitles inside the file. It also says how the video plays:
-// an MP4 or MOV with at most one sound track plays through the app's own buffer
-// (./buffered), which the element is given as a Media Source; the rest, and one
-// whose buffer fails before its first frame, play by the element itself from the
-// file's address. The same for a drive's file and a link's: its place says where
-// to ask.
+// chapters and the subtitles inside the file. It also says how an MP4 or MOV
+// plays: with at most one sound track, through the app's own buffer (./buffered),
+// which the element is given as a Media Source, so it waits for the info; the
+// rest, and one whose buffer fails before its first frame, play by the element
+// itself from the file's address, at once. The same for a drive's file and a
+// link's: its place says where to ask.
 
 interface VideoViewProps {
   name: string
@@ -210,14 +210,17 @@ export default function VideoView({
   // What the media info says of this browser, once it comes, for the version playing.
   const info = source && media.data?.versionId === source.versionId ? media.data.info : null
 
-  // How a start plays (§10.4) is decided once, when the media info has come or failed, and kept
-  // while its element lives: a refetch of the info must not change a video that plays. Until
-  // then the element has no source. A new start (a retry, a new file, a fallback) decides again.
+  // How a start plays (§10.4) is decided once, and kept while its element lives: a refetch of
+  // the info must not change a video that plays. A name that can't be an MP4 or MOV plays by
+  // the element at once; one that can waits for the media info to come or fail, with no source
+  // until then. A new start (a retry, a new file, a fallback) decides again.
   const sourceKey = source ? `${source.versionId}:${String(source.attempt)}` : ''
-  if (source && mode?.key !== sourceKey && (info !== null || !media.isFetching)) {
+  const mayBuffer = mayPlayBuffered(name)
+  if (source && mode?.key !== sourceKey && (!mayBuffer || info !== null || !media.isFetching)) {
     setMode({
       key: sourceKey,
       buffered:
+        mayBuffer &&
         info !== null &&
         playsBuffered(info, typeof MediaSource !== 'undefined') &&
         bufferFailedFor !== source.versionId,
@@ -230,7 +233,8 @@ export default function VideoView({
   const { stats: bufferedStats } = useBufferedPlay({
     video,
     url: source ? contentUrl(place, source.versionId) : '',
-    enabled: buffered,
+    // Not once a problem is shown: a play that failed is over, and `startAt` moves with it.
+    enabled: buffered && problem === null,
     startAt: source?.startAt ?? 0,
     autoplay: active,
     onFailed: () => {
