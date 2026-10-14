@@ -289,3 +289,20 @@ export function trashedVia(state: FoldedState, node: Row): string | null {
   }
   return null
 }
+
+/**
+ * Which tree a node is in (§7.7): the vault's if it is a user's vault root
+ * or below one, else My drive's. Derived, so not journaled, and recomputed.
+ */
+export function treeOf(state: FoldedState, node: Row): 'drive' | 'vault' {
+  let top = node
+  while (top.parentId) {
+    const parent = state.nodes.get(top.parentId as string)
+    if (!parent) break
+    top = parent
+  }
+  for (const user of state.users.values()) {
+    if (user.vaultRootId && user.vaultRootId === top.id) return 'vault'
+  }
+  return 'drive'
+}

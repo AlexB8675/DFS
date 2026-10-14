@@ -4,10 +4,14 @@ import { Compactor } from '@dfs/bot/compactor'
 import { JournalUploader } from '@dfs/bot/journal-uploader'
 import { dataChannels } from '@dfs/bot/storage'
 import { settleBlobs } from '@dfs/bot/testing'
+import { unwrapVaultKeyByCode } from '@dfs/crypto'
 import {
+  appendJournal,
   createDatabase,
   createPool,
   foldAllFolderStats,
+  nodeRecords,
+  nodes,
   purgeEarlierVersions,
   storageChannels,
   users,
@@ -38,6 +42,7 @@ import { testConfig } from '../testing/config.ts'
 import { completeUpload, createUploads, receivePart } from '../uploads/uploads.ts'
 import { updateUserAsAdmin } from '../users/admin-users.ts'
 import { createUser } from '../users/users.ts'
+import { createVault } from '../vault/vault.ts'
 import { drillCommand } from './commands.ts'
 import { compareDatabases } from './compare.ts'
 import { foldJournal, settle as settleState } from './fold.ts'
@@ -359,6 +364,31 @@ async function useTheDrive(stack: Stack): Promise<void> {
   await updateUserAsAdmin(app, owner, sam.user.id, { quotaBytes: 5 * 1024 ** 3 })
 }
 
+/** The owner makes a vault, with a folder in it (§7.7), journaled as the API journals them. */
+async function useTheVault(stack: Stack): Promise<string> {
+  const { app, owner } = stack
+  await createVault(app, owner, 'test-token', { code: '123456' })
+  const [user] = await app.db.select().from(users).where(eq(users.id, owner.user.id))
+  if (!user?.vaultRootId) throw new Error('The vault was not made.')
+  const vaultRootId = user.vaultRootId
+  return app.db.transaction(async (tx) => {
+    const [folder] = await tx
+      // tree: inherits
+      .insert(nodes)
+      .values({
+        ownerId: owner.user.id,
+        parentId: vaultRootId,
+        kind: 'folder',
+        name: 'Inside',
+        nameKey: 'inside',
+      })
+      .returning()
+    if (!folder) throw new Error('The folder was not made.')
+    await appendJournal(tx, nodeRecords([folder]))
+    return folder.id
+  })
+}
+
 /** Packs what waits, and stores every blob, as the leading bot does within seconds. */
 async function settle({ app, store }: Stack): Promise<void> {
   await settleBlobs({ db: app.db, staging: app.staging, store, sizes: app.config.sizes })
@@ -406,10 +436,12 @@ async function contents(reader: FastifyInstance, db: Database): Promise<Map<stri
 for (const storage of ['local', 'discord'] as const) {
   describe(`recovery from the journal alone, with ${storage} storage (§8)`, () => {
     let stack: Stack
+    let vaultFolderId: string
 
     beforeAll(async () => {
       stack = await startStack(storage)
       await useTheDrive(stack)
+      vaultFolderId = await useTheVault(stack)
       await settleStack(stack)
     })
 
@@ -432,6 +464,33 @@ for (const storage of ['local', 'discord'] as const) {
       })
       expect(report.batches).toBeGreaterThan(1)
       expect(await compareDatabases(stack.app.db, target)).toEqual([])
+
+      // The vault comes back sealed, in a tree of its own (§7.7).
+      const ownerId = stack.owner.user.id
+      const treeOf = async (id: string | null | undefined) => {
+        const { rows } = await target.execute<{ tree: string }>(sql`
+          SELECT tree FROM nodes /* tree: all trees: the test reads any node's tree */ WHERE id = ${id ?? null}`)
+        return rows[0]?.tree
+      }
+      const [recovered] = await target.select().from(users).where(eq(users.id, ownerId))
+      expect(recovered?.vaultRootId).toBeTruthy()
+      expect(await treeOf(recovered?.vaultRootId)).toBe('vault')
+      expect(await treeOf(vaultFolderId)).toBe('vault')
+      expect(await treeOf(recovered?.rootNodeId)).toBe('drive')
+      const { rows: driveChildren } = await target.execute<{ id: string }>(sql`
+        SELECT id FROM nodes /* tree: all trees: the test reads any node's children */
+        WHERE parent_id = ${recovered?.rootNodeId ?? null} LIMIT 1`)
+      expect(await treeOf(driveChildren[0]?.id)).toBe('drive')
+      if (!recovered?.vaultKeyByCode || !recovered.vaultSalt)
+        throw new Error('The vault came back without its keys.')
+      const key = await unwrapVaultKeyByCode(
+        stack.app.keys,
+        recovered.vaultKeyByCode,
+        '123456',
+        recovered.vaultSalt,
+        ownerId,
+      )
+      expect(key).toHaveLength(32)
 
       if (storage === 'discord') return
       // An app on the rebuilt database reads every file from the blobs as they are.

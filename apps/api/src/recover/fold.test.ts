@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { foldJournal, settle } from './fold.ts'
+import { foldJournal, settle, treeOf } from './fold.ts'
 import { RecoveryError, type JournalEntry } from './read-journal.ts'
 
 // Settling a journal cut short (DESIGN.md §8 step 4): what recovery can't
@@ -176,5 +176,34 @@ describe('compaction in the journal (§6.6)', () => {
         ]),
       ),
     ).toThrow(RecoveryError)
+  })
+})
+
+describe('the tree a node is in (§7.7)', () => {
+  it('is the vault’s for a vault root and all below it, My drive’s for the rest', () => {
+    const state = foldJournal(
+      entries([
+        ['user.upsert', { id: 'owner', rootNodeId: 'r', vaultRootId: 'v' }],
+        ['node.upsert', { id: 'r', kind: 'folder', parentId: null, ownerId: 'owner' }],
+        ['node.upsert', { id: 'a', kind: 'folder', parentId: 'r', ownerId: 'owner' }],
+        ['node.upsert', { id: 'v', kind: 'folder', parentId: null, ownerId: 'owner' }],
+        ['node.upsert', { id: 'b', kind: 'folder', parentId: 'v', ownerId: 'owner' }],
+        ['node.upsert', { id: 'c', kind: 'folder', parentId: 'b', ownerId: 'owner' }],
+      ]),
+    )
+    const trees = Object.fromEntries(
+      ['r', 'a', 'v', 'b', 'c'].map((id) => [id, treeOf(state, state.nodes.get(id) ?? {})]),
+    )
+    expect(trees).toEqual({ r: 'drive', a: 'drive', v: 'vault', b: 'vault', c: 'vault' })
+  })
+
+  it('is My drive’s for a node whose parent the journal lacks', () => {
+    const state = foldJournal(
+      entries([
+        ['user.upsert', { id: 'owner', rootNodeId: 'r', vaultRootId: 'v' }],
+        ['node.upsert', { id: 'lost', kind: 'folder', parentId: 'missing', ownerId: 'owner' }],
+      ]),
+    )
+    expect(treeOf(state, state.nodes.get('lost') ?? {})).toBe('drive')
   })
 })

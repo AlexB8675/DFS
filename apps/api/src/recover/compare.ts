@@ -27,8 +27,9 @@ const TABLES: readonly TableSpec[] = [
   // Its ID is all there is; when it was made, the new database made it.
   { table: 'instance', key: ['id'], exclude: ['created_at'] },
   // Sign-in counters, the last visit and a request for a new password are
-  // transient (§8); reservations belong to uploads in progress, which
-  // recovery doesn't bring back.
+  // transient (§8), and so is the vault's wrong-code counter (§7.7);
+  // reservations belong to uploads in progress, which recovery doesn't
+  // bring back.
   {
     table: 'users',
     key: ['id'],
@@ -36,6 +37,8 @@ const TABLES: readonly TableSpec[] = [
       'failed_sign_ins',
       'sign_in_locked_until',
       'password_reset_requested_at',
+      'failed_vault_unlocks',
+      'vault_unlock_locked_until',
       'last_seen_at',
       'reserved_bytes',
     ],

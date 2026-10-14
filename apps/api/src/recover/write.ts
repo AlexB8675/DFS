@@ -1,6 +1,6 @@
 import { foldAllFolderStats, type Database, type Executor } from '@dfs/db'
 import { sql } from 'drizzle-orm'
-import { trashedVia, type FoldedState, type VersionState } from './fold.ts'
+import { trashedVia, treeOf, type FoldedState, type VersionState } from './fold.ts'
 import type { CategoryChannel } from './journal-source.ts'
 import { RecoveryError, type ReadBatch } from './read-journal.ts'
 
@@ -62,10 +62,18 @@ export async function writeRecovered(db: Database, input: WriteInput): Promise<v
       for (const row of rows) channelIds.set(row.discord_channel_id, row.id)
     }
 
+    // The roots wait for the nodes they name; the keys are journaled as hex.
     await insert(
       tx,
       'users',
-      [...state.users.values()].map(({ rootNodeId: _root, ...user }) => snake(user)),
+      [...state.users.values()].map(({ rootNodeId: _root, vaultRootId: _vault, ...user }) =>
+        snake({
+          ...user,
+          vaultSalt: hex(user.vaultSalt),
+          vaultKeyByCode: hex(user.vaultKeyByCode),
+          vaultKeyByRecovery: hex(user.vaultKeyByRecovery),
+        }),
+      ),
     )
 
     // Parents before children; files point at their versions once those exist.
@@ -77,11 +85,12 @@ export async function writeRecovered(db: Database, input: WriteInput): Promise<v
       return count
     }
     const nodes = [...state.nodes.values()].toSorted((a, b) => depth(a) - depth(b))
+    // Every row names its tree: a key on some rows only would hand the others a NULL.
     await insert(
       tx,
       'nodes',
       nodes.map(({ currentVersionId: _current, ...node }) =>
-        snake({ ...node, trashedVia: trashedVia(state, node) }),
+        snake({ ...node, trashedVia: trashedVia(state, node), tree: treeOf(state, node) }),
       ),
     )
     await insert(
@@ -112,13 +121,28 @@ export async function writeRecovered(db: Database, input: WriteInput): Promise<v
       )}::jsonb) AS r(id uuid, version_id uuid)
       WHERE nodes.id = r.id`)
     await tx.execute(sql`
-      UPDATE users SET root_node_id = r.root_node_id
+      UPDATE users SET root_node_id = r.root_node_id, vault_root_id = r.vault_root_id
       FROM jsonb_to_recordset(${JSON.stringify(
         [...state.users.values()]
-          .filter((user) => user.rootNodeId)
-          .map((user) => ({ id: user.id, root_node_id: user.rootNodeId })),
-      )}::jsonb) AS r(id uuid, root_node_id uuid)
+          .filter((user) => Boolean(user.rootNodeId) || Boolean(user.vaultRootId))
+          .map((user) => ({
+            id: user.id,
+            root_node_id: user.rootNodeId ?? null,
+            vault_root_id: user.vaultRootId ?? null,
+          })),
+      )}::jsonb) AS r(id uuid, root_node_id uuid, vault_root_id uuid)
       WHERE users.id = r.id`)
+    // Rows are inserted in chunks; the computed tree is the rule, and this makes sure of it.
+    await tx.execute(sql`
+      WITH RECURSIVE below AS (
+        SELECT id FROM nodes /* tree: all trees: recovery recomputes the trees */
+        WHERE id IN (SELECT vault_root_id FROM users WHERE vault_root_id IS NOT NULL)
+        UNION ALL
+        SELECT child.id FROM nodes child /* tree: all trees: recovery recomputes the trees */
+        JOIN below ON child.parent_id = below.id
+      )
+      UPDATE nodes /* tree: all trees: recovery recomputes the trees */ SET tree = 'vault'
+      FROM below WHERE nodes.id = below.id AND nodes.tree <> 'vault'`)
 
     const framesIn = new Map<number, number>()
     for (const version of state.versions.values()) {
