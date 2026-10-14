@@ -34,27 +34,58 @@ const keyFileSchema = z
 export class MasterKeys {
   readonly currentId: string
   readonly #keys: ReadonlyMap<string, AesKey>
+  /** Each master key again, as the base of HKDF derivations (`deriveBits`). */
+  readonly #hkdf: ReadonlyMap<string, webcrypto.CryptoKey>
   /** For signing short-lived tokens such as share unlock cookies; derived, never stored. */
   readonly #macKey: AesKey
 
-  private constructor(currentId: string, keys: ReadonlyMap<string, AesKey>, macKey: AesKey) {
+  private constructor(
+    currentId: string,
+    keys: ReadonlyMap<string, AesKey>,
+    hkdf: ReadonlyMap<string, webcrypto.CryptoKey>,
+    macKey: AesKey,
+  ) {
     this.currentId = currentId
     this.#keys = keys
+    this.#hkdf = hkdf
     this.#macKey = macKey
   }
 
   static async fromFile(file: string): Promise<MasterKeys> {
     const parsed = keyFileSchema.parse(JSON.parse(await readFile(file, 'utf8')))
     const keys = new Map<string, AesKey>()
+    const hkdf = new Map<string, webcrypto.CryptoKey>()
     let macKey: AesKey | null = null
     for (const [id, encoded] of Object.entries(parsed.keys)) {
       const raw = Buffer.from(encoded, 'base64')
       if (raw.length !== KEY_BYTES) throw new Error(`Master key "${id}" is not 256 bits.`)
       keys.set(id, await importAesKey(raw))
+      hkdf.set(id, await crypto.subtle.importKey('raw', raw, 'HKDF', false, ['deriveBits']))
       if (id === parsed.current) macKey = await deriveMacKey(raw)
     }
     if (!macKey) throw new Error('The current master key is missing.')
-    return new MasterKeys(parsed.current, keys, macKey)
+    return new MasterKeys(parsed.current, keys, hkdf, macKey)
+  }
+
+  /**
+   * 32 bytes derived from the master key `keyId` for one purpose, named by
+   * `info`, such as salting a vault's code key (§7.7). Never the key itself,
+   * and never the same bytes for two purposes.
+   */
+  async deriveBits(keyId: string, info: string): Promise<Uint8Array> {
+    const base = this.#hkdf.get(keyId)
+    if (!base) throw new Error(`Master key "${keyId}" is not in the key file.`)
+    const bits = await crypto.subtle.deriveBits(
+      {
+        name: 'HKDF',
+        hash: 'SHA-256',
+        salt: new Uint8Array(32),
+        info: new TextEncoder().encode(info),
+      },
+      base,
+      256,
+    )
+    return new Uint8Array(bits)
   }
 
   /** An HMAC-SHA-256 of `data`, with a key derived from the current master key. */
