@@ -208,7 +208,7 @@ export function FileViewer({
                 file={file}
                 media={
                   place && previewKind(file.name, file.mimeType) === 'video' ? (
-                    <MediaDetails place={place} />
+                    <MediaDetails place={place} name={file.name} />
                   ) : null
                 }
               />

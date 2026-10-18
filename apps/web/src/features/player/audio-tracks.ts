@@ -1,5 +1,8 @@
 // The audio tracks a browser lists of a file it plays (`video.audioTracks`):
-// Safari's, in direct play (DESIGN.md §6.7). Other browsers play the default.
+// Safari lists a file's sound tracks, and DFS switches between them only in
+// Safari's own player, on an iPhone or iPad (DESIGN.md §6.7, §10.4). Through
+// the buffer only the first sound track is there, and other browsers play the
+// default.
 
 export interface AudioTrack {
   id: string

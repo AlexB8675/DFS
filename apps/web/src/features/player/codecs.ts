@@ -1,4 +1,5 @@
 import { isTextSubtitles, type MediaInfo, type MediaStream } from '@dfs/shared'
+import type { PagePlay } from './buffered/choice'
 
 // What this browser decodes (DESIGN.md §6.7, §10.4): each codec of a file's
 // media info put to the browser by its RFC 6381 string, never the
@@ -152,6 +153,38 @@ const LABELS: Record<string, string> = {
 export function codecLabel(codec: string): string {
   if (codec.startsWith('pcm_')) return 'PCM'
   return (LABELS[codec] ?? codec.toUpperCase()).replaceAll('-', NO_BREAK_HYPHEN)
+}
+
+/**
+ * What the Details say of where a video plays (§10.4, D45): in the page, or in
+ * another player and why, as the player's own panel says it. Where it plays
+ * natively, on an iPhone or iPad, `nativeAnswer` is what Safari's own player
+ * would do with it. A picture or a sound with no codec to name is the kind of
+ * file, as in the panel.
+ */
+export function playsHereText(play: PagePlay, nativeAnswer: string): string {
+  switch (play.play) {
+    case 'buffered':
+      return 'In the page'
+    case 'native':
+      return nativeAnswer
+    case 'elsewhere': {
+      const elsewhere = 'In another player: this browser can’t'
+      const format = `${elsewhere} play this kind of file in the page`
+      switch (play.reason) {
+        case 'format':
+          return format
+        case 'picture':
+          return play.codec === null ? format : `${elsewhere} play ${codecLabel(play.codec)} video`
+        case 'sound':
+          return play.codec === null
+            ? format
+            : `${elsewhere} play its ${codecLabel(play.codec)} sound`
+        case 'browser':
+          return `${elsewhere} stream videos`
+      }
+    }
+  }
 }
 
 /** A video stream in a few words: “HEVC Main 10 · 3840×2160 · 23.976 fps · HDR10”. */

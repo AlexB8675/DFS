@@ -298,8 +298,16 @@ export default function VideoView({
       ? codecLabel(picture.stream.codec)
       : null
   // What it plays without: its sound, picture subtitles, other sound tracks, which VLC plays.
+  // Only Safari's own player (`native`) switches sound tracks itself; through the buffer the
+  // element holds the first one alone, so the list desktop Safari gives it can't reach the
+  // others and VLC is offered for them. And a sound the browser can't play stops a buffered
+  // play before it starts (`pagePlay`, the engine), so it never plays without it.
+  const unplayableHere =
+    info && verdict && video
+      ? unplayableOf(info, verdict, native && audioTracksOf(video) !== null)
+      : null
   const unplayable =
-    info && verdict && video ? unplayableOf(info, verdict, audioTracksOf(video) !== null) : null
+    unplayableHere && buffered ? { ...unplayableHere, sound: null } : unplayableHere
   // The page doesn't play it: derived from the decision, like `pictureFails`, and not stored.
   const elsewhereProblem: Problem | null =
     how?.play === 'elsewhere' ? { kind: 'elsewhere', reason: how.reason, codec: how.codec } : null

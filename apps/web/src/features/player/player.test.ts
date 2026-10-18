@@ -1,6 +1,14 @@
 import type { MediaInfo, MediaStream } from '@dfs/shared'
 import { describe, expect, it } from 'vitest'
-import { describeAudio, describeVideo, mimeTypeOf, playability, type CanPlayType } from './codecs'
+import type { PagePlay } from './buffered/choice'
+import {
+  describeAudio,
+  describeVideo,
+  mimeTypeOf,
+  playability,
+  playsHereText,
+  type CanPlayType,
+} from './codecs'
 import { playerAction, stepSpeed } from './keys'
 import { positionChange } from './resume-rules'
 import { formatPlayTime, loadedUntil } from './time'
@@ -120,6 +128,56 @@ describe('what this browser decodes', () => {
     expect(describeAudio(AC3).replaceAll(String.fromCharCode(0x2011), '-')).toBe(
       'Dolby Digital (AC-3) 5.1 · English',
     )
+  })
+})
+
+describe('where a video plays, in its Details', () => {
+  const said = (play: PagePlay, nativeAnswer = 'Directly') =>
+    playsHereText(play, nativeAnswer).replaceAll(String.fromCharCode(0x2011), '-')
+
+  it('says a buffered play is in the page', () => {
+    expect(said({ play: 'buffered' }, 'No: this browser can’t play HEVC video')).toBe('In the page')
+  })
+
+  it('passes the native answer through, whatever it is', () => {
+    for (const answer of [
+      'Directly',
+      'No: this browser can’t play HEVC video',
+      'Without sound: this browser can’t play DTS',
+      'If this browser can open it',
+    ]) {
+      expect(playsHereText({ play: 'native' }, answer)).toBe(answer)
+    }
+  })
+
+  it('says another player for a kind of file the page doesn’t play', () => {
+    expect(said({ play: 'elsewhere', reason: 'format', codec: null })).toBe(
+      'In another player: this browser can’t play this kind of file in the page',
+    )
+  })
+
+  it('names the picture’s codec when that is why', () => {
+    expect(said({ play: 'elsewhere', reason: 'picture', codec: 'hevc' })).toBe(
+      'In another player: this browser can’t play HEVC video',
+    )
+  })
+
+  it('names the sound’s codec when that is why', () => {
+    expect(said({ play: 'elsewhere', reason: 'sound', codec: 'eac3' })).toBe(
+      'In another player: this browser can’t play its Dolby Digital Plus (E-AC-3) sound',
+    )
+  })
+
+  it('says the browser can’t stream when that is why', () => {
+    expect(said({ play: 'elsewhere', reason: 'browser', codec: null })).toBe(
+      'In another player: this browser can’t stream videos',
+    )
+  })
+
+  it('gives the kind-of-file text for a picture or a sound with no codec, as the panel does', () => {
+    const format = 'In another player: this browser can’t play this kind of file in the page'
+    expect(said({ play: 'elsewhere', reason: 'picture', codec: null })).toBe(format)
+    expect(said({ play: 'elsewhere', reason: 'sound', codec: null })).toBe(format)
   })
 })
 

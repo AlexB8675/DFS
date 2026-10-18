@@ -305,7 +305,7 @@ function SharedFile({ token, share, file }: { token: string; share: OpenShare; f
           view={view}
           details={
             video && detailsOpen ? (
-              <FileDetails file={file} media={<MediaDetails place={place} />} />
+              <FileDetails file={file} media={<MediaDetails place={place} name={file.name} />} />
             ) : null
           }
           onCloseDetails={() => {

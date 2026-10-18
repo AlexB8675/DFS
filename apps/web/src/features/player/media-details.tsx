@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import type { FilePlace } from '@/lib/file-place'
 import { connectionTestPath, mediaQuery } from './api'
+import { bufferedPlayAvailable, pagePlay } from './buffered/choice'
 import { ConnectionTest } from './connection-test'
 import { decodingQuery, type Decoding } from './diagnostics'
 import {
@@ -12,14 +13,16 @@ import {
   describeVideo,
   languageName,
   playability,
+  playsHereText,
 } from './codecs'
+import { currentDevice } from './external-players'
 import { formatPlayTime } from './time'
 
-// A video's Details (DESIGN.md §10.4): its formats from the media info, and
-// how it plays in this browser, or why it can't.
+// A video's Details (DESIGN.md §10.4, D45): its formats from the media info, and
+// where it plays in this browser (`pagePlay`), or why it can't.
 
-/** Rows for the viewer's Details, in its grid: of a drive's file or a link's. */
-export function MediaDetails({ place }: { place: FilePlace }) {
+/** Rows for the viewer's Details, in its grid: of a drive's file or a link's, named `name`. */
+export function MediaDetails({ place, name }: { place: FilePlace; name: string }) {
   const media = useQuery(mediaQuery(place))
   const decoding = useQuery(
     decodingQuery(place.path, media.data?.versionId ?? null, media.data?.info ?? null),
@@ -32,6 +35,29 @@ export function MediaDetails({ place }: { place: FilePlace }) {
   const { video, audio } = playability(info, browserCanPlayType)
   const sounds = info.streams.filter((stream) => stream.type === 'audio')
   const subtitles = info.streams.filter((stream) => stream.type === 'subtitle')
+  // What a direct play would do: Safari's own player's answer, and a music file's.
+  const directly =
+    video?.decodes === false
+      ? `No: this browser can’t play ${codecLabel(video.stream.codec)} video`
+      : audio?.decodes === false
+        ? `Without sound: this browser can’t play ${codecLabel(audio.stream.codec)}`
+        : video?.decodes === true || (!video && audio?.decodes === true)
+          ? 'Directly'
+          : 'If this browser can open it'
+  // A video plays where `pagePlay` says, as the player decides; music plays directly.
+  const playsHere =
+    info.kind === 'video'
+      ? playsHereText(
+          pagePlay({
+            name,
+            info,
+            device: currentDevice(),
+            canBuffer: bufferedPlayAvailable(),
+            supports: (mime) => MediaSource.isTypeSupported(mime),
+          }),
+          directly,
+        )
+      : directly
   return (
     <>
       {info.durationMs !== null && (
@@ -62,15 +88,7 @@ export function MediaDetails({ place }: { place: FilePlace }) {
       <Row label="Connection">
         <ConnectionTest path={connectionTestPath(place)} />
       </Row>
-      <Row label="Plays here">
-        {video?.decodes === false
-          ? `No: this browser can’t play ${codecLabel(video.stream.codec)} video`
-          : audio?.decodes === false
-            ? `Without sound: this browser can’t play ${codecLabel(audio.stream.codec)}`
-            : video?.decodes === true || (!video && audio?.decodes === true)
-              ? 'Directly'
-              : 'If this browser can open it'}
-      </Row>
+      <Row label="Plays here">{playsHere}</Row>
     </>
   )
 }
