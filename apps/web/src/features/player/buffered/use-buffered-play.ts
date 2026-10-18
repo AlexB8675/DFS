@@ -13,7 +13,7 @@ interface PlayStats {
  * Runs `playBuffered` on `video` while `enabled` (§10.4). It plays once the
  * source has its metadata if `autoplay`, since setting a source cancels a
  * pending `play()`. It calls `onFailed` when the play fails before any frame
- * showed, so the player can fall back to `<video src>`. A new `video`, `url` or
+ * showed, so the player can offer another player instead. A new `video`, `url` or
  * `startAt` ends the play and starts another; `autoplay` and `onFailed` do not.
  * `stats` is the play's latest numbers, or null before the first.
  */

@@ -40,7 +40,7 @@ import { isEditable } from '@/lib/editable'
 import type { FilePlace } from '@/lib/file-place'
 import { cn } from '@/lib/utils'
 import { contentUrl, mediaQuery, playbackQuery } from './api'
-import { bufferedPlayAvailable, mayPlayBuffered, pagePlay } from './buffered/choice'
+import { bufferedPlayAvailable, mayPlayBuffered, pagePlay, type PagePlay } from './buffered/choice'
 import { useBufferedPlay } from './buffered/use-buffered-play'
 import { browserCanPlayType, codecLabel, playability, playedStreams, unplayableOf } from './codecs'
 import { audioTracksOf, chooseAudioTrack } from './audio-tracks'
@@ -67,16 +67,18 @@ import { useMediaState } from './use-media-state'
 import { RESUME_FROM_MS, RESUME_NOTE_MS, RESUME_OFFER_MS } from './resume-rules'
 import { useResume } from './use-resume'
 
-// The video player (DESIGN.md §10.4): direct play of the version the API
-// names, from the start, offering to resume where the viewer stopped, with
-// controls of its own over the picture. The media info, when it comes, says
-// whether this browser decodes the picture and the sound, and brings the
-// chapters and the subtitles inside the file. It also says how an MP4 or MOV
-// plays: with at most one sound track, through the app's own buffer (./buffered),
-// which the element is given as a Media Source, so it waits for the info; the
-// rest, and one whose buffer fails before its first frame, play by the element
-// itself from the file's address, at once. The same for a drive's file and a
-// link's: its place says where to ask.
+// The video player (DESIGN.md §10.4, D45): the version the API names, from
+// the start, offering to resume where the viewer stopped, with controls of
+// its own over the picture. The media info, when it comes, says whether this
+// browser decodes the picture and the sound, and brings the chapters and the
+// subtitles inside the file. It also says how the video plays (`pagePlay`):
+// in the page only through the app's own buffer (./buffered), which the
+// element is given as a Media Source, so an MP4 or MOV waits for the info;
+// on an iPhone or iPad by Safari's own player, the element given the file's
+// address, at once; and otherwise not in the page at all: another player is
+// offered, with Download, and no element is made. A buffer that fails before
+// its first frame ends the same way. The same for a drive's file and a link's:
+// its place says where to ask.
 
 interface VideoViewProps {
   name: string
@@ -94,8 +96,18 @@ interface VideoViewProps {
 type Problem =
   /** The browser can't decode the picture (from the media info). */
   | { kind: 'codec'; codec: string }
-  /** The browser couldn't open the file, or decode it. */
+  /** The browser couldn't open the file (the buffered play, before its first frame, too), or decode it. */
   | { kind: 'unsupported' | 'decode'; detail: string }
+  /**
+   * The page doesn't play it (`pagePlay`, §10.4, D45): the file's kind, its picture or its
+   * first sound track (the `codec`), or this browser. Derived from the decision, not stored,
+   * and with no element, so nothing is played or reported.
+   */
+  | {
+      kind: 'elsewhere'
+      reason: 'format' | 'picture' | 'sound' | 'browser'
+      codec: string | null
+    }
   /** A read of the file failed while it played. */
   | { kind: 'network' }
   /** The file has another version since it started. */
@@ -170,12 +182,8 @@ export default function VideoView({
   const [fading, setFading] = useState<ReadonlySet<string>>(new Set())
   /** Asked to play, and not playing yet nor refused: a spinner, not a play button. */
   const [starting, setStarting] = useState(true)
-  /** The version whose own buffer failed before its first frame, and why: the element plays it. */
-  const [bufferFailed, setBufferFailed] = useState<{ versionId: string; message: string } | null>(
-    null,
-  )
-  /** How the start with this key plays, once decided: through the own buffer, or by the element. */
-  const [mode, setMode] = useState<{ key: string; buffered: boolean } | null>(null)
+  /** How the start with this key plays, once decided (§10.4): in the page, natively, or elsewhere. */
+  const [mode, setMode] = useState<{ key: string; play: PagePlay } | null>(null)
 
   const rootRef = useRef<HTMLDivElement | null>(null)
   const [root, setRoot] = useState<HTMLDivElement | null>(null)
@@ -193,7 +201,7 @@ export default function VideoView({
       const { volume, muted } = usePlayerPreferences.getState()
       element.volume = volume
       element.muted = muted
-      // It plays once it has a source: see `direct`, and `onCanPlay` for the own buffer.
+      // It plays once it has a source: see `native`, and `onCanPlay` for the own buffer.
       setStarting(true)
     }
   }, [])
@@ -213,32 +221,36 @@ export default function VideoView({
   // What the media info says of this browser, once it comes, for the version playing.
   const info = source && media.data?.versionId === source.versionId ? media.data.info : null
 
-  // How a start plays (§10.4) is decided once, and kept while its element lives: a refetch of
-  // the info must not change a video that plays. A name that can't be an MP4 or MOV plays by
-  // the element at once; one that can waits for the media info to come or fail, with no source
-  // until then. A new start (a retry, a new file, a fallback) decides again.
+  // How a start plays (`pagePlay`, §10.4, D45) is decided once, and kept while its element
+  // lives: a refetch of the info must not change a video that plays. An iPhone or iPad, and a
+  // name that can't be an MP4 or MOV, decide at once; one that can waits for the media info to
+  // come or fail (then it is `null`), with no element until then. A new start (a retry, a new
+  // file) decides again.
+  const device = currentDevice()
   const sourceKey = source ? `${source.versionId}:${String(source.attempt)}` : ''
   const mayBuffer = mayPlayBuffered(name)
-  if (source && mode?.key !== sourceKey && (!mayBuffer || info !== null || !media.isFetching)) {
+  if (
+    source &&
+    mode?.key !== sourceKey &&
+    (device === 'ios' || !mayBuffer || info !== null || !media.isFetching)
+  ) {
     setMode({
       key: sourceKey,
-      buffered:
-        mayBuffer &&
-        info !== null &&
-        pagePlay({
-          name,
-          info,
-          device: currentDevice(),
-          canBuffer: bufferedPlayAvailable(),
-          supports: (mime) => MediaSource.isTypeSupported(mime),
-        }).play === 'buffered' &&
-        bufferFailed?.versionId !== source.versionId,
+      play: pagePlay({
+        name,
+        info,
+        device,
+        canBuffer: bufferedPlayAvailable(),
+        supports: (mime) => MediaSource.isTypeSupported(mime),
+      }),
     })
   }
   const decided = mode?.key === sourceKey ? mode : null
-  const buffered = decided?.buffered === true
-  /** The element plays by its own source: the file's address. */
-  const direct = decided !== null && !decided.buffered
+  const how = decided?.play ?? null
+  /** The page plays it through the own buffer. */
+  const buffered = how?.play === 'buffered'
+  /** An iPhone or iPad plays it, in Safari's own player, by the file's address. */
+  const native = how?.play === 'native'
   const { stats: bufferedStats } = useBufferedPlay({
     video,
     url: source ? contentUrl(place, source.versionId) : '',
@@ -246,17 +258,15 @@ export default function VideoView({
     enabled: buffered && problem === null,
     startAt: source?.startAt ?? 0,
     autoplay: active,
+    // Before its first frame: another player is offered, not another way in the page.
     onFailed: (message) => {
-      if (!source) return
-      // Before its first frame: the element plays the file by its address instead, anew.
-      setBufferFailed({ versionId: source.versionId, message })
-      setSource((current) => current && { ...current, attempt: current.attempt + 1 })
+      setProblem({ kind: 'unsupported', detail: message })
     },
   })
 
   // Asked to play, without a click first (an address opened or reloaded) the browser may refuse.
   useEffect(() => {
-    if (!video || !direct) return
+    if (!video || !native) return
     let current = true
     video
       .play()
@@ -267,7 +277,7 @@ export default function VideoView({
     return () => {
       current = false
     }
-  }, [video, direct])
+  }, [video, native])
 
   // After its first frame, a failed own-buffer play leaves the element as it is, with no error of
   // its own: a read that broke off, the file replaced. It is a failed play all the same.
@@ -281,33 +291,33 @@ export default function VideoView({
 
   const verdict = info ? playability(info, browserCanPlayType) : null
   const picture = verdict?.video
+  // The element's own check of the picture, for Safari's player alone: on the buffered path
+  // `pagePlay` and the engine check the codecs, and elsewhere there is no element.
   const pictureFails =
-    picture && (picture.decodes === false || (blank && picture.decodes !== true))
+    native && picture && (picture.decodes === false || (blank && picture.decodes !== true))
       ? codecLabel(picture.stream.codec)
       : null
   // What it plays without: its sound, picture subtitles, other sound tracks, which VLC plays.
   const unplayable =
     info && verdict && video ? unplayableOf(info, verdict, audioTracksOf(video) !== null) : null
+  // The page doesn't play it: derived from the decision, like `pictureFails`, and not stored.
+  const elsewhereProblem: Problem | null =
+    how?.play === 'elsewhere' ? { kind: 'elsewhere', reason: how.reason, codec: how.codec } : null
   const shown: Problem | null =
-    problem ?? (pictureFails ? { kind: 'codec', codec: pictureFails } : null)
+    problem ?? elsewhereProblem ?? (pictureFails ? { kind: 'codec', codec: pictureFails } : null)
   const stopped = shown !== null
   const visible = awake || state.paused || menuOpen
 
   // How it played, for the play's report (§10.4): read when the report goes, so kept in a ref.
-  const fellBack =
-    source && bufferFailed?.versionId === source.versionId ? bufferFailed.message : null
-  const played = useRef({ buffered, stats: bufferedStats, fellBack })
+  const played = useRef({ player: how?.play ?? null, stats: bufferedStats })
   useEffect(() => {
-    played.current = { buffered, stats: bufferedStats, fellBack }
+    played.current = { player: how?.play ?? null, stats: bufferedStats }
   })
   const howItPlayed = useCallback(() => {
-    const { buffered: own, stats, fellBack: why } = played.current
-    // Direct because its own buffer failed: the report says so, and why.
-    if (!own) {
-      return why === null
-        ? '{"player":"direct"}'
-        : JSON.stringify({ player: 'direct', fellBack: why.slice(0, 300) })
-    }
+    const { player, stats } = played.current
+    if (player === 'native') return '{"player":"native"}'
+    // Elsewhere nothing plays, and no element follows it: nothing to say.
+    if (player !== 'buffered') return undefined
     return JSON.stringify({
       player: 'buffered',
       phase: stats?.phase,
@@ -651,7 +661,8 @@ export default function VideoView({
     const fresh = await queryClient
       .query({ ...playbackQuery(place), staleTime: 0 })
       .catch((reason: unknown) => (reason instanceof ApiError ? reason : null))
-    // Another element plays by now: an own-buffer play that failed before its first frame.
+    // The element is gone by now: an own-buffer play that failed before its first frame has its
+    // panel already.
     if (videoRef.current !== element) return
     // Gone, or its link ended: /playback's answer says so, in place of the player.
     if (fresh instanceof ApiError && fresh.status < 500) return
@@ -788,13 +799,16 @@ export default function VideoView({
           }}
         />
       ) : (
-        source && (
+        // No element until the start is decided: one made for a video that then plays elsewhere
+        // would be followed, and reported, for nothing.
+        source &&
+        decided !== null && (
           <>
             <video
               key={sourceKey}
               ref={attachVideo}
-              // The own buffer sets a source of its own; until the start is decided there is none.
-              src={direct ? contentUrl(place, source.versionId, source.startAt) : undefined}
+              // The own buffer sets a source of its own; Safari's player is given the file's address.
+              src={native ? contentUrl(place, source.versionId, source.startAt) : undefined}
               className="size-full object-contain"
               playsInline
               preload="auto"
@@ -845,8 +859,8 @@ export default function VideoView({
       )}
       {!shown && (
         <Center
-          loading={!source || starting || state.waiting || bufferedStats?.holding === true}
-          paused={state.paused && source !== null && !starting}
+          loading={decided === null || starting || state.waiting || bufferedStats?.holding === true}
+          paused={state.paused && decided !== null && !starting}
           ended={state.ended}
           onPlay={togglePlay}
         />
@@ -863,7 +877,7 @@ export default function VideoView({
           {SKIP_TAP_SECONDS} s
         </div>
       )}
-      {resumeAt !== null && offer !== 'gone' && !shown && (
+      {resumeAt !== null && offer !== 'gone' && !shown && decided !== null && (
         <div
           className={cn(
             'absolute bottom-24 left-3 sm:left-4',
@@ -986,6 +1000,9 @@ function problemText(problem: Problem): string {
       return 'a read failed while playing'
     case 'replaced':
       return 'replaced while playing'
+    case 'elsewhere':
+      // Nothing is followed, so nothing is reported with it: this only completes the switch.
+      return `not played in the page: ${problem.reason}`
   }
 }
 
@@ -1001,6 +1018,10 @@ function problemKind(problem: Problem): PlayProblemKind {
       return 'read'
     case 'replaced':
       return 'other'
+    case 'elsewhere':
+      // Never reported (see `problemText`); a codec's, a file's or the browser's, all the same.
+      if (problem.reason === 'picture' || problem.reason === 'sound') return 'codec'
+      return problem.reason === 'format' ? 'file' : 'other'
   }
 }
 
@@ -1064,6 +1085,14 @@ function ProblemPanel({
           {external}
         </Trouble>
       )
+    case 'elsewhere': {
+      const { title, description } = elsewhereText(problem)
+      return (
+        <Trouble title={title} description={description} onDownload={onDownload}>
+          {external}
+        </Trouble>
+      )
+    }
     case 'unsupported':
       return (
         <Trouble
@@ -1114,6 +1143,43 @@ function ProblemPanel({
           </Button>
         </Trouble>
       )
+  }
+}
+
+/** What the panel says of a video the page doesn't play (§10.4, D45), and why. */
+function elsewhereText({ reason, codec }: Extract<Problem, { kind: 'elsewhere' }>): {
+  title: string
+  description: string
+} {
+  const format = {
+    title: 'This video can’t play here',
+    description:
+      'This browser can’t play this kind of file in the page. Open it in another player, or download it.',
+  }
+  switch (reason) {
+    case 'format':
+      return format
+    case 'picture':
+      // `pagePlay` always names the codec of a picture it refuses; with none, the 'format' wording.
+      return codec === null
+        ? format
+        : {
+            title: format.title,
+            description: `This browser can’t play ${codecLabel(codec)} video. Open it in another player, or download it.`,
+          }
+    case 'sound':
+      // The same for the sound.
+      return codec === null
+        ? format
+        : {
+            title: 'This video’s sound can’t play here',
+            description: `This browser can’t play its ${codecLabel(codec)} sound. Open it in another player, which plays all of it, or download it.`,
+          }
+    case 'browser':
+      return {
+        title: format.title,
+        description: 'This browser can’t stream videos. Open it in another player, or download it.',
+      }
   }
 }
 
