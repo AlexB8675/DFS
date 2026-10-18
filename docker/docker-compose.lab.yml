@@ -1,0 +1,42 @@
+# The lab (docs/DEPLOY.md, "The lab"): a second DFS beside production on the
+# same VPS, for trials, laid over docker-compose.yml by docker/deploy-lab.sh as
+# the project `dfs-lab`. Everything is its own: containers, images, volumes,
+# networks, database, master key and Discord category (DFS Lab, in .env). It
+# shares only the bot's token, which one bot can use for several categories
+# (D25), and production's certificate, which deploy-lab.sh copies out of
+# production's Caddy each time. It answers on port 8443, as production holds
+# 80 and 443.
+
+services:
+  migrate:
+    image: dfs-lab-server
+  bot:
+    image: dfs-lab-server
+  api:
+    image: dfs-lab-server
+    environment:
+      TRUSTED_PROXY_CIDRS: 10.74.0.10/32
+  media:
+    image: dfs-lab-media
+  caddy:
+    image: dfs-lab-caddy
+    ports: !override
+      - '8443:8443'
+    volumes:
+      # The Caddyfile with production's certificate named (deploy-lab.sh
+      # makes it), and the certificate. Labelled for this container (SELinux).
+      - ./Caddyfile.lab:/etc/caddy/Caddyfile:ro,Z
+      - /etc/dfs-lab/tls:/tls:ro,Z
+    networks:
+      internal:
+        ipv4_address: 10.74.0.10
+
+networks:
+  internal:
+    ipam:
+      config: !override
+        - subnet: 10.74.0.0/24
+
+secrets:
+  dfs_discord_bot_token:
+    file: /etc/dfs/secrets/discord_bot_token

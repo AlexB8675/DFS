@@ -256,3 +256,43 @@ retired bot and server: set them to the ones being retired next time.
    the old application's token, are yours to delete and reset in Discord: a
    bot can't delete a server, and only that, or the script's wipe of its
    categories, makes the old files unreadable for good.
+
+## The lab
+
+A second DFS beside production on the same VPS, for trying a branch on real
+devices without deploying it (the user's decision, 2026-10-18). It is the
+Compose project `dfs-lab` in `/opt/dfs-lab`, laid over the production compose
+file by `docker/docker-compose.lab.yml`, at `https://<DFS_DOMAIN>:8443`, since
+production holds 80 and 443. Its containers, images (`dfs-lab-*`), volumes,
+networks (`10.74.0.0/24` inside), database, master key and Discord category
+(`DFS Lab`) are its own; it shares the bot's token (one bot, several
+categories, D25) and reads production's certificate, which a port doesn't
+change. Production is never stopped, rebuilt or changed by it.
+
+The address is production's host on another port, so a browser keeps one
+set of cookies for both: signing in to the lab signs that browser out of
+production, and back. Each has its own pages otherwise (an origin includes
+the port), service workers included.
+
+Made once, as root on the VPS: `/etc/dfs-lab/dfs.env` (`DFS_DOMAIN` with
+`:8443`, `DFS_SECRETS=/etc/dfs-lab/secrets`, production's `DISCORD_GUILD_ID`,
+`DISCORD_CATEGORY_NAME="DFS Lab"`, smaller `STAGING_MAX_BYTES` and
+`CACHE_MAX_BYTES`), and `/etc/dfs-lab/secrets` as in §3 but without the bot's
+token, with a master key of its own (the lab's files are expendable, so no
+copy is kept), labelled with `chcon -R -t container_file_t`. Then, from the
+development PC:
+
+```bash
+docker/deploy-lab.sh
+```
+
+It copies production's certificate out of its Caddy's volume each time (it
+renews it), and makes the lab's Caddyfile from production's with that
+certificate named. The first time, in `/opt/dfs-lab/docker`, with `lab` for
+`docker compose -p dfs-lab -f docker-compose.yml -f docker-compose.lab.yml`:
+`lab run --rm bot node apps/api/src/cli.ts setup`, then
+`lab run --rm api node apps/api/src/cli.ts owner --username <name>`.
+
+To remove it: `lab down -v`, `rm -rf /opt/dfs-lab /opt/dfs-lab.prev
+/etc/dfs-lab`, `docker image rm dfs-lab-server dfs-lab-media dfs-lab-caddy`,
+and the `DFS Lab` category and its channels in Discord.
