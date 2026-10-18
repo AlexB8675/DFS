@@ -8,6 +8,7 @@ import {
 import { sql, type SQL } from 'drizzle-orm'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { verifyPassword } from '../auth/passwords.ts'
+import { addressKey } from '../auth/rate-limit.ts'
 import { ApiError } from '../errors.ts'
 import {
   listChildren,
@@ -47,17 +48,39 @@ export interface LiveShare extends Record<string, unknown> {
  * The share behind a token, if it still works: not expired or used up. A code
  * typed in capitals or with lookalikes is read as the code it was made as; a
  * code may be stored under any master key in the key file (D46).
+ *
+ * A short code can be guessed, so an address that asks for 30 links that don't
+ * exist in 10 minutes is refused every link, long ones too (§7.5, D46). Only a
+ * miss counts: a link that works, or one expired or used up, was not a guess.
  */
 export async function liveShare(
   app: FastifyInstance,
+  request: FastifyRequest,
   token: string,
 ): Promise<{ share: LiveShare; root: NodeRow }> {
+  const guesser = addressKey(request.ip)
+  const wait = app.limits.shareGuesses.waitMs(guesser)
+  if (wait > 0) {
+    throw new ApiError(
+      429,
+      'rate_limited',
+      'Too many links were tried from here. Wait a few minutes, then try again.',
+      { 'retry-after': String(Math.ceil(wait / 1000)) },
+    )
+  }
   const hashes = await lookupTokenHashes(app.keys, canonicalShareToken(token))
   const stored = sql.join(
     hashes.map((hash) => sql`${hash}`),
     sql`, `,
   )
-  return liveShareWhere(app, sql`share.token_hash IN (${stored})`)
+  try {
+    return await liveShareWhere(app, sql`share.token_hash IN (${stored})`)
+  } catch (error) {
+    if (error instanceof ApiError && error.code === 'share_not_found') {
+      app.limits.shareGuesses.hit(guesser)
+    }
+    throw error
+  }
 }
 
 /** The share `id`, if it still works: for a stream link made through it (§6.7). */
@@ -107,7 +130,7 @@ export async function openShare(
   request: FastifyRequest,
   token: string,
 ): Promise<{ share: LiveShare; root: NodeRow }> {
-  const opened = await liveShare(app, token)
+  const opened = await liveShare(app, request, token)
   if (!(await isUnlocked(app, request, opened.share))) {
     throw new ApiError(403, 'share_locked', 'Enter the password to open this link.')
   }
@@ -120,7 +143,7 @@ export async function describeShare(
   request: FastifyRequest,
   token: string,
 ): Promise<PublicShare> {
-  const { share, root } = await liveShare(app, token)
+  const { share, root } = await liveShare(app, request, token)
   if (!(await isUnlocked(app, request, share))) return { locked: true }
   return {
     locked: false,
@@ -156,7 +179,7 @@ export async function unlockShare(
       },
     )
   }
-  const { share } = await liveShare(app, token)
+  const { share } = await liveShare(app, request, token)
   if (share.password_hash === null) return
   if (!(await verifyPassword(share.password_hash, password))) {
     app.limits.shareUnlock.hit(key)
