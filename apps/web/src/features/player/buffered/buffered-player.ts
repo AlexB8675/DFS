@@ -33,9 +33,12 @@ import {
 
 export interface BufferedStats {
   phase: 'opening' | 'buffering' | 'ended' | 'failed'
-  /** Codec strings of the tracks mp4box read, which play unless `supported` says no. */
+  /** Codec strings of the first picture and sound tracks mp4box read. */
   codecs: string[]
-  /** Each SourceBuffer MIME type, and whether `MediaSource.isTypeSupported` said yes. */
+  /**
+   * Each SourceBuffer MIME type, and whether `MediaSource.isTypeSupported` said yes. A no for
+   * the picture or the sound stops the play.
+   */
   supported: Record<string, boolean>
   bytesReceived: number
   /** Time spent waiting on the network for the next piece. */
@@ -378,11 +381,11 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
     clearTimeout(timer)
     if (!info) return
 
-    // 6. What the browser accepts. A track it can't play is left out, but the picture is needed.
+    // 6. What the browser accepts. A picture or a sound it can't play stops the play (§10.4): it
+    // doesn't play without the sound, as that would show a video with its sound gone.
     const videoTrack = info.videoTracks.at(0)
-    const tracks = [videoTrack, info.audioTracks.at(0)].filter(
-      (track): track is Track => track !== undefined,
-    )
+    const audioTrack = info.audioTracks.at(0)
+    const tracks = [videoTrack, audioTrack].filter((track): track is Track => track !== undefined)
     for (const track of tracks) {
       stats.supported[mimeOf(track)] = MediaSource.isTypeSupported(mimeOf(track))
     }
@@ -390,6 +393,10 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
     emit()
     if (videoTrack && !stats.supported[mimeOf(videoTrack)]) {
       fail(`This browser can’t play ${videoTrack.codec} through Media Source.`)
+      return
+    }
+    if (audioTrack && !stats.supported[mimeOf(audioTrack)]) {
+      fail(`This browser can’t play this video’s ${audioTrack.codec} sound.`)
       return
     }
     const played = tracks.filter((track) => stats.supported[mimeOf(track)])
@@ -432,7 +439,7 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
     // Every track is segmented, not only the played ones: mp4box frees a fed buffer only once
     // every byte in it was used, and a track nobody segments never has its samples read. Its
     // bytes would stay for good, and over a long video that is the whole file. An unplayed track
-    // (a metadata track, sound the browser rejects) gets no queue, and its segments are dropped.
+    // (a metadata track, a second sound track) gets no queue, and its segments are dropped.
     // Samples, not keyframes, decide where a segment ends (see SEGMENT_SECONDS).
     for (const track of info.tracks) {
       file.setSegmentOptions(track.id, queueOfTrack.get(track.id) ?? null, {
