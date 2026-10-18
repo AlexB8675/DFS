@@ -2,13 +2,14 @@ import { ApiClient, workspace } from '@dfs/contract'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
 import { shareLinkSchema } from '@dfs/shared'
 import type { FastifyInstance } from 'fastify'
-import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest'
 import { buildApp } from '../app.ts'
+import { RateLimiter } from '../auth/rate-limit.ts'
 import { testConfig } from '../testing/config.ts'
 import { seedUser } from '../testing/seed.ts'
 
-// Each app counts its own guesses, so this file has its own: the second test
-// fills the address's window, and no other file's links share it.
+// Each app counts its own guesses, so this file has its own, and every test
+// starts with a fresh limiter: the tests fill the address's window.
 let database: TestDatabase
 let setup: Awaited<ReturnType<typeof testConfig>>
 let app: FastifyInstance
@@ -30,6 +31,10 @@ beforeAll(async () => {
   rootId = (await workspace(owner)).id
 })
 
+beforeEach(() => {
+  app.limits.shareGuesses = new RateLimiter(30, 10 * 60_000)
+})
+
 afterAll(async () => {
   await app.close()
   await database.drop()
@@ -37,7 +42,10 @@ afterAll(async () => {
 })
 
 /** A link to `nodeId` made by the owner, as the token after `/s/` in its address. */
-async function link(nodeId: string, terms: { expiresAt?: string | null } = {}): Promise<string> {
+async function link(
+  nodeId: string,
+  terms: { expiresAt?: string | null; maxDownloads?: number | null } = {},
+): Promise<string> {
   const made = await owner.call('POST', '/shares', shareLinkSchema, {
     json: { nodeId, expiresAt: null, password: null, maxDownloads: null, ...terms },
   })
@@ -48,11 +56,20 @@ describe('the guess limit (§7.5, D46)', () => {
   it('never counts a link that works, or one expired or used up', async () => {
     const working = await link(rootId)
     const expired = await link(rootId, { expiresAt: new Date(Date.now() - 60_000).toISOString() })
+    // One download, read to the end, uses this link up.
+    const usedUp = await link(rootId, { maxDownloads: 1 })
+    const archive = await stranger.fetch('GET', `/s/${usedUp}/archive`)
+    expect(archive.status).toBe(200)
+    await archive.arrayBuffer()
     for (let i = 0; i < 40; i += 1) {
       expect((await stranger.fetch('GET', `/s/${working}`)).status).toBe(200)
       expect(await stranger.error('GET', `/s/${expired}`)).toEqual({
         status: 410,
         code: 'share_expired',
+      })
+      expect(await stranger.error('GET', `/s/${usedUp}`)).toEqual({
+        status: 410,
+        code: 'share_used_up',
       })
     }
   })
@@ -75,5 +92,21 @@ describe('the guess limit (§7.5, D46)', () => {
     expect(
       await stranger.error('POST', `/s/${working}/unlock`, { json: { password: 'x' } }),
     ).toEqual({ status: 429, code: 'rate_limited' })
+  })
+
+  it('answers at most 30 misses from guesses sent at once', async () => {
+    // Each guess is counted only after its lookup, so all 60 pass the first
+    // check; the check made again as each lookup settles keeps the answers to 30.
+    const answers = await Promise.all(
+      Array.from({ length: 60 }, (_, i) => stranger.error('GET', `/s/guess-${String(i)}`)),
+    )
+    for (const answer of answers) {
+      expect([
+        { status: 404, code: 'share_not_found' },
+        { status: 429, code: 'rate_limited' },
+      ]).toContainEqual(answer)
+    }
+    expect(answers.filter((answer) => answer.status === 404).length).toBeLessThanOrEqual(30)
+    expect(answers.filter((answer) => answer.status === 429).length).toBeGreaterThanOrEqual(30)
   })
 })

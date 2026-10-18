@@ -52,6 +52,14 @@ export interface LiveShare extends Record<string, unknown> {
  * A short code can be guessed, so an address that asks for 30 links that don't
  * exist in 10 minutes is refused every link, long ones too (§7.5, D46). Only a
  * miss counts: a link that works, or one expired or used up, was not a guess.
+ *
+ * The limit is checked twice. The first check spares the database a lookup for
+ * an address already refused. But a miss is counted only after its lookup,
+ * and guesses sent at once all pass the first check before any is counted, so
+ * the limit is checked again as the lookup settles, in the same step that
+ * counts the miss. JavaScript runs that step without interruption, so at most
+ * 30 misses are answered per window however many were in flight. Over the limit
+ * the answer is 429 whatever the lookup found, so a guesser learns nothing.
  */
 export async function liveShare(
   app: FastifyInstance,
@@ -59,28 +67,38 @@ export async function liveShare(
   token: string,
 ): Promise<{ share: LiveShare; root: NodeRow }> {
   const guesser = addressKey(request.ip)
-  const wait = app.limits.shareGuesses.waitMs(guesser)
-  if (wait > 0) {
-    throw new ApiError(
-      429,
-      'rate_limited',
-      'Too many links were tried from here. Wait a few minutes, then try again.',
-      { 'retry-after': String(Math.ceil(wait / 1000)) },
-    )
-  }
+  const early = app.limits.shareGuesses.waitMs(guesser)
+  if (early > 0) throw tooManyGuesses(early)
   const hashes = await lookupTokenHashes(app.keys, canonicalShareToken(token))
   const stored = sql.join(
     hashes.map((hash) => sql`${hash}`),
     sql`, `,
   )
+  let outcome: { found: { share: LiveShare; root: NodeRow } } | { error: unknown }
   try {
-    return await liveShareWhere(app, sql`share.token_hash IN (${stored})`)
+    outcome = { found: await liveShareWhere(app, sql`share.token_hash IN (${stored})`) }
   } catch (error) {
-    if (error instanceof ApiError && error.code === 'share_not_found') {
+    outcome = { error }
+  }
+  // No await from this check to the count, so no other guess slips in between.
+  const wait = app.limits.shareGuesses.waitMs(guesser)
+  if (wait > 0) throw tooManyGuesses(wait)
+  if ('error' in outcome) {
+    if (outcome.error instanceof ApiError && outcome.error.code === 'share_not_found') {
       app.limits.shareGuesses.hit(guesser)
     }
-    throw error
+    throw outcome.error
   }
+  return outcome.found
+}
+
+function tooManyGuesses(waitMs: number): ApiError {
+  return new ApiError(
+    429,
+    'rate_limited',
+    'Too many links were tried from here. Wait a few minutes, then try again.',
+    { 'retry-after': String(Math.ceil(waitMs / 1000)) },
+  )
 }
 
 /** The share `id`, if it still works: for a stream link made through it (§6.7). */
