@@ -1,4 +1,10 @@
-import type { DriveNode, PublicShare, SharedFolderPage, SharedNode } from '@dfs/shared'
+import {
+  canonicalShareToken,
+  type DriveNode,
+  type PublicShare,
+  type SharedFolderPage,
+  type SharedNode,
+} from '@dfs/shared'
 import { sql, type SQL } from 'drizzle-orm'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { verifyPassword } from '../auth/passwords.ts'
@@ -13,7 +19,7 @@ import {
   VISIBLE,
   type NodeRow,
 } from '../nodes/read.ts'
-import { tokenHash } from './shares.ts'
+import { lookupTokenHashes } from './tokens.ts'
 
 // Public share access (DESIGN.md §7.5, D18): no session. A password-protected
 // link reveals nothing, not even the item's name, until it is unlocked; the
@@ -37,12 +43,21 @@ export interface LiveShare extends Record<string, unknown> {
   shared_by: string
 }
 
-/** The share behind a token, if it still works: not expired or used up. */
-export function liveShare(
+/**
+ * The share behind a token, if it still works: not expired or used up. A code
+ * typed in capitals or with lookalikes is read as the code it was made as; a
+ * code may be stored under any master key in the key file (D46).
+ */
+export async function liveShare(
   app: FastifyInstance,
   token: string,
 ): Promise<{ share: LiveShare; root: NodeRow }> {
-  return liveShareWhere(app, sql`share.token_hash = ${tokenHash(token)}`)
+  const hashes = await lookupTokenHashes(app.keys, canonicalShareToken(token))
+  const stored = sql.join(
+    hashes.map((hash) => sql`${hash}`),
+    sql`, `,
+  )
+  return liveShareWhere(app, sql`share.token_hash IN (${stored})`)
 }
 
 /** The share `id`, if it still works: for a stream link made through it (§6.7). */
@@ -125,7 +140,11 @@ export async function unlockShare(
   token: string,
   password: string,
 ): Promise<void> {
-  const key = `${request.ip}:${token}`
+  // The share page always asks with the code as made, and a cookie's path is
+  // case-sensitive, so a code typed with lookalikes still sets one it can use
+  // (D46). The same code, typed any way, shares a limiter key.
+  const canonical = canonicalShareToken(token)
+  const key = `${request.ip}:${canonical}`
   const wait = app.limits.shareUnlock.waitMs(key)
   if (wait > 0) {
     throw new ApiError(
@@ -147,7 +166,7 @@ export async function unlockShare(
   const claim = unlockClaim(share, expiresAt)
   const mac = Buffer.from(await app.keys.sign(claim)).toString('base64url')
   reply.setCookie(UNLOCK_COOKIE, `${String(expiresAt)}.${mac}`, {
-    path: `/api/s/${token}`,
+    path: `/api/s/${canonical}`,
     httpOnly: true,
     secure: app.config.nodeEnv === 'production',
     sameSite: 'strict',

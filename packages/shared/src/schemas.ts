@@ -389,6 +389,8 @@ export const createShareSchema = z.object({
   expiresAt: timestamp.nullable(),
   password: z.string().min(4).nullable(),
   maxDownloads: z.number().int().positive().nullable(),
+  /** A six-character code instead of a long token, to type or read out (§7.5, D46). */
+  short: z.boolean().optional(),
 })
 export type CreateShareInput = z.infer<typeof createShareSchema>
 

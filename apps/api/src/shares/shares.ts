@@ -1,12 +1,12 @@
-import { createHash, randomBytes } from 'node:crypto'
 import { openObject, sealObject, shareTokenContext } from '@dfs/crypto'
-import type {
-  CreateShareInput,
-  Page,
-  ShareCount,
-  ShareCountInput,
-  ShareLink,
-  UpdateShareInput,
+import {
+  newShortCode,
+  type CreateShareInput,
+  type Page,
+  type ShareCount,
+  type ShareCountInput,
+  type ShareLink,
+  type UpdateShareInput,
 } from '@dfs/shared'
 import {
   appendJournal,
@@ -24,11 +24,12 @@ import { hashPassword } from '../auth/passwords.ts'
 import type { Auth } from '../auth/sessions.ts'
 import { ApiError } from '../errors.ts'
 import { visibleNode } from '../nodes/read.ts'
+import { newLongToken, storedTokenHash } from './tokens.ts'
 
-// Share links, as their owner manages them (DESIGN.md §7.5): a 128-bit
-// token, found by its SHA-256 and kept sealed, so the owner can copy the link
-// again; an optional argon2id password, expiry and download limit, all
-// editable later.
+// Share links, as their owner manages them (DESIGN.md §7.5, D46): a 128-bit
+// token, or on request a six-character code, found by its hash (tokens.ts) and
+// kept sealed, so the owner can copy the link again; an optional argon2id
+// password, expiry and download limit, all editable later.
 
 interface ShareRow extends Record<string, unknown> {
   id: string
@@ -41,10 +42,6 @@ interface ShareRow extends Record<string, unknown> {
   max_downloads: number | null
   download_count: number
   token_sealed: Buffer | null
-}
-
-export function tokenHash(token: string): Buffer {
-  return createHash('sha256').update(token).digest()
 }
 
 /** `GET /shares`: the user's links, newest first, each to copy again. */
@@ -89,19 +86,23 @@ export async function countShareLinks(
   return { links: rows[0]?.links ?? 0 }
 }
 
-/** `POST /shares`: a new link, its token kept sealed to be shown again. */
+/** How many codes `createShare` draws before it gives up on finding one not taken. */
+const CODE_TRIES = 5
+
+/**
+ * `POST /shares`: a new link, its token kept sealed to be shown again. A short
+ * link's code is drawn by `newCode`, a test seam, again if it is taken (D46).
+ */
 export async function createShare(
   app: FastifyInstance,
   auth: Auth,
   input: CreateShareInput,
+  newCode: () => string = newShortCode,
 ): Promise<ShareLink> {
   const node = await visibleNode(app.db, auth.user.id, input.nodeId)
   const id = uuidv7()
-  const token = randomBytes(16).toString('base64url')
-  const tokenSealed = Buffer.from(
-    await sealObject(app.keys, new TextEncoder().encode(token), shareTokenContext(id)),
-  )
   const passwordHash = input.password === null ? null : await hashPassword(input.password)
+  const short = input.short === true
   const share = await app.db.transaction(async (tx) => {
     // A file link is made for the file as it is now, its current version. Read
     // under the file's lock, so an upload replacing it completes before, or
@@ -112,20 +113,38 @@ export async function createShare(
     if (node.kind === 'file' && versionId === null) {
       throw new ApiError(409, 'not_ready', 'This file hasn’t finished uploading.')
     }
-    const [created] = await tx
-      .insert(shareLinks)
-      .values({
-        id,
-        nodeId: node.id,
-        versionId: node.kind === 'file' ? versionId : null,
-        tokenHash: tokenHash(token),
-        tokenSealed,
-        expiresAt: input.expiresAt ? new Date(input.expiresAt) : null,
-        passwordHash,
-        maxDownloads: input.maxDownloads,
-      })
-      .returning()
-    if (!created) throw new Error('Inserting a share returned nothing.')
+    // A code is one of about 1.45 billion, so another link may hold it: the
+    // unique hash then leaves the insert empty, and another code is drawn. A
+    // long token is 128 random bits, which never meets one.
+    let created: typeof shareLinks.$inferSelect | undefined
+    for (let tries = 0; !created && tries < (short ? CODE_TRIES : 1); tries++) {
+      const token = short ? newCode() : newLongToken()
+      const tokenSealed = Buffer.from(
+        await sealObject(app.keys, new TextEncoder().encode(token), shareTokenContext(id)),
+      )
+      const inserted = await tx
+        .insert(shareLinks)
+        .values({
+          id,
+          nodeId: node.id,
+          versionId: node.kind === 'file' ? versionId : null,
+          tokenHash: await storedTokenHash(app.keys, token),
+          tokenSealed,
+          expiresAt: input.expiresAt ? new Date(input.expiresAt) : null,
+          passwordHash,
+          maxDownloads: input.maxDownloads,
+        })
+        .onConflictDoNothing({ target: shareLinks.tokenHash })
+        .returning()
+      created = inserted[0]
+    }
+    if (!created) {
+      throw new Error(
+        short
+          ? `Every one of ${String(CODE_TRIES)} short codes drawn was taken.`
+          : 'Inserting a share returned nothing.',
+      )
+    }
     const audited = await audit(tx, {
       actorId: auth.user.id,
       action: 'share.created',
