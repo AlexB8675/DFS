@@ -313,6 +313,10 @@ describe('master keys and wrapped DEKs', () => {
     )
   })
 
+  it('lists the key IDs in the file, the current one first', () => {
+    expect(keys.keyIds()).toEqual([keys.currentId])
+  })
+
   it('never overwrites an existing key file', async () => {
     await expect(MasterKeys.createFile(path.join(dir, 'master-key.json'))).rejects.toThrow()
   })

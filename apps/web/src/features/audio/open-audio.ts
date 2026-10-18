@@ -3,6 +3,7 @@ import { queryOptions } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { queryClient } from '@/app/query-client'
 import { apiGet, errorMessage } from '@/lib/api/client'
+import { retryServerErrors } from '@/features/share-view/api'
 import { addTracks, playOpened, playTracks, unlockAudio, type NewTrack } from './engine'
 
 // Opening and queueing audio (DESIGN.md §10.4), from the drive, search and
@@ -50,6 +51,9 @@ export function audioQuery(folderId: string, token: string | null, deep: boolean
       return { ...queue, items: queue.items.map((item): NewTrack => ({ ...item, token })) }
     },
     staleTime: 30_000,
+    // Under a link a 4xx is not retried: each ask under a gone link counts
+    // against the viewer's address (§7.5, D46). The drive keeps the default.
+    ...(token !== null && { retry: retryServerErrors }),
     meta: { skipAuthRedirect: token !== null },
   })
 }

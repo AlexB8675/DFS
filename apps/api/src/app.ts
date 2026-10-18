@@ -55,6 +55,7 @@ declare module 'fastify' {
       linkPlayReports: RateLimiter
       streamLinks: RateLimiter
       deviceTokens: RateLimiter
+      shareGuesses: RateLimiter
     }
     /** Frames received but not yet stored (§6.1), and whether there is room for more. */
     staging: Staging
@@ -189,6 +190,8 @@ export async function buildApp({
     streamLinks: new RateLimiter(30, 10 * 60_000),
     // Device tokens that fail, and pairing codes that don't trade, per address (§7.6).
     deviceTokens: new RateLimiter(30, 10 * 60_000),
+    // Links that don't exist, asked for by token, per address, so a short code can't be guessed (§7.5, D46).
+    shareGuesses: new RateLimiter(30, 10 * 60_000),
   })
   app.decorate('staging', new Staging(config.stagingDir))
   app.decorate('stagingRoom', new StagingRoom(db, config.stagingMaxBytes))

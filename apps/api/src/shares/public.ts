@@ -1,7 +1,14 @@
-import type { DriveNode, PublicShare, SharedFolderPage, SharedNode } from '@dfs/shared'
+import {
+  canonicalShareToken,
+  type DriveNode,
+  type PublicShare,
+  type SharedFolderPage,
+  type SharedNode,
+} from '@dfs/shared'
 import { sql, type SQL } from 'drizzle-orm'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { verifyPassword } from '../auth/passwords.ts'
+import { addressKey } from '../auth/rate-limit.ts'
 import { ApiError } from '../errors.ts'
 import {
   listChildren,
@@ -13,7 +20,7 @@ import {
   VISIBLE,
   type NodeRow,
 } from '../nodes/read.ts'
-import { tokenHash } from './shares.ts'
+import { lookupTokenHashes } from './tokens.ts'
 
 // Public share access (DESIGN.md §7.5, D18): no session. A password-protected
 // link reveals nothing, not even the item's name, until it is unlocked; the
@@ -37,12 +44,61 @@ export interface LiveShare extends Record<string, unknown> {
   shared_by: string
 }
 
-/** The share behind a token, if it still works: not expired or used up. */
-export function liveShare(
+/**
+ * The share behind a token, if it still works: not expired or used up. A code
+ * typed in capitals or with lookalikes is read as the code it was made as; a
+ * code may be stored under any master key in the key file (D46).
+ *
+ * A short code can be guessed, so an address that asks for 30 links that don't
+ * exist in 10 minutes is refused every link, long ones too (§7.5, D46). Only a
+ * miss counts: a link that works, or one expired or used up, was not a guess.
+ *
+ * The limit is checked twice. The first check spares the database a lookup for
+ * an address already refused. But a miss is counted only after its lookup,
+ * and guesses sent at once all pass the first check before any is counted, so
+ * the limit is checked again as the lookup settles, in the same step that
+ * counts the miss. JavaScript runs that step without interruption, so at most
+ * 30 misses are answered per window however many were in flight. Over the limit
+ * the answer is 429 whatever the lookup found, so a guesser learns nothing.
+ */
+export async function liveShare(
   app: FastifyInstance,
+  request: FastifyRequest,
   token: string,
 ): Promise<{ share: LiveShare; root: NodeRow }> {
-  return liveShareWhere(app, sql`share.token_hash = ${tokenHash(token)}`)
+  const guesser = addressKey(request.ip)
+  const early = app.limits.shareGuesses.waitMs(guesser)
+  if (early > 0) throw tooManyGuesses(early)
+  const hashes = await lookupTokenHashes(app.keys, canonicalShareToken(token))
+  const stored = sql.join(
+    hashes.map((hash) => sql`${hash}`),
+    sql`, `,
+  )
+  let outcome: { found: { share: LiveShare; root: NodeRow } } | { error: unknown }
+  try {
+    outcome = { found: await liveShareWhere(app, sql`share.token_hash IN (${stored})`) }
+  } catch (error) {
+    outcome = { error }
+  }
+  // No await from this check to the count, so no other guess slips in between.
+  const wait = app.limits.shareGuesses.waitMs(guesser)
+  if (wait > 0) throw tooManyGuesses(wait)
+  if ('error' in outcome) {
+    if (outcome.error instanceof ApiError && outcome.error.code === 'share_not_found') {
+      app.limits.shareGuesses.hit(guesser)
+    }
+    throw outcome.error
+  }
+  return outcome.found
+}
+
+function tooManyGuesses(waitMs: number): ApiError {
+  return new ApiError(
+    429,
+    'rate_limited',
+    'Too many links were tried from here. Wait a few minutes, then try again.',
+    { 'retry-after': String(Math.ceil(waitMs / 1000)) },
+  )
 }
 
 /** The share `id`, if it still works: for a stream link made through it (§6.7). */
@@ -92,7 +148,7 @@ export async function openShare(
   request: FastifyRequest,
   token: string,
 ): Promise<{ share: LiveShare; root: NodeRow }> {
-  const opened = await liveShare(app, token)
+  const opened = await liveShare(app, request, token)
   if (!(await isUnlocked(app, request, opened.share))) {
     throw new ApiError(403, 'share_locked', 'Enter the password to open this link.')
   }
@@ -105,7 +161,7 @@ export async function describeShare(
   request: FastifyRequest,
   token: string,
 ): Promise<PublicShare> {
-  const { share, root } = await liveShare(app, token)
+  const { share, root } = await liveShare(app, request, token)
   if (!(await isUnlocked(app, request, share))) return { locked: true }
   return {
     locked: false,
@@ -125,21 +181,24 @@ export async function unlockShare(
   token: string,
   password: string,
 ): Promise<void> {
-  const key = `${request.ip}:${token}`
-  const wait = app.limits.shareUnlock.waitMs(key)
-  if (wait > 0) {
-    throw new ApiError(
-      429,
-      'rate_limited',
-      'Too many wrong passwords. Wait a little, then try again.',
-      {
-        'retry-after': String(Math.ceil(wait / 1000)),
-      },
-    )
-  }
-  const { share } = await liveShare(app, token)
+  // The share page always asks with the code as made, and a cookie's path is
+  // case-sensitive, so a code typed with lookalikes still sets one it can use
+  // (D46). The same code, typed any way, shares a limiter key, and so does an
+  // IPv6 /64 as one address, as in the guess limit.
+  const canonical = canonicalShareToken(token)
+  const key = `${addressKey(request.ip)}:${canonical}`
+  const early = app.limits.shareUnlock.waitMs(key)
+  if (early > 0) throw tooManyPasswords(early)
+  const { share } = await liveShare(app, request, token)
   if (share.password_hash === null) return
-  if (!(await verifyPassword(share.password_hash, password))) {
+  const right = await verifyPassword(share.password_hash, password)
+  // A wrong password is counted only after it is tried, and attempts sent at
+  // once all pass the first check, so check again in the step that counts it:
+  // at most 10 wrong passwords are answered per window, and over the limit the
+  // answer is 429 whatever the password was.
+  const wait = app.limits.shareUnlock.waitMs(key)
+  if (wait > 0) throw tooManyPasswords(wait)
+  if (!right) {
     app.limits.shareUnlock.hit(key)
     throw new ApiError(403, 'wrong_password', 'That password isn’t right.')
   }
@@ -147,12 +206,21 @@ export async function unlockShare(
   const claim = unlockClaim(share, expiresAt)
   const mac = Buffer.from(await app.keys.sign(claim)).toString('base64url')
   reply.setCookie(UNLOCK_COOKIE, `${String(expiresAt)}.${mac}`, {
-    path: `/api/s/${token}`,
+    path: `/api/s/${canonical}`,
     httpOnly: true,
     secure: app.config.nodeEnv === 'production',
     sameSite: 'strict',
     expires: new Date(expiresAt),
   })
+}
+
+function tooManyPasswords(waitMs: number): ApiError {
+  return new ApiError(
+    429,
+    'rate_limited',
+    'Too many wrong passwords. Wait a little, then try again.',
+    { 'retry-after': String(Math.ceil(waitMs / 1000)) },
+  )
 }
 
 /** `GET /s/:token/children`: a folder inside the share, with its path from the shared folder. */

@@ -1,4 +1,5 @@
 import {
+  isShortCode,
   publicShareSchema,
   sessionSchema,
   shareCountSchema,
@@ -162,6 +163,22 @@ export function shareTests({ describe, it, expect, owner, target }: SuiteContext
         locked: false,
         root: { id: root.id },
       })
+    })
+
+    it('makes a short link on request, which opens as typed in capitals with lookalikes (D46)', async () => {
+      const client = await owner()
+      const root = await workspace(client)
+      const created = await share(client, root.id, { short: true })
+      const { token, client: stranger } = visitor(created.url)
+      expect(isShortCode(token)).toBe(true)
+      const typed = token.toUpperCase().replaceAll('0', 'O').replaceAll('1', 'I')
+      for (const path of [token, typed]) {
+        expect(await stranger.call('GET', `/s/${path}`, publicShareSchema)).toMatchObject({
+          locked: false,
+          root: { id: root.id },
+        })
+      }
+      expect((await listed(client, created.id))?.url).toBe(created.url)
     })
 
     it('opens a shared folder without signing in, and never reaches outside it', async () => {
