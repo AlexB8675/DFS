@@ -12,6 +12,10 @@ services:
     image: dfs-lab-server
   bot:
     image: dfs-lab-server
+    environment:
+      # Production's bot holds the one gateway connection (D25), which answers
+      # `/dfs setup`; a second would answer it too, for the lab's category.
+      DISCORD_GATEWAY: 'off'
   api:
     image: dfs-lab-server
     environment:
