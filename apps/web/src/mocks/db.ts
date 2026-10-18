@@ -1,4 +1,5 @@
 import {
+  canonicalShareToken,
   decodeSubtitles,
   fileCategory,
   formatBytes,
@@ -9,6 +10,7 @@ import {
   MAX_SUBTITLE_FILE_BYTES,
   mediaKind,
   nameKey,
+  newShortCode,
   playOrder,
   normalizeName,
   splitExtension,
@@ -119,7 +121,8 @@ export interface MockShare {
   nodeId: string
   /**
    * The link's token and password, kept in the clear because this is a mock.
-   * The real API stores only the token's SHA-256 and an argon2id hash (§7.5).
+   * The real API stores only the token's hash and an argon2id hash (§7.5).
+   * A short link's token is its six-character code (D46).
    */
   token: string
   password: string | null
@@ -871,7 +874,8 @@ export class MockDb {
       url: `${location.origin}/api/stream/${shareId.replaceAll('-', '')}`,
     })
     if (place.token !== null) {
-      const share = this.state.shares.find((candidate) => candidate.token === place.token)
+      const token = canonicalShareToken(place.token)
+      const share = this.state.shares.find((candidate) => candidate.token === token)
       return { link: address(share?.id ?? place.token), created: false }
     }
     const plain = this.state.shares.find(
@@ -1598,16 +1602,25 @@ export class MockDb {
     expiresAt: string | null
     password: string | null
     maxDownloads: number | null
+    short?: boolean
   }): ShareLink {
     const node = this.visibleNode(input.nodeId)
     if (node.syncState === 'uploading') {
       throw new MockApiError(409, 'not_ready', 'This file hasn’t finished uploading.')
     }
+    let token: string
+    if (input.short === true) {
+      // A six-character code to type by hand, drawn again while another link has it (§7.5, D46).
+      do token = newShortCode()
+      while (this.state.shares.some((candidate) => candidate.token === token))
+    } else {
+      // 128 random bits, as hex (§7.5).
+      token = crypto.randomUUID().replaceAll('-', '')
+    }
     const share: MockShare = {
       id: crypto.randomUUID(),
       nodeId: input.nodeId,
-      // 128 random bits, as hex (§7.5).
-      token: crypto.randomUUID().replaceAll('-', ''),
+      token,
       password: input.password,
       createdAt: new Date().toISOString(),
       expiresAt: input.expiresAt,
@@ -1653,7 +1666,7 @@ export class MockDb {
   /** `GET /s/:token`: nothing but "locked" until a password-protected link is unlocked. */
   publicShare(token: string): PublicShare {
     const { share, root } = this.liveShare(token, { requireUnlocked: false })
-    if (share.password !== null && !this.unlockedShares.has(token)) return { locked: true }
+    if (share.password !== null && !this.unlockedShares.has(share.token)) return { locked: true }
     const owner = this.state.users.find((user) => user.id === root.ownerId)
     return {
       locked: false,
@@ -1675,7 +1688,7 @@ export class MockDb {
     if (share.password !== null && share.password !== password) {
       throw new MockApiError(403, 'wrong_password', 'That password isn’t right.')
     }
-    this.unlockedShares.add(token)
+    this.unlockedShares.add(share.token)
   }
 
   /** `GET /s/:token/children`: a folder inside the share, with its path from the shared folder. */
@@ -1727,12 +1740,18 @@ export class MockDb {
     return { name: `${folder.name}.zip`, body: createZip(this.zipEntries([folder])) }
   }
 
-  /** The share behind a token, if it still works: not expired or used up. */
+  /**
+   * The share behind a token, if it still works: not expired or used up. A code
+   * typed in capitals or with lookalikes is read as the code it was made as
+   * (D46). Unlike the API, the mock has no limit on guesses: it is one person,
+   * in their own browser.
+   */
   private liveShare(
     token: string,
     { requireUnlocked = true } = {},
   ): { share: MockShare; root: MockNode } {
-    const share = this.state.shares.find((candidate) => candidate.token === token)
+    const canonical = canonicalShareToken(token)
+    const share = this.state.shares.find((candidate) => candidate.token === canonical)
     const root = share ? this.state.nodes[share.nodeId] : undefined
     if (!share || !root || !isVisible(root)) {
       throw new MockApiError(404, 'share_not_found', 'This link doesn’t exist.')
@@ -1743,7 +1762,7 @@ export class MockDb {
     if (share.maxDownloads !== null && share.downloadCount >= share.maxDownloads) {
       throw new MockApiError(410, 'share_used_up', 'This link has reached its download limit.')
     }
-    if (requireUnlocked && share.password !== null && !this.unlockedShares.has(token)) {
+    if (requireUnlocked && share.password !== null && !this.unlockedShares.has(canonical)) {
       throw new MockApiError(403, 'share_locked', 'Enter the password to open this link.')
     }
     return { share, root }
