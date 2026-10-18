@@ -67,6 +67,11 @@ export class MasterKeys {
     return new MasterKeys(parsed.current, keys, hkdf, macKey)
   }
 
+  /** Every master key ID in the key file, the current one first, then the retired ones. */
+  keyIds(): string[] {
+    return [this.currentId, ...[...this.#keys.keys()].filter((id) => id !== this.currentId)]
+  }
+
   /**
    * 32 bytes derived from the master key `keyId` for one purpose, named by
    * `info`, such as salting a vault's code key (§7.7). Never the key itself,
