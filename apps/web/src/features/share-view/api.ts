@@ -7,8 +7,11 @@ import { downloadFromApi, withTimeZone } from '@/lib/download'
 // Public share access (`/api/s/:token/*`, §7.5). No session is involved: an
 // unlocked password-protected link is remembered by a cookie for that share.
 
-/** A dead or locked link won't come back by asking again; only server hiccups are retried. */
-function retryServerErrors(failureCount: number, error: Error): boolean {
+/**
+ * A dead or locked link won't come back by asking again; only server hiccups are retried.
+ * Each retry under a dead link also counts against the viewer's address (§7.5, D46).
+ */
+export function retryServerErrors(failureCount: number, error: Error): boolean {
   return !(error instanceof ApiError && error.status < 500) && failureCount < 2
 }
 

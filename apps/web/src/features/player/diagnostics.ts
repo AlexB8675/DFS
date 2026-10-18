@@ -8,7 +8,7 @@ import {
 } from '@dfs/shared'
 import { queryOptions } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
-import { apiFetch, apiGet } from '@/lib/api/client'
+import { ApiError, apiFetch, apiGet } from '@/lib/api/client'
 import { describeBriefly, mimeTypeOf, playedStreams, type Unplayable } from './codecs'
 
 // Why a video is slow (DESIGN.md §10.4, §16), as the player can tell: whether
@@ -160,6 +160,13 @@ export function usePlaybackStats(
     /** The server's totals at the last ask, and when the answer came. */
     let lastAsk: { at: number; totals: Delivery } | null = null
     let asking = false
+    /**
+     * The server answered an ask with a 4xx: the link may be gone, and each
+     * ask under a gone link counts against the viewer's address, which is
+     * refused every link after enough of them (§7.5, D46). In the drive a
+     * 4xx (the file deleted) won't get better by asking again either.
+     */
+    let refused = false
     let samples = 0
     let frames: { total: number; dropped: number }[] = []
     let reported = false
@@ -167,7 +174,7 @@ export function usePlaybackStats(
     // The server counts the bytes the video element can't (§10.4): its
     // reads of this version for this viewer, summed, as they go.
     const ask = async () => {
-      if (asking) return
+      if (asking || refused) return
       asking = true
       try {
         const totals = await apiGet(`${base}/media/${versionId}/delivery`, deliverySchema)
@@ -180,8 +187,9 @@ export function usePlaybackStats(
         starvedBytes += arrival.bytes
         starvedMs += arrival.ms
         arrivals = [...arrivals, arrival].slice(-ARRIVAL_WINDOW)
-      } catch {
-        // Not now: the next ask.
+      } catch (error) {
+        // A network failure or a 5xx may pass: the next ask. A 4xx won't.
+        if (error instanceof ApiError && error.status >= 400 && error.status < 500) refused = true
       } finally {
         asking = false
       }
