@@ -1,4 +1,4 @@
-import { openObject, sealObject, shareTokenContext } from '@dfs/crypto'
+import { openObject, sealObject, shareTokenContext, type MasterKeys } from '@dfs/crypto'
 import {
   newShortCode,
   type CreateShareInput,
@@ -17,14 +17,14 @@ import {
   uuidv7,
   WORKING_LINK,
 } from '@dfs/db'
-import { eq, sql } from 'drizzle-orm'
+import { eq, inArray, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { audit } from '../audit.ts'
 import { hashPassword } from '../auth/passwords.ts'
 import type { Auth } from '../auth/sessions.ts'
 import { ApiError } from '../errors.ts'
 import { visibleNode } from '../nodes/read.ts'
-import { newLongToken, storedTokenHash } from './tokens.ts'
+import { lookupTokenHashes, newLongToken, storedTokenHash } from './tokens.ts'
 
 // Share links, as their owner manages them (DESIGN.md §7.5, D46): a 128-bit
 // token, or on request a six-character code, found by its hash (tokens.ts) and
@@ -89,6 +89,21 @@ export async function countShareLinks(
 /** How many codes `createShare` draws before it gives up on finding one not taken. */
 const CODE_TRIES = 5
 
+/** Whether a link already holds this code, stored under any master key in the key file. */
+async function codeTaken(
+  tx: Pick<FastifyInstance['db'], 'select'>,
+  keys: MasterKeys,
+  code: string,
+): Promise<boolean> {
+  const hashes = await lookupTokenHashes(keys, code)
+  const [held] = await tx
+    .select({ id: shareLinks.id })
+    .from(shareLinks)
+    .where(inArray(shareLinks.tokenHash, hashes))
+    .limit(1)
+  return held !== undefined
+}
+
 /**
  * `POST /shares`: a new link, its token kept sealed to be shown again. A short
  * link's code is drawn by `newCode`, a test seam, again if it is taken (D46).
@@ -113,12 +128,16 @@ export async function createShare(
     if (node.kind === 'file' && versionId === null) {
       throw new ApiError(409, 'not_ready', 'This file hasn’t finished uploading.')
     }
-    // A code is one of about 1.45 billion, so another link may hold it: the
-    // unique hash then leaves the insert empty, and another code is drawn. A
-    // long token is 128 random bits, which never meets one.
+    // A code is one of about 1.45 billion, so another link may hold it. A link
+    // made under a master key since retired holds it under a hash the unique
+    // index can't match to the current key's, so look for it under every key
+    // first; the unique index is still the answer for two links made at once,
+    // and leaves the insert empty. Either way another code is drawn. A long
+    // token is 128 random bits, which never meets one.
     let created: typeof shareLinks.$inferSelect | undefined
     for (let tries = 0; !created && tries < (short ? CODE_TRIES : 1); tries++) {
       const token = short ? newCode() : newLongToken()
+      if (short && (await codeTaken(tx, app.keys, token))) continue
       const tokenSealed = Buffer.from(
         await sealObject(app.keys, new TextEncoder().encode(token), shareTokenContext(id)),
       )
