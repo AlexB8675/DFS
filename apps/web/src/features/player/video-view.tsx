@@ -40,7 +40,7 @@ import { isEditable } from '@/lib/editable'
 import type { FilePlace } from '@/lib/file-place'
 import { cn } from '@/lib/utils'
 import { contentUrl, mediaQuery, playbackQuery } from './api'
-import { bufferedPlayAvailable, mayPlayBuffered, playsBuffered } from './buffered/choice'
+import { bufferedPlayAvailable, mayPlayBuffered, pagePlay } from './buffered/choice'
 import { useBufferedPlay } from './buffered/use-buffered-play'
 import { browserCanPlayType, codecLabel, playability, playedStreams, unplayableOf } from './codecs'
 import { audioTracksOf, chooseAudioTrack } from './audio-tracks'
@@ -51,6 +51,7 @@ import {
   usePlaybackStats,
   type PlaybackNotice,
 } from './diagnostics'
+import { currentDevice } from './external-players'
 import { playerAction, stepSpeed, type PlayerAction } from './keys'
 import { OpenInMenu } from './open-in-menu'
 import { usePlayerPreferences } from './preferences'
@@ -224,7 +225,13 @@ export default function VideoView({
       buffered:
         mayBuffer &&
         info !== null &&
-        playsBuffered(info, bufferedPlayAvailable()) &&
+        pagePlay({
+          name,
+          info,
+          device: currentDevice(),
+          canBuffer: bufferedPlayAvailable(),
+          supports: (mime) => MediaSource.isTypeSupported(mime),
+        }).play === 'buffered' &&
         bufferFailed?.versionId !== source.versionId,
     })
   }

@@ -1,6 +1,7 @@
 import type { MediaInfo, MediaStream } from '@dfs/shared'
 import { describe, expect, it } from 'vitest'
-import { bufferedPlayAvailable, mayPlayBuffered, playsBuffered } from './choice'
+import type { Device } from '../external-players'
+import { bufferedPlayAvailable, mayPlayBuffered, pagePlay } from './choice'
 
 /** The proof file's picture: 4K HEVC. */
 const HEVC: MediaStream = {
@@ -74,33 +75,153 @@ const PROOF: MediaInfo = {
   hasCover: false,
 }
 
-describe('choosing a video’s own buffer', () => {
-  it('plays an MP4 with a picture and one sound track through the buffer', () => {
-    expect(playsBuffered(PROOF, true)).toBe(true)
+/** An AC-3 sound track: a browser's Media Source seldom takes it. */
+const AC3: MediaStream = { ...AAC, codec: 'ac3', codecString: 'ac-3' }
+
+const HEVC_MIME = 'video/mp4; codecs="hvc1.2.4.L153.B0"'
+const AAC_MIME = 'audio/mp4; codecs="mp4a.40.2"'
+const AC3_MIME = 'audio/mp4; codecs="ac-3"'
+
+/**
+ * The input of a Windows desktop that can buffer, with a `supports` that says yes to the MIME
+ * types in `yes` only and notes every one it is asked, in `asked`.
+ */
+function input(
+  info: MediaInfo | null,
+  ...yes: string[]
+): Parameters<typeof pagePlay>[0] & { asked: string[] } {
+  const asked: string[] = []
+  return {
+    name: 'Clip.mp4',
+    info,
+    device: 'windows',
+    canBuffer: true,
+    supports: (mime) => {
+      asked.push(mime)
+      return yes.includes(mime)
+    },
+    asked,
+  }
+}
+
+describe('deciding how a video plays', () => {
+  it('leaves an iPhone or iPad to Safari’s own player, whatever the info', () => {
+    for (const info of [PROOF, null, { ...PROOF, container: 'matroska,webm' }]) {
+      for (const name of ['Clip.mp4', 'film.mkv']) {
+        for (const canBuffer of [true, false]) {
+          const given = { ...input(info), name, device: 'ios' as Device, canBuffer }
+          expect(pagePlay(given)).toEqual({ play: 'native' })
+          expect(given.asked).toEqual([])
+        }
+      }
+    }
   })
 
-  it('plays a video with no sound at all through the buffer', () => {
-    expect(playsBuffered({ ...PROOF, streams: [HEVC] }, true)).toBe(true)
+  it('offers another player where the browser cannot buffer', () => {
+    const elsewhere = { play: 'elsewhere', reason: 'browser', codec: null }
+    expect(pagePlay({ ...input(PROOF, HEVC_MIME, AAC_MIME), canBuffer: false })).toEqual(elsewhere)
+    expect(pagePlay({ ...input(null), canBuffer: false })).toEqual(elsewhere)
   })
 
-  it('leaves it to the element when the browser has no Media Source', () => {
-    expect(playsBuffered(PROOF, false)).toBe(false)
+  it('buffers an MP4 by its name while there is no info; the player checks the codecs as it opens', () => {
+    const given = input(null)
+    expect(pagePlay({ ...given, name: 'Clip.mp4' })).toEqual({ play: 'buffered' })
+    expect(pagePlay({ ...given, name: 'a.MOV' })).toEqual({ play: 'buffered' })
+    expect(given.asked).toEqual([])
   })
 
-  it('leaves Matroska and WebM to the element', () => {
-    expect(playsBuffered({ ...PROOF, container: 'matroska,webm' }, true)).toBe(false)
+  it('offers another player for a name that cannot be an MP4 while there is no info', () => {
+    expect(pagePlay({ ...input(null), name: 'film.mkv' })).toEqual({
+      play: 'elsewhere',
+      reason: 'format',
+      codec: null,
+    })
   })
 
-  it('leaves a video with two sound tracks to the element', () => {
-    expect(playsBuffered({ ...PROOF, streams: [HEVC, AAC, AAC_ITALIAN] }, true)).toBe(false)
+  it('offers another player for a Matroska or WebM container', () => {
+    const info = { ...PROOF, container: 'matroska,webm' }
+    expect(pagePlay(input(info, HEVC_MIME, AAC_MIME))).toEqual({
+      play: 'elsewhere',
+      reason: 'format',
+      codec: null,
+    })
   })
 
-  it('leaves audio files to the audio bar, even one whose cover is a picture stream', () => {
-    expect(playsBuffered({ ...PROOF, kind: 'audio' }, true)).toBe(false)
+  it('offers another player for an audio file, even one whose cover is a picture stream', () => {
+    expect(pagePlay(input({ ...PROOF, kind: 'audio' }, HEVC_MIME, AAC_MIME))).toEqual({
+      play: 'elsewhere',
+      reason: 'format',
+      codec: null,
+    })
   })
 
-  it('leaves a file with no picture to the element', () => {
-    expect(playsBuffered({ ...PROOF, streams: [AAC] }, true)).toBe(false)
+  it('offers another player for a file with no picture', () => {
+    expect(pagePlay(input({ ...PROOF, streams: [AAC] }, AAC_MIME))).toEqual({
+      play: 'elsewhere',
+      reason: 'format',
+      codec: null,
+    })
+  })
+
+  it('names the picture’s codec when the browser cannot take it', () => {
+    const given = input(PROOF, AAC_MIME)
+    expect(pagePlay(given)).toEqual({ play: 'elsewhere', reason: 'picture', codec: 'hevc' })
+    expect(given.asked).toEqual([HEVC_MIME])
+  })
+
+  it('names the sound’s codec when the browser cannot take it', () => {
+    const given = input({ ...PROOF, streams: [HEVC, AC3] }, HEVC_MIME)
+    expect(pagePlay(given)).toEqual({ play: 'elsewhere', reason: 'sound', codec: 'ac3' })
+    expect(given.asked).toEqual([HEVC_MIME, AC3_MIME])
+  })
+
+  it('asks about the picture before the sound', () => {
+    const given = input({ ...PROOF, streams: [HEVC, AC3] })
+    expect(pagePlay(given)).toEqual({ play: 'elsewhere', reason: 'picture', codec: 'hevc' })
+    expect(given.asked).toEqual([HEVC_MIME])
+  })
+
+  it('judges the first sound track only: it is the one the engine plays', () => {
+    const second = input({ ...PROOF, streams: [HEVC, AAC, AC3] }, HEVC_MIME, AAC_MIME)
+    expect(pagePlay(second)).toEqual({ play: 'buffered' })
+    expect(second.asked).toEqual([HEVC_MIME, AAC_MIME])
+    const first = input({ ...PROOF, streams: [HEVC, AC3, AAC] }, HEVC_MIME, AAC_MIME)
+    expect(pagePlay(first)).toEqual({ play: 'elsewhere', reason: 'sound', codec: 'ac3' })
+  })
+
+  it('judges the first picture only', () => {
+    const other: MediaStream = { ...HEVC, index: 3, codec: 'h264', codecString: 'avc1.640028' }
+    const given = input({ ...PROOF, streams: [HEVC, AAC, other] }, HEVC_MIME, AAC_MIME)
+    expect(pagePlay(given)).toEqual({ play: 'buffered' })
+    expect(given.asked).toEqual([HEVC_MIME, AAC_MIME])
+  })
+
+  it('buffers a file with several sound tracks: the first plays, and VLC is offered for the others', () => {
+    const streams = [HEVC, AAC, AAC_ITALIAN]
+    expect(pagePlay(input({ ...PROOF, streams }, HEVC_MIME, AAC_MIME))).toEqual({
+      play: 'buffered',
+    })
+  })
+
+  it('buffers a video with no sound at all', () => {
+    const given = input({ ...PROOF, streams: [HEVC] }, HEVC_MIME)
+    expect(pagePlay(given)).toEqual({ play: 'buffered' })
+    expect(given.asked).toEqual([HEVC_MIME])
+  })
+
+  it('trusts a stream that has no codec string, as the player checks it as it opens', () => {
+    const noPicture = input({ ...PROOF, streams: [{ ...HEVC, codecString: null }, AAC] }, AAC_MIME)
+    expect(pagePlay(noPicture)).toEqual({ play: 'buffered' })
+    expect(noPicture.asked).toEqual([AAC_MIME])
+    const noSound = input({ ...PROOF, streams: [HEVC, { ...AAC, codecString: null }] }, HEVC_MIME)
+    expect(pagePlay(noSound)).toEqual({ play: 'buffered' })
+    expect(noSound.asked).toEqual([HEVC_MIME])
+  })
+
+  it('buffers an HEVC and AAC file where the browser takes both', () => {
+    const given = input(PROOF, HEVC_MIME, AAC_MIME)
+    expect(pagePlay(given)).toEqual({ play: 'buffered' })
+    expect(given.asked).toEqual([HEVC_MIME, AAC_MIME])
   })
 })
 
