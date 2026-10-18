@@ -14,6 +14,7 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import {
   EXPIRY_OPTIONS,
@@ -48,6 +49,7 @@ export function ShareDialog({ node, onClose }: ShareDialogProps) {
     (link) => link.nodeId === node.id && link.url !== null && shareStatus(link) === 'active',
   )
   const [expiry, setExpiry] = useState<string>('7')
+  const [short, setShort] = useState(false)
   const [state, submit, pending] = useActionState(
     async (_previous: FormState, formData: FormData): Promise<FormState> => {
       const password = formText(formData, 'password')
@@ -60,6 +62,7 @@ export function ShareDialog({ node, onClose }: ShareDialogProps) {
           expiresAt: expiryFromChoice(expiry),
           password: password || null,
           maxDownloads: limit ? Number(limit) : null,
+          short,
         })
         return { link, error: null }
       } catch (error) {
@@ -145,6 +148,20 @@ export function ShareDialog({ node, onClose }: ShareDialogProps) {
                     min={1}
                     inputMode="numeric"
                   />
+                </div>
+              </div>
+              <div className="flex items-start gap-3">
+                <Switch
+                  id="share-short"
+                  className="mt-0.5"
+                  checked={short}
+                  onCheckedChange={setShort}
+                />
+                <div className="grid gap-1">
+                  <Label htmlFor="share-short">Short link</Label>
+                  <p className="text-xs text-muted-foreground">
+                    Six characters, to type by hand or read out.
+                  </p>
                 </div>
               </div>
               {state.error && (

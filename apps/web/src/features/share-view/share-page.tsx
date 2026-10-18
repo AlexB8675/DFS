@@ -1,4 +1,4 @@
-import type { PublicShare, SharedNode } from '@dfs/shared'
+import { canonicalShareToken, type PublicShare, type SharedNode } from '@dfs/shared'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import {
   ChevronRight,
@@ -20,7 +20,7 @@ import {
   type ReactNode,
   type RefObject,
 } from 'react'
-import { Link, useParams, useSearchParams } from 'react-router'
+import { Link, Navigate, useLocation, useParams, useSearchParams } from 'react-router'
 import { toast } from 'sonner'
 import { AppLogo } from '@/components/app-logo'
 import { AudioBar } from '@/features/audio/audio-bar'
@@ -69,7 +69,19 @@ type OpenShare = Extract<PublicShare, { locked: false }>
  */
 export function SharePage() {
   const { token = '' } = useParams()
-  const share = useQuery(publicShareQuery(token))
+  const location = useLocation()
+  // A code typed in capitals or with lookalikes goes to the code as made: the
+  // unlock cookie's path is that, and is case-sensitive (§7.5, D46).
+  const canonical = canonicalShareToken(token)
+  const share = useQuery({ ...publicShareQuery(token), enabled: canonical === token })
+  if (canonical !== token) {
+    return (
+      <Navigate
+        to={{ pathname: `/s/${canonical}`, search: location.search, hash: location.hash }}
+        replace
+      />
+    )
+  }
 
   let content: ReactNode
   if (share.isPending) {
@@ -121,7 +133,11 @@ const UNAVAILABLE: Record<string, { title: string; description: string }> = {
   share_not_found: {
     title: 'This link doesn’t exist',
     description:
-      'Check that you copied all of it. The person who shared it may also have turned it off.',
+      'Check that you copied or typed all of it. The person who shared it may also have turned it off.',
+  },
+  rate_limited: {
+    title: 'Too many tries',
+    description: 'Too many links were tried from here. Wait a few minutes, then try again.',
   },
 }
 
