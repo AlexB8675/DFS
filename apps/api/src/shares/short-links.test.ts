@@ -112,6 +112,39 @@ describe('short share links (§7.5, D46)', () => {
     })
     expect(response.status).toBe(204)
     expect(response.headers.getSetCookie().join('\n')).toContain(`Path=/api/s/${code};`)
+    // The cookie opens the link at the code as made, where the share page asks.
+    expect(await stranger.call('GET', `/s/${code}`, publicShareSchema)).toMatchObject({
+      locked: false,
+    })
+  })
+
+  it('counts wrong passwords for a code however it is typed', async () => {
+    const code = await fixedLink('q2w-3e', 'open sesame')
+    // The limiter counts an IPv6 /64 as one address, as the guess limit does,
+    // and the code as made however it was typed (§7.5, D46).
+    for (let hit = 1; hit < 10; hit += 1) app.limits.shareUnlock.hit(`address:127.0.0.1:${code}`)
+    expect(
+      await stranger.error('POST', `/s/${typed(code)}/unlock`, { json: { password: 'wrong' } }),
+    ).toEqual({ status: 403, code: 'wrong_password' })
+    expect(
+      await stranger.error('POST', `/s/${code}/unlock`, { json: { password: 'open sesame' } }),
+    ).toEqual({ status: 429, code: 'rate_limited' })
+  })
+
+  it('answers at most 10 wrong passwords from attempts sent at once', async () => {
+    const code = await fixedLink('r4t-5y', 'open sesame')
+    for (let hit = 1; hit < 10; hit += 1) app.limits.shareUnlock.hit(`address:127.0.0.1:${code}`)
+    // All 12 pass the first check, which counts nothing; the check made again
+    // when each password has been tried lets only the 10th wrong one through.
+    const answers = await Promise.all(
+      Array.from({ length: 12 }, () =>
+        stranger.error('POST', `/s/${code}/unlock`, { json: { password: 'wrong' } }),
+      ),
+    )
+    expect(answers.filter((answer) => answer.status === 403)).toEqual([
+      { status: 403, code: 'wrong_password' },
+    ])
+    expect(answers.filter((answer) => answer.status === 429)).toHaveLength(11)
   })
 
   it('still makes a long link when short is left out', async () => {
@@ -127,6 +160,22 @@ describe('short share links (§7.5, D46)', () => {
     const codes = ['aaaaaa', 'bbbbbb']
     const second = await createShare(app, ownerAuth, terms, () => codes.shift() ?? 'cccccc')
     expect(second.url).toMatch(/\/s\/bbbbbb$/)
+  })
+
+  it('draws another code when two links take the same one at once', async () => {
+    // Whichever inserts second meets the code taken, or the unique index's
+    // refusal; either way it draws again.
+    const terms = shortTerms(rootId)
+    const first = ['hhhhhh', 'jjjjjj']
+    const second = ['hhhhhh', 'jjjjjj']
+    const made = await Promise.all([
+      createShare(app, ownerAuth, terms, () => first.shift() ?? 'kkkkkk'),
+      createShare(app, ownerAuth, terms, () => second.shift() ?? 'kkkkkk'),
+    ])
+    expect(made.map((share) => share.url?.split('/s/')[1] ?? '').sort()).toEqual([
+      'hhhhhh',
+      'jjjjjj',
+    ])
   })
 
   it('gives up after five codes in a row are taken', async () => {

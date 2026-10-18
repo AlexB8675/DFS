@@ -183,23 +183,22 @@ export async function unlockShare(
 ): Promise<void> {
   // The share page always asks with the code as made, and a cookie's path is
   // case-sensitive, so a code typed with lookalikes still sets one it can use
-  // (D46). The same code, typed any way, shares a limiter key.
+  // (D46). The same code, typed any way, shares a limiter key, and so does an
+  // IPv6 /64 as one address, as in the guess limit.
   const canonical = canonicalShareToken(token)
-  const key = `${request.ip}:${canonical}`
-  const wait = app.limits.shareUnlock.waitMs(key)
-  if (wait > 0) {
-    throw new ApiError(
-      429,
-      'rate_limited',
-      'Too many wrong passwords. Wait a little, then try again.',
-      {
-        'retry-after': String(Math.ceil(wait / 1000)),
-      },
-    )
-  }
+  const key = `${addressKey(request.ip)}:${canonical}`
+  const early = app.limits.shareUnlock.waitMs(key)
+  if (early > 0) throw tooManyPasswords(early)
   const { share } = await liveShare(app, request, token)
   if (share.password_hash === null) return
-  if (!(await verifyPassword(share.password_hash, password))) {
+  const right = await verifyPassword(share.password_hash, password)
+  // A wrong password is counted only after it is tried, and attempts sent at
+  // once all pass the first check, so check again in the step that counts it:
+  // at most 10 wrong passwords are answered per window, and over the limit the
+  // answer is 429 whatever the password was.
+  const wait = app.limits.shareUnlock.waitMs(key)
+  if (wait > 0) throw tooManyPasswords(wait)
+  if (!right) {
     app.limits.shareUnlock.hit(key)
     throw new ApiError(403, 'wrong_password', 'That password isn’t right.')
   }
@@ -213,6 +212,15 @@ export async function unlockShare(
     sameSite: 'strict',
     expires: new Date(expiresAt),
   })
+}
+
+function tooManyPasswords(waitMs: number): ApiError {
+  return new ApiError(
+    429,
+    'rate_limited',
+    'Too many wrong passwords. Wait a little, then try again.',
+    { 'retry-after': String(Math.ceil(waitMs / 1000)) },
+  )
 }
 
 /** `GET /s/:token/children`: a folder inside the share, with its path from the shared folder. */

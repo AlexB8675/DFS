@@ -16,6 +16,7 @@ import {
   uuidArray,
   uuidv7,
   WORKING_LINK,
+  type Executor,
 } from '@dfs/db'
 import { eq, inArray, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
@@ -90,11 +91,7 @@ export async function countShareLinks(
 const CODE_TRIES = 5
 
 /** Whether a link already holds this code, stored under any master key in the key file. */
-async function codeTaken(
-  tx: Pick<FastifyInstance['db'], 'select'>,
-  keys: MasterKeys,
-  code: string,
-): Promise<boolean> {
+async function codeTaken(tx: Executor, keys: MasterKeys, code: string): Promise<boolean> {
   const hashes = await lookupTokenHashes(keys, code)
   const [held] = await tx
     .select({ id: shareLinks.id })
