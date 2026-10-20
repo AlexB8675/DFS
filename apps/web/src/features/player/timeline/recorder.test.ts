@@ -337,13 +337,12 @@ describe('Timeline', () => {
     const { send, calls } = fakeSend()
     const timeline = newTimeline(send)
     timeline.record({ type: 'error', from: 'page', code: null, message: 'y'.repeat(301) })
-    timeline.record({ type: 'error', from: 'page', code: null, message: 'a\u0000b' })
     timeline.record(hide())
     await vi.advanceTimersByTimeAsync(5000)
 
     expect(calls).toHaveLength(1)
     expect(calls[0]?.batch.events).toEqual([
-      { type: 'dropped', t: 5000, events: 0, invalid: 2 },
+      { type: 'dropped', t: 5000, events: 0, invalid: 1 },
       { type: 'visibility', hidden: true, t: 0 },
     ])
 
@@ -351,6 +350,29 @@ describe('Timeline', () => {
     timeline.record(hide(false))
     await vi.advanceTimersByTimeAsync(5000)
     expect(calls[1]?.batch.events).toEqual([{ type: 'visibility', hidden: false, t: 5000 }])
+  })
+
+  it('drops text the database can’t hold, counting each event', async () => {
+    const { send, calls } = fakeSend()
+    const timeline = newTimeline(send)
+    timeline.record({
+      type: 'error',
+      from: 'page',
+      code: null,
+      message: 'a' + String.fromCharCode(0) + 'b',
+    })
+    timeline.record({
+      type: 'error',
+      from: 'page',
+      code: null,
+      message: 'a' + String.fromCharCode(0xd800) + 'b',
+    })
+    timeline.record(hide())
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(calls[0]?.batch.events).toEqual([
+      { type: 'dropped', t: 5000, events: 0, invalid: 2 },
+      { type: 'visibility', hidden: true, t: 0 },
+    ])
   })
 
   it('sends the count of a refused event even when nothing else was kept', async () => {
@@ -427,6 +449,21 @@ describe('Timeline', () => {
     await vi.advanceTimersByTimeAsync(10_000)
     await timeline.flush()
     expect(calls).toHaveLength(1)
+  })
+
+  it('sends the closing batch with keepalive even when closed tips the 16 KiB', () => {
+    const { send, calls } = fakeSend()
+    const timeline = newTimeline(send)
+    // Just under 16 KiB, so that the `closed` event close() adds is what takes it over.
+    const closedBytes = bytesOf({ type: 'closed', t: 0 })
+    const justUnder = Math.ceil((16 * 1024) / closedBytes) - 1
+    for (let i = 0; i < justUnder; i++) timeline.record({ type: 'closed' })
+    expect(calls).toHaveLength(0)
+
+    timeline.close()
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.keepalive).toBe(true)
+    expect(calls[0]?.batch.events).toHaveLength(justUnder + 1)
   })
 
   it('keeps its play ID', () => {

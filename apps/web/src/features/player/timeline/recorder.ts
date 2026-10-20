@@ -103,16 +103,7 @@ export class Timeline {
 
   /** Stamps `t` and keeps the event; one the schema refuses is dropped and counted. */
   record(event: TimelineEventInput): void {
-    if (this.closed || this.refused) return
-    const parsed = timelineEventSchema.safeParse({ ...event, t: this.elapsed() })
-    if (!parsed.success) {
-      this.invalid += 1
-      return
-    }
-    const bytes = sizeOf(parsed.data)
-    this.kept.push({ event: parsed.data, bytes })
-    this.keptBytes += bytes
-    this.trim()
+    this.keep(event)
     // A batch waiting to go again waits for the timer, so an outage isn't retried at every event.
     if (this.keptBytes >= FLUSH_AT_BYTES && this.pending.length === 0) void this.flush()
   }
@@ -139,10 +130,24 @@ export class Timeline {
   /** Records `closed`, flushes with keepalive, and stops its timer; later records are ignored. */
   close(): void {
     if (this.closed) return
-    this.record({ type: 'closed' })
+    // Not through `record`: its at-once flush would send the last events without keepalive.
+    this.keep({ type: 'closed' })
     this.closed = true
     void this.flush({ keepalive: true })
     this.stopTimer()
+  }
+
+  private keep(event: TimelineEventInput): void {
+    if (this.closed || this.refused) return
+    const parsed = timelineEventSchema.safeParse({ ...event, t: this.elapsed() })
+    if (!parsed.success) {
+      this.invalid += 1
+      return
+    }
+    const bytes = sizeOf(parsed.data)
+    this.kept.push({ event: parsed.data, bytes })
+    this.keptBytes += bytes
+    this.trim()
   }
 
   private elapsed(): number {
