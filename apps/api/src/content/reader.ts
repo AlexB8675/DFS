@@ -10,6 +10,7 @@ import {
   type ChunkFrameLayout,
 } from '@dfs/crypto'
 import type { Executor } from '@dfs/db'
+import type { SourceFigures } from '@dfs/shared'
 import { isFresh, type BlobReader, type CdnUrl, type StoredBlob } from '@dfs/storage'
 import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
@@ -83,11 +84,33 @@ export class ContentError extends Error {
 /** What a read's bytes count as on the graphs (§16): sent to a browser, or read by the media service. */
 export type ReadCounter = 'downloads.bytes' | 'media.read_bytes'
 
+/** Where a read's bytes came from (§6.2): staging, the frame cache, or the blob store (Discord; the local store in development). */
+export type ReadSource = 'staging' | 'cache' | 'discord'
+
+/** A read's bytes and waits by source. */
+export type ReadSources = Record<ReadSource, SourceFigures>
+
+/** All zeros. */
+export function readSources(): ReadSources {
+  return {
+    staging: { bytes: 0, waitMs: 0 },
+    cache: { bytes: 0, waitMs: 0 },
+    discord: { bytes: 0, waitMs: 0 },
+  }
+}
+
 /**
  * Bytes `start` to `end` (inclusive) of a version, as plaintext, each piece
  * counted as `counter` as it is handed on. Once `signal` aborts, the chunks
  * being read are given up on, unless another reader waits for them too, and
  * the stream fails with its reason.
+ *
+ * With `sources`, each piece's bytes are added to the source it came from, with
+ * the time the reader waited for it (§16). That is the time from asking for
+ * the next piece until it arrives, charged to that piece's source, whatever
+ * went into the wait: starting reads ahead, looking chunks up, signing URLs,
+ * unwrapping the key. The time a `yield` takes is the client's, and never
+ * charged here. A piece read ahead and already waiting costs nothing.
  */
 export async function* readVersion(
   app: FastifyInstance,
@@ -96,8 +119,10 @@ export async function* readVersion(
   end: number,
   signal?: AbortSignal,
   counter: ReadCounter = 'downloads.bytes',
+  sources?: ReadSources,
 ): AsyncGenerator<Uint8Array> {
   if (end < start) return
+  let asked = performance.now()
   const { version_id: versionId, chunk_size: chunkSize } = version
   const key = await app.dataKeys.get(versionId, () =>
     app.keys.unwrapDek(version.wrapped_dek, version.key_id, uuidBytes(versionId)),
@@ -152,10 +177,16 @@ export async function* readVersion(
         ahead === 0 ? Math.min(READ_AHEAD_AFTER_BYTES, Math.ceil(expected / 2)) : Infinity
       let sent = 0
       try {
-        for await (const piece of current.read.pieces()) {
+        for await (const { bytes: piece, source } of current.read.pieces()) {
+          if (sources) {
+            sources[source].bytes += piece.length
+            sources[source].waitMs += performance.now() - asked
+          }
           sent += piece.length
           app.metrics.record(counter, piece.length)
           yield piece
+          // The next piece is asked for from here, reads ahead started included.
+          asked = performance.now()
           if (ahead === 0 && sent >= readAheadAt) {
             ahead = 1
             await startReads(ahead, true)
@@ -183,22 +214,28 @@ export async function* readVersion(
   }
 }
 
+/** A checked piece of a chunk's plaintext, and where it came from. */
+interface SourcedPiece {
+  bytes: Uint8Array
+  source: ReadSource
+}
+
 /**
- * A chunk being read: its plaintext in checked pieces, kept until taken.
- * It starts reading at once, so a chunk read ahead fills while the one
- * before it is sent, and a failure comes out when it is reached.
+ * A chunk being read: its plaintext in checked pieces, each with its source,
+ * kept until taken. It starts reading at once, so a chunk read ahead fills
+ * while the one before it is sent, and a failure comes out when it is reached.
  */
 class ChunkRead {
   /** Settles once the read is over, however it went: it never rejects. */
   readonly finished: Promise<void>
-  readonly #pieces: Uint8Array[] = []
+  readonly #pieces: SourcedPiece[] = []
   #over = false
   #error: Error | null = null
   #wake: (() => void) | null = null
 
-  constructor(read: (emit: (piece: Uint8Array) => void) => Promise<void>) {
-    this.finished = read((piece) => {
-      this.#pieces.push(piece)
+  constructor(read: (emit: (piece: Uint8Array, source: ReadSource) => void) => Promise<void>) {
+    this.finished = read((bytes, source) => {
+      this.#pieces.push({ bytes, source })
       this.#notify()
     }).then(
       () => {
@@ -213,7 +250,7 @@ class ChunkRead {
     )
   }
 
-  async *pieces(): AsyncGenerator<Uint8Array> {
+  async *pieces(): AsyncGenerator<SourcedPiece> {
     for (;;) {
       const piece = this.#pieces.shift()
       if (piece) {
@@ -242,8 +279,8 @@ interface ChunkRange {
   from: number
   to: number
   signal: AbortSignal | undefined
-  /** Takes each checked piece, in order. */
-  emit: (piece: Uint8Array) => void
+  /** Takes each checked piece, in order, with the source its plaintext came from. */
+  emit: (piece: Uint8Array, source: ReadSource) => void
 }
 
 /** The locations of chunks `first` to `last`, a batch at a time, with fresh CDN URLs. */
@@ -290,13 +327,16 @@ async function readChunk(
     await streamSegments(app, versionId, key, chunk, layout, range)
     return
   }
+  // Decided as the read begins: a frame the cache holds then is the cache's,
+  // one that is fetched through it is Discord's.
+  const source = frameSource(app, chunk)
   const frame = await checkedFrame(app, versionId, chunk, range.signal)
   if (!layout) {
     const plaintext = await openFrame(key, frame, context)
     if (plaintext.length !== chunk.plain_size) {
       throw new ContentError(`Chunk ${String(chunk.idx)} of ${versionId} has the wrong size.`)
     }
-    range.emit(plaintext.subarray(range.from, range.to + 1))
+    range.emit(plaintext.subarray(range.from, range.to + 1), source)
     return
   }
   for (let index = layout.segmentOf(range.from); index <= layout.segmentOf(range.to); index += 1) {
@@ -308,8 +348,19 @@ async function readChunk(
       frame.subarray(start, start + layout.segmentLength(index)),
       context,
     )
-    range.emit(wanted(layout, index, plaintext, range))
+    range.emit(wanted(layout, index, plaintext, range), source)
   }
+}
+
+/**
+ * Where a chunk read whole comes from: its file in staging, or the pack it is
+ * sealed in there, until its blob is stored; after, the frame cache if it
+ * holds the frame, else the blob store. A store with no frame cache (local
+ * development) is counted as Discord.
+ */
+function frameSource(app: FastifyInstance, chunk: ChunkLocation): ReadSource {
+  if (chunk.staged_path || chunk.blob_staged_path) return 'staging'
+  return app.frameCache?.has(chunk.frame_sha256) ? 'cache' : 'discord'
 }
 
 /** A stored chunk Discord's CDN can stream: not in staging, nor already in the frame cache. */
@@ -470,6 +521,8 @@ async function streamSegments(
   const sources = planSegments(fetch, first, last, false)
   for (let index = first; index <= last; index += 1) {
     let plaintext: Uint8Array | null = null
+    // Where the plaintext that is finally emitted came from, after any re-plan.
+    let origin: ReadSource = 'discord'
     // Once more if a kept copy fails its tag or was evicted, or another
     // reader's fetch was given up on: then this reader fetches it itself.
     for (let attempt = 0; plaintext === null; attempt += 1) {
@@ -482,8 +535,11 @@ async function streamSegments(
         } else {
           plaintext = await source.plaintext
         }
-        // Served from the cache, or by another reader's fetch: no request of its own.
-        if (plaintext) app.frameCache?.counted(source.kind !== 'fetch')
+        if (plaintext) {
+          // Served from the cache, or by another reader's fetch: no request of its own.
+          app.frameCache?.counted(source.kind !== 'fetch')
+          origin = source.kind === 'cache' ? 'cache' : 'discord'
+        }
       } catch (error) {
         if (range.signal?.aborted || source.kind === 'fetch' || attempt > 0) throw error
         if (source.kind === 'cache') app.frameCache?.forgetSegment(chunk.frame_sha256, index)
@@ -495,7 +551,7 @@ async function streamSegments(
         }
       }
     }
-    range.emit(wanted(layout, index, plaintext, range))
+    range.emit(wanted(layout, index, plaintext, range), origin)
   }
 }
 

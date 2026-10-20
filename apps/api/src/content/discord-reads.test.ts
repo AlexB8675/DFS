@@ -14,16 +14,19 @@ import { setTimeout } from 'node:timers/promises'
 import type { FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest'
 import { buildApp } from '../app.ts'
+import { downloadableFile } from '../routes/content.ts'
 import { testConfig } from '../testing/config.ts'
 import { seedUser } from '../testing/seed.ts'
+import { readSources, readVersion } from './reader.ts'
 
 // Reading back from Discord (DESIGN.md §6.2), over real HTTP: a ZIP of a
 // folder of small files costs one CDN request per pack, not one per file, and
 // nothing the second time; a download stalls with its client instead of
 // fetching the whole file, stops fetching for one its client cancels, and
 // finds a frame whose pack was compacted away mid-download; a video's end is
-// fetched as its player opens. Attachments of 4 MiB make a large file out of
-// little test data.
+// fetched as its player opens; and what a read waited on is counted by where
+// its bytes came from: staging, the frame cache or Discord. Attachments of
+// 4 MiB make a large file out of little test data.
 
 let database: TestDatabase
 let app: FastifyInstance
@@ -550,6 +553,120 @@ describe('reading from Discord', () => {
       Buffer.from(bytes.subarray(size - 3_000_000, size - 2_900_000 + 1)),
     )
     expect(discord.cdnRanges).toEqual([])
+  })
+
+  /** Reads bytes `from` to `to` of a file straight from the reader, with what it counted by source. */
+  async function readCounted(nodeId: string, from: number, to: number, clientMs = 0) {
+    const file = await downloadableFile(app.db, nodeId)
+    const sources = readSources()
+    const pieces: Uint8Array[] = []
+    for await (const piece of readVersion(
+      app,
+      file,
+      from,
+      to,
+      undefined,
+      'downloads.bytes',
+      sources,
+    )) {
+      pieces.push(piece)
+      if (clientMs > 0) await setTimeout(clientMs)
+    }
+    return { sources, bytes: Buffer.concat(pieces) }
+  }
+
+  it('counts a cold read as Discord’s', async () => {
+    const session = await storedFile('Counted cold', 1)
+    const content = Buffer.from(contentOf(1))
+    const { sources, bytes } = await readCounted(session.nodeId, 300_000, 300_099)
+    expect(bytes).toEqual(content.subarray(300_000, 300_100))
+    expect(sources.discord.bytes).toBe(100)
+    expect(sources.discord.waitMs).toBeGreaterThan(0)
+    expect(sources.staging).toEqual({ bytes: 0, waitMs: 0 })
+    expect(sources.cache).toEqual({ bytes: 0, waitMs: 0 })
+  })
+
+  it('counts a read the cache holds as the cache’s', async () => {
+    const session = await storedFile('Counted kept', 1)
+    await readCounted(session.nodeId, 300_000, 300_099)
+    await app.frameCache?.idle()
+    const { sources, bytes } = await readCounted(session.nodeId, 300_000, 300_099)
+    expect(bytes).toEqual(Buffer.from(contentOf(1).subarray(300_000, 300_100)))
+    expect(sources.cache.bytes).toBe(100)
+    expect(sources.discord).toEqual({ bytes: 0, waitMs: 0 })
+    expect(sources.staging).toEqual({ bytes: 0, waitMs: 0 })
+  })
+
+  it('counts a frame the cache holds whole as the cache’s too', async () => {
+    const { chunkSize } = app.config.sizes
+    const session = await storedFile('Counted whole', 1)
+    // The whole chunk read once, so it is kept as one frame.
+    await readCounted(session.nodeId, 0, chunkSize - 1)
+    await app.frameCache?.idle()
+    const { sources, bytes } = await readCounted(session.nodeId, 1000, 1999)
+    expect(bytes).toEqual(Buffer.from(contentOf(1).subarray(1000, 2000)))
+    expect(sources.cache.bytes).toBe(1000)
+    expect(sources.discord.bytes).toBe(0)
+  })
+
+  it('splits a read across the cache and Discord', async () => {
+    const { chunkSize } = app.config.sizes
+    const session = await storedFile('Counted split', 2)
+    // Only the first chunk was read, whole, and is kept.
+    await readCounted(session.nodeId, 0, chunkSize - 1)
+    await app.frameCache?.idle()
+    const { sources, bytes } = await readCounted(session.nodeId, chunkSize - 100, chunkSize + 99)
+    expect(bytes).toEqual(Buffer.from(contentOf(2).subarray(chunkSize - 100, chunkSize + 100)))
+    expect(sources.cache.bytes).toBe(100)
+    expect(sources.discord.bytes).toBe(100)
+    expect(sources.cache.bytes + sources.discord.bytes).toBe(200)
+    expect(sources.staging.bytes).toBe(0)
+  })
+
+  it('counts a version still syncing as staging’s', async () => {
+    const { chunkSize } = app.config.sizes
+    const bytes = new Uint8Array(chunkSize + 5000).map((_, i) => i % 233)
+    const folder = await createFolder(client, (await workspace(client)).id, 'Counted staged')
+    const session = await uploadFile(client, folder.id, 'staged.bin', bytes)
+    // Not settled to Discord: its frames are still in staging.
+    const read = await readCounted(session.nodeId, 10, bytes.length - 11)
+    expect(read.bytes).toEqual(Buffer.from(bytes.subarray(10, bytes.length - 10)))
+    expect(read.sources.staging.bytes).toBe(bytes.length - 20)
+    expect(read.sources.discord).toEqual({ bytes: 0, waitMs: 0 })
+    expect(read.sources.cache).toEqual({ bytes: 0, waitMs: 0 })
+  })
+
+  it('counts a kept segment that fails its tag, fetched again, as Discord’s', async () => {
+    const session = await storedFile('Counted spoiled', 1)
+    await readCounted(session.nodeId, 300_000, 300_099)
+    await app.frameCache?.idle()
+    const [chunk] = (
+      await app.db.execute<{ frame_sha256: Buffer }>(sql`
+        SELECT frame_sha256 FROM chunks WHERE version_id = ${session.versionId}`)
+    ).rows
+    if (!chunk) throw new Error('No chunk.')
+    const hex = chunk.frame_sha256.toString('hex')
+    const file = path.join(app.config.cacheDir, hex.slice(0, 2), `${hex}-1.frame`)
+    const kept = await readFile(file)
+    kept[100] = (kept[100] ?? 0) ^ 1
+    await writeFile(file, kept)
+    // The kept copy is planned as the cache's, fails its tag, and is fetched
+    // afresh: what was emitted came from Discord.
+    const { sources, bytes } = await readCounted(session.nodeId, 300_000, 300_099)
+    expect(bytes).toEqual(Buffer.from(contentOf(1).subarray(300_000, 300_100)))
+    expect(sources.discord.bytes).toBe(100)
+    expect(sources.cache).toEqual({ bytes: 0, waitMs: 0 })
+  })
+
+  it('charges a read only for the time it took to arrive, not the client’s', async () => {
+    const { chunkSize } = app.config.sizes
+    const session = await storedFile('Counted slow client', 1)
+    await readCounted(session.nodeId, 0, chunkSize - 1)
+    await app.frameCache?.idle()
+    // Every piece ready at once, and a client that takes 40 ms over each.
+    const { sources } = await readCounted(session.nodeId, 0, chunkSize - 1, 40)
+    expect(sources.cache.bytes).toBe(chunkSize)
+    expect(sources.cache.waitMs).toBeLessThan(150)
   })
 
   it('answers HEAD with the length, reading nothing from Discord', async () => {

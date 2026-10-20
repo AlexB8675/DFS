@@ -1,7 +1,7 @@
 import { Readable, type Writable } from 'node:stream'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { z } from 'zod'
-import { readVersion, type ReadableVersion } from './reader.ts'
+import { readSources, readVersion, type ReadableVersion, type ReadSources } from './reader.ts'
 import { writeZip, zipLength, zipTimeZone, type ZipEntry } from './zip.ts'
 
 // Sending files and archives (DESIGN.md §6.2, §7.5): streamed, Range-aware,
@@ -72,6 +72,7 @@ export function sendFile(
     end,
     cancellation(reply.raw),
     forMediaService ? 'media.read_bytes' : 'downloads.bytes',
+    stats.sources,
   )
   return reply.send(Readable.from(paced(reply.raw, pieces, stats)))
 }
@@ -84,6 +85,8 @@ export interface SendStats {
   firstPieceMs: number | null
   /** Time waiting for the source: the reader, from the cache, staging or Discord. */
   sourceMs: number
+  /** The same split by source: each one's bytes and the time waited for them (§16). */
+  sources: ReadSources
   /**
    * Time waiting for the client to take what was sent: the stream holding a
    * piece while the socket is full, and the socket to drain.
@@ -94,7 +97,14 @@ export interface SendStats {
 }
 
 function sendStats(): SendStats {
-  return { startedAt: performance.now(), bytes: 0, firstPieceMs: null, sourceMs: 0, clientMs: 0 }
+  return {
+    startedAt: performance.now(),
+    bytes: 0,
+    firstPieceMs: null,
+    sourceMs: 0,
+    sources: readSources(),
+    clientMs: 0,
+  }
 }
 
 /**
@@ -128,6 +138,11 @@ function logSent(
 ): void {
   const totalMs = performance.now() - stats.startedAt
   const round = (ms: number) => Math.round(ms)
+  const bySource = ({ staging, cache, discord }: ReadSources): ReadSources => ({
+    staging: { bytes: staging.bytes, waitMs: round(staging.waitMs) },
+    cache: { bytes: cache.bytes, waitMs: round(cache.waitMs) },
+    discord: { bytes: discord.bytes, waitMs: round(discord.waitMs) },
+  })
   request.log.info(
     {
       sent: {
@@ -139,6 +154,7 @@ function logSent(
         firstByteMs: stats.firstPieceMs === null ? null : round(stats.firstPieceMs),
         totalMs: round(totalMs),
         waitedForSourceMs: round(stats.sourceMs),
+        sources: bySource(stats.sources),
         waitedForClientMs: round(stats.clientMs),
         mbitPerSecond: totalMs > 0 ? Math.round((stats.bytes * 8) / totalMs / 100) / 10 : null,
       },
@@ -199,7 +215,8 @@ function nothing(): Readable {
 export async function* paced(
   response: Writable,
   source: AsyncIterable<Uint8Array>,
-  stats?: SendStats,
+  // Pacing counts the waits of the source and the client, not the source's split.
+  stats?: Omit<SendStats, 'sources'>,
 ): AsyncGenerator<Uint8Array> {
   const pieces = source[Symbol.asyncIterator]()
   try {

@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { Deliveries } from './deliveries.ts'
+import { readSources } from './reader.ts'
 import type { SendStats } from './send.ts'
 
 function stats(bytes: number, sourceMs: number, clientMs: number): SendStats {
-  return { startedAt: 0, bytes, firstPieceMs: 0, sourceMs, clientMs }
+  return { startedAt: 0, bytes, firstPieceMs: 0, sourceMs, sources: readSources(), clientMs }
 }
 
 describe('how fast a user’s reads of a version go (§10.4)', () => {
