@@ -53,6 +53,7 @@ declare module 'fastify' {
       passwordResets: RateLimiter
       connectionTests: RateLimiter
       linkPlayReports: RateLimiter
+      timelines: RateLimiter
       streamLinks: RateLimiter
       deviceTokens: RateLimiter
       shareGuesses: RateLimiter
@@ -186,6 +187,8 @@ export async function buildApp({
     connectionTests: new RateLimiter(10, 10 * 60_000),
     // Play reports through share links per address (§10.4): logged, and on the graphs.
     linkPlayReports: new RateLimiter(60, 10 * 60_000),
+    // Timeline batches per user or, through share links, per address (§16): a play sends one every 5 s, and at 64 KiB each one address can't push the store's 2 GiB out in less than about 18 hours.
+    timelines: new RateLimiter(300, 10 * 60_000),
     // Stream links made per user or, through share links, per address (§6.7).
     streamLinks: new RateLimiter(30, 10 * 60_000),
     // Device tokens that fail, and pairing codes that don't trade, per address (§7.6).

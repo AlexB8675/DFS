@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto'
 import { Readable } from 'node:stream'
-import { WORKING_LINK, type Executor } from '@dfs/db'
+import { appendTimelineBatch, WORKING_LINK, type Executor } from '@dfs/db'
 import {
   audioQueueSchema,
   coverType,
@@ -14,6 +14,8 @@ import {
   savePositionSchema,
   streamLinkRequestSchema,
   streamLinkSchema,
+  TIMELINE_MAX_BATCH_BYTES,
+  timelineBatchSchema,
   type MediaInfo,
   type MetricName,
   type PlaybackReport,
@@ -217,6 +219,61 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
         )
         recordPlay(app, report)
         return reply.code(204).send()
+      },
+    )
+
+    // A play's timeline (§16), as the page sends it in batches: kept in the
+    // timeline store, never in the log.
+    routes.post(
+      `${place.path}/timeline`,
+      {
+        config: place.config,
+        bodyLimit: TIMELINE_MAX_BATCH_BYTES,
+        schema: { params: fileParams, body: timelineBatchSchema },
+      },
+      async (request, reply) => {
+        if (request.params.token !== undefined) {
+          // No session, so no CSRF token: from DFS's own page, and a few per address.
+          assertOwnOrigin(app, request)
+          withinLimit(app.limits.timelines, `address:${request.ip}`, 'Too many timeline batches.')
+        } else {
+          const auth = requireAuth(request.auth)
+          withinLimit(app.limits.timelines, `user:${auth.user.id}`, 'Too many timeline batches.')
+        }
+        const played = await playedFile(app, request, request.params)
+        const batch = request.body
+        if (!(await isVersionOf(app.db, played.node.id, batch.versionId))) {
+          throw new ApiError(404, 'not_found', 'This version isn’t this file’s.')
+        }
+        const outcome = await appendTimelineBatch(
+          app.db,
+          batch.playId,
+          {
+            kind: 'play',
+            via: played.shareId === null ? 'drive' : 'link',
+            nodeId: played.node.id,
+            versionId: batch.versionId,
+            userId: played.userId,
+            shareId: played.shareId,
+            playId: null,
+            address: request.ip,
+            userAgent: request.headers['user-agent']?.slice(0, 300) ?? null,
+            clientStartedAt: new Date(batch.startedAt),
+            startedAt: null,
+          },
+          {
+            seq: batch.seq,
+            events: batch.events,
+            address: request.ip,
+            sentMs: batch.sentAt,
+          },
+        )
+        if (outcome === 'stored' || outcome === 'duplicate') return reply.code(204).send()
+        request.log.info({ timeline: { playId: batch.playId, outcome } }, 'timeline batch refused')
+        if (outcome === 'not_yours') {
+          throw new ApiError(409, 'not_your_play', 'This play’s timeline belongs to someone else.')
+        }
+        throw new ApiError(413, 'timeline_full', 'This play’s timeline is full.')
       },
     )
 
