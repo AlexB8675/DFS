@@ -8,7 +8,7 @@ import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
 import { ChunkFrameLayout, chunkFrameLength } from '@dfs/crypto'
 import { DiscordBlobStore } from '@dfs/storage'
 import { FakeDiscord } from '@dfs/storage/testing'
-import { readdir, readFile, writeFile } from 'node:fs/promises'
+import { readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { setTimeout } from 'node:timers/promises'
 import type { FastifyInstance } from 'fastify'
@@ -656,6 +656,53 @@ describe('reading from Discord', () => {
     expect(bytes).toEqual(Buffer.from(contentOf(1).subarray(300_000, 300_100)))
     expect(sources.discord.bytes).toBe(100)
     expect(sources.cache).toEqual({ bytes: 0, waitMs: 0 })
+  })
+
+  it('counts a frame refetched over a bad cached copy as Discord’s', async () => {
+    const { chunkSize } = app.config.sizes
+    const session = await storedFile('Counted refetched', 1)
+    const content = Buffer.from(contentOf(1))
+    // The whole chunk read once: kept as one frame, in place of its segments.
+    await readCounted(session.nodeId, 0, chunkSize - 1)
+    await app.frameCache?.idle()
+    const [chunk] = (
+      await app.db.execute<{ frame_sha256: Buffer }>(sql`
+        SELECT frame_sha256 FROM chunks WHERE version_id = ${session.versionId}`)
+    ).rows
+    if (!chunk) throw new Error('No chunk.')
+    const hex = chunk.frame_sha256.toString('hex')
+    const file = path.join(app.config.cacheDir, hex.slice(0, 2), `${hex}.frame`)
+    // Kept once the read has ended, on its way to the disk.
+    await vi.waitFor(async () => {
+      await app.frameCache?.idle()
+      await readFile(file)
+    })
+    const kept = await readFile(file)
+    kept[100] = (kept[100] ?? 0) ^ 1
+    await writeFile(file, kept)
+    // The cache holds the frame as far as it knows, but its copy fails its
+    // SHA-256: it is read from Discord again, and those bytes are Discord's.
+    discord.cdnRequests = 0
+    const spoiled = await readCounted(session.nodeId, 1000, 1999)
+    expect(spoiled.bytes).toEqual(content.subarray(1000, 2000))
+    expect(discord.cdnRequests).toBe(1)
+    expect(spoiled.sources.discord.bytes).toBe(1000)
+    expect(spoiled.sources.discord.waitMs).toBeGreaterThan(0)
+    expect(spoiled.sources.cache).toEqual({ bytes: 0, waitMs: 0 })
+
+    // Kept again, and then gone from the disk: the same.
+    await app.frameCache?.idle()
+    await readFile(file)
+    const again = await readCounted(session.nodeId, 1000, 1999)
+    expect(again.sources.cache.bytes).toBe(1000)
+    expect(again.sources.discord.bytes).toBe(0)
+    await rm(file)
+    discord.cdnRequests = 0
+    const gone = await readCounted(session.nodeId, 1000, 1999)
+    expect(gone.bytes).toEqual(content.subarray(1000, 2000))
+    expect(discord.cdnRequests).toBe(1)
+    expect(gone.sources.discord.bytes).toBe(1000)
+    expect(gone.sources.cache.bytes).toBe(0)
   })
 
   it('charges a read only for the time it took to arrive, not the client’s', async () => {

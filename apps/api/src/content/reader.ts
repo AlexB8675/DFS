@@ -327,10 +327,7 @@ async function readChunk(
     await streamSegments(app, versionId, key, chunk, layout, range)
     return
   }
-  // Decided as the read begins: a frame the cache holds then is the cache's,
-  // one that is fetched through it is Discord's.
-  const source = frameSource(app, chunk)
-  const frame = await checkedFrame(app, versionId, chunk, range.signal)
+  const { frame, source } = await checkedFrame(app, versionId, chunk, range.signal)
   if (!layout) {
     const plaintext = await openFrame(key, frame, context)
     if (plaintext.length !== chunk.plain_size) {
@@ -350,17 +347,6 @@ async function readChunk(
     )
     range.emit(wanted(layout, index, plaintext, range), source)
   }
-}
-
-/**
- * Where a chunk read whole comes from: its file in staging, or the pack it is
- * sealed in there, until its blob is stored; after, the frame cache if it
- * holds the frame, else the blob store. A store with no frame cache (local
- * development) is counted as Discord.
- */
-function frameSource(app: FastifyInstance, chunk: ChunkLocation): ReadSource {
-  if (chunk.staged_path || chunk.blob_staged_path) return 'staging'
-  return app.frameCache?.has(chunk.frame_sha256) ? 'cache' : 'discord'
 }
 
 /** A stored chunk Discord's CDN can stream: not in staging, nor already in the frame cache. */
@@ -764,26 +750,39 @@ function blobOf(chunk: ChunkLocation): StoredBlob {
   }
 }
 
-/** A chunk's frame, checked against its SHA-256. Stored ones come through the frame cache. */
+/**
+ * A chunk's frame, checked against its SHA-256, with the source that served
+ * it (§16): staging for one still there (its file, or its place in a pack);
+ * for a stored one read through the frame cache, the cache if it gave a good
+ * copy, Discord if the cache had to read it again from the blob store (a copy
+ * that failed its check, or had gone from disk, is such a read); and without a
+ * cache, the blob store (Discord; the local store in development). A reader
+ * that joins another's read of the same frame is counted as the cache's.
+ */
 async function checkedFrame(
   app: FastifyInstance,
   versionId: string,
   chunk: ChunkLocation,
   signal: AbortSignal | undefined,
-): Promise<Uint8Array> {
+): Promise<{ frame: Uint8Array; source: ReadSource }> {
+  // Set once the cache has had to ask for the frame.
+  const reading = { fetched: false }
   // Through the cache, the fetch has its own signal: the cache gives up on it
   // only once every reader waiting for the frame has.
   const read = async (fetchSignal: AbortSignal | undefined) => {
+    reading.fetched = true
     const frame = await readFrame(app, versionId, chunk, fetchSignal)
     if (!Buffer.from(await sha256(frame)).equals(chunk.frame_sha256)) {
       throw new ContentError(`Chunk ${String(chunk.idx)} of ${versionId} is corrupt.`)
     }
     return frame
   }
-  const stored = !chunk.staged_path && !chunk.blob_staged_path && chunk.blob_state === 'stored'
-  return stored && app.frameCache
-    ? app.frameCache.load(chunk.frame_sha256, read, signal)
-    : read(signal)
+  const staged = !!chunk.staged_path || !!chunk.blob_staged_path
+  if (staged || chunk.blob_state !== 'stored' || !app.frameCache) {
+    return { frame: await read(signal), source: staged ? 'staging' : 'discord' }
+  }
+  const frame = await app.frameCache.load(chunk.frame_sha256, read, signal)
+  return { frame, source: reading.fetched ? 'discord' : 'cache' }
 }
 
 async function chunkLocations(
