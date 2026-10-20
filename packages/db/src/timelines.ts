@@ -289,7 +289,9 @@ export async function listTimelines(db: Executor, limit: number): Promise<Timeli
 
 /**
  * One timeline with its batches in `seq` order and, for a play, the stream
- * sessions that served it, oldest first; null if there is none.
+ * sessions that served it, oldest first; null if there is none. They are the
+ * play's own reader's: a play ID comes from the page, so another reader's
+ * session naming it isn't its.
  */
 export async function readTimeline(db: Executor, id: string): Promise<TimelineRead | null> {
   const [timeline] = await selectTimelines(db, sql`WHERE t.id = ${id}`)
@@ -298,7 +300,10 @@ export async function readTimeline(db: Executor, id: string): Promise<TimelineRe
     timeline.kind === 'play'
       ? await selectTimelines(
           db,
-          sql`WHERE t.kind = 'stream' AND t.play_id = ${id} ORDER BY t.started_at, t.id`,
+          sql`WHERE t.kind = 'stream' AND t.play_id = ${id}
+            AND t.user_id IS NOT DISTINCT FROM ${timeline.userId}
+            AND t.share_id IS NOT DISTINCT FROM ${timeline.shareId}
+            ORDER BY t.started_at, t.id`,
         )
       : []
   const batches = await selectBatches(db, [timeline.id, ...sessions.map((session) => session.id)])

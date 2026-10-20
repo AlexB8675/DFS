@@ -384,12 +384,14 @@ describe('play timelines (DESIGN §16)', () => {
     await appendTimelineBatch(db, play, owned, { ...batch(1, second), address: '198.51.100.20' })
     await appendTimelineBatch(db, play, owned, batch(0, first))
 
+    // The play's own reader's sessions: same user, as the server keeps readers apart.
     const session = (playId: string | null, startedAt: string) =>
       owner({
         kind: 'stream',
         via: 'stream',
         nodeId: owned.nodeId,
         versionId: owned.versionId,
+        userId: owned.userId,
         playId,
         startedAt: new Date(startedAt),
       })
@@ -463,6 +465,64 @@ describe('play timelines (DESIGN §16)', () => {
     await appendTimelineBatch(db, quiet, owner(), batch(0))
     expect((await readTimeline(db, quiet))?.sessions).toEqual([])
     expect(await readTimeline(db, randomUUID())).toBeNull()
+  })
+
+  it('links only the play’s own reader’s sessions', async () => {
+    const sessionIds = async (playId: string) =>
+      (await readTimeline(db, playId))?.sessions.map((found) => found.timeline.id)
+    const stream = (playId: string, fields: Partial<TimelineOwner>, startedAt: string) =>
+      owner({
+        kind: 'stream',
+        via: 'stream',
+        playId,
+        startedAt: new Date(startedAt),
+        ...fields,
+      })
+
+    // A drive play: a session naming it for another user, or for a link's viewer, isn't its.
+    const drivePlay = randomUUID()
+    const viewer = owner()
+    await appendTimelineBatch(db, drivePlay, viewer, batch(0))
+    const mine = randomUUID()
+    const anotherUser = randomUUID()
+    const aLink = randomUUID()
+    const sessions = [
+      [mine, { userId: viewer.userId }],
+      [anotherUser, { userId: randomUUID() }],
+      [aLink, { userId: null, shareId: randomUUID() }],
+    ] as const
+    for (const [index, [id, fields]] of sessions.entries()) {
+      await appendTimelineBatch(
+        db,
+        id,
+        stream(drivePlay, fields, `2026-10-19T08:3${String(index)}:00.000Z`),
+        { ...batch(0), sentMs: null },
+      )
+    }
+    expect(await sessionIds(drivePlay)).toEqual([mine])
+
+    // A link play has no user: another link's session, or a signed-in user's, isn't its.
+    const linkPlay = randomUUID()
+    const shareId = randomUUID()
+    const viewerOfLink = owner({ via: 'link', userId: null, shareId })
+    await appendTimelineBatch(db, linkPlay, viewerOfLink, batch(0))
+    const theLinks = randomUUID()
+    const anotherLink = randomUUID()
+    const aUser = randomUUID()
+    const linkSessions = [
+      [theLinks, { userId: null, shareId }],
+      [anotherLink, { userId: null, shareId: randomUUID() }],
+      [aUser, { userId: randomUUID(), shareId }],
+    ] as const
+    for (const [index, [id, fields]] of linkSessions.entries()) {
+      await appendTimelineBatch(
+        db,
+        id,
+        stream(linkPlay, fields, `2026-10-19T08:3${String(index)}:00.000Z`),
+        { ...batch(0), sentMs: null },
+      )
+    }
+    expect(await sessionIds(linkPlay)).toEqual([theLinks])
   })
 
   it('drops timelines older than the retention, with their batches', async () => {
