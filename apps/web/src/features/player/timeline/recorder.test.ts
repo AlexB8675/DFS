@@ -198,6 +198,26 @@ describe('Timeline', () => {
     expect(calls[2]?.batch.events).toEqual([{ type: 'visibility', hidden: false, t: 5000 }])
   })
 
+  it('does not send a failed batch again at every event past 16 KiB', async () => {
+    const { send, calls, state } = fakeSend()
+    state.answer = 'retry'
+    const timeline = newTimeline(send)
+    for (let i = 0; i < 45; i++) timeline.record(big(i))
+    await timeline.flush()
+    expect(calls).toHaveLength(1)
+
+    // More than 16 KiB is kept again, but the failed batch waits for the timer.
+    for (let i = 45; i < 200; i++) timeline.record(big(i))
+    await timeline.flush()
+    expect(calls).toHaveLength(2)
+    for (let i = 200; i < 260; i++) timeline.record(big(i))
+    expect(calls).toHaveLength(2)
+
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(calls).toHaveLength(3)
+    expect(calls[2]?.batch.seq).toBe(0)
+  })
+
   it('stops for good on a refusal', async () => {
     const { send, calls } = fakeSend({ script: ['refused'] })
     const timeline = newTimeline(send)

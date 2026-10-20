@@ -113,7 +113,8 @@ export class Timeline {
     this.kept.push({ event: parsed.data, bytes })
     this.keptBytes += bytes
     this.trim()
-    if (this.keptBytes >= FLUSH_AT_BYTES) void this.flush()
+    // A batch waiting to go again waits for the timer, so an outage isn't retried at every event.
+    if (this.keptBytes >= FLUSH_AT_BYTES && this.pending.length === 0) void this.flush()
   }
 
   /** Batches carry this version; nothing is sent before it is set. */
