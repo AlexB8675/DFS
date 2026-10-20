@@ -158,6 +158,24 @@ describe('printTimeline', () => {
     expect(text).toContain('client start unknown')
   })
 
+  it('names a deleted account once in the header', () => {
+    const text = printTimeline({
+      timeline: row({ username: null, userId: 'u1' }),
+      batches: [batch(0, [opened])],
+      sessions: [],
+    })
+    expect(lines(text)).toContain('viewer user u1')
+    expect(text).not.toContain('user user')
+    // A named viewer and a link's keep their form.
+    expect(lines(printTimeline(playOf([opened])))).toContain('viewer alex')
+    const link = printTimeline({
+      timeline: row({ username: null, userId: null, shareId: 'abc123' }),
+      batches: [batch(0, [opened])],
+      sessions: [],
+    })
+    expect(lines(link)).toContain('viewer link abc123')
+  })
+
   it('orders events by their time across batches, ties in the order they came', () => {
     const text = printTimeline({
       timeline: row(),

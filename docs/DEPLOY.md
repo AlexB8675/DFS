@@ -169,10 +169,11 @@ if lost.
 The API keeps a timeline of each play of a video, from the page's side, and a
 log of each stream the server served it with (DESIGN §16), so a slow or failed
 play can be read afterwards. They are kept 28 days, and 2 GiB at most, the
-least recently written going first. `dfs timelines` lists the newest, and
-`dfs timeline <id>` prints one in full: a play's events in order, with the
-server's own reads of the video among them, placed on the play's clock by the
-server's. `--json` prints the raw events instead.
+least recently written going first. `dfs timelines` lists the newest plays
+(a play's streams are under it, not listed again; one whose page sent no
+timeline is listed), and `dfs timeline <id>` prints one in full: a play's
+events in order, with the server's own reads of the video among them, placed
+on the play's clock by the server's. `--json` prints the raw events instead.
 
 ```bash
 docker compose exec api node apps/api/src/cli.ts timelines --limit 20

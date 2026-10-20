@@ -76,7 +76,7 @@ function headerLines(timeline: TimelineRow): string[] {
     `${timeline.kind}/${timeline.via}  ${timeline.id}`,
     `file ${fileName(timeline)}  node ${timeline.nodeId}`,
     `version ${timeline.versionId}`,
-    `user ${viewer(timeline)}`,
+    `viewer ${viewer(timeline)}`,
     `address ${safe(timeline.address)}`,
     `agent ${timeline.userAgent === null ? 'unknown' : safe(timeline.userAgent)}`,
     timeline.clientStartedAt === null

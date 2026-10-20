@@ -63,8 +63,9 @@ import { createUser } from './users/users.ts'
 //
 // `timelines` and `timeline` read the play timelines and stream sessions the
 // API keeps for 28 days (§16): the list, newest first, up to --limit (1 to
-// 1000, 50 by default), and one in full, with --json as stored. A play's
-// timeline puts its stream sessions on its clock, by the server's.
+// 1000, 50 by default), of plays and the sessions no play of theirs holds,
+// and one in full, with --json as stored. A play's timeline puts its stream
+// sessions on its clock, by the server's.
 
 const USAGE =
   'Usage: dfs owner [--username <name>] | dfs setup | dfs master-key <file> | dfs recover --into <database-url> [--from discord|local] [--instance <id>] [--key-file <file>] | dfs drill [--from discord|local] [--instance <id>] [--key-file <file>] | dfs reset-storage --instance <id> | dfs timelines [--limit <n>] | dfs timeline <id> [--json]'

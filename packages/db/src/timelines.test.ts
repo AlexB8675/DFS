@@ -321,6 +321,8 @@ describe('play timelines (DESIGN §16)', () => {
       batch(0),
     )
     const shareId = randomUUID()
+    // Its play never sent a timeline, so the session is listed (a played one's would sit under it).
+    const absent = randomUUID()
     await appendTimelineBatch(
       db,
       newest,
@@ -329,7 +331,7 @@ describe('play timelines (DESIGN §16)', () => {
         via: 'link',
         userId: null,
         shareId,
-        playId: oldest,
+        playId: absent,
         userAgent: null,
         startedAt: began(8),
       }),
@@ -358,7 +360,7 @@ describe('play timelines (DESIGN §16)', () => {
     })
     expect(listed[0]).toMatchObject({
       kind: 'stream',
-      playId: oldest,
+      playId: absent,
       via: 'link',
       userId: null,
       shareId,
@@ -373,6 +375,49 @@ describe('play timelines (DESIGN §16)', () => {
 
     expect((await listTimelines(db, 2)).map((row) => row.id)).toEqual([newest, middle])
     expect(await listTimelines(db, 0)).toEqual([])
+  })
+
+  it('leaves out the sessions a listed play holds', async () => {
+    const [play, held, orphan, loose, other] = [
+      randomUUID(),
+      randomUUID(),
+      randomUUID(),
+      randomUUID(),
+      randomUUID(),
+    ]
+    const reader = owner({ startedAt: new Date('2026-10-19T08:30:00.000Z') })
+    const session = (playId: string | null, minute: number, fields: Partial<TimelineOwner> = {}) =>
+      owner({
+        kind: 'stream',
+        via: 'stream',
+        nodeId: reader.nodeId,
+        versionId: reader.versionId,
+        userId: reader.userId,
+        playId,
+        startedAt: new Date(`2026-10-19T08:${String(31 + minute)}:00.000Z`),
+        ...fields,
+      })
+    const sent = (events: readonly unknown[] = [{ type: 'opened', t: 0 }]) => ({
+      ...batch(0, events),
+      sentMs: null,
+    })
+    await appendTimelineBatch(db, play, reader, batch(0))
+    // P's own session is under P (`dfs timeline P`), so it isn't listed again.
+    await appendTimelineBatch(db, held, session(play, 0), sent())
+    // T names a play whose page never sent a timeline, U names none: both stay listed.
+    await appendTimelineBatch(db, orphan, session(randomUUID(), 1), sent())
+    await appendTimelineBatch(db, loose, session(null, 2), sent())
+    // Naming P as another reader, a session isn't under P (reads link only the play's own
+    // reader's), so it stays listed.
+    await appendTimelineBatch(db, other, session(play, 3, { userId: randomUUID() }), sent())
+
+    expect((await readTimeline(db, play))?.sessions.map((found) => found.timeline.id)).toEqual([
+      held,
+    ])
+    expect((await listTimelines(db, 10)).map((row) => row.id)).toEqual([other, loose, orphan, play])
+    // The limit counts what is listed: the held session takes no place.
+    expect((await listTimelines(db, 4)).map((row) => row.id)).toEqual([other, loose, orphan, play])
+    expect((await listTimelines(db, 1)).map((row) => row.id)).toEqual([other])
   })
 
   it('reads a play with its stream sessions', async () => {

@@ -282,9 +282,23 @@ async function selectBatches(
   return byTimeline
 }
 
-/** The `limit` most recently started timelines, newest first. */
+/**
+ * The `limit` most recently started timelines, newest first: plays and the
+ * sessions no play of theirs holds. A session that a listed play holds (the
+ * play's own reader's, as `readTimeline` links them) shows under it, so it
+ * takes no place in the list or its limit. One naming a play whose page never
+ * sent a timeline, or another reader's play, or no play, is listed.
+ */
 export async function listTimelines(db: Executor, limit: number): Promise<TimelineRow[]> {
-  return selectTimelines(db, sql`ORDER BY t.started_at DESC, t.id DESC LIMIT ${limit}`)
+  return selectTimelines(
+    db,
+    sql`WHERE NOT (t.kind = 'stream' AND t.play_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM timelines p
+        WHERE p.id = t.play_id AND p.kind = 'play'
+          AND p.user_id IS NOT DISTINCT FROM t.user_id
+          AND p.share_id IS NOT DISTINCT FROM t.share_id))
+      ORDER BY t.started_at DESC, t.id DESC LIMIT ${limit}`,
+  )
 }
 
 /**
