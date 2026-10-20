@@ -250,11 +250,65 @@ describe('stream sessions (§6.2, §16)', () => {
     await sessions.flush()
     const events = served(harness.calls[0])
     const at = (from: number) => events.find((event) => event.from === from)
-    expect(at(0)).toMatchObject({ seek: false, gapMs: null, to: 1_000_000_000, bytes: 65_536 })
-    expect(at(65_536)).toMatchObject({ seek: false, gapMs: 4000 })
-    expect(at(5_000_000)).toMatchObject({ seek: true, gapMs: null })
-    expect(at(5_300_000)).toMatchObject({ seek: false, gapMs: 10 })
-    expect(at(66_536)).toMatchObject({ seek: true, gapMs: 7 })
+    expect(at(0)).toMatchObject({
+      seek: false,
+      rewindBytes: null,
+      gapMs: null,
+      to: 1_000_000_000,
+      bytes: 65_536,
+    })
+    expect(at(65_536)).toMatchObject({ seek: false, rewindBytes: null, gapMs: 4000 })
+    expect(at(5_000_000)).toMatchObject({ seek: true, rewindBytes: null, gapMs: null })
+    expect(at(5_300_000)).toMatchObject({ seek: false, rewindBytes: null, gapMs: 10 })
+    // B stopped at 67 536, a thousand bytes on from where this one starts.
+    expect(at(66_536)).toMatchObject({ seek: true, rewindBytes: 1000, gapMs: 7 })
+  })
+
+  it('says how far back a reopened read starts within what was served', async () => {
+    const harness = setup()
+    // `bytes=0-` closes after 5 000 000 bytes.
+    serve(harness, { from: 0 }, 5_000_000)
+    // The client got to 4 600 000 only, so its new read starts 400 000 before where the server stopped.
+    serve(harness, { from: 4_600_000 })
+    // Outside everything served: a seek, but not back inside what was sent.
+    serve(harness, { from: 9_000_000 })
+    // Where the first stopped: it carries on.
+    serve(harness, { from: 5_000_000 })
+
+    await harness.sessions.flush()
+    expect(
+      served(harness.calls[0]).map((event) => [event.from, event.seek, event.rewindBytes]),
+    ).toEqual([
+      [0, false, null],
+      [4_600_000, true, 400_000],
+      [9_000_000, true, null],
+      [5_000_000, false, null],
+    ])
+  })
+
+  it('takes the nearest end of what was served, running reads included', async () => {
+    const harness = setup()
+    serve(harness, { from: 0 }, 5_000_000)
+    // Two more stopped ranges around 4 900 000, and a running read that has got to 4 950 000.
+    serve(harness, { from: 4_000_000 }, 1_000_000)
+    serve(harness, { from: 4_800_000 }, 130_000)
+    const sent = { bytes: 0 }
+    const running = harness.sessions.open(request({ from: 4_700_000 }), progressOf(sent))
+    sent.bytes = 250_000
+    // 4 900 000 is inside the first three ranges (ends 5 000 000, 5 000 000, 4 930 000) and the
+    // running read's (4 700 000 to 4 950 000): the nearest end is the stopped one at 4 930 000.
+    serve(harness, { from: 4_900_000 })
+    // 4 940 000 is held only by the first two and the running read: nearest is the latter's 4 950 000.
+    serve(harness, { from: 4_940_000 })
+    running.close(result({ bytes: 250_000 }))
+
+    await harness.sessions.flush()
+    const events = served(harness.calls[0])
+    const at = (from: number) => events.find((event) => event.from === from)
+    expect(at(4_900_000)).toMatchObject({ seek: true, rewindBytes: 30_000 })
+    expect(at(4_940_000)).toMatchObject({ seek: true, rewindBytes: 10_000 })
+    // The running read itself began inside the first two ranges, 300 000 before their ends.
+    expect(at(4_700_000)).toMatchObject({ seek: true, rewindBytes: 300_000 })
   })
 
   it('counts a read from where a running one has got to as no seek', async () => {
@@ -272,13 +326,17 @@ describe('stream sessions (§6.2, §16)', () => {
     running.close(result({ bytes: 900 }))
 
     await harness.sessions.flush()
-    expect(served(harness.calls[0]).map((event) => [event.from, event.seek])).toEqual([
-      [0, false],
-      [7500, false],
-      [7400, true],
+    expect(
+      served(harness.calls[0]).map((event) => [event.from, event.seek, event.rewindBytes]),
+    ).toEqual([
+      [0, false, null],
+      [7500, false, null],
+      // Inside what the running read has sent so far (7000 to 7500).
+      [7400, true, 100],
       // The 7500 stopped at is remembered, so a read from there again is not a seek either.
-      [7500, false],
-      [7000, true],
+      [7500, false, null],
+      // It opened when only the first 1000 bytes had been served: nothing held it.
+      [7000, true, null],
     ])
   })
 
@@ -315,6 +373,7 @@ describe('stream sessions (§6.2, §16)', () => {
       totalMs: 100,
       clientMs: 0,
       seek: false,
+      rewindBytes: null,
       gapMs: null,
     })
     expect(first[0]?.sources).toEqual(readSources())

@@ -257,11 +257,13 @@ export async function buildApp({
   // begins to close, not in `onClose`: Fastify runs that once every response
   // has ended, a video read in play is almost always still open, and the
   // process exits after its grace, so the last reads would never be written.
+  // They go last, after the journal's last flush: that matters more, and a
+  // slow timeline store must not eat into the grace before it.
   app.addHook('preClose', async () => {
     events.endStreams()
-    await savingSessions.stop()
     await checks.stop()
     await journalFlusher.stop()
+    await savingSessions.stop()
   })
   app.addHook('onClose', async () => {
     await events.stop()

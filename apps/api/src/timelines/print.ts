@@ -122,7 +122,10 @@ function isFigures(value: unknown): boolean {
   return record !== null && isNumber(record.bytes) && isNumber(record.waitMs)
 }
 
-/** The event as a `served` one, if it has every field the printer reads. */
+/**
+ * The event as a `served` one, if it has every field the printer reads. One
+ * stored before `rewindBytes` existed has none, which reads as null.
+ */
 function asServed(record: Record<string, unknown>): ServedEvent | null {
   const sources = asRecord(record.sources)
   const valid =
@@ -136,6 +139,9 @@ function asServed(record: Record<string, unknown>): ServedEvent | null {
     isNumber(record.clientMs) &&
     (record.firstByteMs === null || isNumber(record.firstByteMs)) &&
     (record.gapMs === null || isNumber(record.gapMs)) &&
+    (record.rewindBytes === undefined ||
+      record.rewindBytes === null ||
+      isNumber(record.rewindBytes)) &&
     typeof record.finished === 'boolean' &&
     typeof record.failed === 'boolean' &&
     typeof record.seek === 'boolean' &&
@@ -143,7 +149,12 @@ function asServed(record: Record<string, unknown>): ServedEvent | null {
     isFigures(sources.staging) &&
     isFigures(sources.cache) &&
     isFigures(sources.discord)
-  return valid ? (record as unknown as ServedEvent) : null
+  return valid
+    ? {
+        ...(record as unknown as ServedEvent),
+        rewindBytes: isNumber(record.rewindBytes) ? record.rewindBytes : null,
+      }
+    : null
 }
 
 /** A read the server answered, on one line; `address` only where it is new to the session. */
@@ -163,11 +174,25 @@ function servedFields(read: ServedEvent, showAddress: boolean): string {
   }
   parts.push(`client=${String(read.clientMs)}ms`)
   if (read.seek) parts.push('seek')
+  if (read.seek && read.rewindBytes !== null) parts.push(`rewind=${size(read.rewindBytes)}`)
   if (read.gapMs !== null) parts.push(`gap=${String(read.gapMs)}ms`)
   if (!read.finished) parts.push('unfinished')
   if (read.failed) parts.push('failed')
   if (showAddress) parts.push(`addr=${safe(read.address)}`)
   return parts.join(' ')
+}
+
+/**
+ * A timeline read as JSON, for `dfs timeline --json`. `JSON.stringify` leaves
+ * DEL and the C1 controls (U+007F to U+009F, which include U+009B, a control
+ * sequence's start) as they are, and a terminal may act on them; they are
+ * written as escapes, which parse back to the same text.
+ */
+export function printTimelineJson(read: TimelineRead): string {
+  return JSON.stringify(read, null, 2).replace(
+    /[\u007f-\u009f]/g,
+    (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`,
+  )
 }
 
 /** An event, placed on a clock: `at` is its time in milliseconds, NaN where unreadable. */

@@ -22,7 +22,7 @@ export const SESSION_IDLE_MS = 120_000
 export const FLUSH_EVERY_MS = 5000
 /** A session's events waiting to be written; past this, the oldest are dropped, counted. */
 export const MAX_PENDING_EVENTS = 5000
-/** Where a session's reads stopped, kept to tell a seek from a read that carries on: the latest. */
+/** The ranges a session's reads served, kept to tell a seek from a read that carries on, and how far back one starts: the latest. */
 const MAX_STOPS = 1000
 /** Sessions held in memory at once, each a timeline once written; past it, no new one begins. */
 export const MAX_LIVE_SESSIONS = 2000
@@ -71,6 +71,12 @@ interface Running {
   end: (result: ServedResult) => void
 }
 
+/** The bytes a read sent: `start` to `end`, the end not included. */
+interface Served {
+  start: number
+  end: number
+}
+
 interface Batch {
   seq: number
   events: StreamEvent[]
@@ -86,8 +92,8 @@ interface Session {
   address: string
   requests: number
   running: Set<Running>
-  /** Where closed requests stopped (`from` + the bytes they sent), oldest first. */
-  stops: Set<number>
+  /** What closed requests sent (`from` to `from` + their bytes), by their range, oldest first. */
+  sent: Map<string, Served>
   lastClosedAt: number | null
   /** The last open or close. */
   lastActivity: number
@@ -166,11 +172,18 @@ export class StreamSessions {
 
     // A read is a seek unless it carries on from where another stopped, or has got to. What it
     // asked for (`to`) says nothing: players ask for `bytes=X-`, which runs to the file's end.
-    let carriesOn = session.stops.has(request.from)
-    for (const other of session.running) {
-      if (other.from + other.progress().bytes === request.from) carriesOn = true
+    // A seek that starts inside what was served says how far before its end: a client that
+    // reconnects at what it actually received starts a little behind what the server sent.
+    let carriesOn = false
+    let rewind: number | null = null
+    for (const { start, end } of servedRanges(session)) {
+      if (end === request.from) carriesOn = true
+      else if (start <= request.from && request.from < end) {
+        if (rewind === null || end - request.from < rewind) rewind = end - request.from
+      }
     }
     const seek = session.requests > 0 && !carriesOn
+    const rewindBytes = seek ? rewind : null
     const gapMs =
       session.running.size === 0 && session.lastClosedAt !== null
         ? Math.round(openedAt - session.lastClosedAt)
@@ -193,7 +206,7 @@ export class StreamSessions {
       session.running.delete(running)
       session.lastClosedAt = closedAt
       session.lastActivity = closedAt
-      this.#remember(session, request.from + result.bytes)
+      this.#remember(session, { start: request.from, end: request.from + result.bytes })
       if (session.stopped) return
       session.pending.push({
         type: 'served',
@@ -214,6 +227,7 @@ export class StreamSessions {
         },
         clientMs: Math.round(result.clientMs),
         seek,
+        rewindBytes,
         gapMs,
       })
       if (session.pending.length > MAX_PENDING_EVENTS) {
@@ -322,7 +336,7 @@ export class StreamSessions {
       address: request.address,
       requests: 0,
       running: new Set(),
-      stops: new Set(),
+      sent: new Map(),
       lastClosedAt: null,
       lastActivity: now,
       pending: [],
@@ -336,13 +350,14 @@ export class StreamSessions {
     return session
   }
 
-  #remember(session: Session, position: number): void {
+  #remember(session: Session, served: Served): void {
     // Seen again, it is the latest: the oldest go first.
-    session.stops.delete(position)
-    session.stops.add(position)
-    if (session.stops.size > MAX_STOPS) {
-      const [oldest] = session.stops
-      if (oldest !== undefined) session.stops.delete(oldest)
+    const key = `${String(served.start)}-${String(served.end)}`
+    session.sent.delete(key)
+    session.sent.set(key, served)
+    if (session.sent.size > MAX_STOPS) {
+      const [oldest] = session.sent.keys()
+      if (oldest !== undefined) session.sent.delete(oldest)
     }
   }
 
@@ -416,6 +431,14 @@ export class StreamSessions {
     }
     this.#sessions.delete(session)
     if (this.#byKey.get(session.key) === session) this.#byKey.delete(session.key)
+  }
+}
+
+/** What the session's reads have sent: the closed ones' ranges, then the running ones' so far. */
+function* servedRanges(session: Session): Generator<Served> {
+  yield* session.sent.values()
+  for (const read of session.running) {
+    yield { start: read.from, end: read.from + read.progress().bytes }
   }
 }
 

@@ -270,6 +270,14 @@ export interface ServedEvent {
   sources: { staging: SourceFigures; cache: SourceFigures; discord: SourceFigures }
   clientMs: number
   seek: boolean
+  /**
+   * For a seek that starts inside what this session already served: how far
+   * before the end of that served range it starts. A few hundred KB to a few MB
+   * right after a read that broke off is a reconnect at what the client
+   * actually received; a seek by the viewer is usually further. Null for a read
+   * that carries on, or that starts outside anything served.
+   */
+  rewindBytes: number | null
   gapMs: number | null
 }
 

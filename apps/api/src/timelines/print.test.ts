@@ -1,7 +1,7 @@
 import type { BatchRow, TimelineRead, TimelineRow } from '@dfs/db'
 import type { ServedEvent } from '@dfs/shared'
 import { describe, expect, it } from 'vitest'
-import { printTimeline, printTimelineList } from './print.ts'
+import { printTimeline, printTimelineJson, printTimelineList } from './print.ts'
 
 // What an admin reads of a play's timeline and its stream sessions (DESIGN.md
 // §16): the printers are pure, so these build the rows by hand.
@@ -65,6 +65,7 @@ function served(overrides: Partial<ServedEvent> = {}): ServedEvent {
     },
     clientMs: 12,
     seek: false,
+    rewindBytes: null,
     gapMs: null,
     ...overrides,
   }
@@ -326,6 +327,29 @@ describe('printTimeline', () => {
     expect(line).not.toContain('failed')
   })
 
+  it('says how far back a seek starts within what was served, where it knows', () => {
+    const lineOf = (event: unknown): string | undefined =>
+      lines(printTimeline(withSession([event]))).find((l) => l.includes('server served'))
+    const back = lineOf(served({ seek: true, rewindBytes: 400_000 }))
+    expect(back).toMatch(/ seek rewind=390\.6KiB( |$)/)
+    // A bigger one in MiB, like the sizes of the line.
+    expect(lineOf(served({ seek: true, rewindBytes: 3 * 1024 * 1024 }))).toMatch(
+      / seek rewind=3\.0MiB( |$)/,
+    )
+    // A seek that starts outside what was served, or a read that carries on, has none to say.
+    const outside = lineOf(served({ seek: true, rewindBytes: null }))
+    expect(outside).toMatch(/ seek( |$)/)
+    expect(outside).not.toContain('rewind')
+    expect(lineOf(served({ seek: false, rewindBytes: null }))).not.toContain('rewind')
+    // Events stored before the field existed still print.
+    const older: Record<string, unknown> = { ...served({ seek: true }) }
+    delete older.rewindBytes
+    const old = lineOf(older)
+    expect(old).toContain('server served 0-1048575 206 ')
+    expect(old).toMatch(/ seek( |$)/)
+    expect(old).not.toContain('rewind')
+  })
+
   it('marks an unfinished or failed read, and leaves out a rate it can’t work out', () => {
     const text = printTimeline(
       withSession([
@@ -396,6 +420,30 @@ describe('printTimeline', () => {
       sessions: [],
     })
     expect(text).toContain('No events.')
+  })
+})
+
+describe('printTimelineJson', () => {
+  it('spells out DEL and the C1 controls, and still parses back to the same object', () => {
+    // U+009B is the C1 form of the escape that starts a control sequence; DEL and both ends of
+    // the C1 range are escaped with it, and the no-break space just past the range is left alone.
+    const agent = 'Mozilla\u009b[31m \u007f \u0080 \u009f \u00a0 é'
+    const read: TimelineRead = {
+      timeline: row({ userAgent: agent }),
+      batches: [batch(0, [{ type: 'error', t: 5, from: 'page', code: null, message: agent }])],
+      sessions: [],
+    }
+    const text = printTimelineJson(read)
+    expect(text).not.toMatch(/[\u007f-\u009f]/)
+    expect(text).toContain('Mozilla\\u009b[31m \\u007f \\u0080 \\u009f \u00a0 é')
+    expect(JSON.parse(text)).toEqual(JSON.parse(JSON.stringify(read)))
+    const parsed = JSON.parse(text) as { timeline: { userAgent: string } }
+    expect(parsed.timeline.userAgent).toBe(agent)
+  })
+
+  it('prints as JSON.stringify does, indented, for text without them', () => {
+    const read = playOf([opened])
+    expect(printTimelineJson(read)).toBe(JSON.stringify(read, null, 2))
   })
 })
 

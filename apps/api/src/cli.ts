@@ -23,7 +23,7 @@ import { endUserSessions } from './auth/sessions.ts'
 import { setUpDiscord } from './discord-setup.ts'
 import { drillCommand, printReport, recoverCommand } from './recover/commands.ts'
 import { resetStorage, storageCounts, type ResetOptions } from './reset-storage.ts'
-import { printTimeline, printTimelineList } from './timelines/print.ts'
+import { printTimeline, printTimelineJson, printTimelineList } from './timelines/print.ts'
 import { createUser } from './users/users.ts'
 
 // `dfs`: admin commands run on the server (DESIGN.md §4, §7.1).
@@ -342,7 +342,7 @@ async function reset(db: Database, config: Config, instance: string): Promise<vo
 async function timeline(db: Database, id: string, json: boolean): Promise<void> {
   const read = await readTimeline(db, id)
   if (!read) throw new Error(`No timeline ${id}.`)
-  console.info(json ? JSON.stringify(read, null, 2) : printTimeline(read))
+  console.info(json ? printTimelineJson(read) : printTimeline(read))
 }
 
 async function ask(question: string): Promise<string> {
