@@ -31,6 +31,7 @@ import {
   sortFieldSchema,
   sortOrderSchema,
   streamLinkRequestSchema,
+  timelineBatchSchema,
   unlockShareSchema,
   unlockVaultSchema,
   updateChannelSchema,
@@ -418,6 +419,17 @@ export const handlers = [
         async () => {
           // Checked as the API checks it, and then forgotten: the mock keeps no logs.
           playbackReportSchema.parse(await request.json())
+          db.media(placeOf(params))
+        },
+        options,
+      ),
+    ),
+    http.post<Place>(`${path}/timeline`, ({ request, params }) =>
+      respondEmpty(
+        request,
+        async () => {
+          // Checked as the API checks it, and then forgotten: the mock keeps no timelines.
+          timelineBatchSchema.parse(await request.json())
           db.media(placeOf(params))
         },
         options,

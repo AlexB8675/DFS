@@ -52,6 +52,20 @@ export function mediaTests({
     }
   }
 
+  /** A player's first batch of a play's timeline (§16). */
+  function timelineBatch(versionId: string) {
+    return {
+      playId: crypto.randomUUID(),
+      versionId,
+      seq: 0,
+      startedAt: Date.now(),
+      sentAt: 0,
+      events: [
+        { type: 'opened', t: 0, device: 'windows', visible: true, online: true, connection: null },
+      ],
+    }
+  }
+
   describe('audio and video (§6.7, §10.4)', () => {
     it('says what a video holds, in its current version, and that other files aren’t media', async () => {
       const client = await owner()
@@ -221,6 +235,24 @@ export function mediaTests({
       const notes = await uploadFile(client, root.id, 'notes.txt', text('notes'))
       expect(
         await client.error('POST', `/files/${notes.nodeId}/playback-report`, { json: report }),
+      ).toEqual({ status: 422, code: 'not_media' })
+    })
+
+    it('takes a player’s timeline within bounds', async () => {
+      const client = await owner()
+      const root = await workspace(client)
+      const video = await uploadFile(client, root.id, 'Timed.mp4', text('mp4'))
+      const batch = timelineBatch(video.versionId)
+      const path = `/files/${video.nodeId}/timeline`
+      await client.send('POST', path, { json: batch })
+      expect(
+        await client.error('POST', path, {
+          json: { ...batch, events: [{ type: 'exploded', t: 0 }] },
+        }),
+      ).toMatchObject({ status: 400 })
+      const notes = await uploadFile(client, root.id, 'notes.txt', text('notes'))
+      expect(
+        await client.error('POST', `/files/${notes.nodeId}/timeline`, { json: batch }),
       ).toEqual({ status: 422, code: 'not_media' })
     })
 
@@ -432,6 +464,23 @@ export function mediaTests({
         await viewer.error('POST', `/s/${token}/files/${notes.nodeId}/playback-report`, {
           json: report,
         }),
+      ).toEqual({ status: 422, code: 'not_media' })
+    })
+
+    it('takes a link viewer’s timeline from DFS’s own pages', async () => {
+      const client = await owner()
+      const folder = await createFolder(client, (await workspace(client)).id, 'Timed here')
+      const video = await uploadFile(client, folder.id, 'Clip.mp4', text('mp4'))
+      const notes = await uploadFile(client, folder.id, 'notes.txt', text('notes'))
+      const { token, client: viewer } = visitorOf(
+        target(),
+        (await shareLink(client, folder.id)).url,
+      )
+
+      const batch = timelineBatch(video.versionId)
+      await viewer.send('POST', `/s/${token}/files/${video.nodeId}/timeline`, { json: batch })
+      expect(
+        await viewer.error('POST', `/s/${token}/files/${notes.nodeId}/timeline`, { json: batch }),
       ).toEqual({ status: 422, code: 'not_media' })
     })
   })
