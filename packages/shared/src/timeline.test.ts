@@ -108,6 +108,18 @@ describe('timeline events (§16)', () => {
     ).toBe(false)
   })
 
+  it('refuses text PostgreSQL can’t store', () => {
+    const accepted = (message: string) =>
+      timelineBatchSchema.safeParse(
+        batch([{ type: 'error', t: 0, from: 'page', code: null, message }]),
+      ).success
+    // jsonb can’t hold U+0000 or an unpaired surrogate.
+    expect(accepted('read\u0000failed')).toBe(false)
+    expect(accepted('half a pair \ud800')).toBe(false)
+    expect(accepted('\udc00 the other half first')).toBe(false)
+    expect(accepted('a whole pair \u{1f4fa}, and é')).toBe(true)
+  })
+
   it('refuses an empty batch and one over 2000 events', () => {
     const closed = { type: 'closed', t: 0 }
     expect(timelineBatchSchema.safeParse(batch([])).success).toBe(false)

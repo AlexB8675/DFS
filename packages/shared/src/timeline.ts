@@ -25,7 +25,19 @@ const offset = z.number().int().min(0).max(1e13)
 const count = z.number().int().min(0).max(1e9)
 const readyState = z.number().int().min(0).max(4)
 const track = z.enum(['video', 'audio'])
-const text = (max: number) => z.string().max(max)
+/**
+ * Text up to `max` characters, without U+0000 or an unpaired surrogate:
+ * PostgreSQL's jsonb can't store them, so a batch holding one would fail to
+ * save and be sent again for good. The page drops such an event, counted,
+ * rather than send it.
+ */
+const text = (max: number) =>
+  z
+    .string()
+    .max(max)
+    .refine((value) => !value.includes('\u0000') && value.isWellFormed(), {
+      message: 'Text can’t hold U+0000 or half a surrogate pair',
+    })
 
 /** What `navigator.connection` said, where the browser has it. */
 export const timelineConnectionSchema = z.object({

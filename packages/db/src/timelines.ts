@@ -32,7 +32,7 @@ export interface TimelineOwner {
   userAgent: string | null
   /** The page's clock at the play's start. */
   clientStartedAt: Date | null
-  /** When the play started, as the page said; null means now. */
+  /** When a stream session began, on the server's clock; null means now (a page's play). */
   startedAt: Date | null
 }
 
