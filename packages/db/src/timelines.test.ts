@@ -3,7 +3,14 @@ import { TIMELINE_MAX_BYTES } from '@dfs/shared'
 import { sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest'
 import { createDatabase, createPool, type Database } from './client.ts'
-import { appendTimelineBatch, pruneTimelines, type TimelineOwner } from './timelines.ts'
+import { nodes, users } from './schema.ts'
+import {
+  appendTimelineBatch,
+  listTimelines,
+  pruneTimelines,
+  readTimeline,
+  type TimelineOwner,
+} from './timelines.ts'
 import { createTestDatabase, type TestDatabase } from './testing/index.ts'
 
 describe('play timelines (DESIGN §16)', () => {
@@ -262,6 +269,200 @@ describe('play timelines (DESIGN §16)', () => {
     expect(outcomes.filter((outcome) => outcome === 'duplicate')).toHaveLength(6)
     const sizes = (await batches(id)).reduce((sum, found) => sum + found.bytes, 0)
     expect(await timeline(id)).toMatchObject({ batches: 6, bytes: sizes })
+  })
+
+  /** A user with a file in their drive and another in their vault (§7.7). */
+  async function userWithFiles() {
+    const username = `viewer-${randomUUID().slice(0, 8)}`
+    const [user] = await db
+      .insert(users)
+      .values({ username, displayName: username, passwordHash: 'x', quotaBytes: 1 })
+      .returning()
+    if (!user) throw new Error('no user')
+    const folder = async (name: string, tree: 'drive' | 'vault') => {
+      const [row] = await db
+        .insert(nodes)
+        .values({ ownerId: user.id, kind: 'folder', name, nameKey: name, tree })
+        .returning()
+      if (!row) throw new Error('no folder')
+      return row
+    }
+    const file = async (parentId: string, name: string) => {
+      const [row] = await db
+        .insert(nodes)
+        .values({ ownerId: user.id, parentId, kind: 'file', name, nameKey: name.toLowerCase() })
+        .returning()
+      if (!row) throw new Error('no file')
+      return row
+    }
+    const drive = await file((await folder('My Drive', 'drive')).id, 'Holiday.mp4')
+    const vault = await file((await folder('Vault', 'vault')).id, 'Private.mp4')
+    return { user, drive, vault }
+  }
+
+  it('lists timelines newest first, with the user’s and the file’s name', async () => {
+    const { user, drive, vault } = await userWithFiles()
+    const [oldest, middle, newest] = [randomUUID(), randomUUID(), randomUUID()]
+    const clock = new Date('2026-10-19T08:29:59.500Z')
+    const began = (hour: number) => new Date(`2026-10-19T0${String(hour)}:30:00.123Z`)
+    const played = owner({
+      nodeId: drive.id,
+      userId: user.id,
+      startedAt: began(6),
+      clientStartedAt: clock,
+    })
+    await appendTimelineBatch(db, oldest, played, batch(0, [{ type: 'opened', t: 0 }]))
+    await appendTimelineBatch(db, oldest, played, batch(1, [{ type: 'opened', t: 1 }]))
+    // A vault file's name stays out, the account is named; a link's viewer has no account.
+    await appendTimelineBatch(
+      db,
+      middle,
+      owner({ nodeId: vault.id, userId: user.id, startedAt: began(7) }),
+      batch(0),
+    )
+    const shareId = randomUUID()
+    await appendTimelineBatch(
+      db,
+      newest,
+      owner({
+        kind: 'stream',
+        via: 'link',
+        userId: null,
+        shareId,
+        playId: oldest,
+        userAgent: null,
+        startedAt: began(8),
+      }),
+      { ...batch(0), sentMs: null },
+    )
+
+    const listed = await listTimelines(db, 10)
+    expect(listed.map((row) => row.id)).toEqual([newest, middle, oldest])
+    expect(listed.map((row) => row.fileName)).toEqual([null, null, 'Holiday.mp4'])
+    expect(listed.map((row) => row.username)).toEqual([null, user.username, user.username])
+    expect(listed[2]).toMatchObject({
+      id: oldest,
+      kind: 'play',
+      playId: null,
+      via: 'drive',
+      nodeId: drive.id,
+      versionId: played.versionId,
+      userId: user.id,
+      shareId: null,
+      address: '203.0.113.7',
+      userAgent: 'Mozilla/5.0 (tests)',
+      clientStartedAt: clock,
+      startedAt: began(6),
+      batches: 2,
+      bytes: Buffer.byteLength('[{"type":"opened","t":0}]') * 2,
+    })
+    expect(listed[0]).toMatchObject({
+      kind: 'stream',
+      playId: oldest,
+      via: 'link',
+      userId: null,
+      shareId,
+      userAgent: null,
+      clientStartedAt: null,
+      startedAt: began(8),
+    })
+    // Real dates, and a number for the bytes.
+    expect(listed[2]?.updatedAt).toBeInstanceOf(Date)
+    expect(Math.abs((listed[2]?.updatedAt.getTime() ?? 0) - Date.now())).toBeLessThan(60_000)
+    expect(typeof listed[2]?.bytes).toBe('number')
+
+    expect((await listTimelines(db, 2)).map((row) => row.id)).toEqual([newest, middle])
+    expect(await listTimelines(db, 0)).toEqual([])
+  })
+
+  it('reads a play with its stream sessions', async () => {
+    const play = randomUUID()
+    const owned = owner({ startedAt: new Date('2026-10-19T08:30:00.000Z') })
+    // Seq 1 arrives before seq 0, and comes back after it.
+    const second = [{ type: 'ended', t: 900 }]
+    const first = [{ type: 'opened', t: 0 }]
+    await appendTimelineBatch(db, play, owned, { ...batch(1, second), address: '198.51.100.20' })
+    await appendTimelineBatch(db, play, owned, batch(0, first))
+
+    const session = (playId: string | null, startedAt: string) =>
+      owner({
+        kind: 'stream',
+        via: 'stream',
+        nodeId: owned.nodeId,
+        versionId: owned.versionId,
+        playId,
+        startedAt: new Date(startedAt),
+      })
+    const later = randomUUID()
+    const earlier = randomUUID()
+    const strange = randomUUID()
+    const elsewhere = randomUUID()
+    const events = (type: string) => [{ type, t: 5 }]
+    // Written first but begun later, so it comes second; two sessions of other plays stay out.
+    await appendTimelineBatch(db, later, session(play, '2026-10-19T08:31:00.000Z'), {
+      ...batch(0, events('read')),
+      sentMs: null,
+    })
+    const earlierOwner = session(play, '2026-10-19T08:30:30.000Z')
+    await appendTimelineBatch(db, earlier, earlierOwner, {
+      ...batch(0, events('seek')),
+      sentMs: null,
+    })
+    await appendTimelineBatch(db, earlier, earlierOwner, {
+      ...batch(1, events('read')),
+      sentMs: null,
+    })
+    await appendTimelineBatch(db, strange, session(null, '2026-10-19T08:30:40.000Z'), batch(0))
+    await appendTimelineBatch(
+      db,
+      elsewhere,
+      session(randomUUID(), '2026-10-19T08:30:50.000Z'),
+      batch(0),
+    )
+
+    const received = expect.any(Date) as Date
+    const read = await readTimeline(db, play)
+    expect(read?.timeline).toMatchObject({ id: play, kind: 'play', batches: 2 })
+    expect(read?.batches).toEqual([
+      { seq: 0, receivedAt: received, sentMs: 0, address: '203.0.113.7', events: first },
+      {
+        seq: 1,
+        receivedAt: received,
+        sentMs: 1000,
+        address: '198.51.100.20',
+        events: second,
+      },
+    ])
+    expect(read?.sessions.map((found) => found.timeline.id)).toEqual([earlier, later])
+    expect(read?.sessions.map((found) => found.timeline.playId)).toEqual([play, play])
+    expect(read?.sessions[0]?.batches).toEqual([
+      {
+        seq: 0,
+        receivedAt: received,
+        sentMs: null,
+        address: '203.0.113.7',
+        events: events('seek'),
+      },
+      {
+        seq: 1,
+        receivedAt: received,
+        sentMs: null,
+        address: '203.0.113.7',
+        events: events('read'),
+      },
+    ])
+    expect(read?.sessions[1]?.batches).toHaveLength(1)
+
+    // A session is read on its own, without sessions of its own.
+    const alone = await readTimeline(db, later)
+    expect(alone?.timeline).toMatchObject({ id: later, kind: 'stream', playId: play })
+    expect(alone?.batches).toHaveLength(1)
+    expect(alone?.sessions).toEqual([])
+    // A play nothing streamed for has none; an unknown ID is no timeline.
+    const quiet = randomUUID()
+    await appendTimelineBatch(db, quiet, owner(), batch(0))
+    expect((await readTimeline(db, quiet))?.sessions).toEqual([])
+    expect(await readTimeline(db, randomUUID())).toBeNull()
   })
 
   it('drops timelines older than the retention, with their batches', async () => {

@@ -1,6 +1,7 @@
 import { TIMELINE_MAX_BYTES } from '@dfs/shared'
-import { sql } from 'drizzle-orm'
+import { sql, type SQL } from 'drizzle-orm'
 import type { Database } from './client.ts'
+import { uuidArray } from './folder-stats.ts'
 import type { Executor } from './journal.ts'
 
 // Play timelines and stream sessions (DESIGN.md §16): what the page, the
@@ -153,4 +154,160 @@ export async function pruneTimelines(
     )
     SELECT count(*)::int AS count FROM deleted`)
   return { expired: expired[0]?.count ?? 0, trimmed: trimmed[0]?.count ?? 0 }
+}
+
+/** A timeline's row, as the CLI shows it. */
+export interface TimelineRow {
+  id: string
+  kind: 'play' | 'stream'
+  playId: string | null
+  via: 'drive' | 'link' | 'stream'
+  nodeId: string
+  versionId: string
+  userId: string | null
+  /** The user's name, while the account exists. */
+  username: string | null
+  shareId: string | null
+  address: string
+  userAgent: string | null
+  clientStartedAt: Date | null
+  startedAt: Date
+  updatedAt: Date
+  bytes: number
+  batches: number
+  /** The file's name, while it exists. A vault file's stays out (§7.7). */
+  fileName: string | null
+}
+
+/** One batch, its events as stored. */
+export interface BatchRow {
+  seq: number
+  receivedAt: Date
+  sentMs: number | null
+  address: string
+  events: unknown[]
+}
+
+export interface TimelineRead {
+  timeline: TimelineRow
+  batches: BatchRow[]
+  /** For a play: the stream sessions that served it (their `play_id` is its id), oldest first. */
+  sessions: { timeline: TimelineRow; batches: BatchRow[] }[]
+}
+
+/** The timelines `tail` (a WHERE, ORDER BY and LIMIT) picks, with their user's and file's names. */
+async function selectTimelines(db: Executor, tail: SQL): Promise<TimelineRow[]> {
+  // Timestamps are selected as epoch milliseconds, which `Date` takes exactly: drizzle's
+  // `execute` hands `timestamptz` back as text.
+  const { rows } = await db.execute<{
+    id: string
+    kind: TimelineRow['kind']
+    play_id: string | null
+    via: TimelineRow['via']
+    node_id: string
+    version_id: string
+    user_id: string | null
+    username: string | null
+    share_id: string | null
+    address: string
+    user_agent: string | null
+    client_started_ms: number | null
+    started_ms: number
+    updated_ms: number
+    bytes: number
+    batches: number
+    file_name: string | null
+  }>(sql`
+    SELECT t.id, t.kind, t.play_id, t.via, t.node_id, t.version_id, t.user_id, users.username,
+      t.share_id, t.address, t.user_agent,
+      floor(extract(epoch FROM t.client_started_at) * 1000)::float8 AS client_started_ms,
+      floor(extract(epoch FROM t.started_at) * 1000)::float8 AS started_ms,
+      floor(extract(epoch FROM t.updated_at) * 1000)::float8 AS updated_ms,
+      t.bytes::float8 AS bytes, t.batches, node.name AS file_name
+    FROM timelines t
+    LEFT JOIN users ON users.id = t.user_id
+    LEFT JOIN nodes node /* tree: not the vault: an admin's read names no vault file (§7.7) */ ON node.id = t.node_id AND node.tree <> 'vault'
+    ${tail}`)
+  return rows.map((row) => ({
+    id: row.id,
+    kind: row.kind,
+    playId: row.play_id,
+    via: row.via,
+    nodeId: row.node_id,
+    versionId: row.version_id,
+    userId: row.user_id,
+    username: row.username,
+    shareId: row.share_id,
+    address: row.address,
+    userAgent: row.user_agent,
+    clientStartedAt: row.client_started_ms === null ? null : new Date(row.client_started_ms),
+    startedAt: new Date(row.started_ms),
+    updatedAt: new Date(row.updated_ms),
+    bytes: row.bytes,
+    batches: row.batches,
+    fileName: row.file_name,
+  }))
+}
+
+/** The batches of the timelines `ids`, in `seq` order, by timeline. */
+async function selectBatches(
+  db: Executor,
+  ids: readonly string[],
+): Promise<Map<string, BatchRow[]>> {
+  const { rows } = await db.execute<{
+    timeline_id: string
+    seq: number
+    received_ms: number
+    sent_ms: number | null
+    address: string
+    events: unknown[]
+  }>(sql`
+    SELECT timeline_id, seq, floor(extract(epoch FROM received_at) * 1000)::float8 AS received_ms,
+      sent_ms, address, events
+    FROM timeline_batches WHERE timeline_id = ANY(${uuidArray(ids)})
+    ORDER BY timeline_id, seq`)
+  const byTimeline = new Map<string, BatchRow[]>()
+  for (const row of rows) {
+    const batch: BatchRow = {
+      seq: row.seq,
+      receivedAt: new Date(row.received_ms),
+      sentMs: row.sent_ms,
+      address: row.address,
+      events: row.events,
+    }
+    const found = byTimeline.get(row.timeline_id)
+    if (found) found.push(batch)
+    else byTimeline.set(row.timeline_id, [batch])
+  }
+  return byTimeline
+}
+
+/** The `limit` most recently started timelines, newest first. */
+export async function listTimelines(db: Executor, limit: number): Promise<TimelineRow[]> {
+  return selectTimelines(db, sql`ORDER BY t.started_at DESC, t.id DESC LIMIT ${limit}`)
+}
+
+/**
+ * One timeline with its batches in `seq` order and, for a play, the stream
+ * sessions that served it, oldest first; null if there is none.
+ */
+export async function readTimeline(db: Executor, id: string): Promise<TimelineRead | null> {
+  const [timeline] = await selectTimelines(db, sql`WHERE t.id = ${id}`)
+  if (!timeline) return null
+  const sessions =
+    timeline.kind === 'play'
+      ? await selectTimelines(
+          db,
+          sql`WHERE t.kind = 'stream' AND t.play_id = ${id} ORDER BY t.started_at, t.id`,
+        )
+      : []
+  const batches = await selectBatches(db, [timeline.id, ...sessions.map((session) => session.id)])
+  return {
+    timeline,
+    batches: batches.get(timeline.id) ?? [],
+    sessions: sessions.map((session) => ({
+      timeline: session,
+      batches: batches.get(session.id) ?? [],
+    })),
+  }
 }
