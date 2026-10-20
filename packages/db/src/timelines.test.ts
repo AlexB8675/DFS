@@ -283,13 +283,13 @@ describe('play timelines (DESIGN §16)', () => {
     expect(await batches(fresh)).toHaveLength(1)
   })
 
-  it('drops the oldest past the size cap', async () => {
+  it('drops the least recently written past the size cap, with their batches', async () => {
     const ids = [randomUUID(), randomUUID(), randomUUID()]
     for (const [index, id] of ids.entries()) {
       await appendTimelineBatch(db, id, owner(), batch(0))
-      // Started 3, 2 and 1 hours ago, each holding 100 bytes.
+      // Last written 3, 2 and 1 hours ago, each holding 100 bytes.
       await db.execute(sql`
-        UPDATE timelines SET bytes = 100, started_at = now() - make_interval(hours => ${3 - index})
+        UPDATE timelines SET bytes = 100, updated_at = now() - make_interval(hours => ${3 - index})
         WHERE id = ${id}`)
     }
 
@@ -298,7 +298,34 @@ describe('play timelines (DESIGN §16)', () => {
       trimmed: 1,
     })
     expect(await timeline(ids[0] ?? '')).toBeUndefined()
+    expect(await batches(ids[0] ?? '')).toEqual([])
     expect(await timeline(ids[1] ?? '')).toBeDefined()
+    expect(await batches(ids[1] ?? '')).toHaveLength(1)
     expect(await timeline(ids[2] ?? '')).toBeDefined()
+    expect(await batches(ids[2] ?? '')).toHaveLength(1)
+  })
+
+  it('keeps a play still being written over an idle one that began later', async () => {
+    const running = randomUUID()
+    const idle = randomUUID()
+    await appendTimelineBatch(db, running, owner(), batch(0))
+    await appendTimelineBatch(db, idle, owner(), batch(0))
+    // The long play began 3 hours ago and wrote just now; the other began later and has been quiet.
+    await db.execute(sql`
+      UPDATE timelines SET bytes = 100, started_at = now() - interval '3 hours', updated_at = now()
+      WHERE id = ${running}`)
+    await db.execute(sql`
+      UPDATE timelines SET bytes = 100, started_at = now() - interval '1 hour',
+        updated_at = now() - interval '50 minutes'
+      WHERE id = ${idle}`)
+
+    expect(await pruneTimelines(db, { days: 28, maxBytes: 150 })).toEqual({
+      expired: 0,
+      trimmed: 1,
+    })
+    expect(await timeline(idle)).toBeUndefined()
+    expect(await batches(idle)).toEqual([])
+    expect(await timeline(running)).toBeDefined()
+    expect(await batches(running)).toHaveLength(1)
   })
 })

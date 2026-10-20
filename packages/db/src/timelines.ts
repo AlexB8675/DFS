@@ -8,11 +8,11 @@ import type { Executor } from './journal.ts'
 // order. The API takes the page's batches and the server's stream sessions
 // write their own through `appendTimelineBatch`. They are diagnostics, so
 // not journaled: the leading bot drops them after `TIMELINE_RETENTION_DAYS`,
-// and the oldest beyond `TIMELINE_MAX_TOTAL_BYTES` in all.
+// and the least recently written beyond `TIMELINE_MAX_TOTAL_BYTES` in all.
 
 /** How long a timeline is kept after its last batch. */
 export const TIMELINE_RETENTION_DAYS = 28
-/** All timelines' events together, in bytes: the oldest go past this (§16). */
+/** All timelines' events together, in bytes: the least recently written go past this (§16). */
 export const TIMELINE_MAX_TOTAL_BYTES = 2 * 1024 ** 3
 
 /** Who a timeline belongs to, and what it is about. IDs are as the database spells them. */
@@ -116,12 +116,14 @@ export async function appendTimelineBatch(
 }
 
 /**
- * Drops the timelines nobody added to for `days` days, then the oldest past
- * `maxBytes` in all, with their batches (they go with the cascade). The
- * newest are kept: those whose running total of `bytes`, newest start first,
- * stays within `maxBytes`. What the cap counts is the sum of the timelines'
- * `bytes`, not the table's size on disk, so it is exact. Returns how many
- * went for age (`expired`) and for size (`trimmed`).
+ * Drops the timelines nobody added to for `days` days, then the least
+ * recently written past `maxBytes` in all, with their batches (they go with
+ * the cascade). The newest are kept: those whose running total of `bytes`,
+ * newest last batch first, stays within `maxBytes`. So a play still sending
+ * batches is never cut for an idle one that began after it, which would
+ * split it. What the cap counts is the sum of the timelines' `bytes`, not the
+ * table's size on disk, so it is exact. Returns how many went for age
+ * (`expired`) and for size (`trimmed`).
  */
 export async function pruneTimelines(
   db: Executor,
@@ -142,7 +144,7 @@ export async function pruneTimelines(
       DELETE FROM timelines
       WHERE id IN (
         SELECT id FROM (
-          SELECT id, sum(bytes) OVER (ORDER BY started_at DESC, id DESC) AS total
+          SELECT id, sum(bytes) OVER (ORDER BY updated_at DESC, id DESC) AS total
           FROM timelines
         ) ranked
         WHERE total > ${limits.maxBytes}
