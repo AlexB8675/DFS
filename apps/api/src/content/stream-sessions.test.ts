@@ -22,12 +22,18 @@ interface Call {
 function setup() {
   const clock = { now: 5000, wall: Date.UTC(2026, 9, 20, 12) }
   const calls: Call[] = []
-  const behaviour: { outcome: AppendOutcome; fails: boolean } = { outcome: 'stored', fails: false }
+  const behaviour: { outcome: AppendOutcome; fails: boolean; failsFor: string | null } = {
+    outcome: 'stored',
+    fails: false,
+    failsFor: null,
+  }
   const warn = vi.fn()
   const sessions = new StreamSessions({
     write: (id, owner, batch) => {
       calls.push({ id, owner, batch })
-      if (behaviour.fails) return Promise.reject(new Error('the database is down'))
+      if (behaviour.fails || id === behaviour.failsFor) {
+        return Promise.reject(new Error('the database is down'))
+      }
       return Promise.resolve(behaviour.outcome)
     },
     log: { warn },
@@ -122,6 +128,14 @@ describe('stream sessions (§6.2, §16)', () => {
     const owners = new Map(harness.calls.map((call) => [call.id, call.owner]))
     expect(owners.get(user)).toMatchObject({ via: 'drive', userId: 'user-2', playId: 'play-1' })
     expect(owners.get(viewer)).toMatchObject({ via: 'link', shareId: 'share-1', playId: 'play-1' })
+  })
+
+  it('keeps two files apart even with the same play ID and reader', () => {
+    const harness = setup()
+    const first = serve(harness, { playId: 'play-1', nodeId: 'node-1' })
+    expect(serve(harness, { playId: 'play-1', nodeId: 'node-1', from: 1000 })).toBe(first)
+    // A play is one file's view: a page that reused the ID for another file doesn't merge them.
+    expect(serve(harness, { playId: 'play-1', nodeId: 'node-2' })).not.toBe(first)
   })
 
   it('groups another player’s requests by link, version, address and user agent', async () => {
@@ -405,15 +419,50 @@ describe('stream sessions (§6.2, §16)', () => {
     expect(
       retried.map((call) => [call.id, call.batch.seq, served(call).map((e) => e.from)]),
     ).toEqual([
+      // The session that failed went to the back, so the other one is written first.
+      [other, 0, [0]],
       [id, 0, [0]],
       [id, 1, [1000]],
-      [other, 0, [0]],
     ])
-    expect(retried[0]?.batch.events).toEqual(calls[0]?.batch.events)
+    expect(retried[1]?.batch.events).toEqual(calls[0]?.batch.events)
 
     await sessions.flush()
     expect(calls).toHaveLength(4)
     expect(warn).toHaveBeenCalledTimes(1)
+  })
+
+  it('doesn’t let one failing session hold back the others', async () => {
+    const harness = setup()
+    const { behaviour, calls, sessions, warn } = harness
+    const a = serve(harness, { playId: 'play-a' })
+    const b = serve(harness, { playId: 'play-b' })
+    behaviour.failsFor = a
+
+    // The run ends at A, as the store may be down, but A goes to the back of the order.
+    await sessions.flush()
+    expect(calls.map((call) => call.id)).toEqual([a])
+    // The next flush begins with B, which is written, and then tries A again.
+    await sessions.flush()
+    expect(calls.map((call) => call.id)).toEqual([a, b, a])
+    expect(served(calls[1])).toHaveLength(1)
+    expect(warn).toHaveBeenCalledTimes(2)
+
+    // And so on: B's later events are not held back by A's failures either.
+    serve(harness, { playId: 'play-b', from: 1000 })
+    await sessions.flush()
+    expect(calls.map((call) => [call.id, call.batch.seq])).toEqual([
+      [a, 0],
+      [b, 0],
+      [a, 0],
+      [b, 1],
+      [a, 0],
+    ])
+
+    // A recovers: what it kept is written.
+    behaviour.failsFor = null
+    await sessions.flush()
+    expect(calls.at(-1)?.id).toBe(a)
+    expect(served(calls.at(-1))).toHaveLength(1)
   })
 
   it.each(['full', 'not_yours'] as const)(

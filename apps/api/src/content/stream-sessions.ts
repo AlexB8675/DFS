@@ -227,12 +227,13 @@ export class StreamSessions {
   /** The key's session if it is still going, else a new one. */
   #join(request: StreamRequest, now: number): Session {
     // A play ID comes from the page, so it is not trusted alone: another reader giving the same
-    // one must not join this reader's session, and have their reads logged under it.
+    // one must not join this reader's session, and have their reads logged under it; nor may
+    // another file's, as a play is one file's view.
     const reader = `${request.via}|${request.userId ?? request.shareId ?? ''}`
     const key =
       request.playId === null
         ? `${reader}|${request.versionId}|${request.address}|${request.userAgent ?? ''}`
-        : `play:${request.playId}|${reader}`
+        : `play:${request.playId}|${request.nodeId}|${reader}`
     const existing = this.#byKey.get(key)
     if (
       existing &&
@@ -300,7 +301,9 @@ export class StreamSessions {
           })
         } catch (error) {
           // The run ends here: a store that is down would make every session wait on a connection
-          // timeout in turn. Every batch is kept, and the next flush tries again.
+          // timeout in turn. Every batch is kept, and the next flush tries again, beginning with
+          // the others: a session that always fails goes to the back, so it can't hold them back.
+          if (this.#sessions.delete(session)) this.#sessions.add(session)
           this.#log.warn(
             { err: error, sessionId: session.id },
             'could not save a stream session; trying again',
