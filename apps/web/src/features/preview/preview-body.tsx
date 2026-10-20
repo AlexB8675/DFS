@@ -3,6 +3,7 @@ import { lazy, Suspense, useState, type RefObject } from 'react'
 import { Spinner } from '@/components/ui/spinner'
 import { previewPath, type FilePlace } from '@/lib/file-place'
 import { previewKind } from '@/lib/preview-kind'
+import { usePlayTimeline } from '@/features/player/timeline/use-play-timeline'
 import { ImageView } from './image-view'
 import { NoPreview } from './no-preview'
 import type { ViewHandle } from './view-handle'
@@ -58,6 +59,11 @@ export function PreviewBody({
 
   const readable = file && file.syncState !== 'uploading' && file.syncState !== 'failed'
   const kind = file && readable ? previewKind(file.name, file.mimeType) : null
+  // A video's play keeps a timeline from when the viewer begins showing it, before its code loads (§16).
+  const timeline = usePlayTimeline(
+    kind === 'video' && place ? place.path : null,
+    kind === 'video' && file ? file.id : null,
+  )
   if (error) {
     return <NoPreview title={error.title} description={error.description} />
   }
@@ -98,6 +104,7 @@ export function PreviewBody({
           name={file.name}
           place={place}
           active={active}
+          timeline={timeline}
           onDownload={onDownload}
           onSwipe={(direction) => {
             ;(direction === 1 ? next : previous)?.()

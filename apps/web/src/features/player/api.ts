@@ -50,12 +50,19 @@ export function mediaQuery(place: FilePlace) {
 /**
  * The version's bytes, for the video element: named, so a replaced file
  * never mixes in. Through a link, playing is looking, which never counts
- * toward its download limit (§7.5).
+ * toward its download limit (§7.5). It names the play when there is one
+ * (`play`, §16), so the server logs the read under that play's timeline.
  */
-export function contentUrl(place: FilePlace, versionId: string, startSeconds = 0): string {
+export function contentUrl(
+  place: FilePlace,
+  versionId: string,
+  startSeconds = 0,
+  playId?: string,
+): string {
   const preview = place.token === null ? '' : '&preview=1'
+  const play = playId === undefined ? '' : `&play=${playId}`
   const start = startSeconds > 0 ? `#t=${startSeconds.toFixed(3)}` : ''
-  return `/api${place.path}/content?version=${versionId}${preview}${start}`
+  return `/api${place.path}/content?version=${versionId}${preview}${play}${start}`
 }
 
 /**

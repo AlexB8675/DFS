@@ -85,6 +85,11 @@ interface PlaybackFacts {
   decoding: Decoding | null
   /** Why it can't play, when it can't: in a few words, and as a kind for the graphs. */
   problem: { text: string; kind: PlayProblemKind } | null
+  /**
+   * The play's timeline (§16), which the report joins; read when the report goes, so one that
+   * comes after the follow began is still sent, and the follow doesn't restart for it.
+   */
+  playId: string | null
 }
 
 const SAMPLE_MS = 1000
@@ -300,7 +305,7 @@ export function usePlaybackStats(
         seekWaitMs += at - seekSince
       }
       const quality = video.getVideoPlaybackQuality()
-      const { problem, decoding } = latest.current
+      const { problem, decoding, playId } = latest.current
       const error = video.error
         ? video.error.message || `media error ${String(video.error.code)}`
         : null
@@ -324,6 +329,8 @@ export function usePlaybackStats(
         problem: (problem?.text ?? error)?.slice(0, 300) ?? null,
         problemKind: problem?.kind ?? (video.error ? errorKind(video.error) : null),
         ...(labLine !== undefined && { lab: labLine }),
+        // Left out, not null, when there is none: the schema's field is optional.
+        ...(playId !== null && { playId }),
       }
       void apiFetch(`${base}/playback-report`, {
         method: 'POST',

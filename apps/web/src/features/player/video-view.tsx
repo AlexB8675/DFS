@@ -1,4 +1,4 @@
-import type { PlayProblemKind } from '@dfs/shared'
+import type { PlayProblemKind, TimelineEventInput } from '@dfs/shared'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Cpu,
@@ -63,6 +63,8 @@ import {
 } from './subtitle-options'
 import { SubtitleOverlay } from './subtitle-overlay'
 import { formatPlayTime } from './time'
+import { clipText, type Timeline } from './timeline/recorder'
+import { watchElement } from './timeline/watch-element'
 import { useMediaState } from './use-media-state'
 import { RESUME_FROM_MS, RESUME_NOTE_MS, RESUME_OFFER_MS } from './resume-rules'
 import { useResume } from './use-resume'
@@ -78,7 +80,9 @@ import { useResume } from './use-resume'
 // address, at once; and otherwise not in the page at all: another player is
 // offered, with Download, and no element is made. A buffer that fails before
 // its first frame ends the same way. The same for a drive's file and a link's:
-// its place says where to ask.
+// its place says where to ask. The play's timeline (§16) comes from the viewer,
+// who makes it before this loads: it records the answers, the decision, the
+// source and the element, and names the play in the reads.
 
 interface VideoViewProps {
   name: string
@@ -86,6 +90,8 @@ interface VideoViewProps {
   place: FilePlace
   /** `false` while the viewer closes: it stops at once. */
   active: boolean
+  /** The play's timeline (§16), from when the viewer began showing the file; null until it exists. */
+  timeline: Timeline | null
   ref?: Ref<ViewHandle>
   onDownload: () => void
   /** A swipe on a touch screen: 1 for the next file, -1 for the previous. */
@@ -151,6 +157,7 @@ export default function VideoView({
   name,
   place,
   active,
+  timeline,
   ref,
   onDownload,
   onSwipe,
@@ -253,7 +260,7 @@ export default function VideoView({
   const native = how?.play === 'native'
   const { stats: bufferedStats } = useBufferedPlay({
     video,
-    url: source ? contentUrl(place, source.versionId) : '',
+    url: source ? contentUrl(place, source.versionId, 0, timeline?.playId) : '',
     // Not once a problem is shown: a play that failed is over, and `startAt` moves with it.
     enabled: buffered && problem === null,
     startAt: source?.startAt ?? 0,
@@ -342,6 +349,69 @@ export default function VideoView({
     })
   }, [])
 
+  // The play's timeline (§16). What happened before it existed is recorded when it does: each of
+  // these once for each timeline (a refetch of a query records nothing again, a new timeline
+  // records it all), kept by the timeline object.
+  const recorded = useRef<{ timeline: Timeline; keys: Set<string> } | null>(null)
+  const recordOnce = useEffectEvent((key: string, event: TimelineEventInput) => {
+    if (!timeline) return
+    if (recorded.current?.timeline !== timeline) {
+      recorded.current = { timeline, keys: new Set() }
+    }
+    if (recorded.current.keys.has(key)) return
+    recorded.current.keys.add(key)
+    timeline.record(event)
+  })
+  // The first answers, whether they came or failed.
+  useEffect(() => {
+    if (playback.status !== 'pending') {
+      recordOnce('answered:playback', answeredEvent('playback', playback.error))
+    }
+    if (media.status !== 'pending') {
+      recordOnce('answered:media', answeredEvent('media', media.error))
+    }
+  }, [timeline, playback.status, playback.error, media.status, media.error])
+  // Its batches name the version once the page knows it.
+  const playedVersion = source?.versionId
+  useEffect(() => {
+    if (timeline && playedVersion) timeline.setVersion(playedVersion)
+  }, [timeline, playedVersion])
+  // Where it plays, once for each start.
+  useEffect(() => {
+    if (!how) return
+    recordOnce(`decided:${sourceKey}`, {
+      type: 'decided',
+      play: how.play,
+      reason: how.play === 'elsewhere' ? how.reason : null,
+      codec: how.play === 'elsewhere' && how.codec !== null ? clipText(how.codec, 40) : null,
+    })
+  }, [timeline, how, sourceKey])
+  // Its source, once for each start: the element given the file's address, or the engine started.
+  const player =
+    video !== null && problem === null && (how?.play === 'native' || how?.play === 'buffered')
+      ? how.play
+      : null
+  useEffect(() => {
+    if (player === null || !source) return
+    recordOnce(`source:${sourceKey}`, {
+      type: 'source',
+      versionId: source.versionId,
+      startAt: source.startAt,
+      attempt: source.attempt,
+      player,
+    })
+  }, [timeline, player, source, sourceKey])
+  // The element's own events, samples and pictures, on the same clock.
+  useEffect(
+    () =>
+      video && timeline
+        ? watchElement(video, (event) => {
+            timeline.record(event)
+          })
+        : undefined,
+    [video, timeline],
+  )
+
   // Why it may be slow, as far as the player can tell, and the play's report when it ends.
   const decoding = useQuery(decodingQuery(base, source?.versionId ?? null, info)).data ?? null
   const signals = usePlaybackStats(
@@ -352,6 +422,7 @@ export default function VideoView({
       bitRate: info?.bitRate ?? null,
       decoding,
       problem: shown && { text: problemText(shown), kind: problemKind(shown) },
+      playId: timeline?.playId ?? null,
     },
     active,
     howItPlayed,
@@ -808,15 +879,21 @@ export default function VideoView({
         />
       ) : (
         // No element until the start is decided: one made for a video that then plays elsewhere
-        // would be followed, and reported, for nothing.
+        // would be followed, and reported, for nothing. Nor before the timeline exists, so that
+        // every read of the play is named by it (§16).
         source &&
-        decided !== null && (
+        decided !== null &&
+        timeline !== null && (
           <>
             <video
               key={sourceKey}
               ref={attachVideo}
               // The own buffer sets a source of its own; Safari's player is given the file's address.
-              src={native ? contentUrl(place, source.versionId, source.startAt) : undefined}
+              src={
+                native
+                  ? contentUrl(place, source.versionId, source.startAt, timeline.playId)
+                  : undefined
+              }
               className="size-full object-contain"
               playsInline
               preload="auto"
@@ -994,6 +1071,16 @@ export default function VideoView({
       )}
     </div>
   )
+}
+
+/** The timeline's note that a first query settled: whether it came, and the status of its refusal. */
+function answeredEvent(what: 'playback' | 'media', error: Error | null): TimelineEventInput {
+  return {
+    type: 'answered',
+    what,
+    ok: error === null,
+    status: error instanceof ApiError ? error.status : null,
+  }
 }
 
 /** Why it doesn't play, in a few words, for the play's report. */

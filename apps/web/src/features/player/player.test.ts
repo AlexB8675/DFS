@@ -1,5 +1,7 @@
 import type { MediaInfo, MediaStream } from '@dfs/shared'
 import { describe, expect, it } from 'vitest'
+import type { FilePlace } from '@/lib/file-place'
+import { contentUrl } from './api'
 import type { PagePlay } from './buffered/choice'
 import {
   describeAudio,
@@ -262,5 +264,27 @@ describe('keeping where a viewer stopped', () => {
     expect(positionChange(300_000, Number.NaN, false)).toBe('keep')
     expect(positionChange(0.95 * TEN_MINUTES, TEN_MINUTES, false)).toBe('clear')
     expect(positionChange(5_000, 6_000, true)).toBe('clear')
+  })
+})
+
+describe('the content address', () => {
+  const drive: FilePlace = { path: '/files/f1', token: null }
+  const link: FilePlace = { path: '/s/tok/files/f1', token: 't' }
+
+  it('names the play in the content address, before the start time', () => {
+    expect(contentUrl(drive, 'v', 12.5, 'p')).toBe(
+      '/api/files/f1/content?version=v&play=p#t=12.500',
+    )
+    expect(contentUrl(drive, 'v', 0, 'p')).toBe('/api/files/f1/content?version=v&play=p')
+    // A link keeps looking apart from downloading (§7.5): `preview` comes first.
+    expect(contentUrl(link, 'v', 12.5, 'p')).toBe(
+      '/api/s/tok/files/f1/content?version=v&preview=1&play=p#t=12.500',
+    )
+  })
+
+  it('leaves the play out when there is none', () => {
+    expect(contentUrl(drive, 'v', 12.5)).toBe('/api/files/f1/content?version=v#t=12.500')
+    expect(contentUrl(link, 'v')).toBe('/api/s/tok/files/f1/content?version=v&preview=1')
+    expect(contentUrl(drive, 'v', 0, undefined)).not.toContain('play=')
   })
 })
