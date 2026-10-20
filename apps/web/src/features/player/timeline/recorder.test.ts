@@ -14,6 +14,11 @@ const WALL = Date.parse('2026-10-20T12:00:00Z')
 const encoder = new TextEncoder()
 const bytesOf = (value: unknown) => encoder.encode(JSON.stringify(value)).length
 
+/** A valid event of exactly `size` bytes (with `t` 0, as under fake time). */
+const sized = (size: number): TimelineEventInput => {
+  const empty = bytesOf({ type: 'error', from: 'page', code: null, message: '', t: 0 })
+  return { type: 'error', from: 'page', code: null, message: 'x'.repeat(size - empty) }
+}
 /** A small valid event. */
 const hide = (hidden = true): TimelineEventInput => ({ type: 'visibility', hidden })
 /** A valid event of about 370 bytes, told apart by its code. */
@@ -90,29 +95,43 @@ afterEach(() => {
 })
 
 describe('Timeline', () => {
-  it('sends nothing before the version is known, then everything kept', async () => {
+  it('sends before the version is known, naming none, then names it', async () => {
     const { send, calls } = fakeSend()
     const timeline = newTimeline(send, false)
     timeline.record(hide(true))
     timeline.record(hide(false))
-    await vi.advanceTimersByTimeAsync(10_000)
-    expect(calls).toHaveLength(0)
-
-    timeline.setVersion(VERSION)
     await vi.advanceTimersByTimeAsync(5000)
     expect(calls).toHaveLength(1)
     expect(calls[0]?.keepalive).toBe(false)
     expect(calls[0]?.batch).toMatchObject({
       playId: PLAY,
-      versionId: VERSION,
+      versionId: null,
       seq: 0,
       startedAt: WALL,
-      sentAt: 15_000,
+      sentAt: 5000,
     })
     expect(calls[0]?.batch.events).toEqual([
       { type: 'visibility', hidden: true, t: 0 },
       { type: 'visibility', hidden: false, t: 0 },
     ])
+
+    timeline.setVersion(VERSION)
+    timeline.record({ type: 'closed' })
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(calls).toHaveLength(2)
+    expect(calls[1]?.batch).toMatchObject({ versionId: VERSION, seq: 1, sentAt: 10_000 })
+  })
+
+  it('sends a play that ends before its version is known', async () => {
+    const { send, calls } = fakeSend()
+    const timeline = newTimeline(send, false)
+    timeline.record(hide(true))
+    timeline.close()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.keepalive).toBe(true)
+    expect(calls[0]?.batch.versionId).toBeNull()
+    expect(calls[0]?.batch.events.map((event) => event.type)).toEqual(['visibility', 'closed'])
   })
 
   it('stamps each event with the milliseconds since the play began', async () => {
@@ -384,14 +403,18 @@ describe('Timeline', () => {
   })
 
   it('drops the oldest past 256 KiB and says how many', async () => {
-    const { send, calls } = fakeSend()
-    const timeline = newTimeline(send, false)
+    // The first send stays in flight, so what comes after is kept, past the cap.
+    const { send, calls, release } = fakeSend({ holdFirst: true })
+    const timeline = newTimeline(send)
     const total = 900
     for (let i = 0; i < total; i++) timeline.record(big(i))
-    timeline.setVersion(VERSION)
+    expect(calls).toHaveLength(1)
+    const inFlight = calls[0]?.batch.events.length ?? 0
+    release()
     await timeline.flush()
 
-    const events = eventsOf(calls)
+    // The next batch begins with the count.
+    const events = eventsOf(calls.slice(1))
     const first = events[0]
     expect(first?.type).toBe('dropped')
     const lost = first?.type === 'dropped' ? first.events : 0
@@ -399,9 +422,9 @@ describe('Timeline', () => {
     expect(first).toMatchObject({ invalid: 0 })
     const kept = events.slice(1)
     // What stayed is the newest, in order, and fits the cap; the rest is counted.
-    expect(kept.length + lost).toBe(total)
+    expect(inFlight + kept.length + lost).toBe(total)
     expect(kept.map((event) => (event.type === 'error' ? event.code : -1))).toEqual(
-      Array.from({ length: kept.length }, (_, index) => lost + index),
+      Array.from({ length: kept.length }, (_, index) => inFlight + lost + index),
     )
     expect(kept.reduce((sum, event) => sum + bytesOf(event), 0)).toBeLessThanOrEqual(256 * 1024)
   })
@@ -428,6 +451,87 @@ describe('Timeline', () => {
     expect(events.slice(1).map((event) => (event.type === 'error' ? event.code : -1))).toEqual(
       Array.from({ length: total - lost }, (_, index) => lost + index),
     )
+  })
+
+  it('puts the lost count in the keepalive batch, the one that outlives the page', async () => {
+    // The first ordinary send stays in flight, so what follows is kept and trimmed.
+    const { send, calls, release } = fakeSend({ holdFirst: true })
+    const timeline = newTimeline(send)
+    for (let i = 0; i < 50; i++) timeline.record(big(i))
+    expect(calls).toHaveLength(1)
+    timeline.record({ type: 'error', from: 'page', code: null, message: 'y'.repeat(301) })
+    timeline.record({ type: 'error', from: 'page', code: null, message: 'y'.repeat(301) })
+    for (let i = 50; i < 950; i++) timeline.record(big(i))
+
+    await timeline.flush({ keepalive: true })
+    const last = calls[calls.length - 1]
+    expect(last?.keepalive).toBe(true)
+    const first = last?.batch.events[0]
+    expect(first).toMatchObject({ type: 'dropped', invalid: 2 })
+    const lost = first?.type === 'dropped' ? first.events : 0
+    expect(lost).toBeGreaterThan(0)
+    // Within what keepalive may carry, the count included.
+    expect(last?.batch.events.reduce((sum, event) => sum + bytesOf(event), 0)).toBeLessThanOrEqual(
+      24 * 1024,
+    )
+    // The ordinary batches, older, say nothing of it: they may be cancelled with the page.
+    const ordinary = calls.slice(0, -1).flatMap((call) => call.batch.events)
+    expect(ordinary.some((event) => event.type === 'dropped')).toBe(false)
+    // Every event is sent or counted, once.
+    const sent = eventsOf(calls).filter((event) => event.type === 'error').length
+    expect(sent + lost).toBe(950)
+    release()
+  })
+
+  it('counts the lost count in the keepalive batch’s 24 KiB', async () => {
+    const { send, calls, release } = fakeSend({ holdFirst: true })
+    const timeline = newTimeline(send)
+    // Events of 256 bytes: 96 fill 24 KiB exactly, so the count must make room.
+    const filler = () => sized(256)
+    for (let i = 0; i < 64; i++) timeline.record(filler())
+    expect(calls).toHaveLength(1)
+    timeline.record({ type: 'error', from: 'page', code: null, message: 'y'.repeat(301) })
+    for (let i = 0; i < 200; i++) timeline.record(filler())
+
+    await timeline.flush({ keepalive: true })
+    const last = calls[calls.length - 1]
+    expect(last?.keepalive).toBe(true)
+    expect(last?.batch.events[0]).toMatchObject({ type: 'dropped', events: 0, invalid: 1 })
+    expect(last?.batch.events.reduce((sum, event) => sum + bytesOf(event), 0)).toBeLessThanOrEqual(
+      24 * 1024,
+    )
+    expect(last?.batch.events).toHaveLength(96)
+    release()
+  })
+
+  it('puts the count in the keepalive batch when only the count is left', async () => {
+    const { send, calls } = fakeSend()
+    const timeline = newTimeline(send)
+    timeline.record({ type: 'error', from: 'page', code: null, message: 'y'.repeat(301) })
+    await timeline.flush({ keepalive: true })
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.keepalive).toBe(true)
+    expect(calls[0]?.batch.events).toEqual([{ type: 'dropped', t: 0, events: 0, invalid: 1 }])
+  })
+
+  it('passes on the counts of a dropped event it trims', async () => {
+    const { send, calls, release } = fakeSend({ holdFirst: true })
+    const timeline = newTimeline(send)
+    for (let i = 0; i < 50; i++) timeline.record(big(i))
+    expect(calls).toHaveLength(1)
+    // A `dropped` event at the head of what is kept, then enough to trim it.
+    timeline.record({ type: 'dropped', events: 5, invalid: 2 })
+    for (let i = 50; i < 850; i++) timeline.record(big(i))
+
+    await timeline.flush({ keepalive: true })
+    const last = calls[calls.length - 1]
+    const first = last?.batch.events[0]
+    expect(first?.type).toBe('dropped')
+    const sent = eventsOf(calls).filter((event) => event.type === 'error').length
+    const trimmed = 850 - sent
+    expect(trimmed).toBeGreaterThan(0)
+    expect(first).toMatchObject({ type: 'dropped', events: 5 + trimmed, invalid: 2 })
+    release()
   })
 
   it('records closed, flushes and ignores what comes after', async () => {
@@ -499,6 +603,7 @@ describe('timelineSender', () => {
     [500, 'retry'],
     [503, 'retry'],
     [429, 'retry'],
+    [408, 'retry'],
     [404, 'refused'],
     [410, 'refused'],
     [413, 'refused'],

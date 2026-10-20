@@ -222,7 +222,12 @@ export type TimelineEventInput = TimelineEvent extends infer E
  */
 export const timelineBatchSchema = z.object({
   playId: z.uuid(),
-  versionId: z.uuid(),
+  /**
+   * The version the page plays, or null until the page knows it (it sends
+   * from the start, even a play that ends before `/playback` answers): the
+   * API then takes the file's served version.
+   */
+  versionId: z.uuid().nullable(),
   seq: z.number().int().min(0).max(100_000),
   /**
    * The page's `Date.now()` at t = 0, for people to read; at most the latest

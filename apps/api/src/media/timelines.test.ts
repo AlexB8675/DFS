@@ -79,7 +79,7 @@ async function linkTo(nodeId: string): Promise<{ id: string; token: string }> {
 }
 
 /** A batch of a play's timeline: any valid events will do. */
-function batch(playId: string, versionId: string, seq: number): TimelineBatch {
+function batch(playId: string, versionId: string | null, seq: number): TimelineBatch {
   return {
     playId,
     versionId,
@@ -104,6 +104,12 @@ async function timelineOf(playId: string) {
       (extract(epoch FROM client_started_at) * 1000)::float8 AS client_started_ms
     FROM timelines WHERE id = ${playId}`)
   return rows[0] ?? null
+}
+
+async function versionOf(playId: string): Promise<string | null> {
+  const { rows } = await app.db.execute<{ version_id: string }>(sql`
+    SELECT version_id FROM timelines WHERE id = ${playId}`)
+  return rows[0]?.version_id ?? null
 }
 
 async function batchesOf(playId: string) {
@@ -141,6 +147,31 @@ describe('a play’s timeline in the drive (§16)', () => {
       { seq: 0, sent_ms: 0 },
       { seq: 1, sent_ms: 1000 },
     ])
+  })
+
+  it('takes a batch before the page knows the version, as the file’s served version', async () => {
+    const video = await upload(client, folderId, 'unknown-version.mp4')
+    const playId = crypto.randomUUID()
+    const path = `/files/${video.nodeId}/timeline`
+    await client.send('POST', path, { json: batch(playId, null, 0) })
+
+    expect(await batchesOf(playId)).toEqual([{ seq: 0, sent_ms: 0 }])
+    expect(await versionOf(playId)).toBe(video.versionId)
+    // A later batch that names the version goes on in the same play.
+    await client.send('POST', path, { json: batch(playId, video.versionId, 1) })
+    expect(await batchesOf(playId)).toHaveLength(2)
+    expect(await versionOf(playId)).toBe(video.versionId)
+  })
+
+  it('takes a link viewer’s batch before the page knows the version', async () => {
+    const video = await upload(client, folderId, 'unknown-version-link.mp4')
+    const link = await linkTo(video.nodeId)
+    const playId = crypto.randomUUID()
+    const viewer = new ApiClient(apiUrl, client.origin)
+    await viewer.send('POST', `/s/${link.token}/files/${video.nodeId}/timeline`, {
+      json: batch(playId, null, 0),
+    })
+    expect(await versionOf(playId)).toBe(video.versionId)
   })
 
   it('keeps a batch sent twice once', async () => {

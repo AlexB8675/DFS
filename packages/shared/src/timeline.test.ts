@@ -108,6 +108,18 @@ describe('timeline events (§16)', () => {
     ).toBe(false)
   })
 
+  it('takes a batch whose version isn’t known yet', () => {
+    const unknown = { ...batch([{ type: 'closed', t: 0 }]), versionId: null }
+    expect(timelineBatchSchema.parse(unknown).versionId).toBeNull()
+    // Left out is not null: the page says it doesn’t know.
+    const without: Record<string, unknown> = batch([{ type: 'closed', t: 0 }])
+    delete without.versionId
+    expect(timelineBatchSchema.safeParse(without).success).toBe(false)
+    expect(timelineBatchSchema.safeParse({ ...unknown, versionId: 'not-a-uuid' }).success).toBe(
+      false,
+    )
+  })
+
   it('refuses text PostgreSQL can’t store', () => {
     const accepted = (message: string) =>
       timelineBatchSchema.safeParse(

@@ -242,9 +242,15 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
         }
         const played = await playedFile(app, request, request.params)
         const batch = request.body
-        if (!(await isVersionOf(app.db, played.node.id, batch.versionId))) {
+        // A page that doesn't know its version yet (it sends from the start) names
+        // none: the file's served one is the one it plays.
+        if (
+          batch.versionId !== null &&
+          !(await isVersionOf(app.db, played.node.id, batch.versionId))
+        ) {
           throw new ApiError(404, 'not_found', 'This version isn’t this file’s.')
         }
+        const versionId = batch.versionId ?? (await servedVersion(app.db, played)).version_id
         const outcome = await appendTimelineBatch(
           app.db,
           batch.playId,
@@ -252,7 +258,7 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
             kind: 'play',
             via: played.shareId === null ? 'drive' : 'link',
             nodeId: played.node.id,
-            versionId: batch.versionId,
+            versionId,
             userId: played.userId,
             shareId: played.shareId,
             playId: null,

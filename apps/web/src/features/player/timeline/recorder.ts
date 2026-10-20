@@ -12,9 +12,12 @@ import { ApiError, apiFetch } from '@/lib/api/client'
 // checked against the shared schema and sent to the API in numbered batches,
 // every 5 s and at once past 16 KiB. The last goes with `keepalive` as the page
 // hides or leaves, which the browser lets outlive it. A batch that failed to
-// send goes again under its number, so the server takes it once. The recorder
-// stops at the first refusal: a link that ended answers 404 or 410, and every
-// answer would count against the viewer's address under the guess limit (D46).
+// send goes again under its number, so the server takes it once. Batches don't
+// wait for the version: a play that ends before the page knows it (the viewer
+// left, or `/playback` failed) still leaves its trail, naming no version, and
+// the API takes the file's served one. The recorder stops at the first
+// refusal: a link that ended answers 404 or 410, and every answer would count
+// against the viewer's address under the guess limit (D46).
 
 /** How often what is kept goes, while there is something. */
 const FLUSH_EVERY_MS = 5000
@@ -42,7 +45,6 @@ interface Kept {
 /** A batch cut from what was kept: its number and its events are fixed, whatever happens to its send. */
 interface Cut {
   seq: number
-  versionId: string
   events: TimelineEvent[]
   bytes: number
 }
@@ -108,20 +110,20 @@ export class Timeline {
     if (this.keptBytes >= FLUSH_AT_BYTES && this.pending.length === 0) void this.flush()
   }
 
-  /** Batches carry this version; nothing is sent before it is set. */
+  /** Batches name this version from now on; before, they carry null and the API takes the file’s served version. */
   setVersion(versionId: string): void {
     this.versionId = versionId
   }
 
   /** Sends what is kept; with `keepalive`, as the page hides or leaves. */
   async flush(options: { keepalive?: boolean } = {}): Promise<void> {
-    if (this.refused || this.versionId === null) return
+    if (this.refused) return
     if (options.keepalive === true) {
-      await this.flushKeepalive(this.versionId)
+      await this.flushKeepalive()
       return
     }
     // One ordinary send at a time: the timer's next tick goes on from here.
-    this.inFlight ??= this.drain(this.versionId).finally(() => {
+    this.inFlight ??= this.drain().finally(() => {
       this.inFlight = null
     })
     await this.inFlight
@@ -174,52 +176,60 @@ export class Timeline {
     while (this.heldBytes() > MAX_KEPT_BYTES) {
       const batch = this.pending.shift()
       if (batch !== undefined) {
-        for (const event of batch.events) {
-          if (event.type === 'dropped') {
-            this.lost += event.events
-            this.invalid += event.invalid
-          } else this.lost += 1
-        }
+        for (const event of batch.events) this.countLost(event)
         continue
       }
       const oldest = this.kept.shift()
       if (oldest === undefined) return
       this.keptBytes -= oldest.bytes
-      this.lost += 1
+      this.countLost(oldest.event)
     }
   }
 
-  /** Puts the count of what was lost or refused first among the kept events, as the next batch's start. */
-  private foldCounts(): void {
-    if (this.lost === 0 && this.invalid === 0) return
+  /** Counts a dropped event as lost; a `dropped` event stands for the events it counted, and passes those on. */
+  private countLost(event: TimelineEvent): void {
+    if (event.type === 'dropped') {
+      this.lost += event.events
+      this.invalid += event.invalid
+    } else this.lost += 1
+  }
+
+  /** The `dropped` event for what was lost or refused since the last batch said so, or `null`; the counts start again. */
+  private takeCounts(): Kept | null {
+    if (this.lost === 0 && this.invalid === 0) return null
     const event: TimelineEvent = {
       type: 'dropped',
       t: this.elapsed(),
       events: this.lost,
       invalid: this.invalid,
     }
-    const bytes = sizeOf(event)
-    this.kept.unshift({ event, bytes })
-    this.keptBytes += bytes
     this.lost = 0
     this.invalid = 0
+    return { event, bytes: sizeOf(event) }
   }
 
-  private cut(items: readonly Kept[], versionId: string): Cut {
+  /** Puts the count of what was lost or refused first among the kept events, as the next batch's start. */
+  private foldCounts(): void {
+    const counts = this.takeCounts()
+    if (counts === null) return
+    this.kept.unshift(counts)
+    this.keptBytes += counts.bytes
+  }
+
+  private cut(items: readonly Kept[]): Cut {
     return {
       seq: this.nextSeq++,
-      versionId,
       events: items.map((item) => item.event),
       bytes: items.reduce((sum, item) => sum + item.bytes, 0),
     }
   }
 
   /** The next batch of what is kept, oldest first, or `null` if nothing is. */
-  private cutNext(versionId: string): Cut | null {
+  private cutNext(): Cut | null {
     this.foldCounts()
     if (this.kept.length === 0) return null
     const taken = this.kept.splice(0, fit(this.kept, 0, this.kept.length, BATCH_MAX_BYTES))
-    const batch = this.cut(taken, versionId)
+    const batch = this.cut(taken)
     this.keptBytes -= batch.bytes
     return batch
   }
@@ -231,7 +241,7 @@ export class Timeline {
       result = await this.send(
         {
           playId: this.playId,
-          versionId: batch.versionId,
+          versionId: this.versionId,
           seq: batch.seq,
           startedAt: this.startedAt,
           sentAt: this.elapsed(),
@@ -253,9 +263,9 @@ export class Timeline {
   }
 
   /** Sends the failed batches, then what is kept, a batch at a time, until a send fails or nothing is left. */
-  private async drain(versionId: string): Promise<void> {
+  private async drain(): Promise<void> {
     while (!this.refused) {
-      const batch = this.pending.shift() ?? this.cutNext(versionId)
+      const batch = this.pending.shift() ?? this.cutNext()
       if (batch === null) return
       if ((await this.dispatch(batch, false)) !== 'sent') return
     }
@@ -265,32 +275,36 @@ export class Timeline {
    * Sends it all now, without waiting for a send in flight: the failed batches
    * and the older kept events as ordinary batches, and the newest events up to
    * `KEEPALIVE_MAX_BYTES` as one `keepalive` batch with the highest number.
+   * The count of what was lost or refused goes in that batch, the one that
+   * outlives the page, and counts toward its size.
    */
-  private async flushKeepalive(versionId: string): Promise<void> {
+  private async flushKeepalive(): Promise<void> {
     const sends: Promise<SendResult>[] = []
     for (const batch of this.pending.splice(0)) sends.push(this.dispatch(batch, false))
 
-    this.foldCounts()
+    const counts = this.takeCounts()
     const all = this.kept
     this.kept = []
     this.keptBytes = 0
-    // The tail is what goes with keepalive: the newest events that fit.
+    // The tail is what goes with keepalive: the newest events that fit beside the count.
     let tail = all.length
-    let tailBytes = 0
-    while (tail > 0 && all.length - tail < TIMELINE_MAX_EVENTS) {
+    let tailBytes = counts?.bytes ?? 0
+    let tailEvents = counts === null ? 0 : 1
+    while (tail > 0 && tailEvents < TIMELINE_MAX_EVENTS) {
       const item = all[tail - 1]
-      if (item === undefined || (tail < all.length && tailBytes + item.bytes > KEEPALIVE_MAX_BYTES))
-        break
+      if (item === undefined || tailBytes + item.bytes > KEEPALIVE_MAX_BYTES) break
       tailBytes += item.bytes
+      tailEvents += 1
       tail -= 1
     }
     let from = 0
     while (from < tail) {
       const to = fit(all, from, tail, BATCH_MAX_BYTES)
-      sends.push(this.dispatch(this.cut(all.slice(from, to), versionId), false))
+      sends.push(this.dispatch(this.cut(all.slice(from, to)), false))
       from = to
     }
-    if (tail < all.length) sends.push(this.dispatch(this.cut(all.slice(tail), versionId), true))
+    const last = counts === null ? all.slice(tail) : [counts, ...all.slice(tail)]
+    if (last.length > 0) sends.push(this.dispatch(this.cut(last), true))
     await Promise.all(sends)
   }
 
@@ -306,7 +320,7 @@ export class Timeline {
   }
 }
 
-/** Sends a batch to `{base}/timeline`: 2xx is sent; a network failure, 429 or 5xx is retry; any other 4xx is refused. */
+/** Sends a batch to `{base}/timeline`: 2xx is sent; a network failure, 408, 429 or 5xx is retry; any other 4xx is refused. */
 export function timelineSender(base: string): TimelineSend {
   return async (batch, keepalive) => {
     try {
@@ -314,7 +328,8 @@ export function timelineSender(base: string): TimelineSend {
       return 'sent'
     } catch (error) {
       if (error instanceof ApiError) {
-        return error.status === 429 || error.status >= 500 ? 'retry' : 'refused'
+        const again = error.status === 408 || error.status === 429 || error.status >= 500
+        return again ? 'retry' : 'refused'
       }
       return 'retry'
     }
