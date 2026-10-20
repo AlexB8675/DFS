@@ -2,7 +2,7 @@ import { Readable, type Writable } from 'node:stream'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { z } from 'zod'
 import { readSources, readVersion, type ReadableVersion, type ReadSources } from './reader.ts'
-import type { StreamRequest } from './stream-sessions.ts'
+import type { ServedResult, StreamRequest } from './stream-sessions.ts'
 import { writeZip, zipLength, zipTimeZone, type ZipEntry } from './zip.ts'
 
 // Sending files and archives (DESIGN.md §6.2, §7.5): streamed, Range-aware,
@@ -76,20 +76,12 @@ export function sendFile(
           address: request.ip,
           userAgent: request.headers['user-agent']?.slice(0, 300) ?? null,
         },
-        stats,
+        () => servedResult(stats, false),
       )
     : null
   reply.raw.once('close', () => {
     followed?.()
-    opened?.close({
-      bytes: stats.bytes,
-      finished: reply.raw.writableFinished,
-      failed: stats.failed ?? false,
-      firstByteMs: stats.firstPieceMs === null ? null : Math.round(stats.firstPieceMs),
-      totalMs: Math.round(performance.now() - stats.startedAt),
-      sources: stats.sources,
-      clientMs: Math.round(stats.clientMs),
-    })
+    opened?.close(servedResult(stats, reply.raw.writableFinished))
     logSent(request, reply, file.version_id, start, end, stats, {
       playId: session?.playId ?? null,
       sessionId: opened?.sessionId ?? null,
@@ -125,6 +117,24 @@ export interface SendStats {
   clientMs: number
   /** The source failed while the response was open: not a client that left. */
   failed?: boolean
+}
+
+/**
+ * A read's figures for its stream session (§6.2, §16): what it has sent so
+ * far, and whether it has finished sending. The session reads them while the
+ * read is still going, to tell a seek from a read that carries on, and when
+ * the API stops with the read still open.
+ */
+function servedResult(stats: SendStats, finished: boolean): ServedResult {
+  return {
+    bytes: stats.bytes,
+    finished,
+    failed: stats.failed ?? false,
+    firstByteMs: stats.firstPieceMs === null ? null : Math.round(stats.firstPieceMs),
+    totalMs: Math.round(performance.now() - stats.startedAt),
+    sources: stats.sources,
+    clientMs: Math.round(stats.clientMs),
+  }
 }
 
 function sendStats(): SendStats {

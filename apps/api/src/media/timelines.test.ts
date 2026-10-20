@@ -672,6 +672,56 @@ describe('stream sessions (§6.2, §16)', () => {
     }
   })
 
+  it('writes a read still open when the API begins to close', async () => {
+    // An API of its own, as above. A response that stays open holds Fastify's `onClose` back, and
+    // the process exits after its grace: the read must be written as the API begins to close.
+    await seedUser(app.db, { username: 'closer-open', password: 'the-closer-password' })
+    const setup = await testConfig({ DATABASE_URL: database.url })
+    const closing = await buildApp({ config: setup.config, logger: false })
+    let body: ReadableStream<Uint8Array> | null = null
+    let closed: Promise<void> | null = null
+    try {
+      const url = await closing.listen({ port: 0, host: '127.0.0.1' })
+      const closer = new ApiClient(url, setup.config.publicBaseUrl)
+      await closer.signIn('closer-open', 'the-closer-password')
+      // More than the connection's buffers hold, so the server can't finish sending while the
+      // client takes nothing.
+      const bytes = new Uint8Array(8 * 1024 * 1024)
+      const video = await uploadFile(closer, (await workspace(closer)).id, 'open.mp4', bytes)
+      const response = await closer.fetch(
+        'GET',
+        `/files/${video.nodeId}/content?play=${crypto.randomUUID()}`,
+        { headers: { Range: 'bytes=0-' } },
+      )
+      body = response.body
+      expect(response.status).toBe(206)
+      expect(await sessionsOf(video.nodeId)).toEqual([])
+
+      closed = closing.close()
+      let served: ServedEvent[] = []
+      await vi.waitFor(
+        async () => {
+          const session = (await sessionsOf(video.nodeId))[0]
+          served = session ? await servedBy(session.id) : []
+          expect(served).toHaveLength(1)
+        },
+        { timeout: 5000, interval: 50 },
+      )
+      expect(served[0]).toMatchObject({ from: 0, to: bytes.length - 1, finished: false })
+      expect(served[0]?.bytes).toBeGreaterThan(0)
+      expect(served[0]?.bytes).toBeLessThan(bytes.length)
+
+      // The client lets go, so the API can finish closing.
+      await body?.cancel()
+      await closed
+      expect(await servedBy((await sessionsOf(video.nodeId))[0]?.id ?? '')).toHaveLength(1)
+    } finally {
+      await body?.cancel().catch(() => undefined)
+      await (closed ?? closing.close())
+      await setup.cleanup()
+    }
+  })
+
   it('refuses a play ID that isn’t one', async () => {
     const video = await upload(client, folderId, 'bad-play.mp4')
     expect(

@@ -253,9 +253,13 @@ export async function buildApp({
   const savingMetrics = metrics.start(db, app.log)
   const savingSessions = app.streamSessions.start()
   // Open event streams would keep the server from closing; a check of
-  // itself would find it closing.
+  // itself would find it closing. The stream sessions are written as the API
+  // begins to close, not in `onClose`: Fastify runs that once every response
+  // has ended, a video read in play is almost always still open, and the
+  // process exits after its grace, so the last reads would never be written.
   app.addHook('preClose', async () => {
     events.endStreams()
+    await savingSessions.stop()
     await checks.stop()
     await journalFlusher.stop()
   })
@@ -263,8 +267,6 @@ export async function buildApp({
     await events.stop()
     await queue.stop()
     await savingMetrics.stop()
-    // Fastify runs `onClose` once the last responses have ended, so their sessions have heard of them.
-    await savingSessions.stop()
     stopWatchingProcess()
     await pool.end()
   })

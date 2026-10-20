@@ -2,6 +2,7 @@ import type { AppendOutcome, TimelineOwner } from '@dfs/db'
 import type { ServedEvent, StreamEvent } from '@dfs/shared'
 import { TIMELINE_MAX_EVENTS } from '@dfs/shared'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { RateLimiter } from '../auth/rate-limit.ts'
 import { readSources } from './reader.ts'
 import {
   FLUSH_EVERY_MS,
@@ -19,18 +20,22 @@ interface Call {
 }
 
 /** A session registry on fake clocks, with a writer that records every attempt. */
-function setup() {
+function setup(limits: { maxLive?: number; newPerReader?: RateLimiter } = {}) {
   const clock = { now: 5000, wall: Date.UTC(2026, 9, 20, 12) }
   const calls: Call[] = []
-  const behaviour: { outcome: AppendOutcome; fails: boolean; failsFor: string | null } = {
-    outcome: 'stored',
-    fails: false,
-    failsFor: null,
-  }
+  const behaviour: {
+    outcome: AppendOutcome
+    fails: boolean
+    failsFor: string | null
+    /** Runs as a write begins, as a response closing meanwhile would. */
+    onWrite: (() => void) | null
+  } = { outcome: 'stored', fails: false, failsFor: null, onWrite: null }
   const warn = vi.fn()
   const sessions = new StreamSessions({
+    ...limits,
     write: (id, owner, batch) => {
       calls.push({ id, owner, batch })
+      behaviour.onWrite?.()
       if (behaviour.fails || id === behaviour.failsFor) {
         return Promise.reject(new Error('the database is down'))
       }
@@ -73,6 +78,11 @@ function result(over: Partial<ServedResult> = {}): ServedResult {
   }
 }
 
+/** A read's figures so far, as `sendFile` gives them: its bytes, the rest of a read going. */
+function progressOf(sent: { readonly bytes: number }): () => ServedResult {
+  return () => result({ bytes: sent.bytes, finished: false })
+}
+
 /** Opens a request, lets `ms` pass while it sends `bytes`, and closes it. */
 function serve(
   harness: ReturnType<typeof setup>,
@@ -81,10 +91,11 @@ function serve(
   ms = 10,
 ): string {
   const sent = { bytes: 0 }
-  const { sessionId, close } = harness.sessions.open(request(over), sent)
+  const { sessionId, close } = harness.sessions.open(request(over), progressOf(sent))
   sent.bytes = bytes
   harness.clock.now += ms
   close(result({ bytes }))
+  if (sessionId === null) throw new Error('the read was not given a session')
   return sessionId
 }
 
@@ -192,9 +203,9 @@ describe('stream sessions (§6.2, §16)', () => {
   it('keeps a session whose request is still running, however long it takes', () => {
     const harness = setup()
     const sent = { bytes: 0 }
-    const long = harness.sessions.open(request(), sent)
+    const long = harness.sessions.open(request(), progressOf(sent))
     harness.clock.now += 10 * SESSION_IDLE_MS
-    expect(harness.sessions.open(request({ from: 50 }), { bytes: 0 }).sessionId).toBe(
+    expect(harness.sessions.open(request({ from: 50 }), progressOf({ bytes: 0 })).sessionId).toBe(
       long.sessionId,
     )
   })
@@ -205,7 +216,7 @@ describe('stream sessions (§6.2, §16)', () => {
 
     // `bytes=0-` runs to the file's end, but is closed after 65 536 bytes: the first is never a seek.
     const sentA = { bytes: 0 }
-    const a = sessions.open(request({ from: 0 }), sentA)
+    const a = sessions.open(request({ from: 0 }), progressOf(sentA))
     sentA.bytes = 65_536
     clock.now += 100
     a.close(result({ bytes: 65_536 }))
@@ -213,13 +224,13 @@ describe('stream sessions (§6.2, §16)', () => {
     // `bytes=65536-` carries on from where A stopped, after four idle seconds.
     clock.now += 4000
     const sentB = { bytes: 0 }
-    const b = sessions.open(request({ from: 65_536 }), sentB)
+    const b = sessions.open(request({ from: 65_536 }), progressOf(sentB))
     sentB.bytes = 1000
 
     // While B runs, a read from far on is a seek, and there is no gap, as B is running.
     clock.now += 50
     const sentC = { bytes: 0 }
-    const c = sessions.open(request({ from: 5_000_000 }), sentC)
+    const c = sessions.open(request({ from: 5_000_000 }), progressOf(sentC))
     sentC.bytes = 300_000
     sentB.bytes = 2000
     clock.now += 20
@@ -228,12 +239,12 @@ describe('stream sessions (§6.2, §16)', () => {
 
     // Both are closed: a read from where C stopped carries on, ten milliseconds after.
     clock.now += 10
-    const d = sessions.open(request({ from: 5_300_000 }), { bytes: 0 })
+    const d = sessions.open(request({ from: 5_300_000 }), progressOf({ bytes: 0 }))
     d.close(result({ bytes: 100 }))
 
     // A read from where B was still running, when C opened, is a seek: it had got to 66 536 only.
     clock.now += 7
-    const e = sessions.open(request({ from: 66_536 }), { bytes: 0 })
+    const e = sessions.open(request({ from: 66_536 }), progressOf({ bytes: 0 }))
     e.close(result({ bytes: 100 }))
 
     await sessions.flush()
@@ -250,14 +261,14 @@ describe('stream sessions (§6.2, §16)', () => {
     const harness = setup()
     serve(harness, { from: 0 }, 1000)
     const sent = { bytes: 0 }
-    const running = harness.sessions.open(request({ from: 7000 }), sent)
+    const running = harness.sessions.open(request({ from: 7000 }), progressOf(sent))
     sent.bytes = 500
     // Where the running read has got to, as it opens: a second connection of the same player.
-    harness.sessions.open(request({ from: 7500 }), { bytes: 0 }).close(result())
+    harness.sessions.open(request({ from: 7500 }), progressOf({ bytes: 0 })).close(result())
     // Behind it, or ahead, is somewhere else.
-    harness.sessions.open(request({ from: 7400 }), { bytes: 0 }).close(result())
+    harness.sessions.open(request({ from: 7400 }), progressOf({ bytes: 0 })).close(result())
     sent.bytes = 900
-    harness.sessions.open(request({ from: 7500 }), { bytes: 0 }).close(result())
+    harness.sessions.open(request({ from: 7500 }), progressOf({ bytes: 0 })).close(result())
     running.close(result({ bytes: 900 }))
 
     await harness.sessions.flush()
@@ -329,13 +340,13 @@ describe('stream sessions (§6.2, §16)', () => {
   it('rounds every time it keeps to whole milliseconds', async () => {
     const harness = setup()
     harness.clock.now = 1000.4
-    const first = harness.sessions.open(request(), { bytes: 0 })
+    const first = harness.sessions.open(request(), progressOf({ bytes: 0 }))
     first.close(result({ firstByteMs: null, totalMs: 0.4, clientMs: 0 }))
     harness.clock.now = 1007.6
     const sources = readSources()
     sources.cache = { bytes: 4096, waitMs: 12.5 }
     sources.discord = { bytes: 100, waitMs: 80.49 }
-    const second = harness.sessions.open(request(), { bytes: 0 })
+    const second = harness.sessions.open(request(), progressOf({ bytes: 0 }))
     second.close(
       result({ sources, bytes: 4196, firstByteMs: 12.5, totalMs: 92.9, clientMs: 33.49 }),
     )
@@ -373,10 +384,13 @@ describe('stream sessions (§6.2, §16)', () => {
     // A read that closes after another opened from elsewhere keeps its own address.
     const slow = harness.sessions.open(
       request({ playId: 'play-1', address: '198.51.100.9', from: 3000 }),
-      { bytes: 0 },
+      progressOf({ bytes: 0 }),
     )
     harness.sessions
-      .open(request({ playId: 'play-1', address: '192.0.2.44', from: 9000 }), { bytes: 0 })
+      .open(
+        request({ playId: 'play-1', address: '192.0.2.44', from: 9000 }),
+        progressOf({ bytes: 0 }),
+      )
       .close(result())
     slow.close(result())
     await harness.sessions.flush()
@@ -389,7 +403,7 @@ describe('stream sessions (§6.2, §16)', () => {
 
   it('takes a request that closes twice once', async () => {
     const harness = setup()
-    const { close } = harness.sessions.open(request(), { bytes: 0 })
+    const { close } = harness.sessions.open(request(), progressOf({ bytes: 0 }))
     close(result({ bytes: 10 }))
     close(result({ bytes: 20 }))
     await harness.sessions.flush()
@@ -528,6 +542,131 @@ describe('stream sessions (§6.2, §16)', () => {
     expect(kept[0]?.from).toBe(extra * 1000)
     expect(kept.at(-1)?.from).toBe((MAX_PENDING_EVENTS + extra - 1) * 1000)
     expect(firstKept?.t).toBe(extra * 2)
+  })
+
+  it('forgets a session idle past two minutes once it is written', async () => {
+    const harness = setup()
+    serve(harness)
+    expect(harness.sessions.live).toBe(1)
+
+    // Not idle for long enough yet: written, but kept, as a read may still join it.
+    harness.clock.now += SESSION_IDLE_MS
+    await harness.sessions.flush()
+    expect(harness.calls).toHaveLength(1)
+    expect(harness.sessions.live).toBe(1)
+
+    harness.clock.now += 1
+    await harness.sessions.flush()
+    expect(harness.sessions.live).toBe(0)
+  })
+
+  it('doesn’t begin a session past the live cap, and says so', async () => {
+    const harness = setup({ maxLive: 2 })
+    const { calls, sessions, warn } = harness
+    const one = serve(harness, { playId: 'play-1' })
+    const two = serve(harness, { playId: 'play-2' })
+    expect(sessions.live).toBe(2)
+
+    // Both are held, so a third reader's read is served, but not given a session or logged.
+    const third = sessions.open(request({ playId: 'play-3' }), progressOf({ bytes: 0 }))
+    expect(third.sessionId).toBeNull()
+    third.close(result({ bytes: 1000 }))
+    expect(sessions.live).toBe(2)
+    // Reads joining the sessions held are never refused.
+    expect(serve(harness, { playId: 'play-1', from: 1000 })).toBe(one)
+
+    await sessions.flush()
+    expect(calls.map((call) => call.id).sort()).toEqual([one, two].sort())
+    expect(calls.flatMap((call) => served(call))).toHaveLength(3)
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalledWith({ skipped: 1 }, 'stream reads not logged: too many sessions')
+
+    // Said once for what was skipped, not at every flush.
+    await sessions.flush()
+    expect(warn).toHaveBeenCalledTimes(1)
+
+    // Room is made once the sessions have ended: a new one begins.
+    harness.clock.now += SESSION_IDLE_MS + 1
+    await sessions.flush()
+    expect(sessions.live).toBe(0)
+    const later = sessions.open(request({ playId: 'play-3' }), progressOf({ bytes: 0 }))
+    expect(later.sessionId).toEqual(expect.any(String))
+  })
+
+  it('limits the new sessions one reader begins', async () => {
+    const harness = setup({ newPerReader: new RateLimiter(2, 10 * 60_000) })
+    const { calls, clock, sessions } = harness
+    const one = serve(harness, { playId: 'play-1' })
+    serve(harness, { playId: 'play-2' })
+    // A third new session from the same address isn't logged.
+    const third = sessions.open(request({ playId: 'play-3' }), progressOf({ bytes: 0 }))
+    expect(third.sessionId).toBeNull()
+    third.close(result({ bytes: 1000 }))
+    // Nor is one from the same address written the IPv4-mapped IPv6 way: it is the same reader.
+    const mapped = request({ playId: 'play-3', address: '::ffff:203.0.113.7' })
+    expect(sessions.open(mapped, progressOf({ bytes: 0 })).sessionId).toBeNull()
+
+    // Reads joining a session that exists are unaffected, however many.
+    for (let from = 1000; from < 6000; from += 1000) {
+      expect(serve(harness, { playId: 'play-1', from })).toBe(one)
+    }
+    // Another address has a count of its own.
+    expect(serve(harness, { playId: 'play-3', address: '198.51.100.9' })).toEqual(
+      expect.any(String),
+    )
+
+    // The count begins again with its window.
+    clock.wall += 10 * 60_000 + 1
+    expect(serve(harness, { playId: 'play-4' })).toEqual(expect.any(String))
+
+    await sessions.flush()
+    expect(new Set(calls.map((call) => call.id)).size).toBe(4)
+  })
+
+  it('counts a signed-in user’s new sessions together, whatever their address', () => {
+    const harness = setup({ newPerReader: new RateLimiter(2, 10 * 60_000) })
+    const user = { via: 'drive', userId: 'user-1', shareId: null } as const
+    serve(harness, { ...user, playId: 'play-1', address: '203.0.113.7' })
+    serve(harness, { ...user, playId: 'play-2', address: '198.51.100.9' })
+    const third = harness.sessions.open(
+      request({ ...user, playId: 'play-3', address: '192.0.2.44' }),
+      progressOf({ bytes: 0 }),
+    )
+    expect(third.sessionId).toBeNull()
+    // Another user, from the address the first came from, is another reader.
+    const other = serve(harness, { ...user, userId: 'user-2', playId: 'play-4' })
+    expect(other).toEqual(expect.any(String))
+  })
+
+  it('writes a read still running when stopped, as unfinished', async () => {
+    vi.useFakeTimers()
+    const harness = setup()
+    const { behaviour, calls, sessions } = harness
+    const running = sessions.start()
+    // Its own figures say finished: whatever they say, a read cut off by the stop is not.
+    const read = sessions.open(request({ playId: 'play-1', from: 100, to: 99_999 }), () =>
+      result({ bytes: 5000, finished: true, totalMs: 40 }),
+    )
+    // Another read of the session has closed, and is written as it closed.
+    serve(harness, { playId: 'play-1', from: 200_000 }, 700)
+    expect(calls).toHaveLength(0)
+
+    // The read closes while the batch is being written, as the API closing may make it.
+    behaviour.onWrite = () => {
+      read.close(result({ bytes: 9000 }))
+    }
+    await running.stop()
+    expect(calls).toHaveLength(1)
+    expect(served(calls[0])).toMatchObject([
+      { from: 200_000, bytes: 700, finished: true },
+      { from: 100, to: 99_999, bytes: 5000, finished: false, totalMs: 40 },
+    ])
+
+    // A close after that adds nothing.
+    behaviour.onWrite = null
+    read.close(result({ bytes: 9000 }))
+    await sessions.flush()
+    expect(calls).toHaveLength(1)
   })
 
   it('writes every session out when stopped', async () => {
