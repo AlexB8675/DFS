@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto'
 import { Readable } from 'node:stream'
-import { appendTimelineBatch, WORKING_LINK, type Executor } from '@dfs/db'
+import { WORKING_LINK, type Executor } from '@dfs/db'
 import {
   audioQueueSchema,
   coverType,
@@ -48,6 +48,7 @@ import {
   streamTokenValid,
   type StreamGrant,
 } from '../media/stream-links.ts'
+import { appendTimelineBatchQuietly } from '../media/timeline-store.ts'
 import { mediaTokenValid } from '../media/token.ts'
 import { visibleFolder, visibleNode, type NodeRow } from '../nodes/read.ts'
 import { liveShareById, nodeInShare, openShare } from '../shares/public.ts'
@@ -238,20 +239,26 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
           withinLimit(app.limits.timelines, addressKey(request.ip), 'Too many timeline batches.')
         } else {
           const auth = requireAuth(request.auth)
-          withinLimit(app.limits.timelines, `user:${auth.user.id}`, 'Too many timeline batches.')
+          withinLimit(
+            app.limits.timelines,
+            `user:${auth.user.id}:${request.body.playId}`,
+            'Too many timeline batches.',
+          )
         }
         const played = await playedFile(app, request, request.params)
         const batch = request.body
         // A page that doesn't know its version yet (it sends from the start) names
-        // none: the file's served one is the one it plays.
-        if (
-          batch.versionId !== null &&
-          !(await isVersionOf(app.db, played.node.id, batch.versionId))
-        ) {
-          throw new ApiError(404, 'not_found', 'This version isn’t this file’s.')
+        // none, and a version that isn't (or is no longer, as replacing a file
+        // purges the earlier ones, D42) this file's is taken as the one it plays
+        // now: the play goes on either way. The timeline keeps the first.
+        const versionId =
+          batch.versionId !== null && (await isVersionOf(app.db, played.node.id, batch.versionId))
+            ? batch.versionId
+            : ((await playedVersionId(app.db, played)) ?? batch.versionId)
+        if (versionId === null) {
+          throw new ApiError(409, 'not_ready', 'This file hasn’t finished uploading.')
         }
-        const versionId = batch.versionId ?? (await servedVersion(app.db, played)).version_id
-        const outcome = await appendTimelineBatch(
+        const outcome = await appendTimelineBatchQuietly(
           app.db,
           batch.playId,
           {
@@ -572,6 +579,18 @@ async function playedFile(
 /** The version a player is given: a file link's own, or the file's current one. */
 function servedVersion(db: Executor, played: Played): Promise<DownloadableFile> {
   return downloadableFile(db, played.node.id, played.pinnedVersionId)
+}
+
+/**
+ * The ID of the version `servedVersion` gives, read alone and without checking
+ * the file is ready: `null` for a file with no version yet, where
+ * `downloadableFile` would refuse.
+ */
+async function playedVersionId(db: Executor, played: Played): Promise<string | null> {
+  if (played.pinnedVersionId !== null) return played.pinnedVersionId
+  const { rows } = await db.execute<{ current_version_id: string | null }>(sql`
+    SELECT current_version_id FROM nodes node /* tree: by id, gated */ WHERE node.id = ${played.node.id}`)
+  return rows[0]?.current_version_id ?? null
 }
 
 /**

@@ -1,4 +1,4 @@
-import { ApiClient, createFolder, text, uploadFile, workspace } from '@dfs/contract'
+import { ApiClient, createFolder, startUpload, text, uploadFile, workspace } from '@dfs/contract'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
 import {
   sessionSchema,
@@ -118,6 +118,20 @@ async function batchesOf(playId: string) {
   return rows
 }
 
+/** A read to its end. */
+async function read(who: ApiClient, path: string, range: string) {
+  const response = await who.fetch('GET', path, { headers: { Range: range } })
+  await response.arrayBuffer()
+  return response
+}
+
+/** The stream sessions kept for a page's play. */
+async function sessionsOfPlay(playId: string) {
+  const { rows } = await app.db.execute<{ id: string }>(sql`
+    SELECT id FROM timelines WHERE kind = 'stream' AND play_id = ${playId}`)
+  return rows
+}
+
 /** What the log says of refused batches. */
 function refusals(playId: string) {
   return lines
@@ -211,17 +225,55 @@ describe('a play’s timeline in the drive (§16)', () => {
     expect((await timelineOf(playId))?.batches).toBe(1)
   })
 
-  it('refuses a version of another file', async () => {
+  it('takes a version of another file as the one this file plays now', async () => {
     const video = await upload(client, folderId, 'this.mp4')
     const another = await upload(client, folderId, 'that.mp4')
     const playId = crypto.randomUUID()
-    const refused = await client.fetch('POST', `/files/${video.nodeId}/timeline`, {
+    await client.send('POST', `/files/${video.nodeId}/timeline`, {
       json: batch(playId, another.versionId, 0),
     })
-    // By its message, so a missing route (also a 404) doesn't pass for it.
-    expect(refused.status).toBe(404)
+    // Stored, under this file's version: the other file's never reaches the timeline.
+    expect(await batchesOf(playId)).toEqual([{ seq: 0, sent_ms: 0 }])
+    expect(await versionOf(playId)).toBe(video.versionId)
+  })
+
+  it('keeps a play going after its file is replaced', async () => {
+    const first = await upload(client, folderId, 'replaced.mp4')
+    const playId = crypto.randomUUID()
+    const path = `/files/${first.nodeId}/timeline`
+    await client.send('POST', path, { json: batch(playId, first.versionId, 0) })
+
+    // Replacing the file purges its earlier versions (D42), the one this play named too.
+    const second = await uploadFile(client, folderId, 'replaced.mp4', text('A second video.'))
+    expect(second.nodeId).toBe(first.nodeId)
+    expect(second.versionId).not.toBe(first.versionId)
+    const { rows: purged } = await app.db.execute(sql`
+      SELECT 1 FROM file_versions WHERE id = ${first.versionId}`)
+    expect(purged).toEqual([])
+
+    // The page goes on naming the version it began with: its batches are still taken.
+    await client.send('POST', path, { json: batch(playId, first.versionId, 1) })
+    expect(await batchesOf(playId)).toEqual([
+      { seq: 0, sent_ms: 0 },
+      { seq: 1, sent_ms: 1000 },
+    ])
+    // The timeline keeps the version it began with.
+    expect(await versionOf(playId)).toBe(first.versionId)
+
+    // A play that begins naming a version that is gone is taken as one of the file's current.
+    const late = crypto.randomUUID()
+    await client.send('POST', path, { json: batch(late, first.versionId, 0) })
+    expect(await versionOf(late)).toBe(second.versionId)
+  })
+
+  it('says a file still uploading isn’t ready for a batch that names no version', async () => {
+    const pending = await startUpload(client, folderId, 'pending.mp4', 100)
+    const path = `/files/${pending.nodeId}/timeline`
+    const playId = crypto.randomUUID()
+    const refused = await client.fetch('POST', path, { json: batch(playId, null, 0) })
+    expect(refused.status).toBe(409)
     expect(await refused.json()).toEqual({
-      error: { code: 'not_found', message: 'This version isn’t this file’s.' },
+      error: { code: 'not_ready', message: 'This file hasn’t finished uploading.' },
     })
     expect(await timelineOf(playId)).toBeNull()
   })
@@ -287,20 +339,96 @@ describe('a play’s timeline in the drive (§16)', () => {
     expect(await timelineOf(playId)).toBeNull()
   })
 
-  it('counts a user’s batches against the user', async () => {
+  it('counts a user’s batches against each play', async () => {
     const mine = await upload(other, otherFolderId, 'counted.mp4')
     const path = `/files/${mine.nodeId}/timeline`
     const { user } = await other.call('GET', '/auth/me', sessionSchema)
+    const playId = crypto.randomUUID()
+    await other.send('POST', path, { json: batch(playId, mine.versionId, 0) })
+    for (let hit = 1; hit < 300; hit += 1) app.limits.timelines.hit(`user:${user.id}:${playId}`)
+    expect(await other.error('POST', path, { json: batch(playId, mine.versionId, 1) })).toEqual({
+      status: 429,
+      code: 'rate_limited',
+    })
+    // The same user's other plays, at the same time, are counted apart.
     await other.send('POST', path, { json: batch(crypto.randomUUID(), mine.versionId, 0) })
-    for (let hit = 1; hit < 300; hit += 1) app.limits.timelines.hit(`user:${user.id}`)
-    expect(
-      await other.error('POST', path, { json: batch(crypto.randomUUID(), mine.versionId, 0) }),
-    ).toEqual({ status: 429, code: 'rate_limited' })
-    // The owner's are counted apart.
+    // So are the owner's.
     const own = await upload(client, folderId, 'uncounted.mp4')
     await client.send('POST', `/files/${own.nodeId}/timeline`, {
       json: batch(crypto.randomUUID(), own.versionId, 0),
     })
+  })
+})
+
+describe('when the timeline store fails (§16)', () => {
+  /** Runs `run` while every batch the store inserts is refused, at the statement. */
+  async function whileStoreFails<T>(run: () => Promise<T>): Promise<T> {
+    await app.db.execute(
+      sql`ALTER TABLE timeline_batches ADD CONSTRAINT reject_all CHECK (bytes < 0) NOT VALID`,
+    )
+    try {
+      return await run()
+    } finally {
+      await app.db.execute(sql`ALTER TABLE timeline_batches DROP CONSTRAINT reject_all`)
+    }
+  }
+
+  it('answers 500 and leaves the batch’s events out of the log', async () => {
+    const video = await upload(client, folderId, 'store-fails.mp4')
+    const playId = crypto.randomUUID()
+    const events = [
+      { type: 'error' as const, t: 5, from: 'page' as const, code: null, message: 'MARKER-7f3c9' },
+    ]
+    const before = lines.length
+    const answer = await whileStoreFails(() =>
+      client.error('POST', `/files/${video.nodeId}/timeline`, {
+        json: { ...batch(playId, video.versionId, 0), events },
+      }),
+    )
+    expect(answer).toEqual({ status: 500, code: 'internal_error' })
+
+    const logged = lines.slice(before)
+    // It is logged, with the database's code and message, but not what the statement held.
+    const failed = logged.find((line) => line.msg === 'request failed')
+    expect((failed?.err as { message?: string } | undefined)?.message).toMatch(
+      /^Could not store a timeline batch: 23514 .*reject_all/,
+    )
+    const text = JSON.stringify(logged)
+    expect(text).not.toContain('MARKER-7f3c9')
+    expect(text).not.toContain('"params"')
+    expect(text).not.toContain('Failing row')
+    expect(await timelineOf(playId)).toBeNull()
+  })
+
+  it('logs a stream session it could not save without the statement’s parameters', async () => {
+    const video = await upload(client, folderId, 'session-fails.mp4')
+    const playId = crypto.randomUUID()
+    const path = `/files/${video.nodeId}/content?version=${video.versionId}&play=${playId}`
+    const before = lines.length
+    await whileStoreFails(async () => {
+      await read(client, path, 'bytes=0-4')
+      // A response closes on the server a moment after the client has its body.
+      await vi.waitFor(async () => {
+        await app.streamSessions.flush()
+        expect(
+          lines.some((line) => line.msg === 'could not save a stream session; trying again'),
+        ).toBe(true)
+      })
+    })
+
+    const logged = lines.slice(before)
+    const warned = logged.find(
+      (line) => line.msg === 'could not save a stream session; trying again',
+    )
+    expect((warned?.err as { message?: string } | undefined)?.message).toMatch(
+      /^Could not store a timeline batch: 23514 .*reject_all/,
+    )
+    const text = JSON.stringify(logged)
+    expect(text).not.toContain('"params"')
+    expect(text).not.toContain('Failing row')
+    // Kept, and stored once the store takes it again.
+    await app.streamSessions.flush()
+    expect(await sessionsOfPlay(playId)).toHaveLength(1)
   })
 })
 
@@ -411,13 +539,6 @@ describe('stream sessions (§6.2, §16)', () => {
       expect(served).toHaveLength(reads)
     })
     return { session, served }
-  }
-
-  /** A read to its end. */
-  async function read(who: ApiClient, path: string, range: string) {
-    const response = await who.fetch('GET', path, { headers: { Range: range } })
-    await response.arrayBuffer()
-    return response
   }
 
   it('logs a page’s reads as a session under its play', async () => {

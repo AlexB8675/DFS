@@ -2,14 +2,7 @@ import { randomUUID } from 'node:crypto'
 import cookie from '@fastify/cookie'
 import type { Config } from '@dfs/config'
 import type { MasterKeys } from '@dfs/crypto'
-import {
-  appendTimelineBatch,
-  createDatabase,
-  createPool,
-  Metrics,
-  recordProcess,
-  type Database,
-} from '@dfs/db'
+import { createDatabase, createPool, Metrics, recordProcess, type Database } from '@dfs/db'
 import { LocalBlobStore, Staging, type BlobReader } from '@dfs/storage'
 import Fastify, {
   LogController,
@@ -33,6 +26,7 @@ import { DataKeyCache, loadMasterKeys } from './keys.ts'
 import { MediaClient } from './media/client.ts'
 import { MediaExaminer } from './media/examine.ts'
 import { hideStreamToken } from './media/stream-links.ts'
+import { appendTimelineBatchQuietly } from './media/timeline-store.ts'
 import { JobQueue } from './queue.ts'
 import { adminRoutes } from './routes/admin.ts'
 import { authRoutes } from './routes/auth.ts'
@@ -197,7 +191,7 @@ export async function buildApp({
     connectionTests: new RateLimiter(10, 10 * 60_000),
     // Play reports through share links per address (§10.4): logged, and on the graphs.
     linkPlayReports: new RateLimiter(60, 10 * 60_000),
-    // Timeline batches per user or, through share links, per address (§16): a play sends one every 5 s, and at 64 KiB each one address can't push the store's 2 GiB out in less than about 18 hours.
+    // Timeline batches per user and play in the drive, per address block through share links (§16): a play sends one every 5 s, so several plays at once don't share a limit; and at 64 KiB each one address can't push the store's 2 GiB out in less than about 18 hours.
     timelines: new RateLimiter(300, 10 * 60_000),
     // Stream links made per user or, through share links, per address (§6.7).
     streamLinks: new RateLimiter(30, 10 * 60_000),
@@ -234,7 +228,8 @@ export async function buildApp({
   app.decorate(
     'streamSessions',
     new StreamSessions({
-      write: (id, owner, batch) => appendTimelineBatch(db, id, owner, { ...batch, sentMs: null }),
+      write: (id, owner, batch) =>
+        appendTimelineBatchQuietly(db, id, owner, { ...batch, sentMs: null }),
       log: app.log,
     }),
   )
