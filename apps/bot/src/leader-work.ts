@@ -9,6 +9,7 @@ import {
   PostgresSampler,
   pruneJournal,
   pruneMetrics,
+  pruneTimelines,
   purgeEarlierVersions,
   QUEUES,
   resetDueVaults,
@@ -209,6 +210,10 @@ export async function startLeaderWork(options: {
     }),
     // On their own, so a failure in one never holds back the others.
     repeat(JANITOR_EVERY_MS, log, 'dropping old metrics', () => pruneMetrics(db)),
+    repeat(JANITOR_EVERY_MS, log, 'dropping old play timelines', async () => {
+      const pruned = await pruneTimelines(db)
+      if (pruned.expired + pruned.trimmed > 0) log.info(pruned, 'dropped old play timelines')
+    }),
     repeat(JANITOR_EVERY_MS, log, 'dropping posted journal records', async () => {
       await pruneJournal(db)
     }),

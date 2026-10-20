@@ -3,7 +3,7 @@ import { TIMELINE_MAX_BYTES } from '@dfs/shared'
 import { sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest'
 import { createDatabase, createPool, type Database } from './client.ts'
-import { appendTimelineBatch, type TimelineOwner } from './timelines.ts'
+import { appendTimelineBatch, pruneTimelines, type TimelineOwner } from './timelines.ts'
 import { createTestDatabase, type TestDatabase } from './testing/index.ts'
 
 describe('play timelines (DESIGN §16)', () => {
@@ -116,7 +116,7 @@ describe('play timelines (DESIGN §16)', () => {
     ])
   })
 
-  it('starts the timeline when the page said it did, or now', async () => {
+  it('starts a stream session when the server says it began, or a page’s play now', async () => {
     const early = new Date('2026-10-19T08:30:00.000Z')
     const dated = randomUUID()
     await appendTimelineBatch(
@@ -262,5 +262,43 @@ describe('play timelines (DESIGN §16)', () => {
     expect(outcomes.filter((outcome) => outcome === 'duplicate')).toHaveLength(6)
     const sizes = (await batches(id)).reduce((sum, found) => sum + found.bytes, 0)
     expect(await timeline(id)).toMatchObject({ batches: 6, bytes: sizes })
+  })
+
+  it('drops timelines older than the retention, with their batches', async () => {
+    const old = randomUUID()
+    const fresh = randomUUID()
+    const play = owner()
+    await appendTimelineBatch(db, old, play, batch(0))
+    await appendTimelineBatch(db, old, play, batch(1))
+    await appendTimelineBatch(db, fresh, owner(), batch(0))
+    expect(await batches(old)).toHaveLength(2)
+    await db.execute(
+      sql`UPDATE timelines SET updated_at = now() - interval '29 days' WHERE id = ${old}`,
+    )
+
+    expect(await pruneTimelines(db)).toEqual({ expired: 1, trimmed: 0 })
+    expect(await timeline(old)).toBeUndefined()
+    expect(await batches(old)).toEqual([])
+    expect(await timeline(fresh)).toBeDefined()
+    expect(await batches(fresh)).toHaveLength(1)
+  })
+
+  it('drops the oldest past the size cap', async () => {
+    const ids = [randomUUID(), randomUUID(), randomUUID()]
+    for (const [index, id] of ids.entries()) {
+      await appendTimelineBatch(db, id, owner(), batch(0))
+      // Started 3, 2 and 1 hours ago, each holding 100 bytes.
+      await db.execute(sql`
+        UPDATE timelines SET bytes = 100, started_at = now() - make_interval(hours => ${3 - index})
+        WHERE id = ${id}`)
+    }
+
+    expect(await pruneTimelines(db, { days: 28, maxBytes: 250 })).toEqual({
+      expired: 0,
+      trimmed: 1,
+    })
+    expect(await timeline(ids[0] ?? '')).toBeUndefined()
+    expect(await timeline(ids[1] ?? '')).toBeDefined()
+    expect(await timeline(ids[2] ?? '')).toBeDefined()
   })
 })

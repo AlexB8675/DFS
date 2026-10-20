@@ -1,6 +1,7 @@
 import { TIMELINE_MAX_BYTES } from '@dfs/shared'
 import { sql } from 'drizzle-orm'
 import type { Database } from './client.ts'
+import type { Executor } from './journal.ts'
 
 // Play timelines and stream sessions (DESIGN.md §16): what the page, the
 // engine and the server saw of one play of a video, as batches of events in
@@ -112,4 +113,42 @@ export async function appendTimelineBatch(
       WHERE id = ${id}`)
     return 'stored'
   })
+}
+
+/**
+ * Drops the timelines nobody added to for `days` days, then the oldest past
+ * `maxBytes` in all, with their batches (they go with the cascade). The
+ * newest are kept: those whose running total of `bytes`, newest start first,
+ * stays within `maxBytes`. What the cap counts is the sum of the timelines'
+ * `bytes`, not the table's size on disk, so it is exact. Returns how many
+ * went for age (`expired`) and for size (`trimmed`).
+ */
+export async function pruneTimelines(
+  db: Executor,
+  limits: { days: number; maxBytes: number } = {
+    days: TIMELINE_RETENTION_DAYS,
+    maxBytes: TIMELINE_MAX_TOTAL_BYTES,
+  },
+): Promise<{ expired: number; trimmed: number }> {
+  const { rows: expired } = await db.execute<{ count: number }>(sql`
+    WITH deleted AS (
+      DELETE FROM timelines
+      WHERE updated_at < now() - make_interval(days => ${limits.days}::int)
+      RETURNING 1
+    )
+    SELECT count(*)::int AS count FROM deleted`)
+  const { rows: trimmed } = await db.execute<{ count: number }>(sql`
+    WITH deleted AS (
+      DELETE FROM timelines
+      WHERE id IN (
+        SELECT id FROM (
+          SELECT id, sum(bytes) OVER (ORDER BY started_at DESC, id DESC) AS total
+          FROM timelines
+        ) ranked
+        WHERE total > ${limits.maxBytes}
+      )
+      RETURNING 1
+    )
+    SELECT count(*)::int AS count FROM deleted`)
+  return { expired: expired[0]?.count ?? 0, trimmed: trimmed[0]?.count ?? 0 }
 }
