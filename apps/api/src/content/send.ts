@@ -2,6 +2,7 @@ import { Readable, type Writable } from 'node:stream'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { z } from 'zod'
 import { readSources, readVersion, type ReadableVersion, type ReadSources } from './reader.ts'
+import type { StreamRequest } from './stream-sessions.ts'
 import { writeZip, zipLength, zipTimeZone, type ZipEntry } from './zip.ts'
 
 // Sending files and archives (DESIGN.md §6.2, §7.5): streamed, Range-aware,
@@ -21,6 +22,11 @@ export interface SendOptions {
    * way, first byte, waits, failures) count it (§16).
    */
   forMediaService?: boolean
+  /**
+   * The stream this read belongs to, for its session's log (§6.2, §16): given
+   * for audio and video by the content routes and stream links.
+   */
+  session?: Omit<StreamRequest, 'from' | 'to' | 'status' | 'address' | 'userAgent'>
 }
 
 /**
@@ -32,7 +38,7 @@ export function sendFile(
   request: FastifyRequest,
   reply: FastifyReply,
   file: DownloadableFile,
-  { readerId, forMediaService = false }: SendOptions = {},
+  { readerId, forMediaService = false, session }: SendOptions = {},
 ): FastifyReply {
   void reply.header('etag', `"${file.version_id}"`).header('cache-control', 'private, no-cache')
   // Before the range: a browser that has the version needs none of it.
@@ -60,9 +66,34 @@ export function sendFile(
   if (!forMediaService) counted(app, reply)
   const stats = sendStats()
   const followed = readerId ? app.deliveries.follow(readerId, file.version_id, stats) : null
+  const opened = session
+    ? app.streamSessions.open(
+        {
+          ...session,
+          from: start,
+          to: end,
+          status: range ? 206 : 200,
+          address: request.ip,
+          userAgent: request.headers['user-agent']?.slice(0, 300) ?? null,
+        },
+        stats,
+      )
+    : null
   reply.raw.once('close', () => {
     followed?.()
-    logSent(request, reply, file.version_id, start, end, stats)
+    opened?.close({
+      bytes: stats.bytes,
+      finished: reply.raw.writableFinished,
+      failed: stats.failed ?? false,
+      firstByteMs: stats.firstPieceMs === null ? null : Math.round(stats.firstPieceMs),
+      totalMs: Math.round(performance.now() - stats.startedAt),
+      sources: stats.sources,
+      clientMs: Math.round(stats.clientMs),
+    })
+    logSent(request, reply, file.version_id, start, end, stats, {
+      playId: session?.playId ?? null,
+      sessionId: opened?.sessionId ?? null,
+    })
     if (!forMediaService) recordSent(app, stats)
   })
   const pieces = readVersion(
@@ -126,7 +157,8 @@ function recordSent(app: FastifyInstance, stats: SendStats): void {
  * what was sent and how fast, the time to its first byte, and how long it
  * waited for the reader against the client, so a slow play shows which side
  * held it back. `finished` is false for a read the client cancelled, as a
- * player does on seeking.
+ * player does on seeking. A read of audio or video names its play and its
+ * stream session, to find its timeline by (§16).
  */
 function logSent(
   request: FastifyRequest,
@@ -135,6 +167,7 @@ function logSent(
   start: number,
   end: number,
   stats: SendStats,
+  stream: { playId: string | null; sessionId: string | null },
 ): void {
   const totalMs = performance.now() - stats.startedAt
   const round = (ms: number) => Math.round(ms)
@@ -147,6 +180,8 @@ function logSent(
     {
       sent: {
         versionId,
+        playId: stream.playId,
+        sessionId: stream.sessionId,
         from: start,
         to: end,
         bytes: stats.bytes,

@@ -299,6 +299,12 @@ export function mediaTests({
       const first = await client.fetch('GET', path, { headers: { Range: 'bytes=0-2' } })
       expect(first.status).toBe(206)
       expect(await first.text()).toBe('fir')
+      // A page names its play too, which its reads are logged under (§16).
+      const played = await client.fetch('GET', `${path}&play=${crypto.randomUUID()}`, {
+        headers: { Range: 'bytes=3-4' },
+      })
+      expect(played.status).toBe(206)
+      expect(await played.text()).toBe('st')
 
       await uploadFile(client, root.id, 'Replaced.mp4', text('second'))
       expect(await client.error('GET', path)).toEqual({ status: 412, code: 'version_changed' })

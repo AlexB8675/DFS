@@ -1,16 +1,26 @@
 import { ApiClient, createFolder, text, uploadFile, workspace } from '@dfs/contract'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
-import { sessionSchema, shareLinkSchema, TIMELINE_MAX_BYTES, type TimelineBatch } from '@dfs/shared'
+import {
+  sessionSchema,
+  shareLinkSchema,
+  streamLinkSchema,
+  TIMELINE_MAX_BYTES,
+  type ServedEvent,
+  type TimelineBatch,
+} from '@dfs/shared'
 import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
-import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest'
 import { buildApp } from '../app.ts'
 import { testConfig } from '../testing/config.ts'
 import { seedUser } from '../testing/seed.ts'
+import { mediaToken } from './token.ts'
 
 // A play's timeline, as the page sends it in batches (DESIGN.md §16), over
 // real HTTP: kept in the timeline store under the user or the share link,
 // within bounds, and never in the log.
+// The reads the API serves of a video are kept in the same store as stream
+// sessions, tested at the end.
 
 let database: TestDatabase
 let app: FastifyInstance
@@ -332,5 +342,208 @@ describe('a play’s report (§10.4, §16)', () => {
     })
     const reported = lines.filter((line) => line.msg === 'video play reported')
     expect(reported.map((line) => (line.play as { playId?: string }).playId)).toContain(playId)
+  })
+})
+
+describe('stream sessions (§6.2, §16)', () => {
+  /** The stream sessions kept for a file, oldest first. */
+  async function sessionsOf(nodeId: string) {
+    const { rows } = await app.db.execute<{
+      id: string
+      via: string
+      play_id: string | null
+      user_id: string | null
+      share_id: string | null
+      user_agent: string | null
+    }>(sql`
+      SELECT id, via, play_id, user_id, share_id, user_agent
+      FROM timelines WHERE node_id = ${nodeId} AND kind = 'stream' ORDER BY started_at, id`)
+    return rows
+  }
+
+  /** What a session's batches hold, in order. */
+  async function servedBy(sessionId: string): Promise<ServedEvent[]> {
+    const { rows } = await app.db.execute<{ events: ServedEvent[] }>(sql`
+      SELECT events FROM timeline_batches WHERE timeline_id = ${sessionId} ORDER BY seq`)
+    return rows.flatMap((row) => row.events)
+  }
+
+  /** Waits until the file's session has `reads` reads written, and gives it with them. */
+  async function sessionWith(nodeId: string, reads: number) {
+    let session: Awaited<ReturnType<typeof sessionsOf>>[number] | undefined
+    let served: ServedEvent[] = []
+    // A response closes on the server a moment after the client has its body.
+    await vi.waitFor(async () => {
+      await app.streamSessions.flush()
+      session = (await sessionsOf(nodeId))[0]
+      served = session ? await servedBy(session.id) : []
+      expect(served).toHaveLength(reads)
+    })
+    return { session, served }
+  }
+
+  /** A read to its end. */
+  async function read(who: ApiClient, path: string, range: string) {
+    const response = await who.fetch('GET', path, { headers: { Range: range } })
+    await response.arrayBuffer()
+    return response
+  }
+
+  it('logs a page’s reads as a session under its play', async () => {
+    const video = await upload(client, folderId, 'session.mp4')
+    const playId = crypto.randomUUID()
+    const path = `/files/${video.nodeId}/content?version=${video.versionId}&play=${playId}`
+    // Two reads, the second where the first stopped.
+    expect((await read(client, path, 'bytes=0-4')).status).toBe(206)
+    expect((await read(client, path, 'bytes=5-9')).status).toBe(206)
+
+    const { session, served } = await sessionWith(video.nodeId, 2)
+    expect(await sessionsOf(video.nodeId)).toHaveLength(1)
+    expect(session).toMatchObject({
+      via: 'drive',
+      play_id: playId,
+      user_id: ownerId,
+      share_id: null,
+    })
+    expect(served).toMatchObject([
+      { type: 'served', from: 0, to: 4, status: 206, bytes: 5, finished: true, seek: false },
+      { type: 'served', from: 5, to: 9, status: 206, bytes: 5, finished: true, seek: false },
+    ])
+    // Just uploaded, so still in staging.
+    for (const event of served) {
+      expect(event.sources.staging.bytes).toBe(5)
+      expect(event.sources.cache.bytes).toBe(0)
+      expect(event.sources.discord.bytes).toBe(0)
+    }
+  })
+
+  it('calls a read a seek when no read stopped where it starts', async () => {
+    const video = await upload(client, folderId, 'seeks.mp4')
+    const play = `play=${crypto.randomUUID()}`
+    const path = `/files/${video.nodeId}/content?version=${video.versionId}&${play}`
+    await read(client, path, 'bytes=0-4')
+    await read(client, path, 'bytes=12-')
+
+    const { served } = await sessionWith(video.nodeId, 2)
+    expect(served.map((event) => event.seek)).toEqual([false, true])
+  })
+
+  it('logs a stream link’s reads as a session of their own', async () => {
+    const video = await upload(client, folderId, 'linked-session.mp4')
+    const link = await client.call('POST', `/files/${video.nodeId}/stream-link`, streamLinkSchema, {
+      json: { create: true },
+    })
+    const userAgent = 'VLC/3.0.21 LibVLC/3.0.21'
+    const response = await fetch(`${apiUrl}${new URL(link.url).pathname}`, {
+      headers: { 'User-Agent': userAgent },
+    })
+    await response.arrayBuffer()
+
+    const { session, served } = await sessionWith(video.nodeId, 1)
+    expect(await sessionsOf(video.nodeId)).toHaveLength(1)
+    expect(session).toMatchObject({
+      via: 'stream',
+      play_id: null,
+      user_id: null,
+      user_agent: userAgent,
+    })
+    expect(session?.share_id).toEqual(expect.any(String))
+    expect(served[0]).toMatchObject({ from: 0, status: 200, finished: true })
+  })
+
+  it('logs a link viewer’s reads under the link', async () => {
+    const video = await upload(client, folderId, 'viewed.mp4')
+    const link = await linkTo(video.nodeId)
+    const viewer = new ApiClient(apiUrl, client.origin)
+    const playId = crypto.randomUUID()
+    const path = `/s/${link.token}/files/${video.nodeId}/content`
+    await read(viewer, `${path}?version=${video.versionId}&play=${playId}`, 'bytes=0-4')
+
+    const { session } = await sessionWith(video.nodeId, 1)
+    expect(await sessionsOf(video.nodeId)).toHaveLength(1)
+    expect(session).toMatchObject({
+      via: 'link',
+      play_id: playId,
+      user_id: null,
+      share_id: link.id,
+    })
+  })
+
+  it('leaves out files that aren’t audio or video, and the media service’s reads', async () => {
+    const notes = await uploadFile(client, folderId, 'session-notes.txt', text('Just notes.'))
+    const play = `play=${crypto.randomUUID()}`
+    const viewed = await client.fetch('GET', `/files/${notes.nodeId}/content?${play}`)
+    expect(await viewed.text()).toBe('Just notes.')
+
+    // The service reads a video through its own route, which no session follows.
+    const video = await upload(client, folderId, 'service.mp4')
+    const served = await fetch(`${apiUrl}/internal/media/${video.versionId}`, {
+      headers: { Authorization: `Bearer ${await mediaToken(app.keys, video.versionId)}` },
+    })
+    expect(await served.text()).toBe('The video service.mp4.')
+
+    // Both reads have been logged as sent, so any session of theirs would be written by now.
+    const sentVersions = () =>
+      lines
+        .filter((line) => line.msg === 'file sent')
+        .map((line) => (line.sent as { versionId: string }).versionId)
+    await vi.waitFor(() => {
+      expect(sentVersions()).toEqual(expect.arrayContaining([notes.versionId, video.versionId]))
+    })
+    await app.streamSessions.flush()
+    expect(await sessionsOf(notes.nodeId)).toEqual([])
+    expect(await sessionsOf(video.nodeId)).toEqual([])
+  })
+
+  it('writes the sessions out when the API closes', async () => {
+    // An API of its own, closed here, over the same database. Its user is made first: its
+    // 5-second flush starts with it, and must not come before the read.
+    await seedUser(app.db, { username: 'closer', password: 'the-closer-password' })
+    const setup = await testConfig({ DATABASE_URL: database.url })
+    const closing = await buildApp({ config: setup.config, logger: false })
+    try {
+      const url = await closing.listen({ port: 0, host: '127.0.0.1' })
+      const closer = new ApiClient(url, setup.config.publicBaseUrl)
+      await closer.signIn('closer', 'the-closer-password')
+      const video = await upload(closer, (await workspace(closer)).id, 'closing.mp4')
+      await read(closer, `/files/${video.nodeId}/content?play=${crypto.randomUUID()}`, 'bytes=0-4')
+      // Nothing has been written yet: a flush comes every 5 seconds.
+      expect(await sessionsOf(video.nodeId)).toEqual([])
+
+      await closing.close()
+      const { session, served } = await sessionWith(video.nodeId, 1)
+      expect(session?.via).toBe('drive')
+      expect(served[0]).toMatchObject({ from: 0, to: 4, bytes: 5, finished: true })
+    } finally {
+      await closing.close()
+      await setup.cleanup()
+    }
+  })
+
+  it('refuses a play ID that isn’t one', async () => {
+    const video = await upload(client, folderId, 'bad-play.mp4')
+    expect(
+      await client.error('GET', `/files/${video.nodeId}/content?play=abc`, {
+        headers: { Range: 'bytes=0-4' },
+      }),
+    ).toMatchObject({ status: 400 })
+  })
+
+  it('names the play, the session and the sources in file sent', async () => {
+    const video = await upload(client, folderId, 'logged.mp4')
+    const playId = crypto.randomUUID()
+    const path = `/files/${video.nodeId}/content?version=${video.versionId}&play=${playId}`
+    await read(client, path, 'bytes=0-4')
+    const { session } = await sessionWith(video.nodeId, 1)
+
+    const sent = lines
+      .filter((line) => line.msg === 'file sent')
+      .map((line) => line.sent as Record<string, unknown>)
+      .find((figures) => figures.playId === playId)
+    expect(sent).toMatchObject({
+      playId,
+      sessionId: session?.id,
+      sources: { staging: { bytes: 5 }, cache: { bytes: 0 }, discord: { bytes: 0 } },
+    })
   })
 })

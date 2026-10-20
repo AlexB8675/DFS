@@ -442,7 +442,16 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
           node.id,
           node.id === root.id ? share.version_id : null,
         )
-        return sendFile(app, request, reply, file)
+        return sendFile(app, request, reply, file, {
+          session: {
+            via: 'stream',
+            nodeId: node.id,
+            versionId: file.version_id,
+            userId: null,
+            shareId: share.id,
+            playId: null,
+          },
+        })
       },
     )
   }

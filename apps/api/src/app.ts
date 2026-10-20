@@ -2,7 +2,14 @@ import { randomUUID } from 'node:crypto'
 import cookie from '@fastify/cookie'
 import type { Config } from '@dfs/config'
 import type { MasterKeys } from '@dfs/crypto'
-import { createDatabase, createPool, Metrics, recordProcess, type Database } from '@dfs/db'
+import {
+  appendTimelineBatch,
+  createDatabase,
+  createPool,
+  Metrics,
+  recordProcess,
+  type Database,
+} from '@dfs/db'
 import { LocalBlobStore, Staging, type BlobReader } from '@dfs/storage'
 import Fastify, {
   LogController,
@@ -19,6 +26,7 @@ import { JournalFlusher } from './journal.ts'
 import { CdnBlobReader } from './content/cdn-reader.ts'
 import { Deliveries } from './content/deliveries.ts'
 import { FrameCache, MemoryBudget } from './content/frame-cache.ts'
+import { StreamSessions } from './content/stream-sessions.ts'
 import { registerErrorHandling } from './errors.ts'
 import { EventHub } from './events/hub.ts'
 import { DataKeyCache, loadMasterKeys } from './keys.ts'
@@ -86,6 +94,8 @@ declare module 'fastify' {
     downloads: UnderWay
     /** How fast each user's reads of each version go, for their players (§10.4). */
     deliveries: Deliveries
+    /** Each stream's range reads, grouped and logged to the timeline store (§6.2, §16). */
+    streamSessions: StreamSessions
   }
 }
 
@@ -221,6 +231,13 @@ export async function buildApp({
   const downloads = new UnderWay()
   app.decorate('downloads', downloads)
   app.decorate('deliveries', new Deliveries())
+  app.decorate(
+    'streamSessions',
+    new StreamSessions({
+      write: (id, owner, batch) => appendTimelineBatch(db, id, owner, { ...batch, sentMs: null }),
+      log: app.log,
+    }),
+  )
   metrics.gauge('downloads.active', () => downloads.sample())
   app.decorate('readBudget', new MemoryBudget(READ_AHEAD_BYTES))
   app.decorate(
@@ -239,6 +256,7 @@ export async function buildApp({
   const journalFlusher = new JournalFlusher(app)
   app.decorate('journalFlusher', journalFlusher)
   const savingMetrics = metrics.start(db, app.log)
+  const savingSessions = app.streamSessions.start()
   // Open event streams would keep the server from closing; a check of
   // itself would find it closing.
   app.addHook('preClose', async () => {
@@ -250,6 +268,8 @@ export async function buildApp({
     await events.stop()
     await queue.stop()
     await savingMetrics.stop()
+    // Fastify runs `onClose` once the last responses have ended, so their sessions have heard of them.
+    await savingSessions.stop()
     stopWatchingProcess()
     await pool.end()
   })

@@ -1,5 +1,6 @@
 import {
   createShareSchema,
+  mediaKind,
   publicShareSchema,
   shareCountInputSchema,
   shareCountSchema,
@@ -134,6 +135,8 @@ export function shareRoutes(app: FastifyInstance, _options: object, done: () => 
         querystring: z.object({
           preview: z.literal('1').optional(),
           version: z.uuid().optional(),
+          // The page's play, which its reads are logged under (§16).
+          play: z.uuid().optional(),
         }),
       },
     },
@@ -159,7 +162,20 @@ export function shareRoutes(app: FastifyInstance, _options: object, done: () => 
         (range === null || (range !== 'unsatisfiable' && range.start === 0))
       )
         await countDownload(app, share)
-      return sendFile(app, request, reply, file, { readerId: linkReader(share.id, request.ip) })
+      return sendFile(app, request, reply, file, {
+        readerId: linkReader(share.id, request.ip),
+        // Audio and video are logged as stream sessions (§6.2, §16).
+        session: mediaKind(file.name, file.mime_type)
+          ? {
+              via: 'link',
+              nodeId: node.id,
+              versionId: file.version_id,
+              userId: null,
+              shareId: share.id,
+              playId: request.query.play ?? null,
+            }
+          : undefined,
+      })
     },
   )
 

@@ -1,4 +1,4 @@
-import { archiveTicketSchema, nodeIdsSchema } from '@dfs/shared'
+import { archiveTicketSchema, mediaKind, nodeIdsSchema } from '@dfs/shared'
 import type { Executor } from '@dfs/db'
 import { sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
@@ -24,7 +24,13 @@ export function contentRoutes(app: FastifyInstance, _options: object, done: () =
 
   routes.get(
     '/files/:id/content',
-    { schema: { params: byId, querystring: z.object({ version: z.uuid().optional() }) } },
+    {
+      schema: {
+        params: byId,
+        // `play` is the page's play, which its reads are logged under (§16).
+        querystring: z.object({ version: z.uuid().optional(), play: z.uuid().optional() }),
+      },
+    },
     async (request, reply) => {
       const auth = requireAuth(request.auth)
       await visibleNode(app.db, auth.user.id, request.params.id)
@@ -32,7 +38,20 @@ export function contentRoutes(app: FastifyInstance, _options: object, done: () =
       // A player names the version it plays, so a replaced file never mixes with it (§10.4).
       const { version } = request.query
       if (version && version !== file.version_id) throw versionChanged()
-      return sendFile(app, request, reply, file, { readerId: auth.user.id })
+      return sendFile(app, request, reply, file, {
+        readerId: auth.user.id,
+        // Audio and video are logged as stream sessions (§6.2, §16).
+        session: mediaKind(file.name, file.mime_type)
+          ? {
+              via: 'drive',
+              nodeId: request.params.id,
+              versionId: file.version_id,
+              userId: auth.user.id,
+              shareId: null,
+              playId: request.query.play ?? null,
+            }
+          : undefined,
+      })
     },
   )
 
