@@ -63,6 +63,8 @@ export const blobStateEnum = pgEnum('blob_state', [
 export const channelKindEnum = pgEnum('channel_kind', ['data', 'journal', 'backup', 'log'])
 export const journalBatchStateEnum = pgEnum('journal_batch_state', ['staged', 'stored'])
 export const uploadStateEnum = pgEnum('upload_state', ['receiving', 'completed'])
+export const timelineKindEnum = pgEnum('timeline_kind', ['play', 'stream'])
+export const timelineViaEnum = pgEnum('timeline_via', ['drive', 'link', 'stream'])
 
 // ── Accounts (§7.1) ──────────────────────────────────────────────────────────
 
@@ -662,6 +664,74 @@ export const metrics = pgTable(
     max: doublePrecision('max').notNull(),
   },
   (t) => [primaryKey({ name: 'metrics_pkey', columns: [t.name, t.step, t.at] })],
+)
+
+// ── Play timelines (§16) ─────────────────────────────────────────────────────
+
+/**
+ * One play of a video, or one stream session of the server's (§16): what the
+ * page, the engine and the server saw, to read afterwards why it was slow or
+ * failed. The ID is the page's play ID, or the session's. It is diagnostics,
+ * so not journaled; the leading bot drops timelines 28 days after their last
+ * batch, and the oldest beyond 2 GiB in all. It has no foreign keys to files,
+ * links or users on purpose: a timeline outlives what it was about, for its 28
+ * days. The file and version are the first ones played; a file replaced
+ * mid-play plays on in the same timeline.
+ */
+export const timelines = pgTable(
+  'timelines',
+  {
+    id: uuid('id').primaryKey(),
+    kind: timelineKindEnum('kind').notNull(),
+    /** A stream session's page play, when its page said so. */
+    playId: uuid('play_id'),
+    via: timelineViaEnum('via').notNull(),
+    nodeId: uuid('node_id').notNull(),
+    versionId: uuid('version_id').notNull(),
+    userId: uuid('user_id'),
+    shareId: uuid('share_id'),
+    /** Where the first batch came from. */
+    address: text('address').notNull(),
+    userAgent: text('user_agent'),
+    /** The page's clock at its start, to read its events against the server's. */
+    clientStartedAt: timestamptz('client_started_at'),
+    startedAt: timestamptz('started_at').notNull().defaultNow(),
+    updatedAt: timestamptz('updated_at').notNull().defaultNow(),
+    /** The batches' events as JSON, in bytes (capped, §16). */
+    bytes: bytes('bytes').notNull().default(0),
+    batches: integer('batches').notNull().default(0),
+  },
+  (t) => [
+    index('timelines_started_at').on(t.startedAt),
+    index('timelines_updated_at').on(t.updatedAt),
+    index('timelines_play_id')
+      .on(t.playId)
+      .where(sql`${t.playId} IS NOT NULL`),
+  ],
+)
+
+/**
+ * What one request sent a timeline: events in order, with where it came from,
+ * since an address that changes mid-play is a network switch. A batch the
+ * page sent twice is kept once (`seq`). Not journaled; it goes with its
+ * timeline.
+ */
+export const timelineBatches = pgTable(
+  'timeline_batches',
+  {
+    timelineId: uuid('timeline_id')
+      .notNull()
+      .references(() => timelines.id, { onDelete: 'cascade' }),
+    seq: integer('seq').notNull(),
+    receivedAt: timestamptz('received_at').notNull().defaultNow(),
+    /** The page's clock when it sent the batch; null for a stream session's. */
+    sentMs: integer('sent_ms'),
+    address: text('address').notNull(),
+    events: jsonb('events').notNull(),
+    /** The events as JSON, in UTF-8 bytes: what counts toward the timeline's cap. */
+    bytes: integer('bytes').notNull(),
+  },
+  (t) => [primaryKey({ name: 'timeline_batches_pkey', columns: [t.timelineId, t.seq] })],
 )
 
 // ── Media (§6.7) ─────────────────────────────────────────────────────────────

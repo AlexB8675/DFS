@@ -109,7 +109,8 @@ const TABLES: readonly TableSpec[] = [
  * graphs, the outbox, what examining audio and video found and the subtitles
  * taken from them, found again as they are played (§6.7), and where users
  * stopped them (§10.4). Device tokens and pairings aren't journaled either:
- * devices pair again after a recovery (§7.6).
+ * devices pair again after a recovery (§7.6). Nor are play timelines and
+ * stream sessions (§16): diagnostics, kept 28 days.
  */
 const NOT_RECOVERED = new Set([
   'media_info',
@@ -118,6 +119,8 @@ const NOT_RECOVERED = new Set([
   'sessions',
   'device_tokens',
   'device_pairings',
+  'timelines',
+  'timeline_batches',
   'upload_sessions',
   'archive_tickets',
   'metrics',

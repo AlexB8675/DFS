@@ -1,0 +1,266 @@
+import { randomUUID } from 'node:crypto'
+import { TIMELINE_MAX_BYTES } from '@dfs/shared'
+import { sql } from 'drizzle-orm'
+import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest'
+import { createDatabase, createPool, type Database } from './client.ts'
+import { appendTimelineBatch, type TimelineOwner } from './timelines.ts'
+import { createTestDatabase, type TestDatabase } from './testing/index.ts'
+
+describe('play timelines (DESIGN §16)', () => {
+  let database: TestDatabase
+  let db: Database
+  let close: () => Promise<void>
+
+  beforeAll(async () => {
+    database = await createTestDatabase(inject('testPostgres'))
+    const pool = createPool(database.url, {
+      applicationName: 'dfs-tests',
+      onError: () => undefined,
+    })
+    db = createDatabase(pool)
+    close = () => pool.end()
+  })
+
+  afterAll(async () => {
+    await close()
+    await database.drop()
+  })
+
+  beforeEach(async () => {
+    await db.execute(sql`DELETE FROM timelines`)
+  })
+
+  /** A signed-in user's play of a file in their drive. */
+  function owner(fields: Partial<TimelineOwner> = {}): TimelineOwner {
+    return {
+      kind: 'play',
+      via: 'drive',
+      nodeId: randomUUID(),
+      versionId: randomUUID(),
+      userId: randomUUID(),
+      shareId: null,
+      playId: null,
+      address: '203.0.113.7',
+      userAgent: 'Mozilla/5.0 (tests)',
+      clientStartedAt: null,
+      startedAt: null,
+      ...fields,
+    }
+  }
+
+  const batch = (seq: number, events: readonly unknown[] = [{ type: 'opened', t: seq }]) => ({
+    seq,
+    events,
+    address: '203.0.113.7',
+    sentMs: seq * 1000,
+  })
+
+  async function timeline(id: string) {
+    const { rows } = await db.execute<{
+      kind: string
+      via: string
+      version_id: string
+      play_id: string | null
+      address: string
+      user_agent: string | null
+      started_ms: number
+      updated_ms: number
+      bytes: number
+      batches: number
+    }>(sql`
+      SELECT kind, via, version_id, play_id, address, user_agent,
+        (extract(epoch FROM started_at) * 1000)::float8 AS started_ms,
+        (extract(epoch FROM updated_at) * 1000)::float8 AS updated_ms,
+        bytes::float8 AS bytes, batches
+      FROM timelines WHERE id = ${id}`)
+    return rows[0]
+  }
+
+  async function batches(id: string) {
+    const { rows } = await db.execute<{
+      seq: number
+      sent_ms: number | null
+      address: string
+      events: unknown
+      bytes: number
+    }>(sql`
+      SELECT seq, sent_ms, address, events, bytes FROM timeline_batches
+      WHERE timeline_id = ${id} ORDER BY seq`)
+    return rows
+  }
+
+  it('stores a play’s batches in order and counts their bytes', async () => {
+    const id = randomUUID()
+    const play = owner()
+    const first = [{ type: 'opened', t: 0 }]
+    // Counted in UTF-8 bytes, not characters.
+    const second = [{ type: 'ended', t: 1500, note: 'é — 動画' }]
+    expect(await appendTimelineBatch(db, id, play, batch(0, first))).toBe('stored')
+    expect(await appendTimelineBatch(db, id, play, batch(1, second))).toBe('stored')
+
+    const row = await timeline(id)
+    const size = (events: readonly unknown[]) => Buffer.byteLength(JSON.stringify(events))
+    expect(row).toMatchObject({
+      kind: 'play',
+      via: 'drive',
+      version_id: play.versionId,
+      play_id: null,
+      address: '203.0.113.7',
+      user_agent: 'Mozilla/5.0 (tests)',
+      batches: 2,
+      bytes: size(first) + size(second),
+    })
+    expect(await batches(id)).toEqual([
+      { seq: 0, sent_ms: 0, address: '203.0.113.7', events: first, bytes: size(first) },
+      { seq: 1, sent_ms: 1000, address: '203.0.113.7', events: second, bytes: size(second) },
+    ])
+  })
+
+  it('starts the timeline when the page said it did, or now', async () => {
+    const early = new Date('2026-10-19T08:30:00.000Z')
+    const dated = randomUUID()
+    await appendTimelineBatch(
+      db,
+      dated,
+      owner({ startedAt: early, clientStartedAt: early, playId: randomUUID() }),
+      batch(0),
+    )
+    const undated = randomUUID()
+    const before = Date.now()
+    await appendTimelineBatch(db, undated, owner({ kind: 'stream', via: 'stream' }), batch(0))
+    expect((await timeline(dated))?.started_ms).toBe(early.getTime())
+    expect((await timeline(dated))?.play_id).not.toBeNull()
+    const started = (await timeline(undated))?.started_ms ?? 0
+    expect(Math.abs(started - before)).toBeLessThan(60_000)
+  })
+
+  it('keeps a batch sent twice once', async () => {
+    const id = randomUUID()
+    const play = owner()
+    expect(await appendTimelineBatch(db, id, play, batch(0))).toBe('stored')
+    const stored = await timeline(id)
+    // A resend with other events changes nothing: the first copy stands.
+    expect(
+      await appendTimelineBatch(
+        db,
+        id,
+        play,
+        batch(0, [{ type: 'other', t: 9, pad: 'x'.repeat(50) }]),
+      ),
+    ).toBe('duplicate')
+    expect(await batches(id)).toHaveLength(1)
+    expect(await batches(id)).toMatchObject([{ events: [{ type: 'opened', t: 0 }] }])
+    expect(await timeline(id)).toEqual(stored)
+  })
+
+  it('refuses a batch from another owner', async () => {
+    const id = randomUUID()
+    const play = owner()
+    await appendTimelineBatch(db, id, play, batch(0))
+    const stored = await timeline(id)
+    for (const other of [
+      owner({ ...play, userId: randomUUID() }),
+      owner({ ...play, userId: null }),
+      owner({ ...play, nodeId: randomUUID() }),
+      owner({ ...play, via: 'link' }),
+      owner({ ...play, kind: 'stream' }),
+    ]) {
+      expect(await appendTimelineBatch(db, id, other, batch(1))).toBe('not_yours')
+    }
+
+    // A link's viewer has no user, only the link.
+    const linkId = randomUUID()
+    const shareId = randomUUID()
+    const viewer = owner({ via: 'link', userId: null, shareId })
+    await appendTimelineBatch(db, linkId, viewer, batch(0))
+    expect(
+      await appendTimelineBatch(db, linkId, { ...viewer, shareId: randomUUID() }, batch(1)),
+    ).toBe('not_yours')
+    expect(await appendTimelineBatch(db, linkId, { ...viewer, shareId: null }, batch(1))).toBe(
+      'not_yours',
+    )
+    expect(
+      await appendTimelineBatch(db, linkId, { ...viewer, userId: randomUUID() }, batch(1)),
+    ).toBe('not_yours')
+    // Nothing was written by the refusals, and the right owner still can.
+    expect(await timeline(id)).toEqual(stored)
+    expect(await batches(id)).toHaveLength(1)
+    expect(await batches(linkId)).toHaveLength(1)
+    expect(await appendTimelineBatch(db, linkId, viewer, batch(1))).toBe('stored')
+  })
+
+  it('takes a batch from a new address in the same play', async () => {
+    const id = randomUUID()
+    const play = owner()
+    await appendTimelineBatch(db, id, play, batch(0))
+    // A phone that moved from Wi-Fi to mobile data, and a file replaced meanwhile.
+    const moved = { ...batch(1), address: '198.51.100.20' }
+    expect(
+      await appendTimelineBatch(
+        db,
+        id,
+        { ...play, address: '198.51.100.20', versionId: randomUUID() },
+        moved,
+      ),
+    ).toBe('stored')
+    expect((await batches(id)).map((found) => found.address)).toEqual([
+      '203.0.113.7',
+      '198.51.100.20',
+    ])
+    // The timeline keeps the address and the version it began with.
+    expect(await timeline(id)).toMatchObject({
+      address: '203.0.113.7',
+      version_id: play.versionId,
+      batches: 2,
+    })
+  })
+
+  it('refuses a batch past the timeline’s cap', async () => {
+    const id = randomUUID()
+    const play = owner()
+    await appendTimelineBatch(db, id, play, batch(0))
+    await db.execute(sql`UPDATE timelines SET bytes = ${TIMELINE_MAX_BYTES - 10} WHERE id = ${id}`)
+    const before = await timeline(id)
+    const events = [{ type: 'opened', t: 1 }]
+    expect(Buffer.byteLength(JSON.stringify(events))).toBeGreaterThan(10)
+    expect(await appendTimelineBatch(db, id, play, batch(1, events))).toBe('full')
+    expect(await timeline(id)).toEqual(before)
+    expect(await batches(id)).toHaveLength(1)
+
+    // Exactly the room left fits; one byte more doesn't.
+    const room = [{ t: 2 }]
+    const size = Buffer.byteLength(JSON.stringify(room))
+    await db.execute(
+      sql`UPDATE timelines SET bytes = ${TIMELINE_MAX_BYTES - size} WHERE id = ${id}`,
+    )
+    expect(await appendTimelineBatch(db, id, play, batch(2, room))).toBe('stored')
+    expect((await timeline(id))?.bytes).toBe(TIMELINE_MAX_BYTES)
+    expect(await appendTimelineBatch(db, id, play, batch(3, [{ t: 3 }]))).toBe('full')
+    expect(await batches(id)).toHaveLength(2)
+  })
+
+  it('answers a stored batch sent again as a duplicate, even once the timeline is full', async () => {
+    const id = randomUUID()
+    const play = owner()
+    await appendTimelineBatch(db, id, play, batch(0))
+    await db.execute(sql`UPDATE timelines SET bytes = ${TIMELINE_MAX_BYTES} WHERE id = ${id}`)
+    expect(await appendTimelineBatch(db, id, play, batch(0))).toBe('duplicate')
+    expect(await appendTimelineBatch(db, id, play, batch(1))).toBe('full')
+  })
+
+  it('adds up batches that arrive at the same time', async () => {
+    const id = randomUUID()
+    const play = owner()
+    const outcomes = await Promise.all(
+      [0, 1, 2, 3, 4, 5].flatMap((seq) => [
+        appendTimelineBatch(db, id, play, batch(seq)),
+        // Each also arrives twice.
+        appendTimelineBatch(db, id, play, batch(seq)),
+      ]),
+    )
+    expect(outcomes.filter((outcome) => outcome === 'stored')).toHaveLength(6)
+    expect(outcomes.filter((outcome) => outcome === 'duplicate')).toHaveLength(6)
+    const sizes = (await batches(id)).reduce((sum, found) => sum + found.bytes, 0)
+    expect(await timeline(id)).toMatchObject({ batches: 6, bytes: sizes })
+  })
+})
