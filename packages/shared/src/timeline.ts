@@ -252,6 +252,8 @@ export interface SourceFigures {
 export interface ServedEvent {
   type: 'served'
   t: number
+  /** Where this read came from: a phone that changes network mid-play changes it. */
+  address: string
   from: number
   to: number
   status: 200 | 206

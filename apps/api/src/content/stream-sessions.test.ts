@@ -100,6 +100,30 @@ describe('stream sessions (§6.2, §16)', () => {
     expect(other).not.toBe(first)
   })
 
+  it('keeps two readers apart even with the same play ID', async () => {
+    const harness = setup()
+    const drive = { playId: 'play-1', via: 'drive', userId: 'user-1', shareId: null } as const
+    const link = { playId: 'play-1', via: 'link', userId: null, shareId: 'share-1' } as const
+    const one = serve(harness, drive)
+    expect(serve(harness, drive)).toBe(one)
+    // Another user presenting the same play ID is another session, not joined to the first's.
+    const user = serve(harness, { ...drive, userId: 'user-2' })
+    expect(user).not.toBe(one)
+    // So is a link's viewer, and a viewer of another link.
+    const viewer = serve(harness, link)
+    expect(viewer).not.toBe(one)
+    expect(viewer).not.toBe(user)
+    expect(serve(harness, link)).toBe(viewer)
+    expect(serve(harness, { ...link, shareId: 'share-2' })).not.toBe(viewer)
+    expect(serve(harness, { ...link, via: 'stream' })).not.toBe(viewer)
+
+    // Each is written under its own timeline, whose owner is its own reader.
+    await harness.sessions.flush()
+    const owners = new Map(harness.calls.map((call) => [call.id, call.owner]))
+    expect(owners.get(user)).toMatchObject({ via: 'drive', userId: 'user-2', playId: 'play-1' })
+    expect(owners.get(viewer)).toMatchObject({ via: 'link', shareId: 'share-1', playId: 'play-1' })
+  })
+
   it('groups another player’s requests by link, version, address and user agent', async () => {
     const harness = setup()
     const first = serve(harness)
@@ -255,6 +279,7 @@ describe('stream sessions (§6.2, §16)', () => {
     expect(first[0]).toMatchObject({
       type: 'served',
       t: 0,
+      address: '203.0.113.7',
       from: 0,
       to: 1_000_000_000,
       status: 200,
@@ -268,7 +293,13 @@ describe('stream sessions (§6.2, §16)', () => {
       gapMs: null,
     })
     expect(first[0]?.sources).toEqual(readSources())
-    expect(first[1]).toMatchObject({ t: 40, status: 206, gapMs: 40, seek: false })
+    expect(first[1]).toMatchObject({
+      t: 40,
+      address: '198.51.100.9',
+      status: 206,
+      gapMs: 40,
+      seek: false,
+    })
 
     // Nothing is written twice.
     await sessions.flush()
@@ -281,21 +312,25 @@ describe('stream sessions (§6.2, §16)', () => {
     expect(calls[2]?.batch.events).toHaveLength(1)
   })
 
-  it('rounds the waits by source and the start time to whole milliseconds', async () => {
+  it('rounds every time it keeps to whole milliseconds', async () => {
     const harness = setup()
     harness.clock.now = 1000.4
     const first = harness.sessions.open(request(), { bytes: 0 })
-    first.close(result())
+    first.close(result({ firstByteMs: null, totalMs: 0.4, clientMs: 0 }))
     harness.clock.now = 1007.6
     const sources = readSources()
     sources.cache = { bytes: 4096, waitMs: 12.5 }
     sources.discord = { bytes: 100, waitMs: 80.49 }
     const second = harness.sessions.open(request(), { bytes: 0 })
-    second.close(result({ sources, bytes: 4196 }))
+    second.close(
+      result({ sources, bytes: 4196, firstByteMs: 12.5, totalMs: 92.9, clientMs: 33.49 }),
+    )
 
     await harness.sessions.flush()
     const events = served(harness.calls[0])
-    expect(events[1]?.t).toBe(7)
+    // A first byte that never came stays missing, and isn't taken for 0.
+    expect(events[0]).toMatchObject({ firstByteMs: null, totalMs: 0, clientMs: 0 })
+    expect(events[1]).toMatchObject({ t: 7, firstByteMs: 13, totalMs: 93, clientMs: 33 })
     expect(events[1]?.sources).toEqual({
       staging: { bytes: 0, waitMs: 0 },
       cache: { bytes: 4096, waitMs: 13 },
@@ -303,6 +338,39 @@ describe('stream sessions (§6.2, §16)', () => {
     })
     // The result's own object is not changed, as the request goes on using it.
     expect(sources.cache.waitMs).toBe(12.5)
+  })
+
+  it('notes where each read came from, as a phone changes network mid-play', async () => {
+    const harness = setup()
+    serve(harness, { playId: 'play-1', address: '203.0.113.7', from: 0 })
+    serve(harness, { playId: 'play-1', address: '198.51.100.9', from: 1000 })
+    serve(harness, { playId: 'play-1', address: '198.51.100.9', from: 2000 })
+    await harness.sessions.flush()
+    expect(harness.calls).toHaveLength(1)
+    expect(served(harness.calls[0]).map((event) => [event.from, event.address])).toEqual([
+      [0, '203.0.113.7'],
+      [1000, '198.51.100.9'],
+      [2000, '198.51.100.9'],
+    ])
+    // The batch goes with the session's latest address, the timeline keeping its first.
+    expect(harness.calls[0]?.batch.address).toBe('198.51.100.9')
+    expect(harness.calls[0]?.owner.address).toBe('203.0.113.7')
+
+    // A read that closes after another opened from elsewhere keeps its own address.
+    const slow = harness.sessions.open(
+      request({ playId: 'play-1', address: '198.51.100.9', from: 3000 }),
+      { bytes: 0 },
+    )
+    harness.sessions
+      .open(request({ playId: 'play-1', address: '192.0.2.44', from: 9000 }), { bytes: 0 })
+      .close(result())
+    slow.close(result())
+    await harness.sessions.flush()
+    expect(served(harness.calls[1]).map((event) => [event.from, event.address])).toEqual([
+      [9000, '192.0.2.44'],
+      [3000, '198.51.100.9'],
+    ])
+    expect(harness.calls[1]?.batch.address).toBe('192.0.2.44')
   })
 
   it('takes a request that closes twice once', async () => {
@@ -321,8 +389,8 @@ describe('stream sessions (§6.2, §16)', () => {
     const id = serve(harness, { playId: 'play-1' })
     const other = serve(harness, { playId: 'play-2' })
     await sessions.flush()
-    // Every session was tried, and the outage was said once.
-    expect(calls.map((call) => call.id)).toEqual([id, other])
+    // The store is down: one attempt, not one for each session, and the outage said once.
+    expect(calls.map((call) => call.id)).toEqual([id])
     expect(warn).toHaveBeenCalledTimes(1)
     expect(warn).toHaveBeenCalledWith(
       { err: expect.any(Error) as unknown, sessionId: id },
@@ -333,7 +401,7 @@ describe('stream sessions (§6.2, §16)', () => {
     serve(harness, { playId: 'play-1', from: 1000 })
     behaviour.fails = false
     await sessions.flush()
-    const retried = calls.slice(2)
+    const retried = calls.slice(1)
     expect(
       retried.map((call) => [call.id, call.batch.seq, served(call).map((e) => e.from)]),
     ).toEqual([
@@ -344,7 +412,7 @@ describe('stream sessions (§6.2, §16)', () => {
     expect(retried[0]?.batch.events).toEqual(calls[0]?.batch.events)
 
     await sessions.flush()
-    expect(calls).toHaveLength(5)
+    expect(calls).toHaveLength(4)
     expect(warn).toHaveBeenCalledTimes(1)
   })
 
@@ -449,5 +517,35 @@ describe('stream sessions (§6.2, §16)', () => {
     expect(calls[1]?.batch.seq).toBe(1)
 
     await running.stop()
+  })
+
+  it('keeps flushing after a flush that failed', async () => {
+    vi.useFakeTimers()
+    const harness = setup()
+    const { behaviour, calls, warn } = harness
+    const running = harness.sessions.start()
+    serve(harness, { playId: 'play-1' })
+
+    // A flush that rejects, not just a write that fails: the warning for the failed write throws.
+    behaviour.fails = true
+    warn.mockImplementationOnce(() => {
+      throw new Error('the log is broken')
+    })
+    await vi.advanceTimersByTimeAsync(FLUSH_EVERY_MS)
+    expect(calls).toHaveLength(1)
+    // The tick says so, instead of leaving an unhandled rejection to end the process.
+    expect(warn).toHaveBeenLastCalledWith(
+      { err: expect.any(Error) as unknown },
+      'could not save stream sessions; trying again',
+    )
+
+    // The next tick comes, and writes what was kept.
+    behaviour.fails = false
+    await vi.advanceTimersByTimeAsync(FLUSH_EVERY_MS)
+    expect(calls).toHaveLength(2)
+    expect(calls[1]?.batch.seq).toBe(0)
+    expect(served(calls[1])).toHaveLength(1)
+
+    await expect(running.stop()).resolves.toBeUndefined()
   })
 })

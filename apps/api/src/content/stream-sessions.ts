@@ -157,20 +157,21 @@ export class StreamSessions {
       session.pending.push({
         type: 'served',
         t: Math.round(openedAt - session.startedAt),
+        address: request.address,
         from: request.from,
         to: request.to,
         status: request.status,
         bytes: result.bytes,
         finished: result.finished,
         failed: result.failed,
-        firstByteMs: result.firstByteMs,
-        totalMs: result.totalMs,
+        firstByteMs: result.firstByteMs === null ? null : Math.round(result.firstByteMs),
+        totalMs: Math.round(result.totalMs),
         sources: {
           staging: roundedWait(result.sources.staging),
           cache: roundedWait(result.sources.cache),
           discord: roundedWait(result.sources.discord),
         },
-        clientMs: result.clientMs,
+        clientMs: Math.round(result.clientMs),
         seek,
         gapMs,
       })
@@ -199,7 +200,7 @@ export class StreamSessions {
     const schedule = () => {
       if (stopped) return
       timer = setTimeout(() => {
-        running = this.flush().finally(schedule)
+        running = this.#flushQuietly().finally(schedule)
       }, FLUSH_EVERY_MS)
       timer.unref()
     }
@@ -209,19 +210,29 @@ export class StreamSessions {
         stopped = true
         if (timer) clearTimeout(timer)
         await running
-        await this.flush()
+        await this.#flushQuietly()
         this.#sessions.clear()
         this.#byKey.clear()
       },
     }
   }
 
+  /** A flush whose failure is logged, not thrown: a timer's tick must not end the process, nor a stop. */
+  #flushQuietly(): Promise<void> {
+    return this.flush().catch((error: unknown) => {
+      this.#log.warn({ err: error }, 'could not save stream sessions; trying again')
+    })
+  }
+
   /** The key's session if it is still going, else a new one. */
   #join(request: StreamRequest, now: number): Session {
+    // A play ID comes from the page, so it is not trusted alone: another reader giving the same
+    // one must not join this reader's session, and have their reads logged under it.
+    const reader = `${request.via}|${request.userId ?? request.shareId ?? ''}`
     const key =
       request.playId === null
-        ? `${request.via}|${request.userId ?? request.shareId ?? ''}|${request.versionId}|${request.address}|${request.userAgent ?? ''}`
-        : `play:${request.playId}`
+        ? `${reader}|${request.versionId}|${request.address}|${request.userAgent ?? ''}`
+        : `play:${request.playId}|${reader}`
     const existing = this.#byKey.get(key)
     if (
       existing &&
@@ -275,7 +286,6 @@ export class StreamSessions {
   }
 
   async #flushAll(): Promise<void> {
-    let warned = false
     for (const session of [...this.#sessions]) {
       while (!session.stopped) {
         const batch = session.unsent ?? this.#take(session)
@@ -289,15 +299,13 @@ export class StreamSessions {
             address: session.address,
           })
         } catch (error) {
-          // Once for all the sessions: a database that is down says so for each.
-          if (!warned) {
-            warned = true
-            this.#log.warn(
-              { err: error, sessionId: session.id },
-              'could not save a stream session; trying again',
-            )
-          }
-          break
+          // The run ends here: a store that is down would make every session wait on a connection
+          // timeout in turn. Every batch is kept, and the next flush tries again.
+          this.#log.warn(
+            { err: error, sessionId: session.id },
+            'could not save a stream session; trying again',
+          )
+          return
         }
         if (outcome === 'stored' || outcome === 'duplicate') {
           session.unsent = null
