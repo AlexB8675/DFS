@@ -164,6 +164,25 @@ if lost.
 - **Stopping:** `docker compose down` keeps every volume; `down -v` would
   delete the database and staging.
 
+## Reading play timelines
+
+The API keeps a timeline of each play of a video, from the page's side, and a
+log of each stream the server served it with (DESIGN §16), so a slow or failed
+play can be read afterwards. They are kept 28 days, and 2 GiB at most, the
+least recently written going first. `dfs timelines` lists the newest, and
+`dfs timeline <id>` prints one in full: a play's events in order, with the
+server's own reads of the video among them, placed on the play's clock by the
+server's. `--json` prints the raw events instead.
+
+```bash
+docker compose exec api node apps/api/src/cli.ts timelines --limit 20
+docker compose exec api node apps/api/src/cli.ts timeline <id>
+```
+
+In the lab, from `/opt/dfs-lab/docker`, with `lab` as in The lab below:
+`lab exec api node apps/api/src/cli.ts timelines --limit 20`. In development:
+`pnpm dfs timelines --limit 20`. Add `-T` after `exec` to pipe the output.
+
 ## Recovery drill and recovery
 
 `dfs drill` rebuilds the database from `#dfs-journal` and the master key

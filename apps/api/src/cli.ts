@@ -7,6 +7,8 @@ import {
   appendJournal,
   createDatabase,
   createPool,
+  listTimelines,
+  readTimeline,
   userRecord,
   users,
   type Database,
@@ -14,12 +16,14 @@ import {
 import { generatePassword, usernameSchema } from '@dfs/shared'
 import { createDiscordRest, discordProblem } from '@dfs/storage'
 import { eq } from 'drizzle-orm'
+import { z } from 'zod'
 import { audit } from './audit.ts'
 import { hashPassword } from './auth/passwords.ts'
 import { endUserSessions } from './auth/sessions.ts'
 import { setUpDiscord } from './discord-setup.ts'
 import { drillCommand, printReport, recoverCommand } from './recover/commands.ts'
 import { resetStorage, storageCounts, type ResetOptions } from './reset-storage.ts'
+import { printTimeline, printTimelineList } from './timelines/print.ts'
 import { createUser } from './users/users.ts'
 
 // `dfs`: admin commands run on the server (DESIGN.md §4, §7.1).
@@ -30,6 +34,8 @@ import { createUser } from './users/users.ts'
 //   pnpm dfs recover --into <database-url> [--from discord|local] [--instance <id>] [--key-file <file>]
 //   pnpm dfs drill [--from discord|local] [--instance <id>] [--key-file <file>]
 //   pnpm dfs reset-storage --instance <id>
+//   pnpm dfs timelines [--limit <n>]
+//   pnpm dfs timeline <id> [--json]
 //
 // `owner` creates the owner account with a temporary password, or, when the
 // owner exists, gives it a new one and signs it out everywhere: the way back
@@ -54,10 +60,17 @@ import { createUser } from './users/users.ts'
 // and the journal, keeping accounts, folders, links to folders and the audit
 // log, which a fresh journal holds (docs/DEPLOY.md). It asks for the
 // database's instance ID, and refuses while the API or the bot is running.
+//
+// `timelines` and `timeline` read the play timelines and stream sessions the
+// API keeps for 28 days (§16): the list, newest first, up to --limit (1 to
+// 1000, 50 by default), and one in full, with --json as stored. A play's
+// timeline puts its stream sessions on its clock, by the server's.
 
 const USAGE =
-  'Usage: dfs owner [--username <name>] | dfs setup | dfs master-key <file> | dfs recover --into <database-url> [--from discord|local] [--instance <id>] [--key-file <file>] | dfs drill [--from discord|local] [--instance <id>] [--key-file <file>] | dfs reset-storage --instance <id>'
+  'Usage: dfs owner [--username <name>] | dfs setup | dfs master-key <file> | dfs recover --into <database-url> [--from discord|local] [--instance <id>] [--key-file <file>] | dfs drill [--from discord|local] [--instance <id>] [--key-file <file>] | dfs reset-storage --instance <id> | dfs timelines [--limit <n>] | dfs timeline <id> [--json]'
 const DAY_MS = 24 * 60 * 60_000
+const DEFAULT_TIMELINES = 50
+const MAX_TIMELINES = 1000
 const rootDir = path.resolve(import.meta.dirname, '../../..')
 
 const { positionals, values } = parseArgs({
@@ -68,32 +81,61 @@ const { positionals, values } = parseArgs({
     from: { type: 'string' },
     instance: { type: 'string' },
     'key-file': { type: 'string' },
+    limit: { type: 'string' },
+    json: { type: 'boolean' },
   },
 })
 
 const [command, keyFile] = positionals
 const recovering =
   values.from !== undefined || values.instance !== undefined || values['key-file'] !== undefined
-const plain = values.username === undefined && values.into === undefined && !recovering
+// What only `timelines` and `timeline` take.
+const reading = values.limit !== undefined || values.json !== undefined
+const limit =
+  values.limit === undefined
+    ? DEFAULT_TIMELINES
+    : /^\d{1,4}$/.test(values.limit)
+      ? Number(values.limit)
+      : NaN
+const unrelated = values.username === undefined && values.into === undefined && !recovering
+const plain = unrelated && !reading
 const valid =
-  (command === 'owner' && positionals.length === 1 && values.into === undefined && !recovering) ||
+  (command === 'owner' &&
+    positionals.length === 1 &&
+    values.into === undefined &&
+    !recovering &&
+    !reading) ||
   (command === 'setup' && positionals.length === 1 && plain) ||
   (command === 'master-key' && positionals.length === 2 && plain) ||
   (command === 'recover' &&
     positionals.length === 1 &&
     values.into !== undefined &&
-    values.username === undefined) ||
+    values.username === undefined &&
+    !reading) ||
   (command === 'drill' &&
     positionals.length === 1 &&
     values.into === undefined &&
-    values.username === undefined) ||
+    values.username === undefined &&
+    !reading) ||
   (command === 'reset-storage' &&
     positionals.length === 1 &&
     values.instance !== undefined &&
     values.from === undefined &&
     values['key-file'] === undefined &&
     values.into === undefined &&
-    values.username === undefined)
+    values.username === undefined &&
+    !reading) ||
+  (command === 'timelines' &&
+    positionals.length === 1 &&
+    unrelated &&
+    values.json === undefined &&
+    limit >= 1 &&
+    limit <= MAX_TIMELINES) ||
+  (command === 'timeline' &&
+    positionals.length === 2 &&
+    unrelated &&
+    values.limit === undefined &&
+    z.uuid().safeParse(keyFile).success)
 const from = values.from ?? undefined
 if (from !== undefined && from !== 'discord' && from !== 'local') {
   console.error(`[ERROR] --from is discord or local. ${USAGE}`)
@@ -165,6 +207,10 @@ try {
   if (command === 'owner') await owner(createDatabase(pool), config, values.username)
   else if (command === 'reset-storage')
     await reset(createDatabase(pool), config, values.instance ?? '')
+  else if (command === 'timelines')
+    console.info(printTimelineList(await listTimelines(createDatabase(pool), limit)))
+  else if (command === 'timeline')
+    await timeline(createDatabase(pool), keyFile ?? '', values.json === true)
   else await setup(createDatabase(pool), config)
 } catch (error) {
   console.error(
@@ -290,6 +336,12 @@ async function reset(db: Database, config: Config, instance: string): Promise<vo
   console.info(
     `[INFO] The journal starts again with ${String(baseline.users)} accounts, ${String(baseline.folders)} folders, ${String(baseline.shares)} links and ${String(baseline.auditEntries)} audit entries; the bot posts it once it runs.`,
   )
+}
+
+async function timeline(db: Database, id: string, json: boolean): Promise<void> {
+  const read = await readTimeline(db, id)
+  if (!read) throw new Error(`No timeline ${id}.`)
+  console.info(json ? JSON.stringify(read, null, 2) : printTimeline(read))
 }
 
 async function ask(question: string): Promise<string> {
