@@ -624,8 +624,8 @@ describe('reading from Discord', () => {
   })
 
   it('counts a version still syncing as staging’s', async () => {
-    const { chunkSize } = app.config.sizes
-    const bytes = new Uint8Array(chunkSize + 5000).map((_, i) => i % 233)
+    // One chunk of several segments: small, so the upload stays quick.
+    const bytes = new Uint8Array(300_000).map((_, i) => i % 233)
     const folder = await createFolder(client, (await workspace(client)).id, 'Counted staged')
     const session = await uploadFile(client, folder.id, 'staged.bin', bytes)
     // Not settled to Discord: its frames are still in staging.
