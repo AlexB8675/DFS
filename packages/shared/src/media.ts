@@ -254,6 +254,8 @@ export type PlayProblemKind = z.infer<typeof playProblemKindSchema>
  */
 export const playbackReportSchema = z.object({
   versionId: z.uuid(),
+  /** The play's timeline (§16), when the player keeps one. */
+  playId: z.uuid().optional(),
   /** It showed a frame, it couldn't play, or the viewer left before either. */
   outcome: z.enum(['played', 'failed', 'left']),
   /** From the player starting to its first frame. */
