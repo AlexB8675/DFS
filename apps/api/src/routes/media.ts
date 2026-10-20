@@ -26,7 +26,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
 import { requireAuth } from '../auth/access.ts'
-import type { RateLimiter } from '../auth/rate-limit.ts'
+import { addressKey, type RateLimiter } from '../auth/rate-limit.ts'
 import { linkReader } from '../content/deliveries.ts'
 import { WARM_END_BYTES, warmEnd } from '../content/reader.ts'
 import { paced, sendFile, type DownloadableFile } from '../content/send.ts'
@@ -235,7 +235,7 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
         if (request.params.token !== undefined) {
           // No session, so no CSRF token: from DFS's own page, and a few per address.
           assertOwnOrigin(app, request)
-          withinLimit(app.limits.timelines, `address:${request.ip}`, 'Too many timeline batches.')
+          withinLimit(app.limits.timelines, addressKey(request.ip), 'Too many timeline batches.')
         } else {
           const auth = requireAuth(request.auth)
           withinLimit(app.limits.timelines, `user:${auth.user.id}`, 'Too many timeline batches.')

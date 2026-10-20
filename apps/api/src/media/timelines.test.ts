@@ -235,6 +235,17 @@ describe('a play’s timeline in the drive (§16)', () => {
     expect(await timelineOf(playId)).toBeNull()
   })
 
+  it('refuses a start a Date can’t hold, as a bad request', async () => {
+    const video = await upload(client, folderId, 'start.mp4')
+    const playId = crypto.randomUUID()
+    const late = { ...batch(playId, video.versionId, 0), startedAt: 8_640_000_000_000_001 }
+    expect(await client.error('POST', `/files/${video.nodeId}/timeline`, { json: late })).toEqual({
+      status: 400,
+      code: 'invalid_request',
+    })
+    expect(await timelineOf(playId)).toBeNull()
+  })
+
   it('counts a user’s batches against the user', async () => {
     const mine = await upload(other, otherFolderId, 'counted.mp4')
     const path = `/files/${mine.nodeId}/timeline`

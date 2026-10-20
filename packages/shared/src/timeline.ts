@@ -224,8 +224,11 @@ export const timelineBatchSchema = z.object({
   playId: z.uuid(),
   versionId: z.uuid(),
   seq: z.number().int().min(0).max(100_000),
-  /** The page's `Date.now()` at t = 0, for people to read. */
-  startedAt: z.number().int().min(0),
+  /**
+   * The page's `Date.now()` at t = 0, for people to read; at most the latest
+   * time a Date holds, past which the API's `new Date(startedAt)` is invalid.
+   */
+  startedAt: z.number().int().min(0).max(8_640_000_000_000_000),
   /**
    * Milliseconds since t = 0 when the batch was sent, on the page's monotonic
    * clock: the reader lines the server's clock up with the play by it.

@@ -120,6 +120,14 @@ describe('timeline events (§16)', () => {
     expect(accepted('a whole pair \u{1f4fa}, and é')).toBe(true)
   })
 
+  it('refuses a start a Date can’t hold', () => {
+    const startingAt = (startedAt: number) =>
+      timelineBatchSchema.safeParse({ ...batch([{ type: 'closed', t: 0 }]), startedAt }).success
+    // The latest time a Date holds: past it the API's `new Date(startedAt)` is invalid.
+    expect(startingAt(8_640_000_000_000_000)).toBe(true)
+    expect(startingAt(8_640_000_000_000_001)).toBe(false)
+  })
+
   it('refuses an empty batch and one over 2000 events', () => {
     const closed = { type: 'closed', t: 0 }
     expect(timelineBatchSchema.safeParse(batch([])).success).toBe(false)
