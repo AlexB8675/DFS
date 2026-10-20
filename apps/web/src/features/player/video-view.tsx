@@ -880,7 +880,8 @@ export default function VideoView({
       ) : (
         // No element until the start is decided: one made for a video that then plays elsewhere
         // would be followed, and reported, for nothing. Nor before the timeline exists, so that
-        // every read of the play is named by it (§16).
+        // every read of the play is named by it (§16). The timeline is always made (`newPlayId`
+        // can't fail), so this waits a render at most.
         source &&
         decided !== null &&
         timeline !== null && (

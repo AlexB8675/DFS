@@ -1,11 +1,19 @@
 import {
   TIMELINE_MAX_EVENTS,
+  timelineBatchSchema,
   timelineEventSchema,
   type TimelineBatch,
   type TimelineEventInput,
 } from '@dfs/shared'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { clipText, Timeline, timelineSender, type SendResult, type TimelineSend } from './recorder'
+import {
+  clipText,
+  newPlayId,
+  Timeline,
+  timelineSender,
+  type SendResult,
+  type TimelineSend,
+} from './recorder'
 
 const PLAY = '0199f3a2-7c41-7d00-8000-00000000a001'
 const VERSION = '0199f3a2-7c41-7d00-8000-00000000b002'
@@ -662,5 +670,45 @@ describe('clipText', () => {
     expect(clipText('abcdef', 3)).toBe('abc')
     expect(clipText('abc', 20)).toBe('abc')
     expect(clipText('')).toBe('')
+  })
+})
+
+describe('newPlayId', () => {
+  const real = globalThis.crypto
+  const accepted = (id: string) => timelineBatchSchema.shape.playId.safeParse(id).success
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('is the browser’s own UUID where it has one', () => {
+    vi.stubGlobal('crypto', {
+      randomUUID: () => '0199f3a2-7c41-4d00-8000-00000000a001',
+      getRandomValues: () => {
+        throw new Error('not needed')
+      },
+    })
+    expect(newPlayId()).toBe('0199f3a2-7c41-4d00-8000-00000000a001')
+  })
+
+  it('makes a valid UUID where randomUUID is missing, as outside a secure context', () => {
+    vi.stubGlobal('crypto', {
+      getRandomValues: <T extends ArrayBufferView<ArrayBuffer>>(bytes: T) =>
+        real.getRandomValues(bytes),
+    })
+    const first = newPlayId()
+    const second = newPlayId()
+    expect(accepted(first)).toBe(true)
+    expect(accepted(second)).toBe(true)
+    expect(first).not.toBe(second)
+    // Version 4, and the variant of RFC 4122.
+    expect(first[14]).toBe('4')
+    expect('89ab').toContain(first[19])
+  })
+
+  it('sets the version and variant bits whatever the random bytes are', () => {
+    vi.stubGlobal('crypto', { getRandomValues: (bytes: Uint8Array) => bytes.fill(0xff) })
+    expect(newPlayId()).toBe('ffffffff-ffff-4fff-bfff-ffffffffffff')
+    vi.stubGlobal('crypto', { getRandomValues: (bytes: Uint8Array) => bytes.fill(0) })
+    expect(newPlayId()).toBe('00000000-0000-4000-8000-000000000000')
   })
 })

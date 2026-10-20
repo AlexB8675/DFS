@@ -30,6 +30,32 @@ const KEEPALIVE_MAX_BYTES = 24 * 1024
 /** What an outage may leave held; past it the oldest events are dropped, counted. */
 const MAX_KEPT_BYTES = 256 * 1024
 
+/** What a browser may leave out of `crypto`, which the DOM library types as always there. */
+type OptionalCrypto = Partial<Pick<Crypto, 'randomUUID'>>
+
+/**
+ * A new play's ID, which can't fail: logging must never stop a video, and the
+ * video waits for its timeline. `crypto.randomUUID` exists only in a secure
+ * context (https, localhost) and is missing elsewhere, as on a development
+ * server opened by a LAN address; `crypto.getRandomValues` works anywhere, so
+ * then an RFC 4122 version 4 UUID is made of its bytes.
+ */
+export function newPlayId(): string {
+  const optional: OptionalCrypto = crypto
+  if (typeof optional.randomUUID === 'function') return crypto.randomUUID()
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20),
+  ].join('-')
+}
+
 /** What a send came to: it got there, it may go again, or the API turned it away for good. */
 export type SendResult = 'sent' | 'retry' | 'refused'
 export type TimelineSend = (batch: TimelineBatch, keepalive: boolean) => Promise<SendResult>

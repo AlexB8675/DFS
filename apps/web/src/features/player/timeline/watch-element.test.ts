@@ -1,6 +1,6 @@
 import { timelineEventSchema, type TimelineEventInput } from '@dfs/shared'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { connectionNow, watchElement } from './watch-element'
+import { watchElement } from './watch-element'
 
 /** An `EventTarget` that knows which listeners it still holds. */
 class Watched extends EventTarget {
@@ -37,7 +37,8 @@ class FakeVideo extends Watched {
   currentTime = 0
   readyState = 0
   paused = true
-  error: { code: number; message: string } | null = null
+  /** A browser may leave the message out. */
+  error: { code: number; message?: string } | null = null
   /** The buffered ranges, as the element reports them. */
   ranges: [number, number][] = []
   frames = 0
@@ -81,37 +82,6 @@ class FrameVideo extends FakeVideo {
   }
 }
 
-class FakeConnection extends Watched {
-  effectiveType: string | undefined = '4g'
-  downlink: number | undefined = 10
-  rtt: number | undefined = 50
-  saveData: boolean | undefined = false
-}
-
-class FakeDocument extends Watched {
-  visibilityState = 'visible'
-}
-
-interface Page {
-  document: FakeDocument
-  window: Watched
-  navigator: { onLine: boolean; connection?: FakeConnection }
-}
-
-/** Stubs the page globals the watcher reads, with a connection unless `connection` is false. */
-function stubPage(connection = true): Page {
-  const page: Page = {
-    document: new FakeDocument(),
-    window: new Watched(),
-    navigator: { onLine: true },
-  }
-  if (connection) page.navigator.connection = new FakeConnection()
-  vi.stubGlobal('document', page.document)
-  vi.stubGlobal('window', page.window)
-  vi.stubGlobal('navigator', page.navigator)
-  return page
-}
-
 /** Watches `video`, collecting what is recorded; every event must pass the shared schema. */
 function watch(video: FakeVideo) {
   const events: TimelineEventInput[] = []
@@ -142,16 +112,13 @@ const ELEMENT_NAMES = [
   'emptied',
 ] as const
 
-let page: Page
-
+// The element alone: the page's own events are `watchPage`'s, and nothing here may touch `window`.
 beforeEach(() => {
   vi.useFakeTimers()
-  page = stubPage()
 })
 
 afterEach(() => {
   vi.useRealTimers()
-  vi.unstubAllGlobals()
 })
 
 describe('watchElement (§10.4, §16)', () => {
@@ -187,6 +154,9 @@ describe('watchElement (§10.4, §16)', () => {
     // Without a message the code stands in, and a long one is cut to 300 characters.
     video.error = { code: 3, message: '' }
     video.dispatchEvent(new Event('error'))
+    // Some engines leave the message out altogether.
+    video.error = { code: 4 }
+    video.dispatchEvent(new Event('error'))
     video.error = { code: 2, message: `${'x'.repeat(299)}😀\u0000` }
     video.dispatchEvent(new Event('error'))
     video.error = null
@@ -194,6 +164,7 @@ describe('watchElement (§10.4, §16)', () => {
     expect(events).toEqual([
       { type: 'error', from: 'element', code: 4, message: 'DEMUXER_ERROR_COULD_NOT_OPEN' },
       { type: 'error', from: 'element', code: 3, message: 'media error 3' },
+      { type: 'error', from: 'element', code: 4, message: 'media error 4' },
       { type: 'error', from: 'element', code: 2, message: 'x'.repeat(299) },
       { type: 'error', from: 'element', code: null, message: 'media error' },
     ])
@@ -266,6 +237,22 @@ describe('watchElement (§10.4, §16)', () => {
     expect(events[0]).toMatchObject({ type: 'sample', aheadS: 5.5 })
   })
 
+  it('counts a buffer that starts a hair after the playhead as ahead', () => {
+    const video = new FakeVideo()
+    video.paused = false
+    video.currentTime = 10
+    // The browser's ranges start at a frame boundary, a little past the time.
+    video.ranges = [[10.02, 20]]
+    const { events } = watch(video)
+    vi.advanceTimersByTime(1000)
+    expect(events[0]).toMatchObject({ type: 'sample', aheadS: 10 })
+
+    // A real gap, 0.1 s, is not.
+    video.ranges = [[10.1, 20]]
+    vi.advanceTimersByTime(1000)
+    expect(events[1]).toMatchObject({ type: 'sample', aheadS: 0 })
+  })
+
   it('gives 0 frames when the browser can’t count them', () => {
     const video = new FakeVideo()
     video.paused = false
@@ -324,6 +311,37 @@ describe('watchElement (§10.4, §16)', () => {
     expect(refused(events)).toEqual([])
   })
 
+  it('samples a pause at once, with nothing else changed, and then rarely', () => {
+    const video = new FakeVideo()
+    video.paused = false
+    video.readyState = 4
+    video.currentTime = 5
+    video.ranges = [[0, 30]]
+    const { events } = watch(video)
+    const samples = () => events.filter((event) => event.type === 'sample')
+    vi.advanceTimersByTime(2000)
+    expect(samples().map((sample) => sample.paused)).toEqual([false, false])
+
+    // Paused between ticks, the buffer and the ready state as they were: the next tick says so.
+    video.paused = true
+    vi.advanceTimersByTime(1000)
+    expect(samples()).toHaveLength(3)
+    expect(samples()[2]).toMatchObject({ type: 'sample', paused: true, aheadS: 25, readyState: 4 })
+
+    // Nothing changes: nothing for as long as it stays so.
+    vi.advanceTimersByTime(30_000)
+    expect(samples()).toHaveLength(3)
+
+    // Playing again is a change too, and a pause after it is sampled even within 10 s.
+    video.paused = false
+    vi.advanceTimersByTime(1000)
+    expect(samples()).toHaveLength(4)
+    video.paused = true
+    vi.advanceTimersByTime(1000)
+    expect(samples()).toHaveLength(5)
+    expect(samples()[4]).toMatchObject({ type: 'sample', paused: true })
+  })
+
   it('samples every second again once the video plays', () => {
     const video = new FakeVideo()
     const { events } = watch(video)
@@ -342,18 +360,22 @@ describe('watchElement (§10.4, §16)', () => {
     video.present(0.0416)
     expect(events).toEqual([{ type: 'picture', at: 0.042, after: 'start' }])
 
+    // The frame still on show while it seeks is not the picture of the seek: it waits for `seeked`.
     video.currentTime = 30
     video.dispatchEvent(new Event('seeking'))
     expect(events.at(-1)).toMatchObject({ type: 'element', name: 'seeking' })
+    expect(video.waiting.size).toBe(0)
+    video.dispatchEvent(new Event('seeked'))
+    expect(events.at(-1)).toMatchObject({ type: 'element', name: 'seeked' })
     expect(video.waiting.size).toBe(1)
     video.present(30.0334)
     expect(events.at(-1)).toEqual({ type: 'picture', at: 30.033, after: 'seek' })
     expect(video.waiting.size).toBe(0)
 
     // A seek on top of a seek: only the latest frame is asked for, the earlier request cancelled.
-    video.dispatchEvent(new Event('seeking'))
+    video.dispatchEvent(new Event('seeked'))
     const first = [...video.waiting.keys()][0]
-    video.dispatchEvent(new Event('seeking'))
+    video.dispatchEvent(new Event('seeked'))
     expect(video.cancelled).toEqual([first])
     expect(video.waiting.size).toBe(1)
     const before = events.length
@@ -371,76 +393,22 @@ describe('watchElement (§10.4, §16)', () => {
     expect(events.map((event) => event.type)).toEqual(['element', 'element', 'element'])
   })
 
-  it('records going offline, hiding and a connection change', () => {
-    const video = new FakeVideo()
-    const { events } = watch(video)
-
-    page.window.dispatchEvent(new Event('offline'))
-    page.window.dispatchEvent(new Event('online'))
-    page.document.visibilityState = 'hidden'
-    page.document.dispatchEvent(new Event('visibilitychange'))
-    page.document.visibilityState = 'visible'
-    page.document.dispatchEvent(new Event('visibilitychange'))
-
-    const connection = page.navigator.connection
-    if (connection === undefined) throw new Error('no connection')
-    connection.effectiveType = '3g'
-    connection.downlink = 1.5
-    connection.rtt = 300
-    connection.saveData = true
-    connection.dispatchEvent(new Event('change'))
-
-    expect(events).toEqual([
-      { type: 'network', online: false },
-      { type: 'network', online: true },
-      { type: 'visibility', hidden: true },
-      { type: 'visibility', hidden: false },
-      {
-        type: 'connection',
-        connection: { effectiveType: '3g', downlinkMbps: 1.5, rttMs: 300, saveData: true },
-      },
-    ])
-    expect(refused(events)).toEqual([])
-  })
-
-  it('watches a browser without a connection API', () => {
-    page = stubPage(false)
-    const video = new FakeVideo()
-    const { events, stop } = watch(video)
-    page.window.dispatchEvent(new Event('offline'))
-    expect(events).toEqual([{ type: 'network', online: false }])
-    expect(() => {
-      stop()
-    }).not.toThrow()
-  })
-
   it('stops listening when stopped', () => {
     const video = new FrameVideo()
     const { events, stop } = watch(video)
-    const connection = page.navigator.connection
-    if (connection === undefined) throw new Error('no connection')
     expect(video.listening).toBeGreaterThan(0)
-    expect(page.window.listening).toBeGreaterThan(0)
-    expect(page.document.listening).toBeGreaterThan(0)
-    expect(connection.listening).toBeGreaterThan(0)
     expect(vi.getTimerCount()).toBe(1)
     // The start's frame is still waiting.
     const [pending] = [...video.waiting.keys()]
 
     stop()
     expect(video.listening).toBe(0)
-    expect(page.window.listening).toBe(0)
-    expect(page.document.listening).toBe(0)
-    expect(connection.listening).toBe(0)
     expect(vi.getTimerCount()).toBe(0)
     expect(video.cancelled).toEqual([pending])
 
     video.paused = false
     for (const name of ELEMENT_NAMES) video.dispatchEvent(new Event(name))
     video.dispatchEvent(new Event('error'))
-    page.window.dispatchEvent(new Event('offline'))
-    page.document.dispatchEvent(new Event('visibilitychange'))
-    connection.dispatchEvent(new Event('change'))
     vi.advanceTimersByTime(60_000)
     expect(events).toEqual([])
     // Stopping again changes nothing.
@@ -448,46 +416,5 @@ describe('watchElement (§10.4, §16)', () => {
       stop()
     }).not.toThrow()
     expect(video.cancelled).toEqual([pending])
-  })
-})
-
-describe('connectionNow (§16)', () => {
-  it('reads navigator.connection', () => {
-    expect(connectionNow()).toEqual({
-      effectiveType: '4g',
-      downlinkMbps: 10,
-      rttMs: 50,
-      saveData: false,
-    })
-  })
-
-  it('is null where the browser has none', () => {
-    stubPage(false)
-    expect(connectionNow()).toBeNull()
-  })
-
-  it('leaves out what the browser doesn’t say or says badly', () => {
-    const connection = page.navigator.connection
-    if (connection === undefined) throw new Error('no connection')
-    connection.effectiveType = undefined
-    connection.downlink = -1
-    connection.rtt = NaN
-    connection.saveData = undefined
-    expect(connectionNow()).toEqual({
-      effectiveType: null,
-      downlinkMbps: null,
-      rttMs: null,
-      saveData: null,
-    })
-    connection.effectiveType = 'a-very-long-type'
-    connection.downlink = Infinity
-    connection.rtt = 0
-    connection.saveData = true
-    expect(connectionNow()).toEqual({
-      effectiveType: 'a-very-lon',
-      downlinkMbps: null,
-      rttMs: 0,
-      saveData: true,
-    })
   })
 })
