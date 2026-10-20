@@ -16,7 +16,9 @@
 // without stopping, at the start, after such a seek and after a stall, and then
 // let go all at once, as YouTube's player does.
 
+import type { TimelineEventInput } from '@dfs/shared'
 import { createFile, MP4BoxBuffer, type ISOFile, type Movie, type Track } from 'mp4box'
+import { clipText } from '../timeline/recorder'
 import { AppendQueue } from './append-queue'
 import { mediaLayout, type MediaLayout } from './boxes'
 import {
@@ -76,7 +78,12 @@ export interface BufferedPlayOptions {
    * is appended or the play fails.
    */
   onStats: (stats: BufferedStats) => void
+  /** Each thing the engine does, for the play's timeline (§16). */
+  onEvent?: (event: TimelineEventInput) => void
 }
+
+/** A track as the timeline names it. */
+type EventTrack = 'video' | 'audio'
 
 /** Everything `streamSamples` needs of the opening. */
 interface StreamContext {
@@ -104,6 +111,12 @@ interface StreamContext {
   holds: Holds
   stats: BufferedStats
   emit: () => void
+  /** Reports to the play's timeline (§16). */
+  event: (event: TimelineEventInput) => void
+  /** The ID for the next read, numbered from 0 for the play. */
+  nextRequest: () => number
+  /** The track a queue carries, as the timeline names it. */
+  trackOf: (queue: AppendQueue) => EventTrack
   /** Ends the play with `message` shown. */
   fail: (message: string) => void
   /** What the queues call when a buffer is full. `streamSamples` puts its handling in `handle`. */
@@ -189,6 +202,15 @@ const FEED_BYTES = 1024 * 1024
  */
 const SEGMENT_SECONDS = 0.5
 
+/** The most seconds a timeline event holds. */
+const MAX_EVENT_SECONDS = 1e7
+
+/** `value` as a timeline event holds seconds: to 3 decimals and between 0 and 10 million. */
+function eventSeconds(value: number): number {
+  if (!Number.isFinite(value)) return 0
+  return Math.round(Math.min(Math.max(value, 0), MAX_EVENT_SECONDS) * 1000) / 1000
+}
+
 /** `bytes` as an ArrayBuffer of exactly its bytes, which a view may be only part of. */
 function exactBuffer(bytes: Uint8Array<ArrayBuffer>): ArrayBuffer {
   const { buffer, byteOffset, byteLength } = bytes
@@ -208,15 +230,42 @@ function queueOf(user: unknown): AppendQueue | null {
  * Bytes `start` to `end` (included) of `url`, and the whole file's size from
  * `Content-Range`. `null` when the server didn’t answer a byte range, which is
  * checked before the body is read: a server that ignores `Range` sends it all.
+ * The read is reported to the timeline as request `trace.id` (§16), and ends
+ * there once, whichever way it goes.
  */
-async function fetchRange(url: string, start: number, end: number, signal: AbortSignal) {
-  const response = await fetch(url, { headers: { Range: `bytes=${start}-${end}` }, signal })
-  const size = /\/(\d+)$/.exec(response.headers.get('Content-Range') ?? '')?.[1]
-  if (response.status !== 206 || size === undefined) {
-    void response.body?.cancel()
-    return null
+async function fetchRange(
+  url: string,
+  start: number,
+  end: number,
+  signal: AbortSignal,
+  trace: { event: (event: TimelineEventInput) => void; id: number },
+) {
+  const { event, id } = trace
+  let bytes = 0
+  let outcome: 'done' | 'aborted' | 'failed' = 'failed'
+  let message: string | null = null
+  event({ type: 'request', id, from: start, to: end })
+  try {
+    const response = await fetch(url, { headers: { Range: `bytes=${start}-${end}` }, signal })
+    // The answer's headers: its body is still to come.
+    event({ type: 'firstByte', id })
+    const size = /\/(\d+)$/.exec(response.headers.get('Content-Range') ?? '')?.[1]
+    if (response.status !== 206 || size === undefined) {
+      void response.body?.cancel()
+      message = `The server didn’t answer a byte range (status ${String(response.status)}).`
+      return null
+    }
+    const body = new Uint8Array(await response.arrayBuffer())
+    bytes = body.length
+    outcome = 'done'
+    return { bytes: body, size: Number(size) }
+  } catch (error) {
+    if (signal.aborted) outcome = 'aborted'
+    else message = clipText(error instanceof Error ? error.message : String(error))
+    throw error
+  } finally {
+    event({ type: 'requestEnd', id, bytes, outcome, message })
   }
-  return { bytes: new Uint8Array(await response.arrayBuffer()), size: Number(size) }
 }
 
 /**
@@ -286,6 +335,16 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
     stats.aheadSeconds = aheadSeconds(video.buffered, video.currentTime)
     options.onStats({ ...stats })
   }
+  // The play's timeline (§16): what the engine does, in order, as the page records it.
+  const event = options.onEvent ?? ((): void => undefined)
+  event({ type: 'phase', phase: 'opening' })
+  let requests = 0
+  /** The ID of the next read, numbered from 0 for the play. */
+  const nextRequest = (): number => {
+    const id = requests
+    requests += 1
+    return id
+  }
 
   // Failing aborts `signal` too, which stops what is being fetched and waited for.
   const controller = new AbortController()
@@ -301,6 +360,8 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
     if (over()) return
     stats.phase = 'failed'
     stats.error = message
+    event({ type: 'error', from: 'engine', code: null, message: clipText(message) })
+    event({ type: 'phase', phase: 'failed' })
     emit()
     controller.abort()
   }
@@ -312,7 +373,7 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
   /** Reads a range, counting the bytes and the time spent waiting for them. */
   const read = async (start: number, end: number) => {
     const began = performance.now()
-    const part = await fetchRange(url, start, end, signal)
+    const part = await fetchRange(url, start, end, signal, { event, id: nextRequest() })
     stats.readingMs += performance.now() - began
     if (part) stats.bytesReceived += part.bytes.length
     return part
@@ -424,18 +485,39 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
     const nbSamples = samplesPerSegment(first, SEGMENT_SECONDS)
     // The queues are made before the streaming is, which fills in what happens on a full buffer.
     const quota = { handle: (): void => undefined }
+    // The track each queue carries, which the timeline's events name (§16).
+    const trackOfQueue = new Map<AppendQueue, EventTrack>()
+    const trackOf = (queue: AppendQueue): EventTrack => trackOfQueue.get(queue) ?? 'video'
     const queueOfTrack = new Map(
-      played.map((track) => [
-        track.id,
-        new AppendQueue(mediaSource.addSourceBuffer(mimeOf(track)), () => {
+      played.map((track): [number, AppendQueue] => {
+        const which: EventTrack = track.id === videoTrack?.id ? 'video' : 'audio'
+        const queue = new AppendQueue(mediaSource.addSourceBuffer(mimeOf(track)), () => {
           stats.quotaErrors += 1
+          event({ type: 'quota', track: which, pendingBytes: queue.pendingBytes })
           quota.handle()
-        }),
-      ]),
+        })
+        trackOfQueue.set(queue, which)
+        return [track.id, queue]
+      }),
     )
     const queues = [...queueOfTrack.values()]
     const bytesPerSecond = fileSize / durationSeconds
-    const holds = createHolds({ video, queues, stats, bytesPerSecond, durationSeconds, emit })
+    const holds = createHolds({
+      video,
+      queues,
+      stats,
+      bytesPerSecond,
+      durationSeconds,
+      emit,
+      event,
+    })
+    /** Hands a segment to its queue, if the track is played, and reports it (§16). */
+    const appendTo = (queue: AppendQueue | null, buffer: ArrayBuffer): void => {
+      if (!queue) return
+      // Before the queue takes it: a full buffer reports its quota error at once.
+      event({ type: 'append', track: trackOf(queue), bytes: buffer.byteLength })
+      queue.append(buffer)
+    }
     // Every track is segmented, not only the played ones: mp4box frees a fed buffer only once
     // every byte in it was used, and a track nobody segments never has its samples read. Its
     // bytes would stay for good, and over a long video that is the whole file. An unplayed track
@@ -452,7 +534,7 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
     file.onSegment = (id, user, buffer, nextSample) => {
       try {
         const queue = queueOf(user)
-        queue?.append(buffer)
+        appendTo(queue, buffer)
         file.releaseUsedSamples(id, nextSample)
         if (queue) stats.segments += 1
       } catch (error) {
@@ -460,7 +542,7 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
       }
     }
     for (const { user, buffer } of file.initializeSegmentation('per-track')) {
-      queueOf(user)?.append(buffer)
+      appendTo(queueOf(user), buffer)
     }
     // Nothing else goes to the browser until enough is queued to play without stopping (§10.4).
     // The init segments went first: the browser needs them to tell the video's size and length.
@@ -485,6 +567,7 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
 
     // 10. The rest of the file, and the viewer's seeks while it is read.
     stats.phase = 'buffering'
+    event({ type: 'phase', phase: 'buffering' })
     emit()
     const context: StreamContext = {
       options,
@@ -503,6 +586,9 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
       holds,
       stats,
       emit,
+      event,
+      nextRequest,
+      trackOf,
       fail,
       quota,
       restart: () => undefined,
@@ -528,8 +614,17 @@ export async function playBuffered(options: BufferedPlayOptions): Promise<void> 
         const offset = placeAt(file, played, info.tracks, keyframes, time)
         if (offset === null) return
         stats.seeks += 1
+        // Said first: the removals, the hold and any segments mp4box gives out at once follow from it.
+        event({ type: 'restart', offset, reason: 'seek' })
         // A queue cancels only an append under way; a removal under way ends first.
-        for (const queue of queues) queue.reset(mediaSource.duration)
+        for (const queue of queues) {
+          event({
+            type: 'remove',
+            track: trackOf(queue),
+            before: eventSeconds(mediaSource.duration),
+          })
+          queue.reset(mediaSource.duration)
+        }
         // As at the start, nothing is appended until enough is queued. Before `file.start()`,
         // which may give segments out at once.
         holds.start('start')
@@ -650,8 +745,9 @@ function createHolds(input: {
   bytesPerSecond: number
   durationSeconds: number
   emit: () => void
+  event: (event: TimelineEventInput) => void
 }): Holds {
-  const { video, queues, stats, bytesPerSecond, durationSeconds, emit } = input
+  const { video, queues, stats, bytesPerSecond, durationSeconds, emit, event } = input
   let holding = false
   let reason: HoldReason = 'start'
   let since = 0
@@ -671,12 +767,29 @@ function createHolds(input: {
     })
     return Math.min(goal, target * GOAL_SHARE_OF_TARGET)
   }
+  /**
+   * Seconds buffered ahead of the playhead. While a seek's removal runs, `video.buffered` still
+   * shows the old position's ranges, which count for nothing.
+   */
+  const aheadNow = (): number =>
+    queues.some((queue) => queue.resetting) ? 0 : aheadSeconds(video.buffered, video.currentTime)
+  /** Reports a hold beginning or ending to the play's timeline (§16). */
+  const report = (on: boolean): void => {
+    event({
+      type: 'hold',
+      on,
+      reason: on ? reason : null,
+      aheadS: eventSeconds(aheadNow()),
+      targetS: eventSeconds(stats.targetAheadSeconds),
+    })
+  }
   /** Releases every queue: the video plays, or has all there is. */
   const end = (): void => {
     holding = false
     stats.holding = false
     stats.holds += 1
     stats.holdMs += performance.now() - since
+    report(false)
     for (const queue of queues) queue.release()
     emit()
   }
@@ -694,6 +807,7 @@ function createHolds(input: {
       holding = true
       since = performance.now()
       stats.holding = true
+      report(true)
       for (const queue of queues) queue.hold()
       emit()
     },
@@ -703,11 +817,8 @@ function createHolds(input: {
       const queued = queues.reduce((sum, queue) => sum + queue.pendingBytes, 0) / bytesPerSecond
       // The gate stops reading once what is buffered and queued reaches the target. The goal is
       // under the target, but not by what is already buffered: waiting for more than the gate lets
-      // in would be for ever, so that ends the hold too. While a seek's removal runs,
-      // `video.buffered` still shows the old position's ranges, which count for nothing.
-      const resetting = queues.some((queue) => queue.resetting)
-      const ahead = resetting ? 0 : aheadSeconds(video.buffered, video.currentTime)
-      if (queued >= goalSeconds() || ahead + queued >= stats.targetAheadSeconds) end()
+      // in would be for ever, so that ends the hold too.
+      if (queued >= goalSeconds() || aheadNow() + queued >= stats.targetAheadSeconds) end()
     },
     finish: () => {
       fed = true
@@ -731,6 +842,7 @@ function createBufferGate(context: StreamContext): {
   roomToRead: (within: AbortSignal) => Promise<void>
 } {
   const { options, signal, queues, stats, soundOnly, keyframes, bytesPerSecond, holds } = context
+  const { event, trackOf } = context
   const { video } = options
   const targets = bufferTargets(bytesPerSecond, context.keyframeGapSeconds)
   let target = targets.aheadSeconds
@@ -755,6 +867,13 @@ function createBufferGate(context: StreamContext): {
    */
   const cutBefore = (time: number): number =>
     soundOnly ? time : keyframeAtOrBefore(keyframes, time) - CUT_MARGIN_SECONDS
+  /** Queues dropping what is buffered before `cut` in every queue, and reports it (§16). */
+  const dropBefore = (cut: number): void => {
+    for (const queue of queues) {
+      event({ type: 'remove', track: trackOf(queue), before: eventSeconds(cut) })
+      queue.removeBefore(cut)
+    }
+  }
   /**
    * Drops what was played, further back than is kept, at most once a second.
    * Media Source drops the frames that depend on what is removed, up to the next
@@ -765,7 +884,7 @@ function createBufferGate(context: StreamContext): {
     const cut = cutBefore(video.currentTime - targets.behindSeconds)
     if (cut <= 0 || performance.now() - trimmedAt < TRIM_INTERVAL_MS) return
     trimmedAt = performance.now()
-    for (const queue of queues) queue.removeBefore(cut)
+    dropBefore(cut)
   }
   /** Waits for the playhead to move, a little while, or until `within` (the play) aborts. */
   const wait = (ms: number, within: AbortSignal = signal): Promise<void> =>
@@ -779,7 +898,7 @@ function createBufferGate(context: StreamContext): {
     target = Math.max(2, ahead() * 0.8)
     stats.targetAheadSeconds = target
     const cut = soundOnly ? video.currentTime - 1 : cutBefore(video.currentTime)
-    if (cut > 0) for (const queue of queues) queue.removeBefore(cut)
+    if (cut > 0) dropBefore(cut)
     if (retrying) return
     retrying = true
     void wait(QUOTA_RETRY_MS).then(() => {
@@ -858,15 +977,24 @@ type StreamReader = ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>
 /**
  * Opens the file's bytes from `offset` to the end of what is streamed, and
  * gives the reader, or the message to fail with when the server didn't answer
- * with that part of the file. Aborting `signal` stops the connection.
+ * with that part of the file. Aborting `signal` stops the connection. It reports
+ * the read to the timeline as request `id` (§16), up to its first bytes; the
+ * caller reports its end.
  */
 async function openStream(
   context: StreamContext,
   offset: number,
   signal: AbortSignal,
+  id: number,
 ): Promise<StreamReader | string> {
-  const range = `bytes=${offset}-${context.layout.stream.to - 1}`
-  const response = await fetch(context.options.url, { headers: { Range: range }, signal })
+  const to = context.layout.stream.to - 1
+  context.event({ type: 'request', id, from: offset, to })
+  const response = await fetch(context.options.url, {
+    headers: { Range: `bytes=${offset}-${to}` },
+    signal,
+  })
+  // The answer's headers: its body is still to come.
+  context.event({ type: 'firstByte', id })
   const answered = response.headers.get('Content-Range') ?? ''
   if (response.status !== 206 || !answered.startsWith(`bytes ${offset}-`)) {
     void response.body?.cancel()
@@ -895,9 +1023,19 @@ async function streamRun(
   from: number,
   within: AbortSignal,
 ): Promise<boolean> {
-  const { layout, stats, emit, holds } = context
+  const { layout, stats, emit, holds, event } = context
   // A function, or TypeScript takes `within.aborted` to stay false across an await.
   const over = (): boolean => within.aborted
+
+  // The read under way, if any, for the timeline (§16): kept in an object, as TypeScript would
+  // take an assigned variable to stay as it was across the awaits.
+  const reading = { id: 0, bytes: 0, open: false }
+  /** Reports the end of the read under way, once: each `request` has exactly one `requestEnd`. */
+  const endRead = (outcome: 'done' | 'aborted' | 'failed', message: string | null): void => {
+    if (!reading.open) return
+    reading.open = false
+    event({ type: 'requestEnd', id: reading.id, bytes: reading.bytes, outcome, message })
+  }
 
   let offset = from
   let reader: StreamReader | null = null
@@ -914,8 +1052,12 @@ async function streamRun(
       const began = performance.now()
       try {
         if (!reader) {
-          const opened = await openStream(context, offset, within)
+          reading.id = context.nextRequest()
+          reading.bytes = 0
+          reading.open = true
+          const opened = await openStream(context, offset, within, reading.id)
           if (typeof opened === 'string') {
+            endRead('failed', opened)
             context.fail(opened)
             return false
           }
@@ -932,6 +1074,7 @@ async function streamRun(
       stats.readingMs += performance.now() - began
 
       if (!piece) {
+        endRead('failed', 'The connection broke off.')
         // What was collected goes to mp4box now: the stream may be a while in coming back.
         feeder.feed()
         holds.check()
@@ -943,6 +1086,7 @@ async function streamRun(
         }
         brokenInARow += 1
         stats.reopens += 1
+        event({ type: 'retry', attempt: brokenInARow, delayMs: REOPEN_WAIT_MS, offset })
         emit()
         await pause(REOPEN_WAIT_MS, within)
         continue
@@ -952,14 +1096,22 @@ async function streamRun(
       feeder.add(piece, offset)
       offset += piece.byteLength
       stats.bytesReceived += piece.byteLength
+      reading.bytes += piece.byteLength
       // Not retried: a parse error here is the file's, not the connection's.
       if (feeder.size >= FEED_BYTES || offset >= layout.stream.to) {
         feeder.feed()
         holds.check()
       }
     }
+  } catch (error) {
+    // An error from mp4box or a buffer is no broken connection: it ends the play, through the
+    // caller, and the read under way with it.
+    if (!over()) endRead('failed', clipText(error instanceof Error ? error.message : String(error)))
+    throw error
   } finally {
     if (reader) release(reader)
+    // Not yet ended: all of the stream was read, or a restart or the end of the play stopped it.
+    endRead(over() ? 'aborted' : 'done', null)
   }
   return !over()
 }
@@ -971,7 +1123,7 @@ async function streamRun(
  * restart (`within` aborts) cuts this short and ends nothing.
  */
 async function endStream(context: StreamContext, within: AbortSignal): Promise<void> {
-  const { file, queues, mediaSource, stats, emit, holds } = context
+  const { file, queues, mediaSource, stats, emit, holds, event } = context
   // A function, or TypeScript takes `within.aborted` to stay false across an await.
   const over = (): boolean => within.aborted
   // A restart may come between the last piece and here.
@@ -984,6 +1136,7 @@ async function endStream(context: StreamContext, within: AbortSignal): Promise<v
   if (over()) return
   if (mediaSource.readyState === 'open') mediaSource.endOfStream()
   stats.phase = 'ended'
+  event({ type: 'phase', phase: 'ended' })
   emit()
 }
 
@@ -997,7 +1150,7 @@ async function endStream(context: StreamContext, within: AbortSignal): Promise<v
  * over: the caller aborted it, or it failed.
  */
 async function streamSamples(context: StreamContext): Promise<void> {
-  const { signal, stats, emit } = context
+  const { signal, stats, emit, event } = context
   const gate = createBufferGate(context)
   const feeder = createFeeder(context.file)
   // A function, or TypeScript takes `signal.aborted` to stay false across an await.
@@ -1014,12 +1167,14 @@ async function streamSamples(context: StreamContext): Promise<void> {
     feeder.clear()
     if (stats.phase === 'ended') {
       stats.phase = 'buffering'
+      event({ type: 'phase', phase: 'buffering' })
       emit()
     }
     current.abort()
   }
 
   let offset = context.firstOffset
+  event({ type: 'restart', offset, reason: 'start' })
   while (!over()) {
     // Taking the request and starting the next run is one step, so a restart
     // always finds the run it replaces.

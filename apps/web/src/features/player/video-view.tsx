@@ -269,6 +269,10 @@ export default function VideoView({
     onFailed: (message) => {
       setProblem({ kind: 'unsupported', detail: message })
     },
+    // What the engine does goes to the play's timeline (§16).
+    onEvent: (event) => {
+      timeline?.record(event)
+    },
   })
 
   // Asked to play, without a click first (an address opened or reloaded) the browser may refuse.

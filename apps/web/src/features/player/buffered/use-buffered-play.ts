@@ -1,3 +1,4 @@
+import type { TimelineEventInput } from '@dfs/shared'
 import { useEffect, useEffectEvent, useState } from 'react'
 import { playBuffered, type BufferedStats } from './buffered-player'
 
@@ -14,8 +15,9 @@ interface PlayStats {
  * source has its metadata if `autoplay`, since setting a source cancels a
  * pending `play()`. It calls `onFailed` when the play fails before any frame
  * showed, so the player can offer another player instead. A new `video`, `url` or
- * `startAt` ends the play and starts another; `autoplay` and `onFailed` do not.
- * `stats` is the play's latest numbers, or null before the first.
+ * `startAt` ends the play and starts another; `autoplay`, `onFailed` and `onEvent`
+ * do not. `onEvent` is given what the engine does, for the play's timeline (§16),
+ * until the play is over. `stats` is the play's latest numbers, or null before the first.
  */
 export function useBufferedPlay(input: {
   video: HTMLVideoElement | null
@@ -24,14 +26,18 @@ export function useBufferedPlay(input: {
   startAt: number
   autoplay: boolean
   onFailed: (message: string) => void
+  onEvent?: (event: TimelineEventInput) => void
 }): { stats: BufferedStats | null } {
   const { video, url, enabled, startAt } = input
   const [latest, setLatest] = useState<PlayStats | null>(null)
 
-  // The latest `autoplay` and `onFailed`, which the play reads when it needs them.
+  // The latest `autoplay`, `onFailed` and `onEvent`, which the play reads when it needs them.
   const shouldPlay = useEffectEvent(() => input.autoplay)
   const failed = useEffectEvent((message: string) => {
     input.onFailed(message)
+  })
+  const record = useEffectEvent((event: TimelineEventInput) => {
+    input.onEvent?.(event)
   })
 
   useEffect(() => {
@@ -63,6 +69,11 @@ export function useBufferedPlay(input: {
       url,
       startAt,
       signal,
+      // Nothing after the play is over: a read it aborted ends in silence, and a new play's
+      // events are not mixed with its.
+      onEvent: (event) => {
+        if (!signal.aborted) record(event)
+      },
       onStats: (stats) => {
         if (signal.aborted) return
         setLatest({ video, url, startAt, stats })
