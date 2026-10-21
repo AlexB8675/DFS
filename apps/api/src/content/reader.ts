@@ -408,9 +408,11 @@ const warming = new WeakMap<FastifyInstance, Set<string>>()
  * video of several chunks has its first chunk fetched whole, and the last
  * `WARM_END_BYTES` that aren't in it, the last megabyte first, on a request
  * of its own; one of a single chunk has all of it fetched, the same last
- * megabyte first and the rest on another request, never whole. What is kept,
- * staged or being fetched is left as it is, nothing is sent anywhere, and it
- * runs on if the viewer leaves, into the cache. Best effort: it never throws.
+ * megabyte first and the rest on another request, never whole. A chunk is
+ * fetched only if the cache would keep what is fetched of it, and holds that
+ * much of the read budget until its fetches are over. What is kept, staged or
+ * being fetched is left as it is, nothing is sent anywhere, and it runs on if
+ * the viewer leaves, into the cache. Best effort: it never throws.
  */
 export async function warmVideo(app: FastifyInstance, version: ReadableVersion): Promise<void> {
   const cache = app.frameCache
@@ -462,14 +464,19 @@ export async function warmVideo(app: FastifyInstance, version: ReadableVersion):
       ) {
         continue
       }
-      // A frame fetched whole is held whole meanwhile: from the read-ahead budget.
-      const giveBack = app.readBudget
-        ? app.readBudget.tryTake(chunk.frame_size)
-        : NOTHING_TO_GIVE_BACK
-      if (!giveBack) continue
-      const fetch: SegmentFetch = { app, versionId, key, chunk, layout, signal, reader: false }
       const split =
         chunk.idx === chunkCount - 1 ? Math.max(first, last - INDEX_SEGMENTS + 1) : first
+      // What the runs hold meanwhile and then keep: a frame fetched whole, all of it; otherwise
+      // the segments from `first`, each kept on its own.
+      const held =
+        split === 0
+          ? chunk.frame_size
+          : layout.segmentStart(last) + layout.segmentLength(last) - layout.segmentStart(first)
+      // Nothing is fetched to be thrown away, nor held from the read-ahead budget beyond that.
+      if (!cache.canKeep(held)) continue
+      const giveBack = app.readBudget ? app.readBudget.tryTake(held) : NOTHING_TO_GIVE_BACK
+      if (!giveBack) continue
+      const fetch: SegmentFetch = { app, versionId, key, chunk, layout, signal, reader: false }
       const sources = [
         ...planSegments(fetch, split, last, false).values(),
         ...(split > first ? planSegments(fetch, first, split - 1, false).values() : []),

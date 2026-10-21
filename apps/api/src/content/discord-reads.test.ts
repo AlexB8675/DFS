@@ -818,6 +818,77 @@ describe('reading from Discord', () => {
     expect(discord.cdnRanges).toEqual([])
   })
 
+  /** A stored video of `size` bytes, never read yet. */
+  async function storedFilm(name: string, size: number) {
+    const bytes = new Uint8Array(size).map((_, i) => i % 229)
+    const folder = await createFolder(client, (await workspace(client)).id, name)
+    const session = await uploadFile(client, folder.id, `${name}.mp4`, bytes)
+    const store = app.blobStore as DiscordBlobStore
+    await settleBlobs({ db: app.db, staging: app.staging, store, sizes: app.config.sizes })
+    return session
+  }
+
+  it('warms nothing of a video the cache wouldn’t keep', async () => {
+    const { chunkSize } = app.config.sizes
+    const session = await storedFilm('Film unkept', Math.floor(2.5 * chunkSize))
+    if (!app.frameCache) throw new Error('No frame cache.')
+    discord.cdnRanges.length = 0
+    const canKeep = vi.spyOn(app.frameCache, 'canKeep').mockReturnValue(false)
+    try {
+      await client.call('GET', `/files/${session.nodeId}/playback`, playbackSchema)
+      // Neither its end nor its first chunk: nothing is fetched to be thrown away.
+      await setTimeout(400)
+      expect(discord.cdnRanges).toEqual([])
+    } finally {
+      canKeep.mockRestore()
+    }
+    // Room again: opened once more, it is fetched.
+    await client.call('GET', `/files/${session.nodeId}/playback`, playbackSchema)
+    await vi.waitFor(() => {
+      expect(discord.cdnRanges).toHaveLength(4)
+    })
+  })
+
+  it('takes from the read budget only what a warm of the end holds', async () => {
+    const { chunkSize } = app.config.sizes
+    const size = Math.floor(2.5 * chunkSize)
+    const session = await storedFilm('Film budget', size)
+    // What the end's runs keep: the segments of chunk 1 from the last 4 MiB's start,
+    // and all of chunk 2's. Chunk 0's whole frame would need more than is left.
+    const heldFrom = (layout: ChunkFrameLayout, first: number) =>
+      Array.from({ length: layout.segments - first }, (_, i) =>
+        layout.segmentLength(first + i),
+      ).reduce((total, length) => total + length, 0)
+    const middle = new ChunkFrameLayout(chunkSize)
+    const lastChunk = size - 2 * chunkSize
+    const last = new ChunkFrameLayout(lastChunk)
+    const held =
+      heldFrom(middle, middle.segmentOf(size - 4 * 1024 * 1024 - chunkSize)) + heldFrom(last, 0)
+    // The old claim, a whole frame for each end chunk, wouldn't fit in this.
+    const room = held + 1024
+    expect(room).toBeLessThan(chunkFrameLength(chunkSize) + chunkFrameLength(lastChunk))
+    const taken = app.readBudget?.tryTake(256 * 1024 * 1024 - room)
+    if (!taken) throw new Error('The read budget is in use.')
+    discord.cdnRanges.length = 0
+    try {
+      await client.call('GET', `/files/${session.nodeId}/playback`, playbackSchema)
+      // The end of chunk 1, and chunk 2's index and the rest; chunk 0 has no room.
+      await vi.waitFor(() => {
+        expect(discord.cdnRanges).toHaveLength(3)
+      })
+      await setTimeout(300)
+      expect(discord.cdnRanges).toHaveLength(3)
+      expect(discord.cdnRanges).not.toContain(`bytes=0-${String(chunkFrameLength(chunkSize) - 1)}`)
+      // Given back once its fetches are over.
+      await app.frameCache?.idle()
+      const again = app.readBudget?.tryTake(room)
+      expect(again).toBeTruthy()
+      again?.()
+    } finally {
+      taken()
+    }
+  })
+
   /** The SHA-256 of the frame of chunk `idx` of a version, which is what the cache keeps it under. */
   async function frameOf(versionId: string, idx: number): Promise<Buffer> {
     const [chunk] = (
