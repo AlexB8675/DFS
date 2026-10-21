@@ -454,7 +454,7 @@ export async function warmEnd(
         ? app.readBudget.tryTake(chunk.frame_size)
         : NOTHING_TO_GIVE_BACK
       if (!giveBack) continue
-      const fetch: SegmentFetch = { app, versionId, key, chunk, layout, signal }
+      const fetch: SegmentFetch = { app, versionId, key, chunk, layout, signal, reader: false }
       const split =
         chunk.idx === version.chunk_count - 1 ? Math.max(first, last - INDEX_SEGMENTS + 1) : first
       const sources = [
@@ -484,11 +484,28 @@ export async function warmEnd(
 const READ_AROUND_SEGMENTS = 4
 
 /**
- * Segments being fetched, as checked plaintext, by frame and index, so
- * readers of the same one share the fetch. In memory only: the cache keeps
- * ciphertext.
+ * A client's read shares another's fetch of a segment only when the fetch is
+ * this close to it (about 1 MiB, some 30 to 40 ms of Discord): a fetch brings
+ * its segments in order, so a read wanting one further on would wait for every
+ * segment before it, and fetches its own instead (§6.2). A fetch ahead shares
+ * anything.
  */
-const segmentsUnderWay = new WeakMap<FastifyInstance, Map<string, Promise<Uint8Array>>>()
+export const SHARE_WITHIN_SEGMENTS = 4
+
+/** Where a run of segments being fetched has got to: the next it will deliver. */
+interface RunProgress {
+  next: number
+}
+
+/**
+ * Segments being fetched, as checked plaintext, by frame and index, so
+ * readers of the same one share the fetch, with the progress of the run
+ * fetching it. In memory only: the cache keeps ciphertext.
+ */
+const segmentsUnderWay = new WeakMap<
+  FastifyInstance,
+  Map<string, { plaintext: Promise<Uint8Array>; run: RunProgress }>
+>()
 
 /**
  * Where a segment a reader wants comes from: the cache's ciphertext, or a
@@ -520,7 +537,15 @@ async function streamSegments(
   const context = chunkContext(versionId, chunk.idx)
   const first = layout.segmentOf(range.from)
   const last = layout.segmentOf(range.to)
-  const fetch: SegmentFetch = { app, versionId, key, chunk, layout, signal: range.signal }
+  const fetch: SegmentFetch = {
+    app,
+    versionId,
+    key,
+    chunk,
+    layout,
+    signal: range.signal,
+    reader: true,
+  }
   const sources = planSegments(fetch, first, last, false)
   for (let index = first; index <= last; index += 1) {
     let plaintext: Uint8Array | null = null
@@ -575,13 +600,17 @@ interface SegmentFetch {
   chunk: ChunkLocation
   layout: ChunkFrameLayout
   signal: AbortSignal | undefined
+  /** A client's read, rather than a fetch ahead of one: it shares only fetches near what it wants. */
+  reader: boolean
 }
 
 /**
  * Where segments `from` to `last` come from, starting the fetches needed: a
  * frame the cache holds whole first, then segments it keeps on their own,
- * then fetches under way. With `fresh`, segment `from` is fetched whatever
- * the cache or another reader says of it.
+ * then fetches under way (for a client's read, those within
+ * `SHARE_WITHIN_SEGMENTS` of the segment they are at; a fetch ahead shares
+ * any). With `fresh`, segment `from` is fetched whatever the cache or another
+ * reader says of it.
  */
 function planSegments(
   fetch: SegmentFetch,
@@ -618,7 +647,10 @@ function planSegments(
       }
     }
     const shared = underWay?.get(keyOf(index))
-    return shared ? { kind: 'shared', plaintext: shared } : null
+    if (!shared) return null
+    // Further ahead of that fetch than a read will wait: it fetches its own.
+    if (fetch.reader && index - shared.run.next > SHARE_WITHIN_SEGMENTS) return null
+    return { kind: 'shared', plaintext: shared.plaintext }
   }
   // The whole chunk is fetched whole, kept segments or not, so it is kept
   // as one frame in their place; unless the cache holds it whole already,
@@ -677,22 +709,25 @@ function startRun(
   const registry = underWay
   const whole = from === 0 && to === layout.segments - 1
   const pending = new Map<number, PromiseWithResolvers<Uint8Array>>()
+  // How far the run has got, for the readers who would share what it has under way.
+  const progress: RunProgress = { next: from }
   for (let index = from; index <= to; index += 1) {
     const deferred = Promise.withResolvers<Uint8Array>()
     // Segments read around a range have no reader waiting.
     void deferred.promise.catch(() => undefined)
     pending.set(index, deferred)
     sources.set(index, { kind: 'fetch', plaintext: deferred.promise })
-    registry.set(`${hex}-${String(index)}`, deferred.promise)
+    registry.set(`${hex}-${String(index)}`, { plaintext: deferred.promise, run: progress })
   }
   const settle = (index: number) => {
     const deferred = pending.get(index)
     pending.delete(index)
     const key = `${hex}-${String(index)}`
-    if (deferred && registry.get(key) === deferred.promise) registry.delete(key)
+    // Only its own entry: a read that fetched this segment itself has put its own there.
+    if (deferred && registry.get(key)?.plaintext === deferred.promise) registry.delete(key)
     return deferred
   }
-  void fetchRun(fetch, from, to, whole, (index, plaintext, ciphertext) => {
+  void fetchRun(fetch, from, to, whole, progress, (index, plaintext, ciphertext) => {
     // Kept before it is let go of, so readers who look next find it.
     if (!whole) app.frameCache?.putSegment(chunk.frame_sha256, index, ciphertext)
     const deferred = whole ? pending.get(index) : settle(index)
@@ -726,13 +761,15 @@ function startRun(
  * each and handing it on with its ciphertext as soon as it has arrived. With
  * `whole`, the header is read too, and the whole frame is returned with its
  * SHA-256. If the frame moves meanwhile (§6.6), the rest is read where it is
- * now, from the next segment on.
+ * now, from the next segment on. `progress.next` is the next segment it will
+ * hand on, kept up to date for the readers who might share the run.
  */
 async function fetchRun(
   fetch: SegmentFetch,
   from: number,
   to: number,
   whole: boolean,
+  progress: RunProgress,
   emit: (index: number, plaintext: Uint8Array, ciphertext: Uint8Array) => void,
 ): Promise<{ bytes: Uint8Array; hash: Uint8Array } | null> {
   const { app, versionId, key, chunk, layout, signal } = fetch
@@ -769,6 +806,7 @@ async function fetchRun(
           pending = pending.subarray(layout.segmentLength(next))
           emit(next, await openSegment(key, layout, next, ciphertext, context), ciphertext)
           next += 1
+          progress.next = next
         }
       }
       if (next <= to) {

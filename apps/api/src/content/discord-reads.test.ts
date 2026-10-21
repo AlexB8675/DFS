@@ -366,6 +366,38 @@ describe('reading from Discord', () => {
     }
   })
 
+  it('doesn’t wait behind a fetch far from the segment it wants, and shares one close to it', async () => {
+    const { chunkSize } = app.config.sizes
+    const layout = new ChunkFrameLayout(chunkSize)
+    const session = await storedFile('Far and near', 1)
+    const content = Buffer.from(contentOf(1))
+    discord.cdnRanges.length = 0
+    // A whole-chunk read, its CDN body held after the header and the first segment.
+    discord.holdNextBodyAt = 14 + layout.segmentLength(0)
+    try {
+      const whole = await client.fetch('GET', `/files/${session.nodeId}/content`, {
+        headers: { Range: 'bytes=0-' },
+      })
+      const body = whole.body?.getReader()
+      if (!body) throw new Error('No body.')
+      await receive(body, layout.plaintextSize(0))
+      // Far ahead of where that fetch has got to: a request of its own, answered now.
+      const far = layout.plaintextStart(10)
+      expect(await bytesOf(session.nodeId, far, far + 99)).toEqual(content.subarray(far, far + 100))
+      expect(discord.cdnRanges[1]).toMatch(new RegExp(`^bytes=${String(layout.segmentStart(10))}-`))
+      // Close to it: shared, no request of its own; it comes once the fetch goes on.
+      const near = layout.plaintextStart(2)
+      const shared = bytesOf(session.nodeId, near, near + 99)
+      await setTimeout(200)
+      expect(discord.cdnRanges).toHaveLength(2)
+      discord.releaseCdn()
+      expect(await shared).toEqual(content.subarray(near, near + 100))
+      await body.cancel()
+    } finally {
+      discord.releaseCdn()
+    }
+  })
+
   it('fetches again a kept segment that fails its tag', async () => {
     const session = await storedFile('Spoiled', 1)
     const content = Buffer.from(contentOf(1))
