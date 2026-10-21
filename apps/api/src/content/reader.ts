@@ -27,8 +27,8 @@ import type { FastifyInstance } from 'fastify'
 // keeps up, never past the requested range. A response asks for its next
 // piece only once its socket has taken the last (`paced`, send.ts), and gives
 // up on what is being read once its client has gone (`cancellation`), so a
-// cancelled seek stops fetching at once. A video's end is fetched into the
-// cache as its player opens (`warmEnd`), where its index usually is.
+// cancelled seek stops fetching at once. A video's first chunk and end, where
+// its index usually is, are fetched into the cache as its player opens (`warmVideo`).
 
 /** What reading needs to know about a file version. */
 export interface ReadableVersion extends Record<string, unknown> {
@@ -392,27 +392,32 @@ export const WARM_END_BYTES = 4 * 1024 * 1024
  * with the rest would come last.
  */
 const INDEX_SEGMENTS = 4
-/** A fetch of a video's end given up after this long: nobody waits for it. */
+/** A fetch of a video's start and end given up after this long: nobody waits for it. */
 const WARM_TIMEOUT_MS = 30_000
-/** Videos' ends fetched at once per API at most; more are left to their players. */
+/** Videos fetched at once per API at most; more are left to their players. */
 const MAX_WARMING = 4
-/** The versions whose ends are being fetched, so a player asking again starts nothing. */
+/** The versions being fetched, so a player asking again starts nothing. */
 const warming = new WeakMap<FastifyInstance, Set<string>>()
 
 /**
- * Fetches the last `bytes` of a stored version from Discord into the frame
- * cache, ahead of the reader who will want them: a player looks at a
- * video's end for its index before it plays. What is kept, staged or being
- * fetched is left as it is, nothing is sent anywhere, and it runs on if the
- * viewer leaves, into the cache. Best effort: it never throws.
+ * Fetches a stored version's start and end from Discord into the frame
+ * cache, ahead of the reader who will want them: a player reads a video's
+ * first bytes, looks at its end for the index, then plays from the start. A
+ * video of several chunks has its first chunk fetched whole, and the last
+ * `WARM_END_BYTES` that aren't in it, the last megabyte first, on a request
+ * of its own; one of a single chunk has all of it fetched, the same last
+ * megabyte first and the rest on another request, never whole. What is kept,
+ * staged or being fetched is left as it is, nothing is sent anywhere, and it
+ * runs on if the viewer leaves, into the cache. Best effort: it never throws.
  */
-export async function warmEnd(
-  app: FastifyInstance,
-  version: ReadableVersion,
-  bytes: number,
-): Promise<void> {
+export async function warmVideo(app: FastifyInstance, version: ReadableVersion): Promise<void> {
   const cache = app.frameCache
-  const { version_id: versionId, chunk_size: chunkSize, size_bytes: size } = version
+  const {
+    version_id: versionId,
+    chunk_size: chunkSize,
+    chunk_count: chunkCount,
+    size_bytes: size,
+  } = version
   let under = warming.get(app)
   if (!under) {
     under = new Set()
@@ -427,14 +432,20 @@ export async function warmEnd(
       app.keys.unwrapDek(version.wrapped_dek, version.key_id, uuidBytes(versionId)),
     )
     const signal = AbortSignal.timeout(WARM_TIMEOUT_MS)
-    const start = Math.max(0, size - bytes)
-    const chunks = chunksBetween(
+    // The end of a longer video starts after its first chunk, which comes whole.
+    const several = chunkCount > 1
+    const start = several ? Math.max(chunkSize, size - WARM_END_BYTES) : 0
+    const chunks: ChunkLocation[] = []
+    for await (const chunk of chunksBetween(
       app,
       versionId,
       Math.floor(start / chunkSize),
       Math.floor((size - 1) / chunkSize),
-    )
-    for await (const chunk of chunks) {
+    )) {
+      chunks.push(chunk)
+    }
+    // The last chunk first, for the index in it.
+    for (const chunk of chunks.reverse()) {
       const layout = streamable(app, chunk)
         ? chunkFrameLayout(chunk.plain_size, chunk.frame_size)
         : null
@@ -456,19 +467,22 @@ export async function warmEnd(
       if (!giveBack) continue
       const fetch: SegmentFetch = { app, versionId, key, chunk, layout, signal, reader: false }
       const split =
-        chunk.idx === version.chunk_count - 1 ? Math.max(first, last - INDEX_SEGMENTS + 1) : first
+        chunk.idx === chunkCount - 1 ? Math.max(first, last - INDEX_SEGMENTS + 1) : first
       const sources = [
         ...planSegments(fetch, split, last, false).values(),
         ...(split > first ? planSegments(fetch, first, split - 1, false).values() : []),
       ]
+      // A run is over once its frame, if it was fetched whole, is the cache's.
       const done = Promise.allSettled(
-        sources.flatMap((source) => (source.kind === 'fetch' ? [source.plaintext] : [])),
+        sources.flatMap((source) => (source.kind === 'fetch' ? [source.ended] : [])),
       ).then(giveBack)
       settled.push(done)
     }
+    // After the index's request is made, and not awaited: nothing of the end waits for it.
+    if (several) settled.push(prefetchChunk(app, version, 0, signal))
     await Promise.all(settled)
   } catch (error) {
-    app.log.info({ err: error, versionId }, 'could not fetch a video’s end ahead')
+    app.log.info({ err: error, versionId }, 'could not fetch a video’s start and end ahead')
   } finally {
     await Promise.allSettled(settled)
     under.delete(versionId)

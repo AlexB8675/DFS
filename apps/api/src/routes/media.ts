@@ -28,7 +28,7 @@ import { z } from 'zod'
 import { requireAuth } from '../auth/access.ts'
 import { addressKey, type RateLimiter } from '../auth/rate-limit.ts'
 import { linkReader } from '../content/deliveries.ts'
-import { WARM_END_BYTES, warmEnd } from '../content/reader.ts'
+import { warmVideo } from '../content/reader.ts'
 import { paced, sendFile, type DownloadableFile } from '../content/send.ts'
 import { ApiError } from '../errors.ts'
 import { audioQueue, coverBeside } from '../media/audio.ts'
@@ -106,9 +106,9 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
         const played = await playedFile(app, request, request.params)
         const file = await servedVersion(app.db, played)
         const { userId, node } = played
-        // Its index, which the browser reads first, is usually at the end (§6.2).
+        // Its first chunk, and its index, usually at the end, which the browser reads next (§6.2).
         if (mediaKind(node.name, node.mime_type) === 'video') {
-          void warmEnd(app, file, WARM_END_BYTES)
+          void warmVideo(app, file)
         }
         const [positionMs, subtitleFiles] = await Promise.all([
           userId === null ? null : savedPosition(app.db, userId, node.id, file.version_id),

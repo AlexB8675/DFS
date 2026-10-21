@@ -23,8 +23,8 @@ import { prefetchChunk, readSources, readVersion } from './reader.ts'
 // folder of small files costs one CDN request per pack, not one per file, and
 // nothing the second time; a download stalls with its client instead of
 // fetching the whole file, stops fetching for one its client cancels, and
-// finds a frame whose pack was compacted away mid-download; a video's end is
-// fetched as its player opens; and what a read waited on is counted by where
+// finds a frame whose pack was compacted away mid-download; a video's start and
+// end are fetched as its player opens; and what a read waited on is counted by where
 // its bytes came from: staging, the frame cache or Discord. Attachments of
 // 4 MiB make a large file out of little test data.
 
@@ -732,7 +732,7 @@ describe('reading from Discord', () => {
     }
   })
 
-  it('fetches a video’s end into the cache as its player opens, once', async () => {
+  it('fetches a video’s start and end into the cache as its player opens, once', async () => {
     const { chunkSize } = app.config.sizes
     const bytes = new Uint8Array(Math.floor(2.5 * chunkSize)).map((_, i) => i % 239)
     const folder = await createFolder(client, (await workspace(client)).id, 'Film')
@@ -742,14 +742,24 @@ describe('reading from Discord', () => {
 
     discord.cdnRanges.length = 0
     await client.call('GET', `/files/${session.nodeId}/playback`, playbackSchema)
-    // The last 4 MiB: the end of the second chunk, and the third, its last
-    // megabyte on a request of its own.
+    // The first chunk, whole; the last 4 MiB: the end of the second chunk, and
+    // the third, its last megabyte on a request of its own.
     await vi.waitFor(() => {
-      expect(discord.cdnRanges).toHaveLength(3)
+      expect(discord.cdnRanges).toHaveLength(4)
     })
+    expect(discord.cdnRanges).toContain(`bytes=0-${String(chunkFrameLength(chunkSize) - 1)}`)
+    const middle = new ChunkFrameLayout(chunkSize)
+    const endOfMiddle = middle.segmentOf(bytes.length - 4 * 1024 * 1024 - chunkSize)
+    expect(discord.cdnRanges).toContain(
+      `bytes=${String(middle.segmentStart(endOfMiddle))}-${String(chunkFrameLength(chunkSize) - 1)}`,
+    )
     const lastChunk = bytes.length - 2 * chunkSize
     const layout = new ChunkFrameLayout(lastChunk)
     expect(discord.cdnRanges).toContain(
+      `bytes=${String(layout.segmentStart(0))}-${String(layout.segmentStart(layout.segments - 4) - 1)}`,
+    )
+    // The index, the last megabyte, is asked for first.
+    expect(discord.cdnRanges[0]).toBe(
       `bytes=${String(layout.segmentStart(layout.segments - 4))}-${String(chunkFrameLength(lastChunk) - 1)}`,
     )
     // Fetched, and kept once written.
@@ -758,16 +768,52 @@ describe('reading from Discord', () => {
     // Opened again: it is kept, so nothing more is fetched.
     await client.call('GET', `/files/${session.nodeId}/playback`, playbackSchema)
     await setTimeout(200)
-    expect(discord.cdnRanges).toHaveLength(3)
+    expect(discord.cdnRanges).toHaveLength(4)
 
-    // The browser's look at the end for the index comes from the cache.
+    // The browser's first read comes from the cache, as does its look at the end for the index.
     discord.cdnRanges.length = 0
     const size = bytes.length
+    expect(await bytesOf(session.nodeId, 0, 65_535)).toEqual(Buffer.from(bytes.subarray(0, 65_536)))
     expect(await bytesOf(session.nodeId, size - 100_000, size - 1)).toEqual(
       Buffer.from(bytes.subarray(size - 100_000)),
     )
     expect(await bytesOf(session.nodeId, size - 3_000_000, size - 2_900_000)).toEqual(
       Buffer.from(bytes.subarray(size - 3_000_000, size - 2_900_000 + 1)),
+    )
+    expect(discord.cdnRanges).toEqual([])
+  })
+
+  it('warms a one-chunk video’s index first, then the rest of it', async () => {
+    const { chunkSize } = app.config.sizes
+    const size = Math.floor(0.8 * chunkSize)
+    const bytes = new Uint8Array(size).map((_, i) => i % 233)
+    const folder = await createFolder(client, (await workspace(client)).id, 'Short film')
+    const session = await uploadFile(client, folder.id, 'short.mp4', bytes)
+    const store = app.blobStore as DiscordBlobStore
+    await settleBlobs({ db: app.db, staging: app.staging, store, sizes: app.config.sizes })
+    const layout = new ChunkFrameLayout(size)
+
+    discord.cdnRanges.length = 0
+    await client.call('GET', `/files/${session.nodeId}/playback`, playbackSchema)
+    await vi.waitFor(() => {
+      expect(discord.cdnRanges).toHaveLength(2)
+    })
+    // The index on a request of its own (planned first), and the rest on another: never whole.
+    expect(discord.cdnRanges[0]).toBe(
+      `bytes=${String(layout.segmentStart(layout.segments - 4))}-${String(chunkFrameLength(size) - 1)}`,
+    )
+    expect(discord.cdnRanges[1]).toBe(
+      `bytes=${String(layout.segmentStart(0))}-${String(layout.segmentStart(layout.segments - 4) - 1)}`,
+    )
+    expect(discord.cdnRanges).not.toContain(`bytes=0-${String(chunkFrameLength(size) - 1)}`)
+    await setTimeout(300)
+    await app.frameCache?.idle()
+
+    // Its head and its end both come from the cache, with no request.
+    discord.cdnRanges.length = 0
+    expect(await bytesOf(session.nodeId, 0, 65_535)).toEqual(Buffer.from(bytes.subarray(0, 65_536)))
+    expect(await bytesOf(session.nodeId, size - 100_000, size - 1)).toEqual(
+      Buffer.from(bytes.subarray(size - 100_000)),
     )
     expect(discord.cdnRanges).toEqual([])
   })
