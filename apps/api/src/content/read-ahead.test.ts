@@ -13,7 +13,13 @@ interface Call {
 
 /** A window on a fake clock whose fetches the test settles. */
 function setup(
-  options: { chunkCount?: number; size?: number; parallel?: number; windowBytes?: number } = {},
+  options: {
+    chunkCount?: number
+    size?: number
+    parallel?: number
+    windowBytes?: number
+    onFetched?: (fetch: AheadFetch) => void
+  } = {},
 ) {
   const clock = { now: 1000 }
   const calls: Call[] = []
@@ -27,7 +33,11 @@ function setup(
       new Promise<PrefetchOutcome>((resolve) => {
         calls.push({ index, signal, settle: resolve })
       }),
-    onFetched: (fetch) => fetched.push(fetch),
+    onFetched:
+      options.onFetched ??
+      ((fetch) => {
+        fetched.push(fetch)
+      }),
     now: () => clock.now,
     ...(options.parallel === undefined ? {} : { parallel: options.parallel }),
     ...(options.windowBytes === undefined ? {} : { windowBytes: options.windowBytes }),
@@ -51,26 +61,50 @@ describe('ReadAhead', () => {
     ahead.reached(0, 2 * MiB - 1)
     expect(calls).toHaveLength(0)
     ahead.reached(0, 2 * MiB)
-    expect(ahead.fetching).toEqual([3, 4])
+    expect(ahead.fetching).toEqual([2, 3])
+  })
+
+  it('reads ahead from the chunk after the last byte sent, at a chunk boundary too', () => {
+    // The last byte a run sent is the one before its reach: a run that stops
+    // exactly where a chunk ends has the chunk that begins there next.
+    const boundary = setup()
+    boundary.ahead.reached(0, 3 * MiB)
+    expect(boundary.ahead.fetching).toEqual([3, 4])
+
+    const inside = setup()
+    inside.ahead.reached(0, 3 * MiB + 1)
+    expect(inside.ahead.fetching).toEqual([4, 5])
+
+    const before = setup()
+    before.ahead.reached(0, 3 * MiB - 1)
+    expect(before.ahead.fetching).toEqual([3, 4])
+
+    // The last chunk has nothing after it; the one before it has that.
+    const end = setup({ chunkCount: 4, parallel: Infinity })
+    end.ahead.reached(0, 4 * MiB)
+    expect(end.started()).toEqual([])
+    const beforeEnd = setup({ chunkCount: 4, parallel: Infinity })
+    beforeEnd.ahead.reached(0, 3 * MiB)
+    expect(beforeEnd.started()).toEqual([3])
   })
 
   it('reads ahead at most four times what the run has sent, up to 128 MiB, never past the last chunk', () => {
     const first = setup({ parallel: Infinity })
     first.ahead.reached(0, 2 * MiB)
-    expect(first.ahead.fetching).toEqual([3, 4, 5, 6, 7, 8, 9, 10])
+    expect(first.ahead.fetching).toEqual([2, 3, 4, 5, 6, 7, 8, 9])
 
-    // 3 to 10 are under way still; the window now reaches from 65 to 192.
+    // 2 to 9 are under way still; the window now reaches from 64 to 191.
     const before = first.calls.length
     first.ahead.reached(0, 64 * MiB)
     const next = first.calls.slice(before).map((call) => call.index)
-    expect(next).toHaveLength(192 - 65 + 1)
-    expect(next[0]).toBe(65)
-    expect(next.at(-1)).toBe(192)
+    expect(next).toHaveLength(191 - 64 + 1)
+    expect(next[0]).toBe(64)
+    expect(next.at(-1)).toBe(191)
 
     const short = setup({ chunkCount: 70, parallel: Infinity })
     short.ahead.reached(0, 64 * MiB)
     const indexes = short.started()
-    expect(indexes[0]).toBe(65)
+    expect(indexes[0]).toBe(64)
     expect(indexes.at(-1)).toBe(69)
     expect(Math.max(...indexes)).toBe(69)
   })
@@ -78,9 +112,9 @@ describe('ReadAhead', () => {
   it('fetches two chunks at once, nearest first, and the next as one ends', async () => {
     const { ahead, settle } = setup()
     ahead.reached(0, 2 * MiB)
+    expect(ahead.fetching).toEqual([2, 3])
+    await settle(2, 'fetched')
     expect(ahead.fetching).toEqual([3, 4])
-    await settle(3, 'fetched')
-    expect(ahead.fetching).toEqual([4, 5])
   })
 
   it('carries a run across reads that follow one another', () => {
@@ -88,7 +122,7 @@ describe('ReadAhead', () => {
     ahead.reached(0, MiB)
     expect(calls).toHaveLength(0)
     ahead.reached(MiB, 2 * MiB)
-    expect(ahead.fetching).toEqual([3, 4])
+    expect(ahead.fetching).toEqual([2, 3])
 
     // A reconnect starts a little behind the reach, and the run it joins has
     // sent 2.25 MiB; as a run of its own it would have sent 1.75 MiB.
@@ -98,16 +132,32 @@ describe('ReadAhead', () => {
     expect(reconnect.ahead.fetching).toEqual([3, 4])
   })
 
+  it('joins the followed run, though the runs kept have forgotten it', () => {
+    const { ahead, started } = setup({ parallel: Infinity })
+    ahead.reached(0, 2 * MiB)
+    expect(started()).toEqual([2, 3, 4, 5, 6, 7, 8, 9])
+    // Short reads elsewhere push it off the eight kept.
+    for (let run = 1; run <= MAX_RUNS + 2; run += 1) {
+      ahead.reached((100 + run * 10) * MiB, (101 + run * 10) * MiB)
+    }
+    expect(started()).toHaveLength(8)
+
+    // The player's request goes on where the run reached, with 1 MiB more: the
+    // window moves on at once, as it would had the run been kept.
+    ahead.reached(2 * MiB, 3 * MiB)
+    expect(started().slice(8)).toEqual([10, 11, 12, 13, 14])
+  })
+
   it('a storm of short reads moves nothing', async () => {
     // Nothing holds a fetch back here, so a read the window followed would show.
     const { ahead, calls, settle, started } = setup({ parallel: Infinity })
     ahead.reached(0, 2 * MiB)
     const first = started()
-    expect(first).toEqual([3, 4, 5, 6, 7, 8, 9, 10])
+    expect(first).toEqual([2, 3, 4, 5, 6, 7, 8, 9])
     for (let at = 50; at <= 240; at += 10) {
       ahead.reached(at * MiB, (at + 1) * MiB)
     }
-    await settle(3, 'fetched')
+    await settle(2, 'fetched')
     expect(started()).toEqual(first)
     expect(calls.every((call) => !call.signal.aborted)).toBe(true)
   })
@@ -115,25 +165,25 @@ describe('ReadAhead', () => {
   it('follows the newest run that has sent 2 MiB, and lets the fetches under way finish', async () => {
     const { ahead, calls, settle, started } = setup()
     ahead.reached(0, 2 * MiB)
-    expect(started()).toEqual([3, 4])
+    expect(started()).toEqual([2, 3])
 
     ahead.reached(100 * MiB, 102 * MiB)
     expect(calls.slice(0, 2).every((call) => !call.signal.aborted)).toBe(true)
     // Both fetches are still under way: no new one starts until one ends.
-    expect(started()).toEqual([3, 4])
+    expect(started()).toEqual([2, 3])
 
-    await settle(3, 'fetched')
-    expect(started()).toEqual([3, 4, 103])
-    expect(ahead.fetching).toEqual([4, 103])
+    await settle(2, 'fetched')
+    expect(started()).toEqual([2, 3, 102])
+    expect(ahead.fetching).toEqual([3, 102])
   })
 
   it('never fetches a chunk twice', async () => {
     const { ahead, calls, settle } = setup({ parallel: Infinity })
     ahead.reached(0, 2 * MiB)
-    await settle(3, 'fetched')
-    await settle(4, 'kept')
-    await settle(5, 'skipped')
-    await settle(6, 'failed')
+    await settle(2, 'fetched')
+    await settle(3, 'kept')
+    await settle(4, 'skipped')
+    await settle(5, 'failed')
 
     // The run goes elsewhere and then moves back over the chunks it fetched.
     ahead.reached(100 * MiB, 102 * MiB)
@@ -141,17 +191,17 @@ describe('ReadAhead', () => {
 
     const counts = new Map<number, number>()
     for (const call of calls) counts.set(call.index, (counts.get(call.index) ?? 0) + 1)
-    for (const index of [3, 4, 5, 6, 7, 8, 9, 10]) expect(counts.get(index)).toBe(1)
+    for (const index of [2, 3, 4, 5, 6, 7, 8, 9]) expect(counts.get(index)).toBe(1)
     expect([...counts.values()].every((count) => count === 1)).toBe(true)
   })
 
   it('tries a busy chunk again after a second', async () => {
-    // Chunks 3 and 4 are all the window reaches.
-    const { ahead, calls, clock, settle } = setup({ chunkCount: 5 })
+    // Chunks 2 and 3 are all the window reaches.
+    const { ahead, calls, clock, settle } = setup({ chunkCount: 4 })
     ahead.reached(0, 2 * MiB)
-    expect(ahead.fetching).toEqual([3, 4])
-    await settle(3, 'busy')
-    await settle(4, 'skipped')
+    expect(ahead.fetching).toEqual([2, 3])
+    await settle(2, 'busy')
+    await settle(3, 'skipped')
     expect(calls).toHaveLength(2)
 
     clock.now += BUSY_RETRY_MS - 1
@@ -160,7 +210,7 @@ describe('ReadAhead', () => {
 
     clock.now += 1
     ahead.reached(0, 2 * MiB)
-    expect(calls.map((call) => call.index)).toEqual([3, 4, 3])
+    expect(calls.map((call) => call.index)).toEqual([2, 3, 2])
   })
 
   it('stops: aborts what is under way and does nothing after', async () => {
@@ -174,57 +224,57 @@ describe('ReadAhead', () => {
     ahead.reached(100 * MiB, 102 * MiB)
     expect(calls).toHaveLength(2)
 
-    await settle(3, 'fetched')
-    await settle(4, 'failed')
+    await settle(2, 'fetched')
+    await settle(3, 'failed')
     expect(fetched).toEqual([])
     expect(calls).toHaveLength(2)
   })
 
   it('reports each fetch that ends, but not one the cache had', async () => {
-    // The last chunk, 4, holds what the file has past 4 MiB.
-    const { ahead, clock, fetched, settle } = setup({ chunkCount: 5, size: 4 * MiB + 300_000 })
+    // The last chunk, 3, holds what the file has past 3 MiB.
+    const { ahead, clock, fetched, settle } = setup({ chunkCount: 4, size: 3 * MiB + 300_000 })
     ahead.reached(0, 2 * MiB)
     clock.now += 40
-    await settle(3, 'fetched')
-    expect(fetched).toEqual([{ from: 3 * MiB, bytes: MiB, ms: 40, outcome: 'fetched' }])
+    await settle(2, 'fetched')
+    expect(fetched).toEqual([{ from: 2 * MiB, bytes: MiB, ms: 40, outcome: 'fetched' }])
 
     clock.now += 15
-    await settle(4, 'fetched')
-    expect(fetched[1]).toEqual({ from: 4 * MiB, bytes: 300_000, ms: 55, outcome: 'fetched' })
+    await settle(3, 'fetched')
+    expect(fetched[1]).toEqual({ from: 3 * MiB, bytes: 300_000, ms: 55, outcome: 'fetched' })
 
     const cached = setup()
     cached.ahead.reached(0, 2 * MiB)
-    await cached.settle(3, 'kept')
-    await cached.settle(4, 'skipped')
+    await cached.settle(2, 'kept')
+    await cached.settle(3, 'skipped')
     expect(cached.fetched).toEqual([])
 
     const failing = setup()
     failing.ahead.reached(0, 2 * MiB)
     failing.clock.now += 7
-    await failing.settle(3, 'failed')
-    expect(failing.fetched).toEqual([{ from: 3 * MiB, bytes: MiB, ms: 7, outcome: 'failed' }])
+    await failing.settle(2, 'failed')
+    expect(failing.fetched).toEqual([{ from: 2 * MiB, bytes: MiB, ms: 7, outcome: 'failed' }])
   })
 
   it('goes on to the next nearest chunk while one is busy', async () => {
     const { ahead, settle, started } = setup()
     ahead.reached(0, 2 * MiB)
-    await settle(3, 'busy')
-    // Chunk 3 waits for its second; 5 is the nearest the window may fetch.
-    expect(ahead.fetching).toEqual([4, 5])
-    expect(started()).toEqual([3, 4, 5])
+    await settle(2, 'busy')
+    // Chunk 2 waits for its second; 4 is the nearest the window may fetch.
+    expect(ahead.fetching).toEqual([3, 4])
+    expect(started()).toEqual([2, 3, 4])
   })
 
   it('reports a chunk that is busy only the first time', async () => {
-    const { ahead, clock, fetched, settle } = setup({ chunkCount: 5 })
+    const { ahead, clock, fetched, settle } = setup({ chunkCount: 4 })
     ahead.reached(0, 2 * MiB)
-    await settle(3, 'busy')
-    await settle(4, 'skipped')
-    expect(fetched).toEqual([{ from: 3 * MiB, bytes: MiB, ms: 0, outcome: 'busy' }])
+    await settle(2, 'busy')
+    await settle(3, 'skipped')
+    expect(fetched).toEqual([{ from: 2 * MiB, bytes: MiB, ms: 0, outcome: 'busy' }])
 
     clock.now += BUSY_RETRY_MS
     ahead.reached(0, 2 * MiB)
-    expect(ahead.fetching).toEqual([3])
-    await settle(3, 'busy')
+    expect(ahead.fetching).toEqual([2])
+    await settle(2, 'busy')
     expect(fetched).toHaveLength(1)
   })
 
@@ -254,24 +304,55 @@ describe('ReadAhead', () => {
     for (let run = 1; run <= MAX_RUNS + 2; run += 1) {
       ahead.reached((100 + run * 10) * MiB, (101 + run * 10) * MiB)
     }
-    expect(started()).toEqual([3, 4])
-    await settle(3, 'fetched')
-    expect(started()).toEqual([3, 4, 5])
+    expect(started()).toEqual([2, 3])
+    await settle(2, 'fetched')
+    expect(started()).toEqual([2, 3, 4])
   })
 
   it('counts a fetch whose promise rejects as failed', async () => {
     const fetched: AheadFetch[] = []
     const ahead = new ReadAhead({
-      size: 4 * MiB,
+      size: 3 * MiB,
       chunkSize: MiB,
-      chunkCount: 4,
+      chunkCount: 3,
       prefetch: () => Promise.reject(new Error('a fetch that was not to reject')),
-      onFetched: (fetch) => fetched.push(fetch),
+      onFetched: (fetch) => {
+        fetched.push(fetch)
+      },
       now: () => 0,
     })
     ahead.reached(0, 2 * MiB)
     await Promise.resolve()
     await Promise.resolve()
-    expect(fetched).toEqual([{ from: 3 * MiB, bytes: MiB, ms: 0, outcome: 'failed' }])
+    expect(fetched).toEqual([{ from: 2 * MiB, bytes: MiB, ms: 0, outcome: 'failed' }])
+  })
+
+  it('goes on fetching when its recorder throws, and raises nothing', async () => {
+    const unhandled: unknown[] = []
+    const listen = (reason: unknown) => {
+      unhandled.push(reason)
+    }
+    process.on('unhandledRejection', listen)
+    try {
+      let reports = 0
+      const { ahead, settle, started } = setup({
+        onFetched: () => {
+          reports += 1
+          throw new Error('the recorder is broken')
+        },
+      })
+      ahead.reached(0, 2 * MiB)
+      await settle(2, 'fetched')
+      // The window filled again, whatever the recorder did.
+      expect(started()).toEqual([2, 3, 4])
+      await settle(3, 'failed')
+      expect(started()).toEqual([2, 3, 4, 5])
+      expect(reports).toBe(2)
+      // An unhandled rejection is raised once the microtasks are over.
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', listen)
+    }
   })
 })

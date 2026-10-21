@@ -97,10 +97,11 @@ export class ReadAhead {
    */
   reached(from: number, to: number): void {
     if (this.#stopped) return
-    const run = this.#runs.find((each) => each.start <= from && from <= each.reach) ?? {
-      start: from,
-      reach: from,
-    }
+    const carries = (run: Run) => run.start <= from && from <= run.reach
+    // The followed run too, though short reads elsewhere have pushed it off the
+    // runs kept: a request that goes on where it reached isn't a new run.
+    const followed = this.#followed !== null && carries(this.#followed) ? this.#followed : undefined
+    const run = this.#runs.find(carries) ?? followed ?? { start: from, reach: from }
     run.reach = Math.max(run.reach, to)
     // The run read of last goes first; with a new one, the oldest may fall off.
     const at = this.#runs.indexOf(run)
@@ -131,7 +132,9 @@ export class ReadAhead {
     const run = this.#followed
     if (run === null || this.#stopped) return
     const last = this.#chunkCount - 1
-    const current = Math.min(last, Math.floor(run.reach / this.#chunkSize))
+    // The chunk holding the last byte sent, the one before `reach`: when a read
+    // stops exactly where a chunk ends, the chunk that begins there is next.
+    const current = Math.min(last, Math.floor((run.reach - 1) / this.#chunkSize))
     const count = Math.max(
       1,
       Math.ceil(
@@ -177,16 +180,21 @@ export class ReadAhead {
       this.#finished.add(index)
       if (outcome === 'fetched' || outcome === 'failed') reported = outcome
     }
-    // Filled before it reports, so a recorder that throws can't stall the window.
+    // Filled before it reports.
     this.#fill()
     if (reported !== null) {
       const from = index * this.#chunkSize
-      this.#onFetched?.({
-        from,
-        bytes: Math.min(this.#chunkSize, this.#size - from),
-        ms,
-        outcome: reported,
-      })
+      try {
+        this.#onFetched?.({
+          from,
+          bytes: Math.min(this.#chunkSize, this.#size - from),
+          ms,
+          outcome: reported,
+        })
+      } catch {
+        // The recorder is not the window's business: what it throws mustn't
+        // stop the window, nor become an unhandled rejection in the API.
+      }
     }
   }
 }
