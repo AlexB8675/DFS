@@ -1065,7 +1065,7 @@ describe('reading from Discord', () => {
     // The first fetch ahead is under way, and held.
     discord.holdCdnFrom = 1
     try {
-      reads.follow('a session made up', file).reached(0, 2.5 * 1024 * 1024)
+      reads.follow('a session made up', file).ahead.reached(0, 2.5 * 1024 * 1024)
       await vi.waitFor(() => {
         expect(discord.cdnRequests).toBe(2)
       })
@@ -1086,6 +1086,62 @@ describe('reading from Discord', () => {
       const frame = await frameOf(session.versionId, index)
       expect(app.frameCache?.has(frame)).toBe(false)
       expect(app.frameCache?.hasSegment(frame, 0)).toBe(false)
+    }
+  })
+
+  it('ends a read’s hold on its window as its response closes, finished or cancelled', async () => {
+    const { chunkSize } = app.config.sizes
+    const session = await storedFilm('Film hold', 4 * chunkSize)
+    const follow = app.readAheads.follow.bind(app.readAheads)
+    let opened = 0
+    let ended = 0
+    const spy = vi.spyOn(app.readAheads, 'follow').mockImplementation((sessionId, version) => {
+      opened += 1
+      const followed = follow(sessionId, version)
+      return {
+        ahead: followed.ahead,
+        done: () => {
+          ended += 1
+          followed.done()
+        },
+      }
+    })
+    const path = `/files/${session.nodeId}/content?play=${crypto.randomUUID()}`
+    discord.cdnRequests = 0
+    discord.cdnAborted = 0
+    discord.holdCdnFrom = 1
+    try {
+      // A read held on Discord and cancelled before its first byte.
+      const controller = new AbortController()
+      const held = client.fetch('GET', path, {
+        headers: { Range: 'bytes=0-' },
+        signal: controller.signal,
+      })
+      await vi.waitFor(() => {
+        expect(discord.cdnRequests).toBe(1)
+      })
+      expect([opened, ended]).toEqual([1, 0])
+      controller.abort()
+      await expect(held).rejects.toThrow()
+      await vi.waitFor(() => {
+        expect(discord.cdnAborted).toBe(1)
+      })
+      await vi.waitFor(() => {
+        expect(ended).toBe(1)
+      })
+    } finally {
+      discord.holdCdnFrom = Infinity
+      discord.releaseCdn()
+    }
+    try {
+      // One that finishes.
+      const whole = await client.fetch('GET', path, { headers: { Range: 'bytes=0-99' } })
+      expect((await whole.arrayBuffer()).byteLength).toBe(100)
+      await vi.waitFor(() => {
+        expect([opened, ended]).toEqual([2, 2])
+      })
+    } finally {
+      spy.mockRestore()
     }
   })
 

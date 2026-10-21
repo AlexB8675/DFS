@@ -388,22 +388,22 @@ describe('ReadAheads', () => {
   it('keeps one window per session and version', () => {
     const { reads } = windows()
     const first = film('v1')
-    const window = reads.follow('s', first)
-    expect(reads.follow('s', first)).toBe(window)
+    const { ahead } = reads.follow('s', first)
+    expect(reads.follow('s', first).ahead).toBe(ahead)
     // The same version from another row, as a later request reads it.
-    expect(reads.follow('s', film('v1'))).toBe(window)
+    expect(reads.follow('s', film('v1')).ahead).toBe(ahead)
     // A file replaced in the middle of a play, and another session's play.
-    expect(reads.follow('s', film('v2'))).not.toBe(window)
-    expect(reads.follow('t', first)).not.toBe(window)
+    expect(reads.follow('s', film('v2')).ahead).not.toBe(ahead)
+    expect(reads.follow('t', first).ahead).not.toBe(ahead)
     expect(reads.size).toBe(3)
   })
 
   it('fetches through the prefetch it was given, for the version the window is of', () => {
     const { reads, calls } = windows()
     const first = film('v1')
-    reads.follow('s', first).reached(0, 2 * MiB)
+    reads.follow('s', first).ahead.reached(0, 2 * MiB)
     const second = film('v2')
-    reads.follow('s', second).reached(0, 2 * MiB)
+    reads.follow('s', second).ahead.reached(0, 2 * MiB)
     expect(calls.map((call) => [call.version.version_id, call.index])).toEqual([
       ['v1', 2],
       ['v1', 3],
@@ -414,10 +414,12 @@ describe('ReadAheads', () => {
     expect(calls[2]?.version).toBe(second)
   })
 
-  it('forgets a window idle past two minutes', () => {
+  it('forgets a window idle past two minutes, once its reads are over', () => {
     const { reads, clock } = windows()
     // Reached, but not enough to read ahead: nothing under way.
-    reads.follow('idle', film('v1')).reached(0, MiB)
+    const { ahead, done } = reads.follow('idle', film('v1'))
+    ahead.reached(0, MiB)
+    done()
     clock.now += SESSION_IDLE_MS
     reads.follow('other', film('v1'))
     // Idle for exactly two minutes is not past them.
@@ -427,44 +429,93 @@ describe('ReadAheads', () => {
     expect(reads.size).toBe(2)
     // Dropped, so asking for it again makes a new window.
     const before = reads.size
-    reads.follow('idle', film('v1'))
+    expect(reads.follow('idle', film('v1')).ahead).not.toBe(ahead)
     expect(reads.size).toBe(before + 1)
   })
 
-  it('keeps a window that has been reached lately, however long it was followed ago', () => {
+  it('keeps a window while a read of it is open, however long it sends nothing', () => {
+    const { reads, clock, calls } = windows()
+    // A player paused over two minutes, its one long request still open.
+    const first = reads.follow('s', film('v1'))
+    clock.now += SESSION_IDLE_MS + 1
+    reads.follow('t', film('v2'))
+    expect(reads.size).toBe(2)
+    // Not stopped: it reads ahead as the request carries on.
+    first.ahead.reached(0, 2 * MiB)
+    expect(first.ahead.fetching).toEqual([2, 3])
+    expect(calls.every((call) => !call.signal.aborted)).toBe(true)
+    expect(reads.follow('s', film('v1')).ahead).toBe(first.ahead)
+  })
+
+  it('forgets a window once its last open read is over, and it has been idle', () => {
     const { reads, clock } = windows()
-    const window = reads.follow('long', film('v1'))
+    const first = reads.follow('s', film('v1'))
+    clock.now += SESSION_IDLE_MS + 1
+    reads.follow('t', film('v2'))
+    expect(reads.size).toBe(2)
+    first.done()
+    // The time it ended counts: two idle minutes run from there.
     clock.now += SESSION_IDLE_MS
-    // A request that has carried on for minutes still reports what it sends.
-    window.reached(0, MiB)
+    reads.follow('u', film('v3'))
+    expect(reads.size).toBe(3)
+    clock.now += 1
+    reads.follow('u', film('v3'))
+    // 's' is forgotten; 't' and 'u' have reads open.
+    expect(reads.size).toBe(2)
+  })
+
+  it('counts each read of a window once, however often it is done', () => {
+    const { reads, clock } = windows()
+    const first = reads.follow('s', film('v1'))
+    const second = reads.follow('s', film('v1'))
+    first.done()
+    first.done()
+    clock.now += SESSION_IDLE_MS + 1
+    reads.follow('t', film('v2'))
+    // The second read is open still.
+    expect(reads.size).toBe(2)
+    second.done()
+    clock.now += SESSION_IDLE_MS + 1
+    reads.follow('u', film('v3'))
+    expect(reads.size).toBe(2)
+  })
+
+  it('keeps a window that has been reached lately, however long ago its reads were done', () => {
+    const { reads, clock } = windows()
+    const { ahead, done } = reads.follow('long', film('v1'))
+    done()
+    clock.now += SESSION_IDLE_MS
+    ahead.reached(0, MiB)
     clock.now += SESSION_IDLE_MS
     reads.follow('other', film('v1'))
     expect(reads.size).toBe(2)
-    expect(reads.follow('long', film('v1'))).toBe(window)
+    expect(reads.follow('long', film('v1')).ahead).toBe(ahead)
   })
 
   it('keeps an idle window with a fetch under way, and stops one it drops', () => {
     const { reads, clock, calls } = windows()
     const busy = reads.follow('busy', film('v1'))
-    busy.reached(0, 2 * MiB)
-    expect(busy.fetching).toEqual([2, 3])
+    busy.ahead.reached(0, 2 * MiB)
+    busy.done()
+    expect(busy.ahead.fetching).toEqual([2, 3])
     const idle = reads.follow('idle', film('v1'))
-    idle.reached(0, MiB)
+    idle.ahead.reached(0, MiB)
+    idle.done()
 
     clock.now += SESSION_IDLE_MS + 1
     reads.follow('other', film('v1'))
     // `idle` is gone (stopped, so it fetches nothing more); `busy` has fetches under way.
     expect(reads.size).toBe(2)
-    expect(reads.follow('busy', film('v1'))).toBe(busy)
+    expect(reads.follow('busy', film('v1')).ahead).toBe(busy.ahead)
     expect(calls.every((call) => !call.signal.aborted)).toBe(true)
-    idle.reached(0, 64 * MiB)
+    idle.ahead.reached(0, 64 * MiB)
     expect(calls).toHaveLength(2)
   })
 
   it('stops every window: the fetches under way are aborted, and none starts after', () => {
     const { reads, calls } = windows()
-    reads.follow('a', film('v1')).reached(0, 2 * MiB)
-    reads.follow('b', film('v2')).reached(0, 2 * MiB)
+    reads.follow('a', film('v1')).ahead.reached(0, 2 * MiB)
+    reads.follow('b', film('v2')).ahead.reached(0, 2 * MiB)
     expect(calls).toHaveLength(4)
     expect(calls.every((call) => !call.signal.aborted)).toBe(true)
 
@@ -474,7 +525,8 @@ describe('ReadAheads', () => {
 
     // A read that begins as the API closes finds a window that is already stopped.
     const late = reads.follow('c', film('v3'))
-    late.reached(0, 4 * MiB)
+    late.ahead.reached(0, 4 * MiB)
+    late.done()
     expect(calls).toHaveLength(4)
     expect(reads.size).toBe(0)
   })

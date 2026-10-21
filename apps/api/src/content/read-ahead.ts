@@ -209,10 +209,13 @@ export class ReadAhead {
   }
 }
 
-/** A session's window of a version, and when a read of it last began. */
+/** A session's window of a version, the reads of it still open, and when it last had activity. */
 interface Followed {
   ahead: ReadAhead
-  followedAt: number
+  /** Reads of the window that have begun and are not over. */
+  open: number
+  /** When a read of it last began or ended. */
+  activeAt: number
 }
 
 /**
@@ -250,32 +253,51 @@ export class ReadAheads {
   }
 
   /**
-   * The window of a session's reads of a version, made at its first read. Keyed
-   * by both, so a play whose file is replaced mid-play gets a window of its own
-   * for the new version. Windows not reached for `SESSION_IDLE_MS`, with nothing
-   * under way, are forgotten here, and stopped: they were of a session that has
-   * ended, or of one whose request has sent nothing for as long.
+   * The window of a session's reads of a version, made at its first read, for a
+   * read that is beginning: call `done` once it is over, which counts it off
+   * (once, however often it is called). Keyed by session and version, so a play
+   * whose file is replaced mid-play gets a window of its own for the new
+   * version. A window is forgotten, and stopped, only when no read of it is
+   * open, nothing is under way, and it has had no read begin or end and nothing
+   * reported for `SESSION_IDLE_MS`, as a stream session lasts while a read of
+   * it runs: a player paused for minutes keeps its request open and sends
+   * nothing, and reads ahead again when it plays on. Windows are forgotten here,
+   * when the next is asked for.
    */
-  follow(sessionId: string, version: ReadableVersion): ReadAhead {
+  follow(sessionId: string, version: ReadableVersion): { ahead: ReadAhead; done: () => void } {
     const now = this.#now()
     this.#forgetIdle(now)
     const key = `${sessionId}|${version.version_id}`
-    const held = this.#windows.get(key)
-    if (held) {
-      held.followedAt = now
-      return held.ahead
+    let held = this.#windows.get(key)
+    if (!held) {
+      const ahead = new ReadAhead({
+        size: version.size_bytes,
+        chunkSize: version.chunk_size,
+        chunkCount: version.chunk_count,
+        prefetch: (index, signal) => this.#prefetch(version, index, signal),
+        now: this.#now,
+      })
+      // A read that begins as the API closes gets a window that fetches nothing.
+      if (this.#stopped) {
+        ahead.stop()
+        return { ahead, done: () => undefined }
+      }
+      held = { ahead, open: 0, activeAt: now }
+      this.#windows.set(key, held)
     }
-    const ahead = new ReadAhead({
-      size: version.size_bytes,
-      chunkSize: version.chunk_size,
-      chunkCount: version.chunk_count,
-      prefetch: (index, signal) => this.#prefetch(version, index, signal),
-      now: this.#now,
-    })
-    // A read that begins as the API closes gets a window that fetches nothing.
-    if (this.#stopped) ahead.stop()
-    else this.#windows.set(key, { ahead, followedAt: now })
-    return ahead
+    const entry = held
+    entry.open += 1
+    entry.activeAt = now
+    let over = false
+    return {
+      ahead: entry.ahead,
+      done: () => {
+        if (over) return
+        over = true
+        entry.open -= 1
+        entry.activeAt = this.#now()
+      },
+    }
   }
 
   /** Stops every window, aborting the fetches under way: the API is closing. */
@@ -286,9 +308,9 @@ export class ReadAheads {
   }
 
   #forgetIdle(now: number): void {
-    for (const [key, { ahead, followedAt }] of this.#windows) {
-      if (now - Math.max(followedAt, ahead.lastReachedAt) <= SESSION_IDLE_MS) continue
-      if (ahead.fetching.length > 0) continue
+    for (const [key, { ahead, open, activeAt }] of this.#windows) {
+      if (open > 0 || ahead.fetching.length > 0) continue
+      if (now - Math.max(activeAt, ahead.lastReachedAt) <= SESSION_IDLE_MS) continue
       ahead.stop()
       this.#windows.delete(key)
     }
