@@ -71,8 +71,10 @@ const MAX_READ_AHEAD = 2
  * seek, rather than passing by, and the next chunk is under way well before
  * it is wanted, wherever in a chunk the seek landed. A seek left sooner reads
  * nothing past its chunk; one left later gives up the read at once (`signal`).
- * The window across a stream's requests (`ReadAhead`) follows the same rule:
- * it reads nothing ahead of a run of reads that has sent less than this.
+ * The window across a stream's requests (`ReadAhead`) asks this of a run of
+ * reads too, and that the run has gone on for `FOLLOW_AFTER_MS`, as bytes sent
+ * run ahead of the client's: it reads nothing ahead of a run that has sent less
+ * than this, nor of one given up sooner.
  */
 export const READ_AHEAD_AFTER_BYTES = 2 * 1024 * 1024
 const NOTHING_TO_GIVE_BACK = () => undefined

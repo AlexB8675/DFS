@@ -5,11 +5,14 @@ import { SESSION_IDLE_MS } from './stream-sessions.ts'
 // on through a file, the chunks after them are fetched from Discord into the
 // frame cache, so a read that gets there finds them kept. `ReadAhead` holds the
 // rules alone, with no I/O: it is told what the stream's reads have sent, and
-// says which chunks to fetch through the function it is given. A single
-// request's own read-ahead (the reader's, at most 2 chunks) is a separate thing
-// and stays; this one works across the requests of a stream, which a player
-// makes one after another (and a seek makes one for each). `ReadAheads` keeps a
-// window for each stream session and version, for `sendFile` to feed.
+// says which chunks to fetch through the function it is given. It follows a run
+// of reads that has sent 2 MiB and has gone on for a second, so a seek bar
+// dragged, each step of which is given up within a second whatever it sent, sets
+// nothing reading. A single request's own read-ahead (the reader's, at most 2
+// chunks) is a separate thing and stays; this one works across the requests of a
+// stream, which a player makes one after another (and a seek makes one for
+// each). `ReadAheads` keeps a window for each stream session and version, for
+// `sendFile` to feed.
 
 /** The window ahead is never longer than this. */
 export const WINDOW_BYTES = 128 * 1024 * 1024
@@ -21,6 +24,15 @@ export const PARALLEL_FETCHES = 2
 export const BUSY_RETRY_MS = 1000
 /** Runs of reads kept to tell which a read carries on, the most recently updated. */
 export const MAX_RUNS = 8
+/**
+ * A run is followed only once it has been read for this long, as well as
+ * having sent `READ_AHEAD_AFTER_BYTES`. Bytes sent don't tell a seek passed by
+ * from one played on: through the proxy and the sockets' buffers, a read its
+ * client gave up after 0.3 s had been sent 3.5 to 14.5 MiB (the lab, 2026-10-22),
+ * so every step of a seek bar being dragged had sent enough to start fetches.
+ * Time does: a drag's reads are given up within a second, a play's go on.
+ */
+export const FOLLOW_AFTER_MS = 1000
 
 /** A fetch ahead that ended, for the session's log: not one the cache had, nor one skipped. */
 export interface AheadFetch {
@@ -31,10 +43,12 @@ export interface AheadFetch {
   outcome: 'fetched' | 'failed' | 'busy'
 }
 
-/** Reads that follow one another: `start` is where the first began, `reach` how far they have sent. */
+/** Reads that follow one another: `start` is where the first began, `reach` how far they have sent, `began` when the first did. */
 interface Run {
   start: number
   reach: number
+  /** On the window's clock; a read that carries on the run leaves it. */
+  began: number
 }
 
 interface Underway {
@@ -100,25 +114,29 @@ export class ReadAhead {
   /**
    * A read that began at byte `from` has sent bytes up to `to` (not included).
    * It carries on the run that reaches `from`, or begins one; the window
-   * follows a run once it has sent `READ_AHEAD_AFTER_BYTES`, the one most
-   * recently read of, so a storm of short reads (a player probing a file) moves
-   * nothing, and a jump to somewhere the player then plays on from does.
+   * follows a run once it has sent `READ_AHEAD_AFTER_BYTES` and has been read
+   * for `FOLLOW_AFTER_MS` (from the first read of it, whichever carried it on),
+   * the one most recently read of. So a storm of short reads (a player probing a
+   * file) moves nothing, nor does one of reads given up quickly however much
+   * they sent (a seek bar dragged), and a jump to somewhere the player then
+   * plays on from does.
    */
   reached(from: number, to: number): void {
     if (this.#stopped) return
-    this.#lastReachedAt = this.#now()
+    const now = this.#now()
+    this.#lastReachedAt = now
     const carries = (run: Run) => run.start <= from && from <= run.reach
     // The followed run too, though short reads elsewhere have pushed it off the
     // runs kept: a request that goes on where it reached isn't a new run.
     const followed = this.#followed !== null && carries(this.#followed) ? this.#followed : undefined
-    const run = this.#runs.find(carries) ?? followed ?? { start: from, reach: from }
+    const run = this.#runs.find(carries) ?? followed ?? { start: from, reach: from, began: now }
     run.reach = Math.max(run.reach, to)
     // The run read of last goes first; with a new one, the oldest may fall off.
     const at = this.#runs.indexOf(run)
     if (at >= 0) this.#runs.splice(at, 1)
     this.#runs.unshift(run)
     if (this.#runs.length > MAX_RUNS) this.#runs.length = MAX_RUNS
-    if (run.reach - run.start < READ_AHEAD_AFTER_BYTES) return
+    if (run.reach - run.start < READ_AHEAD_AFTER_BYTES || now - run.began < FOLLOW_AFTER_MS) return
     this.#followed = run
     this.#fill()
   }

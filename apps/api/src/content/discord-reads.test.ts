@@ -17,7 +17,7 @@ import { buildApp } from '../app.ts'
 import { downloadableFile } from '../routes/content.ts'
 import { testConfig } from '../testing/config.ts'
 import { seedUser } from '../testing/seed.ts'
-import { ReadAheads } from './read-ahead.ts'
+import { FOLLOW_AFTER_MS, ReadAheads } from './read-ahead.ts'
 import { prefetchChunk, readSources, readVersion } from './reader.ts'
 
 // Reading back from Discord (DESIGN.md §6.2), over real HTTP: a ZIP of a
@@ -1177,18 +1177,32 @@ describe('reading from Discord', () => {
     const chunks = 8
     const session = await storedFilm('Film ahead', chunks * chunkSize)
     const play = crypto.randomUUID()
-    // 2.5 MiB, read whole: a run the window follows, and a read that never reaches past its range.
-    const sent = 2.5 * 1024 * 1024
-    // Four times what the run sent, in whole chunks, after the one it is in.
+    // A player reading on in bounded ranges: 2.5 MiB, then 0.5 MiB more from where the first
+    // stopped, over a second later. Neither read reaches past its range, and the first is over
+    // in milliseconds, though it sent 2.5 MiB: the window waits for the second, which joins its
+    // run once the run has been read for a second.
+    const firstBytes = 2.5 * 1024 * 1024
+    const sent = 3 * 1024 * 1024
+    // Four times what the run has sent, in whole chunks, after the one it is in.
     const n = Math.ceil((4 * sent) / chunkSize)
     expect(n + 1).toBeLessThan(chunks)
 
     discord.cdnRequests = 0
     const first = await client.fetch('GET', `/files/${session.nodeId}/content?play=${play}`, {
-      headers: { Range: `bytes=0-${String(sent - 1)}` },
+      headers: { Range: `bytes=0-${String(firstBytes - 1)}` },
     })
     expect(Buffer.from(await first.arrayBuffer())).toEqual(
-      Buffer.from(session.bytes.subarray(0, sent)),
+      Buffer.from(session.bytes.subarray(0, firstBytes)),
+    )
+    // Nothing is read ahead of it yet: its own request, for the segments it took, and no more.
+    await setTimeout(1100)
+    expect(discord.cdnRequests).toBe(1)
+
+    const second = await client.fetch('GET', `/files/${session.nodeId}/content?play=${play}`, {
+      headers: { Range: `bytes=${String(firstBytes)}-${String(sent - 1)}` },
+    })
+    expect(Buffer.from(await second.arrayBuffer())).toEqual(
+      Buffer.from(session.bytes.subarray(firstBytes, sent)),
     )
     await vi.waitFor(
       async () => {
@@ -1199,10 +1213,10 @@ describe('reading from Discord', () => {
       },
       { timeout: 5000 },
     )
-    // Nothing past the window. The read made one request, for its chunk; the window made one
-    // for each chunk it holds, whole.
+    // Nothing past the window. The reads made a request each, for the segments they took; the
+    // window made one for each chunk it holds, whole.
     await setTimeout(500)
-    expect(discord.cdnRequests).toBe(1 + n)
+    expect(discord.cdnRequests).toBe(2 + n)
     const past = await frameOf(session.versionId, n + 1)
     expect(app.frameCache?.has(past)).toBe(false)
     expect(app.frameCache?.hasSegment(past, 0)).toBe(false)
@@ -1215,7 +1229,7 @@ describe('reading from Discord', () => {
     expect(Buffer.from(await next.arrayBuffer())).toEqual(
       Buffer.from(session.bytes.subarray(from, from + 100_000)),
     )
-    expect(discord.cdnRequests).toBe(1 + n)
+    expect(discord.cdnRequests).toBe(2 + n)
 
     // The stream session's timeline says what was read ahead: each chunk the window fetched, once.
     let ahead: { type: string; from: number; bytes: number; ms: number; outcome: string }[] = []
@@ -1309,15 +1323,21 @@ describe('reading from Discord', () => {
     const session = await storedFile('Closing ahead', 4)
     const file = await downloadableFile(app.db, session.nodeId)
     // Built as app.ts builds it, so the app's own keeps working for the other tests.
+    const clock = { now: 0 }
     const reads = new ReadAheads({
       prefetch: (version, index, signal) => prefetchChunk(app, version, index, signal),
+      now: () => clock.now,
     })
     discord.cdnRequests = 0
     discord.cdnAborted = 0
     // The first fetch ahead is under way, and held.
     discord.holdCdnFrom = 1
     try {
-      reads.follow('a session made up', file).ahead.reached(0, 2.5 * 1024 * 1024)
+      // A run of 2.5 MiB that has been read for a second, as a play's is.
+      const { ahead } = reads.follow('a session made up', file)
+      ahead.reached(0, 2.5 * 1024 * 1024)
+      clock.now += FOLLOW_AFTER_MS
+      ahead.reached(0, 2.5 * 1024 * 1024)
       await vi.waitFor(() => {
         expect(discord.cdnRequests).toBe(2)
       })

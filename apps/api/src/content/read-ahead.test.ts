@@ -1,9 +1,26 @@
 import { describe, expect, it } from 'vitest'
 import type { PrefetchOutcome, ReadableVersion } from './reader.ts'
-import { type AheadFetch, BUSY_RETRY_MS, MAX_RUNS, ReadAhead, ReadAheads } from './read-ahead.ts'
+import {
+  type AheadFetch,
+  BUSY_RETRY_MS,
+  FOLLOW_AFTER_MS,
+  MAX_RUNS,
+  ReadAhead,
+  ReadAheads,
+} from './read-ahead.ts'
 import { SESSION_IDLE_MS } from './stream-sessions.ts'
 
 const MiB = 1024 * 1024
+
+/**
+ * Reads as a play does, which a window follows: a first byte, then, once
+ * `FOLLOW_AFTER_MS` have gone by on the clock, on to `to`.
+ */
+function playTo(ahead: ReadAhead, clock: { now: number }, from: number, to: number) {
+  ahead.reached(from, from + 1)
+  clock.now += FOLLOW_AFTER_MS
+  ahead.reached(from, to)
+}
 
 interface Call {
   index: number
@@ -53,12 +70,20 @@ function setup(
   }
   /** The chunks fetched, in the order they were started. */
   const started = () => calls.map((call) => call.index)
-  return { ahead, clock, calls, fetched, settle, started }
+  /** `playTo` for this window. */
+  const play = (from: number, to: number) => {
+    playTo(ahead, clock, from, to)
+  }
+  return { ahead, clock, calls, fetched, play, settle, started }
 }
 
 describe('ReadAhead', () => {
   it('reads nothing ahead until a run has sent 2 MiB', () => {
-    const { ahead, calls } = setup()
+    const { ahead, calls, clock } = setup()
+    ahead.reached(0, 2 * MiB - 1)
+    expect(calls).toHaveLength(0)
+    // Read for as long as a play is, it is the bytes that are short.
+    clock.now += FOLLOW_AFTER_MS
     ahead.reached(0, 2 * MiB - 1)
     expect(calls).toHaveLength(0)
     ahead.reached(0, 2 * MiB)
@@ -69,29 +94,29 @@ describe('ReadAhead', () => {
     // The last byte a run sent is the one before its reach: a run that stops
     // exactly where a chunk ends has the chunk that begins there next.
     const boundary = setup()
-    boundary.ahead.reached(0, 3 * MiB)
+    boundary.play(0, 3 * MiB)
     expect(boundary.ahead.fetching).toEqual([3, 4])
 
     const inside = setup()
-    inside.ahead.reached(0, 3 * MiB + 1)
+    inside.play(0, 3 * MiB + 1)
     expect(inside.ahead.fetching).toEqual([4, 5])
 
     const before = setup()
-    before.ahead.reached(0, 3 * MiB - 1)
+    before.play(0, 3 * MiB - 1)
     expect(before.ahead.fetching).toEqual([3, 4])
 
     // The last chunk has nothing after it; the one before it has that.
     const end = setup({ chunkCount: 4, parallel: Infinity })
-    end.ahead.reached(0, 4 * MiB)
+    end.play(0, 4 * MiB)
     expect(end.started()).toEqual([])
     const beforeEnd = setup({ chunkCount: 4, parallel: Infinity })
-    beforeEnd.ahead.reached(0, 3 * MiB)
+    beforeEnd.play(0, 3 * MiB)
     expect(beforeEnd.started()).toEqual([3])
   })
 
   it('reads ahead at most four times what the run has sent, up to 128 MiB, never past the last chunk', () => {
     const first = setup({ parallel: Infinity })
-    first.ahead.reached(0, 2 * MiB)
+    first.play(0, 2 * MiB)
     expect(first.ahead.fetching).toEqual([2, 3, 4, 5, 6, 7, 8, 9])
 
     // 2 to 9 are under way still; the window now reaches from 64 to 191.
@@ -103,7 +128,7 @@ describe('ReadAhead', () => {
     expect(next.at(-1)).toBe(191)
 
     const short = setup({ chunkCount: 70, parallel: Infinity })
-    short.ahead.reached(0, 64 * MiB)
+    short.play(0, 64 * MiB)
     const indexes = short.started()
     expect(indexes[0]).toBe(64)
     expect(indexes.at(-1)).toBe(69)
@@ -111,17 +136,18 @@ describe('ReadAhead', () => {
   })
 
   it('fetches two chunks at once, nearest first, and the next as one ends', async () => {
-    const { ahead, settle } = setup()
-    ahead.reached(0, 2 * MiB)
+    const { ahead, play, settle } = setup()
+    play(0, 2 * MiB)
     expect(ahead.fetching).toEqual([2, 3])
     await settle(2, 'fetched')
     expect(ahead.fetching).toEqual([3, 4])
   })
 
   it('carries a run across reads that follow one another', () => {
-    const { ahead, calls } = setup()
+    const { ahead, calls, clock } = setup()
     ahead.reached(0, MiB)
     expect(calls).toHaveLength(0)
+    clock.now += FOLLOW_AFTER_MS
     ahead.reached(MiB, 2 * MiB)
     expect(ahead.fetching).toEqual([2, 3])
 
@@ -129,13 +155,14 @@ describe('ReadAhead', () => {
     // sent 2.25 MiB; as a run of its own it would have sent 1.75 MiB.
     const reconnect = setup()
     reconnect.ahead.reached(0, MiB)
+    reconnect.clock.now += FOLLOW_AFTER_MS
     reconnect.ahead.reached(MiB - 512 * 1024, 2 * MiB + 256 * 1024)
     expect(reconnect.ahead.fetching).toEqual([3, 4])
   })
 
   it('joins the followed run, though the runs kept have forgotten it', () => {
-    const { ahead, started } = setup({ parallel: Infinity })
-    ahead.reached(0, 2 * MiB)
+    const { ahead, play, started } = setup({ parallel: Infinity })
+    play(0, 2 * MiB)
     expect(started()).toEqual([2, 3, 4, 5, 6, 7, 8, 9])
     // Short reads elsewhere push it off the eight kept.
     for (let run = 1; run <= MAX_RUNS + 2; run += 1) {
@@ -151,8 +178,8 @@ describe('ReadAhead', () => {
 
   it('a storm of short reads moves nothing', async () => {
     // Nothing holds a fetch back here, so a read the window followed would show.
-    const { ahead, calls, settle, started } = setup({ parallel: Infinity })
-    ahead.reached(0, 2 * MiB)
+    const { ahead, calls, play, settle, started } = setup({ parallel: Infinity })
+    play(0, 2 * MiB)
     const first = started()
     expect(first).toEqual([2, 3, 4, 5, 6, 7, 8, 9])
     for (let at = 50; at <= 240; at += 10) {
@@ -163,12 +190,50 @@ describe('ReadAhead', () => {
     expect(calls.every((call) => !call.signal.aborted)).toBe(true)
   })
 
-  it('follows the newest run that has sent 2 MiB, and lets the fetches under way finish', async () => {
-    const { ahead, calls, settle, started } = setup()
-    ahead.reached(0, 2 * MiB)
+  it('a storm of reads each given up within a second moves nothing, however much each sent', () => {
+    // The lab's finding (2026-10-22): through the proxy and the sockets' buffers, a seek the
+    // client gave up after 0.3 s had been sent 3.5 to 14.5 MiB, so every step of a drag
+    // had sent enough. Nothing holds a fetch back here, so a read followed would show.
+    const { ahead, calls, clock } = setup({ parallel: Infinity })
+    for (let step = 1; step <= 10; step += 1) {
+      const from = step * 20 * MiB
+      ahead.reached(from, from + 4 * MiB)
+      clock.now += 300
+      ahead.reached(from, from + 12 * MiB)
+    }
+    expect(calls).toHaveLength(0)
+  })
+
+  it('follows a run once it has been read for a second as well as 2 MiB', () => {
+    const { ahead, calls, clock } = setup()
+    ahead.reached(0, 3 * MiB)
+    expect(calls).toHaveLength(0)
+    clock.now += FOLLOW_AFTER_MS - 1
+    ahead.reached(0, 4 * MiB)
+    expect(calls).toHaveLength(0)
+    clock.now += 1
+    ahead.reached(0, 5 * MiB)
+    expect(ahead.fetching).toEqual([5, 6])
+  })
+
+  it('a read that carries on a run keeps the run’s time', () => {
+    const { ahead, calls, clock } = setup()
+    // 2.5 MiB sent at once, as a socket takes it: a run just begun, and not yet followed.
+    ahead.reached(0, 2.5 * MiB)
+    expect(calls).toHaveLength(0)
+    // The player's next request, a second on, carries on where it reached: it isn't a run begun
+    // again, which would have to be read for a second more.
+    clock.now += FOLLOW_AFTER_MS
+    ahead.reached(2.5 * MiB, 3.5 * MiB)
+    expect(ahead.fetching).toEqual([4, 5])
+  })
+
+  it('follows the newest run that has sent 2 MiB over a second, and lets the fetches under way finish', async () => {
+    const { ahead, calls, play, settle, started } = setup()
+    play(0, 2 * MiB)
     expect(started()).toEqual([2, 3])
 
-    ahead.reached(100 * MiB, 102 * MiB)
+    play(100 * MiB, 102 * MiB)
     expect(calls.slice(0, 2).every((call) => !call.signal.aborted)).toBe(true)
     // Both fetches are still under way: no new one starts until one ends.
     expect(started()).toEqual([2, 3])
@@ -179,15 +244,15 @@ describe('ReadAhead', () => {
   })
 
   it('never fetches a chunk twice', async () => {
-    const { ahead, calls, settle } = setup({ parallel: Infinity })
-    ahead.reached(0, 2 * MiB)
+    const { ahead, calls, play, settle } = setup({ parallel: Infinity })
+    play(0, 2 * MiB)
     await settle(2, 'fetched')
     await settle(3, 'kept')
     await settle(4, 'skipped')
     await settle(5, 'failed')
 
     // The run goes elsewhere and then moves back over the chunks it fetched.
-    ahead.reached(100 * MiB, 102 * MiB)
+    play(100 * MiB, 102 * MiB)
     ahead.reached(0, 2 * MiB)
 
     const counts = new Map<number, number>()
@@ -198,8 +263,8 @@ describe('ReadAhead', () => {
 
   it('tries a busy chunk again after a second', async () => {
     // Chunks 2 and 3 are all the window reaches.
-    const { ahead, calls, clock, settle } = setup({ chunkCount: 4 })
-    ahead.reached(0, 2 * MiB)
+    const { ahead, calls, clock, play, settle } = setup({ chunkCount: 4 })
+    play(0, 2 * MiB)
     expect(ahead.fetching).toEqual([2, 3])
     await settle(2, 'busy')
     await settle(3, 'skipped')
@@ -216,8 +281,8 @@ describe('ReadAhead', () => {
 
   it('tries a chunk again after a second when its fetch leaned on another', async () => {
     // Chunks 2 and 3 are all the window reaches.
-    const { ahead, calls, clock, fetched, settle } = setup({ chunkCount: 4 })
-    ahead.reached(0, 2 * MiB)
+    const { ahead, calls, clock, fetched, play, settle } = setup({ chunkCount: 4 })
+    play(0, 2 * MiB)
     await settle(2, 'shared')
     await settle(3, 'skipped')
     expect(calls).toHaveLength(2)
@@ -241,14 +306,14 @@ describe('ReadAhead', () => {
   })
 
   it('stops: aborts what is under way and does nothing after', async () => {
-    const { ahead, calls, fetched, settle } = setup()
-    ahead.reached(0, 2 * MiB)
+    const { ahead, calls, fetched, play, settle } = setup()
+    play(0, 2 * MiB)
     expect(calls).toHaveLength(2)
     ahead.stop()
     expect(calls.every((call) => call.signal.aborted)).toBe(true)
 
     ahead.reached(0, 64 * MiB)
-    ahead.reached(100 * MiB, 102 * MiB)
+    play(100 * MiB, 102 * MiB)
     expect(calls).toHaveLength(2)
 
     await settle(2, 'fetched')
@@ -259,8 +324,8 @@ describe('ReadAhead', () => {
 
   it('reports each fetch that ends, but not one the cache had', async () => {
     // The last chunk, 3, holds what the file has past 3 MiB.
-    const { ahead, clock, fetched, settle } = setup({ chunkCount: 4, size: 3 * MiB + 300_000 })
-    ahead.reached(0, 2 * MiB)
+    const { clock, fetched, play, settle } = setup({ chunkCount: 4, size: 3 * MiB + 300_000 })
+    play(0, 2 * MiB)
     clock.now += 40
     await settle(2, 'fetched')
     expect(fetched).toEqual([{ from: 2 * MiB, bytes: MiB, ms: 40, outcome: 'fetched' }])
@@ -270,21 +335,21 @@ describe('ReadAhead', () => {
     expect(fetched[1]).toEqual({ from: 3 * MiB, bytes: 300_000, ms: 55, outcome: 'fetched' })
 
     const cached = setup()
-    cached.ahead.reached(0, 2 * MiB)
+    cached.play(0, 2 * MiB)
     await cached.settle(2, 'kept')
     await cached.settle(3, 'skipped')
     expect(cached.fetched).toEqual([])
 
     const failing = setup()
-    failing.ahead.reached(0, 2 * MiB)
+    failing.play(0, 2 * MiB)
     failing.clock.now += 7
     await failing.settle(2, 'failed')
     expect(failing.fetched).toEqual([{ from: 2 * MiB, bytes: MiB, ms: 7, outcome: 'failed' }])
   })
 
   it('goes on to the next nearest chunk while one is busy', async () => {
-    const { ahead, settle, started } = setup()
-    ahead.reached(0, 2 * MiB)
+    const { ahead, play, settle, started } = setup()
+    play(0, 2 * MiB)
     await settle(2, 'busy')
     // Chunk 2 waits for its second; 4 is the nearest the window may fetch.
     expect(ahead.fetching).toEqual([3, 4])
@@ -292,8 +357,8 @@ describe('ReadAhead', () => {
   })
 
   it('reports a chunk that is busy only the first time', async () => {
-    const { ahead, clock, fetched, settle } = setup({ chunkCount: 4 })
-    ahead.reached(0, 2 * MiB)
+    const { ahead, clock, fetched, play, settle } = setup({ chunkCount: 4 })
+    play(0, 2 * MiB)
     await settle(2, 'busy')
     await settle(3, 'skipped')
     expect(fetched).toEqual([{ from: 2 * MiB, bytes: MiB, ms: 0, outcome: 'busy' }])
@@ -306,8 +371,8 @@ describe('ReadAhead', () => {
   })
 
   it('keeps the newest eight runs, which a read may join', () => {
-    const { ahead, calls } = setup({ parallel: Infinity })
-    ahead.reached(0, 2 * MiB)
+    const { ahead, calls, clock, play } = setup({ parallel: Infinity })
+    play(0, 2 * MiB)
     expect(calls).toHaveLength(8)
     // Ten runs of 1 MiB, 10 MiB apart: the first two are dropped.
     for (let run = 1; run <= MAX_RUNS + 2; run += 1) {
@@ -315,7 +380,8 @@ describe('ReadAhead', () => {
     }
     expect(calls).toHaveLength(8)
 
-    // A read joining the oldest run kept (the third) makes it 2.25 MiB, and the window follows it.
+    // A read joining the oldest run kept (the third), a second after it began, makes it 2.25 MiB, and the window follows it.
+    clock.now += FOLLOW_AFTER_MS
     ahead.reached(130 * MiB + 512 * 1024, 132 * MiB + 256 * 1024)
     expect(calls[8]?.index).toBe(133)
     const followed = calls.length
@@ -326,8 +392,8 @@ describe('ReadAhead', () => {
   })
 
   it('keeps following a run that has fallen off the ones kept', async () => {
-    const { ahead, settle, started } = setup()
-    ahead.reached(0, 2 * MiB)
+    const { ahead, play, settle, started } = setup()
+    play(0, 2 * MiB)
     for (let run = 1; run <= MAX_RUNS + 2; run += 1) {
       ahead.reached((100 + run * 10) * MiB, (101 + run * 10) * MiB)
     }
@@ -338,6 +404,7 @@ describe('ReadAhead', () => {
 
   it('counts a fetch whose promise rejects as failed', async () => {
     const fetched: AheadFetch[] = []
+    const clock = { now: 0 }
     const ahead = new ReadAhead({
       size: 3 * MiB,
       chunkSize: MiB,
@@ -346,9 +413,9 @@ describe('ReadAhead', () => {
       onFetched: (fetch) => {
         fetched.push(fetch)
       },
-      now: () => 0,
+      now: () => clock.now,
     })
-    ahead.reached(0, 2 * MiB)
+    playTo(ahead, clock, 0, 2 * MiB)
     await Promise.resolve()
     await Promise.resolve()
     expect(fetched).toEqual([{ from: 2 * MiB, bytes: MiB, ms: 0, outcome: 'failed' }])
@@ -362,13 +429,13 @@ describe('ReadAhead', () => {
     process.on('unhandledRejection', listen)
     try {
       let reports = 0
-      const { ahead, settle, started } = setup({
+      const { play, settle, started } = setup({
         onFetched: () => {
           reports += 1
           throw new Error('the recorder is broken')
         },
       })
-      ahead.reached(0, 2 * MiB)
+      play(0, 2 * MiB)
       await settle(2, 'fetched')
       // The window filled again, whatever the recorder did.
       expect(started()).toEqual([2, 3, 4])
@@ -425,11 +492,11 @@ describe('ReadAheads', () => {
   })
 
   it('fetches through the prefetch it was given, for the version the window is of', () => {
-    const { reads, calls } = windows()
+    const { reads, calls, clock } = windows()
     const first = film('v1')
-    reads.follow('s', first).ahead.reached(0, 2 * MiB)
+    playTo(reads.follow('s', first).ahead, clock, 0, 2 * MiB)
     const second = film('v2')
-    reads.follow('s', second).ahead.reached(0, 2 * MiB)
+    playTo(reads.follow('s', second).ahead, clock, 0, 2 * MiB)
     expect(calls.map((call) => [call.version.version_id, call.index])).toEqual([
       ['v1', 2],
       ['v1', 3],
@@ -454,9 +521,15 @@ describe('ReadAheads', () => {
       },
       now: () => clock.now,
     })
-    // Two sessions, each with its own window, which tell their own IDs.
-    reads.follow('s', film('v1')).ahead.reached(0, 2 * MiB)
-    reads.follow('t', film('v2')).ahead.reached(0, 2 * MiB)
+    // Two sessions, each with its own window, which tell their own IDs. Both are read for
+    // a second at once, so their fetches begin together.
+    const s = reads.follow('s', film('v1')).ahead
+    const t = reads.follow('t', film('v2')).ahead
+    s.reached(0, 1)
+    t.reached(0, 1)
+    clock.now += FOLLOW_AFTER_MS
+    s.reached(0, 2 * MiB)
+    t.reached(0, 2 * MiB)
     expect(settles).toHaveLength(4)
 
     clock.now += 40
@@ -500,7 +573,7 @@ describe('ReadAheads', () => {
     reads.follow('t', film('v2'))
     expect(reads.size).toBe(2)
     // Not stopped: it reads ahead as the request carries on.
-    first.ahead.reached(0, 2 * MiB)
+    playTo(first.ahead, clock, 0, 2 * MiB)
     expect(first.ahead.fetching).toEqual([2, 3])
     expect(calls.every((call) => !call.signal.aborted)).toBe(true)
     expect(reads.follow('s', film('v1')).ahead).toBe(first.ahead)
@@ -554,7 +627,7 @@ describe('ReadAheads', () => {
   it('keeps an idle window with a fetch under way, and stops one it drops', () => {
     const { reads, clock, calls } = windows()
     const busy = reads.follow('busy', film('v1'))
-    busy.ahead.reached(0, 2 * MiB)
+    playTo(busy.ahead, clock, 0, 2 * MiB)
     busy.done()
     expect(busy.ahead.fetching).toEqual([2, 3])
     const idle = reads.follow('idle', film('v1'))
@@ -572,9 +645,9 @@ describe('ReadAheads', () => {
   })
 
   it('stops every window: the fetches under way are aborted, and none starts after', () => {
-    const { reads, calls } = windows()
-    reads.follow('a', film('v1')).ahead.reached(0, 2 * MiB)
-    reads.follow('b', film('v2')).ahead.reached(0, 2 * MiB)
+    const { reads, calls, clock } = windows()
+    playTo(reads.follow('a', film('v1')).ahead, clock, 0, 2 * MiB)
+    playTo(reads.follow('b', film('v2')).ahead, clock, 0, 2 * MiB)
     expect(calls).toHaveLength(4)
     expect(calls.every((call) => !call.signal.aborted)).toBe(true)
 
@@ -584,7 +657,7 @@ describe('ReadAheads', () => {
 
     // A read that begins as the API closes finds a window that is already stopped.
     const late = reads.follow('c', film('v3'))
-    late.ahead.reached(0, 4 * MiB)
+    playTo(late.ahead, clock, 0, 4 * MiB)
     late.done()
     expect(calls).toHaveLength(4)
     expect(reads.size).toBe(0)
