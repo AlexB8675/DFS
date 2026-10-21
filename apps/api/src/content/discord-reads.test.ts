@@ -947,6 +947,35 @@ describe('reading from Discord', () => {
     expect(discord.cdnRanges).toHaveLength(1)
   })
 
+  it('shares a client’s fetch under way with a fetch ahead of the same chunk', async () => {
+    const { chunkSize } = app.config.sizes
+    const layout = new ChunkFrameLayout(chunkSize)
+    const session = await storedFile('Ahead beside a read', 1)
+    const file = await downloadableFile(app.db, session.nodeId)
+    discord.cdnRequests = 0
+    // The client's read comes through the content routes, the fetch ahead (a window's, or a
+    // video's warm start) through the API's own: they still share what is under way, as
+    // every read of the API does, whichever of its routes made it.
+    discord.holdNextBodyAt = 14 + layout.segmentLength(0)
+    let body: ReadableStreamDefaultReader<Uint8Array> | undefined
+    try {
+      const whole = await client.fetch('GET', `/files/${session.nodeId}/content`, {
+        headers: { Range: 'bytes=0-' },
+      })
+      body = whole.body?.getReader()
+      if (!body) throw new Error('No body.')
+      const first = await receive(body, layout.plaintextSize(0))
+      await prefetchChunk(app, file, 0, new AbortController().signal)
+      expect(discord.cdnRequests).toBe(1)
+      discord.releaseCdn()
+      const rest = await receive(body, chunkSize, 10_000)
+      expect(Buffer.concat([...first, ...rest]).equals(Buffer.from(contentOf(1)))).toBe(true)
+    } finally {
+      discord.releaseCdn()
+      await body?.cancel().catch(() => undefined)
+    }
+  })
+
   it('fetches nothing ahead for a chunk still syncing, or without room in the read budget', async () => {
     const signal = new AbortController().signal
     const session = await storedFile('Ahead without room', 1)

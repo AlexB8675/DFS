@@ -637,9 +637,13 @@ interface UnderWay {
  * share the fetch: every run fetching a segment has its own entry for it, as
  * checked plaintext with the run's progress, so one that ends (a cancelled
  * read's) leaves the others' visible. In memory only: the cache keeps
- * ciphertext.
+ * ciphertext. Kept per API by its blob store, not by `app`: Fastify gives
+ * each plugin's routes an instance of its own, which inherits what the API
+ * decorates, so a key of `app` would keep a read of the content routes, one of
+ * a share link's, a video's warm start and a stream's window apart, though
+ * they all fetch from the same place.
  */
-const segmentsUnderWay = new WeakMap<FastifyInstance, Map<string, UnderWay[]>>()
+const segmentsUnderWay = new WeakMap<BlobReader, Map<string, UnderWay[]>>()
 
 /**
  * Where a segment a reader wants comes from: the cache's ciphertext, or a
@@ -758,7 +762,7 @@ function planSegments(
 ): Map<number, SegmentSource> {
   const { app, chunk, layout } = fetch
   const cache = app.frameCache
-  const underWay = segmentsUnderWay.get(app)
+  const underWay = segmentsUnderWay.get(app.blobStore)
   const sources = new Map<number, SegmentSource>()
   const keyOf = (index: number) =>
     `${Buffer.from(chunk.frame_sha256).toString('hex')}-${String(index)}`
@@ -857,10 +861,10 @@ function startRun(
 ): void {
   const { app, chunk, layout } = fetch
   const hex = Buffer.from(chunk.frame_sha256).toString('hex')
-  let underWay = segmentsUnderWay.get(app)
+  let underWay = segmentsUnderWay.get(app.blobStore)
   if (!underWay) {
     underWay = new Map()
-    segmentsUnderWay.set(app, underWay)
+    segmentsUnderWay.set(app.blobStore, underWay)
   }
   const registry = underWay
   const whole = from === 0 && to === layout.segments - 1
