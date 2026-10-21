@@ -26,6 +26,7 @@ import {
 import { cn } from '@/lib/utils'
 import { audioTracksOf, type AudioTrack } from './audio-tracks'
 import { SPEEDS } from './keys'
+import { seekBarTime, type SeekDrag } from './seek-position'
 import { Slider } from './slider'
 import type { SubtitleOption } from './subtitle-options'
 import { formatPlayTime, loadedUntil } from './time'
@@ -98,11 +99,14 @@ export function Controls({
   subtitles,
 }: ControlsProps) {
   const state = useMediaState(video, visible)
-  /** Where the seek bar is dragged to, ahead of the video. */
-  const [dragTo, setDragTo] = useState<number | null>(null)
+  /**
+   * Where the seek bar is dragged to, ahead of the video; held where it was
+   * let go until the video's state changes, since it still says the old time.
+   */
+  const [drag, setDrag] = useState<SeekDrag | null>(null)
   const [hover, setHover] = useState<number | null>(null)
   const duration = Number.isFinite(state.duration) ? state.duration : (durationHint ?? 0)
-  const time = dragTo ?? state.currentTime
+  const time = seekBarTime(drag, state)
   const fraction = duration > 0 ? Math.min(1, time / duration) : 0
   const tracks = audioTracksOf(video)
   const quiet = state.muted || state.volume === 0
@@ -178,10 +182,10 @@ export function Controls({
           step={duration > 0 ? 5 / duration : 0.01}
           valueText={`${formatPlayTime(time, duration)} of ${formatPlayTime(duration)}`}
           onChange={(value) => {
-            setDragTo(value * duration)
+            setDrag({ time: value * duration, letGoAt: null })
           }}
           onCommit={(value) => {
-            setDragTo(null)
+            setDrag({ time: value * duration, letGoAt: state })
             onSeek(value * duration)
           }}
           onHover={setHover}
