@@ -609,6 +609,74 @@ describe('reading from Discord', () => {
     expect(sources.discord.bytes).toBe(0)
   })
 
+  /**
+   * Waits until the cache holds the frame of `versionId`'s only chunk whole,
+   * on its disk: the read that kept it has ended before the frame is put.
+   */
+  async function keptWhole(versionId: string) {
+    const [chunk] = (
+      await app.db.execute<{ frame_sha256: Buffer }>(sql`
+        SELECT frame_sha256 FROM chunks WHERE version_id = ${versionId}`)
+    ).rows
+    if (!chunk) throw new Error('No chunk.')
+    await vi.waitFor(() => {
+      expect(app.frameCache?.has(chunk.frame_sha256)).toBe(true)
+    })
+    await app.frameCache?.idle()
+    const hex = chunk.frame_sha256.toString('hex')
+    return {
+      sha: chunk.frame_sha256,
+      file: path.join(app.config.cacheDir, hex.slice(0, 2), `${hex}.frame`),
+    }
+  }
+
+  it('reads a seek into a frame kept whole by its segments alone', async () => {
+    const { chunkSize } = app.config.sizes
+    const layout = new ChunkFrameLayout(chunkSize)
+    const session = await storedFile('Kept whole', 1)
+    await readCounted(session.nodeId, 0, chunkSize - 1) // kept whole
+    await keptWhole(session.versionId)
+    discord.cdnRequests = 0
+    const before = app.frameCache?.stats.bytesRead ?? 0
+    const at = layout.plaintextStart(5) + 1000 // inside segment 5
+    const { sources, bytes } = await readCounted(session.nodeId, at, at + 999)
+    expect(bytes).toEqual(Buffer.from(contentOf(1).subarray(at, at + 1000)))
+    expect(discord.cdnRequests).toBe(0)
+    expect(sources.cache.bytes).toBe(1000)
+    expect((app.frameCache?.stats.bytesRead ?? 0) - before).toBe(layout.segmentLength(5))
+  })
+
+  it('fetches the rest of a range from where a frame kept whole fails its tag', async () => {
+    const { chunkSize } = app.config.sizes
+    const layout = new ChunkFrameLayout(chunkSize)
+    const session = await storedFile('Spoiled whole', 1)
+    await readCounted(session.nodeId, 0, chunkSize - 1)
+    const { sha, file } = await keptWhole(session.versionId)
+    // Segment 7 is spoiled; segments 6 to 8 are wanted.
+    const kept = await readFile(file)
+    const spoiled = layout.segmentStart(7) + 100
+    kept[spoiled] = (kept[spoiled] ?? 0) ^ 1
+    await writeFile(file, kept)
+    // The cache holds the frame, so the lookup signed nothing: the refetch signs its own URL.
+    await app.db.execute(sql`
+      UPDATE blobs SET cdn_url_expires_at = now() - interval '1 hour'
+      WHERE id = (SELECT blob_id FROM chunks WHERE version_id = ${session.versionId})`)
+    const signs = () =>
+      discord.requests.filter((request) => request === 'POST /attachments/refresh-urls').length
+    const signed = signs()
+    discord.cdnRequests = 0
+    const from = layout.plaintextStart(6) + 1000
+    const to = layout.plaintextStart(8) + 999
+    const { sources, bytes } = await readCounted(session.nodeId, from, to)
+    expect(bytes).toEqual(Buffer.from(contentOf(1).subarray(from, to + 1)))
+    expect(signs() - signed).toBe(1)
+    // Segment 6 came from the frame; the rest from one request, from segment 7 on.
+    expect(sources.cache.bytes).toBe(layout.plaintextSize(6) - 1000)
+    expect(sources.discord.bytes).toBe(layout.plaintextSize(7) + 1000)
+    expect(discord.cdnRequests).toBe(1)
+    expect(app.frameCache?.has(sha)).toBe(false)
+  })
+
   it('splits a read across the cache and Discord', async () => {
     const { chunkSize } = app.config.sizes
     const session = await storedFile('Counted split', 2)
@@ -680,8 +748,8 @@ describe('reading from Discord', () => {
     const kept = await readFile(file)
     kept[100] = (kept[100] ?? 0) ^ 1
     await writeFile(file, kept)
-    // The cache holds the frame as far as it knows, but its copy fails its
-    // SHA-256: it is read from Discord again, and those bytes are Discord's.
+    // The cache holds the frame as far as it knows, but its segment fails its
+    // tag: it is read from Discord again, and those bytes are Discord's.
     discord.cdnRequests = 0
     const spoiled = await readCounted(session.nodeId, 1000, 1999)
     expect(spoiled.bytes).toEqual(content.subarray(1000, 2000))
@@ -689,10 +757,19 @@ describe('reading from Discord', () => {
     expect(spoiled.sources.discord.bytes).toBe(1000)
     expect(spoiled.sources.discord.waitMs).toBeGreaterThan(0)
     expect(spoiled.sources.cache).toEqual({ bytes: 0, waitMs: 0 })
+    // The bad frame is let go; the refetch is by segment, as any partial read is.
+    expect(app.frameCache?.has(chunk.frame_sha256)).toBe(false)
 
-    // Kept again, and then gone from the disk: the same.
+    // Kept whole again (once the segments read around have been kept, so the
+    // whole chunk is read in one request), and then gone from the disk: the same.
+    await vi.waitFor(() => {
+      expect(app.frameCache?.hasSegment(chunk.frame_sha256, 3)).toBe(true)
+    })
+    await readCounted(session.nodeId, 0, chunkSize - 1)
+    await vi.waitFor(() => {
+      expect(app.frameCache?.has(chunk.frame_sha256)).toBe(true)
+    })
     await app.frameCache?.idle()
-    await readFile(file)
     const again = await readCounted(session.nodeId, 1000, 1999)
     expect(again.sources.cache.bytes).toBe(1000)
     expect(again.sources.discord.bytes).toBe(0)

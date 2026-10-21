@@ -18,10 +18,11 @@ import type { FastifyInstance } from 'fastify'
 // Reading a file back (DESIGN.md §6.2): find the chunks that cover a byte
 // range, read each frame from staging (still syncing) or the blob store
 // (stored, through the frame cache), check it, decrypt it, and stream the
-// requested slice. A chunk sealed in segments (format 2, §7.3) that has to
-// come from Discord streams instead: only the segments the range covers, by
-// Range, each checked and sent on as it arrives, so the first bytes don't
-// wait for the whole 20 MiB. Chunks are read ahead while the current one is sent,
+// requested slice. A stored chunk sealed in segments (format 2, §7.3) is read
+// by segment instead: only the segments the range covers, each checked and
+// sent on as it arrives, from the frame cache (positional reads, for a frame it
+// holds whole) or by Range from Discord, so the first bytes don't wait for
+// the whole 20 MiB. Chunks are read ahead while the current one is sent,
 // the first once the client has taken some of the first chunk, more as it
 // keeps up, never past the requested range. A response asks for its next
 // piece only once its socket has taken the last (`paced`, send.ts), and gives
@@ -304,9 +305,10 @@ async function* chunksBetween(
 }
 
 /**
- * Reads bytes `from` to `to` of a chunk. One sealed in segments that has to
- * come from Discord streams them; the others are read whole (staging, the
- * frame cache, format 1), and only the segments wanted are opened.
+ * Reads bytes `from` to `to` of a chunk. A stored one sealed in segments is
+ * read by segment: from the frame cache where it holds them, kept whole or in
+ * part, and from Discord's CDN for the rest. The others are read whole
+ * (staging, format 1), and only the segments wanted are opened.
  */
 async function readChunk(
   app: FastifyInstance,
@@ -349,14 +351,17 @@ async function readChunk(
   }
 }
 
-/** A stored chunk Discord's CDN can stream: not in staging, nor already in the frame cache. */
+/**
+ * A stored chunk that is read by segment: not in staging, and from a store
+ * that can stream. One the frame cache holds whole is too, a segment at a time
+ * from its file, so it isn't read and hashed whole to serve a few segments.
+ */
 function streamable(app: FastifyInstance, chunk: ChunkLocation): boolean {
   return (
     !chunk.staged_path &&
     !chunk.blob_staged_path &&
     chunk.blob_state === 'stored' &&
-    app.blobStore.stream !== undefined &&
-    !app.frameCache?.has(chunk.frame_sha256)
+    app.blobStore.stream !== undefined
   )
 }
 
@@ -437,8 +442,13 @@ export async function warmEnd(
       const first = layout.segmentOf(Math.max(0, start - chunk.idx * chunkSize))
       const last = layout.segments - 1
       const wanted = Array.from({ length: last - first + 1 }, (_, index) => first + index)
-      // Kept already: nothing to fetch, nor to read off the cache's disk.
-      if (wanted.every((index) => cache.hasSegment(chunk.frame_sha256, index))) continue
+      // Kept already, whole or by segment: nothing to fetch, nor to read off the cache's disk.
+      if (
+        cache.has(chunk.frame_sha256) ||
+        wanted.every((index) => cache.hasSegment(chunk.frame_sha256, index))
+      ) {
+        continue
+      }
       // A frame fetched whole is held whole meanwhile: from the read-ahead budget.
       const giveBack = app.readBudget
         ? app.readBudget.tryTake(chunk.frame_size)
@@ -480,17 +490,24 @@ const READ_AROUND_SEGMENTS = 4
  */
 const segmentsUnderWay = new WeakMap<FastifyInstance, Map<string, Promise<Uint8Array>>>()
 
-/** Where a segment a reader wants comes from: the cache's ciphertext, or a fetch's plaintext. */
+/**
+ * Where a segment a reader wants comes from: the cache's ciphertext, or a
+ * fetch's plaintext. The cache's is read when the reader reaches that segment,
+ * not when it is planned, so planning reads nothing and a frame's ciphertext
+ * is never held whole; `whole` says it is part of a frame kept whole, rather
+ * than a segment kept on its own.
+ */
 type SegmentSource =
-  | { kind: 'cache'; ciphertext: Promise<Uint8Array | null> }
+  | { kind: 'cache'; whole: boolean; ciphertext: () => Promise<Uint8Array | null> }
   | { kind: 'fetch' | 'shared'; plaintext: Promise<Uint8Array> }
 
 /**
  * Reads the segments of a stored chunk that a range covers, each checked by
  * its own tag and emitted as soon as it has arrived: kept ones from the
- * cache, ones another reader is fetching from that fetch, and the rest from
- * the CDN, consecutive ones in one request. A chunk read whole is also
- * checked against its SHA-256 and kept whole.
+ * cache (a frame kept whole by positional reads of just those segments), ones
+ * another reader is fetching from that fetch, and the rest from the CDN,
+ * consecutive ones in one request. A chunk fetched whole is also checked
+ * against its SHA-256 and kept whole.
  */
 async function streamSegments(
   app: FastifyInstance,
@@ -516,8 +533,13 @@ async function streamSegments(
       if (!source) throw new ContentError(`Segment ${String(index)} wasn't planned.`)
       try {
         if (source.kind === 'cache') {
-          const ciphertext = await source.ciphertext
-          if (ciphertext) plaintext = await openSegment(key, layout, index, ciphertext, context)
+          const ciphertext = await source.ciphertext()
+          if (ciphertext) {
+            plaintext = await openSegment(key, layout, index, ciphertext, context)
+          } else if (source.whole) {
+            // A frame kept whole that gave nothing of it is let go.
+            app.frameCache?.forget(chunk.frame_sha256)
+          }
         } else {
           plaintext = await source.plaintext
         }
@@ -528,7 +550,12 @@ async function streamSegments(
         }
       } catch (error) {
         if (range.signal?.aborted || source.kind === 'fetch' || attempt > 0) throw error
-        if (source.kind === 'cache') app.frameCache?.forgetSegment(chunk.frame_sha256, index)
+        // A bad segment of a frame kept whole lets the whole frame go: it is
+        // fetched again by segment, as any part is, and kept whole once read whole.
+        if (source.kind === 'cache') {
+          if (source.whole) app.frameCache?.forget(chunk.frame_sha256)
+          else app.frameCache?.forgetSegment(chunk.frame_sha256, index)
+        }
       }
       if (plaintext === null) {
         if (attempt > 0) throw new ContentError(`Segment ${String(index)} couldn't be read.`)
@@ -551,9 +578,10 @@ interface SegmentFetch {
 }
 
 /**
- * Where segments `from` to `last` come from, starting the fetches needed.
- * With `fresh`, segment `from` is fetched whatever the cache or another
- * reader says of it.
+ * Where segments `from` to `last` come from, starting the fetches needed: a
+ * frame the cache holds whole first, then segments it keeps on their own,
+ * then fetches under way. With `fresh`, segment `from` is fetched whatever
+ * the cache or another reader says of it.
  */
 function planSegments(
   fetch: SegmentFetch,
@@ -569,16 +597,34 @@ function planSegments(
     `${Buffer.from(chunk.frame_sha256).toString('hex')}-${String(index)}`
   const found = (index: number): SegmentSource | null => {
     if (fresh && index === from) return null
+    // Read when the reader gets to it: positional reads of just that segment.
+    if (cache?.has(chunk.frame_sha256)) {
+      return {
+        kind: 'cache',
+        whole: true,
+        ciphertext: () =>
+          cache.frameSlice(
+            chunk.frame_sha256,
+            layout.segmentStart(index),
+            layout.segmentLength(index),
+          ),
+      }
+    }
     if (cache?.hasSegment(chunk.frame_sha256, index)) {
-      return { kind: 'cache', ciphertext: cache.segment(chunk.frame_sha256, index) }
+      return {
+        kind: 'cache',
+        whole: false,
+        ciphertext: () => cache.segment(chunk.frame_sha256, index),
+      }
     }
     const shared = underWay?.get(keyOf(index))
     return shared ? { kind: 'shared', plaintext: shared } : null
   }
   // The whole chunk is fetched whole, kept segments or not, so it is kept
-  // as one frame in their place; unless another reader is fetching some of
-  // it, which is shared instead.
-  const wholeChunk = !fresh && from === 0 && last === layout.segments - 1
+  // as one frame in their place; unless the cache holds it whole already,
+  // or another reader is fetching some of it, which is shared instead.
+  const wholeChunk =
+    !fresh && from === 0 && last === layout.segments - 1 && !cache?.has(chunk.frame_sha256)
   if (
     wholeChunk &&
     !Array.from({ length: layout.segments }, (_, i) => i).some((i) => underWay?.has(keyOf(i)))

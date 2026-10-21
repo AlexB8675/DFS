@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { sha256 } from '@dfs/crypto'
 import type { Metrics } from '@dfs/db'
@@ -71,8 +71,8 @@ export class FrameCache {
   readonly #segmentsOf = new Map<string, Set<string>>()
   #segmentCount = 0
   readonly #ready: Promise<void>
-  /** Since start, for measuring. */
-  readonly stats = { hits: 0, misses: 0 }
+  /** Since start, for measuring; `bytesRead` is what was read from the cache's disk. */
+  readonly stats = { hits: 0, misses: 0, bytesRead: 0 }
 
   constructor(options: {
     dir: string
@@ -229,6 +229,60 @@ export class FrameCache {
     this.#keep(key, bytes)
   }
 
+  /**
+   * Bytes `start` to `start + length` of a frame kept whole, from memory while
+   * it waits for the disk, else by one positional read of its file, so reading
+   * a segment of a 20 MiB frame doesn't read the rest (§6.2). Unchecked: the
+   * reader's own tags check them. `null` if the frame isn't kept or doesn't
+   * reach that far; a file that is gone or comes short is let go, as `#read`
+   * lets one go.
+   */
+  async frameSlice(
+    frameSha256: Uint8Array,
+    start: number,
+    length: number,
+  ): Promise<Uint8Array | null> {
+    const key = Buffer.from(frameSha256).toString('hex')
+    const writing = this.#writing.get(key)
+    if (writing)
+      return start + length <= writing.length ? writing.subarray(start, start + length) : null
+    if (!this.#entries.has(key)) return null
+    try {
+      const handle = await open(this.#file(key), 'r')
+      try {
+        const bytes = Buffer.allocUnsafe(length)
+        let got = 0
+        while (got < length) {
+          const { bytesRead } = await handle.read(bytes, got, length - got, start + got)
+          if (bytesRead === 0) break
+          got += bytesRead
+        }
+        this.stats.bytesRead += got
+        if (got < length) {
+          this.#forget(key)
+          return null
+        }
+        this.#touch(key)
+        return new Uint8Array(bytes.buffer, bytes.byteOffset, length)
+      } finally {
+        await handle.close()
+      }
+    } catch {
+      // Evicted meanwhile, or unreadable: a miss.
+      this.#forget(key)
+      return null
+    }
+  }
+
+  /**
+   * Lets a frame kept whole go: one a segment of which failed its tag. A frame
+   * still on its way to the disk stays, for its SHA-256 was checked before it
+   * was kept.
+   */
+  forget(frameSha256: Uint8Array): void {
+    this.#forget(Buffer.from(frameSha256).toString('hex'))
+  }
+
   /** Lets a segment go that failed its tag: it is fetched again. */
   forgetSegment(frameSha256: Uint8Array, index: number): void {
     this.#forget(segmentKey(frameSha256, index))
@@ -267,17 +321,22 @@ export class FrameCache {
     if (!this.#entries.has(key)) return null
     try {
       const bytes = await readFile(this.#file(key))
-      // Most recently used now.
-      const size = this.#entries.get(key)
-      if (size !== undefined) {
-        this.#entries.delete(key)
-        this.#entries.set(key, size)
-      }
+      this.stats.bytesRead += bytes.length
+      this.#touch(key)
       return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
     } catch {
       // Evicted meanwhile, or unreadable: a miss.
       this.#forget(key)
       return null
+    }
+  }
+
+  /** Most recently used now. */
+  #touch(key: string): void {
+    const size = this.#entries.get(key)
+    if (size !== undefined) {
+      this.#entries.delete(key)
+      this.#entries.set(key, size)
     }
   }
 

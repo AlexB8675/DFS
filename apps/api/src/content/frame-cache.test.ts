@@ -47,7 +47,7 @@ describe('FrameCache (DESIGN.md §6.2)', () => {
     await cache.idle()
     expect(await cache.load(hash, fetch)).toEqual(bytes)
     expect(fetch).toHaveBeenCalledOnce()
-    expect(cache.stats).toEqual({ hits: 1, misses: 1 })
+    expect(cache.stats).toEqual({ hits: 1, misses: 1, bytesRead: 100 })
     expect(await files()).toEqual([`${Buffer.from(hash).toString('hex')}.frame`])
   })
 
@@ -209,6 +209,107 @@ describe('segments kept on their own (§6.2)', () => {
     reopened.put(hash, bytes)
     await reopened.idle()
     expect(reopened.frames).toBe(1)
+  })
+})
+
+describe('part of a frame kept whole (§6.2)', () => {
+  /** A frame whose bytes differ along its length, so a slice of it is told from any other. */
+  async function varied(size: number) {
+    const bytes = new Uint8Array(size).map((_, index) => index % 251)
+    return { bytes, hash: new Uint8Array(await sha256(bytes)) }
+  }
+
+  /** The kept frame's file, for spoiling or removing it. */
+  function fileOf(hash: Uint8Array): string {
+    const hex = Buffer.from(hash).toString('hex')
+    return path.join(dir, hex.slice(0, 2), `${hex}.frame`)
+  }
+
+  it('reads part of a kept frame without reading the rest', async () => {
+    const cache = open(10_000_000)
+    await cache.ready()
+    const { bytes, hash } = await varied(1024 * 1024)
+    cache.put(hash, bytes)
+    await cache.idle()
+    const before = cache.stats.bytesRead
+    const slice = await cache.frameSlice(hash, 1000, 500)
+    expect(Buffer.from(slice ?? [])).toEqual(Buffer.from(bytes.subarray(1000, 1500)))
+    expect(cache.stats.bytesRead - before).toBe(500)
+  })
+
+  it('reads part of a frame still on its way to the disk from memory', async () => {
+    const cache = open(10_000_000)
+    await cache.ready()
+    const { bytes, hash } = await varied(100_000)
+    cache.put(hash, bytes)
+    // Not idle: the frame is waiting for the disk, and is read from where it is.
+    const read = cache.frameSlice(hash, 70_000, 500)
+    expect(Buffer.from((await read) ?? [])).toEqual(Buffer.from(bytes.subarray(70_000, 70_500)))
+    expect(cache.stats.bytesRead).toBe(0)
+    // Past its end is no part of it.
+    expect(await cache.frameSlice(hash, 99_900, 500)).toBeNull()
+  })
+
+  it('marks a frame most recently used when part of it is read', async () => {
+    const cache = open(250)
+    await cache.ready()
+    const a = await frame(5)
+    const b = await frame(6)
+    const c = await frame(7)
+    for (const { bytes, hash } of [a, b]) {
+      cache.put(hash, bytes)
+      await cache.idle()
+    }
+    // `a` is used again, so `b` is the one to go.
+    expect(await cache.frameSlice(a.hash, 10, 10)).not.toBeNull()
+    cache.put(c.hash, c.bytes)
+    await cache.idle()
+    expect([a, b, c].map(({ hash }) => cache.has(hash))).toEqual([true, false, true])
+  })
+
+  it('gives null for part of a frame whose file is gone, and lets it go', async () => {
+    const cache = open(10_000)
+    await cache.ready()
+    const { bytes, hash } = await varied(1000)
+    cache.put(hash, bytes)
+    await cache.idle()
+    await rm(fileOf(hash))
+    expect(await cache.frameSlice(hash, 0, 10)).toBeNull()
+    expect(cache.has(hash)).toBe(false)
+  })
+
+  it('gives null for part of a frame whose file comes short, and lets it go', async () => {
+    const cache = open(10_000)
+    await cache.ready()
+    const { bytes, hash } = await varied(1000)
+    cache.put(hash, bytes)
+    await cache.idle()
+    await writeFile(fileOf(hash), bytes.subarray(0, 600))
+    // The first 500 bytes are all there; the rest of the frame isn't.
+    expect(await cache.frameSlice(hash, 400, 500)).toBeNull()
+    expect(cache.has(hash)).toBe(false)
+    expect(await cache.frameSlice(hash, 0, 10)).toBeNull()
+  })
+
+  it('gives null for part of a frame it never kept', async () => {
+    const cache = open(10_000)
+    await cache.ready()
+    const { hash } = await varied(1000)
+    expect(await cache.frameSlice(hash, 0, 10)).toBeNull()
+  })
+
+  it('lets a frame kept whole go when told to', async () => {
+    const cache = open(10_000)
+    await cache.ready()
+    const { bytes, hash } = await varied(1000)
+    cache.put(hash, bytes)
+    await cache.idle()
+    cache.forget(hash)
+    expect(cache.has(hash)).toBe(false)
+    expect(await cache.frameSlice(hash, 0, 10)).toBeNull()
+    await vi.waitFor(async () => {
+      expect(await files()).toEqual([])
+    })
   })
 })
 
