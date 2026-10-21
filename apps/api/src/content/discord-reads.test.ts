@@ -1036,6 +1036,26 @@ describe('reading from Discord', () => {
       Buffer.from(session.bytes.subarray(from, from + 100_000)),
     )
     expect(discord.cdnRequests).toBe(1 + n)
+
+    // The stream session's timeline says what was read ahead: each chunk the window fetched, once.
+    let ahead: { type: string; from: number; bytes: number; ms: number; outcome: string }[] = []
+    await vi.waitFor(async () => {
+      await app.streamSessions.flush()
+      const { rows } = await app.db.execute<{
+        events: { type: string; from: number; bytes: number; ms: number; outcome: string }[]
+      }>(sql`
+        SELECT b.events FROM timeline_batches b JOIN timelines t ON t.id = b.timeline_id
+        WHERE t.kind = 'stream' AND t.play_id = ${play} ORDER BY b.seq`)
+      ahead = rows.flatMap((row) => row.events).filter((event) => event.type === 'ahead')
+      expect(ahead).toHaveLength(n)
+    })
+    expect(ahead.map((event) => event.from).sort((a, b) => a - b)).toEqual(
+      Array.from({ length: n }, (_, at) => (at + 1) * chunkSize),
+    )
+    for (const event of ahead) {
+      expect(event).toMatchObject({ bytes: chunkSize, outcome: 'fetched' })
+      expect(event.ms).toBeGreaterThanOrEqual(0)
+    }
   })
 
   it('reads nothing ahead of a download that isn’t audio or video', async () => {

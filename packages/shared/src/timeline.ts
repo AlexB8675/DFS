@@ -281,5 +281,18 @@ export interface ServedEvent {
   gapMs: number | null
 }
 
+/** The server read a chunk of the file ahead of the stream into its frame cache (§6.2). */
+export interface AheadEvent {
+  type: 'ahead'
+  t: number
+  /** The chunk's first byte in the file. */
+  from: number
+  /** Its plaintext bytes. */
+  bytes: number
+  /** From when the fetch began until it ended. */
+  ms: number
+  outcome: 'fetched' | 'failed' | 'busy'
+}
+
 /** An event of a stream session's own log: the server writes `invalid: 0`. */
-export type StreamEvent = ServedEvent | Extract<TimelineEvent, { type: 'dropped' }>
+export type StreamEvent = ServedEvent | AheadEvent | Extract<TimelineEvent, { type: 'dropped' }>

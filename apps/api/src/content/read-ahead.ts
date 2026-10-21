@@ -231,6 +231,7 @@ export class ReadAheads {
     index: number,
     signal: AbortSignal,
   ) => Promise<PrefetchOutcome>
+  readonly #note: ((sessionId: string, fetch: AheadFetch) => void) | undefined
   readonly #now: () => number
   readonly #windows = new Map<string, Followed>()
   #stopped = false
@@ -241,9 +242,12 @@ export class ReadAheads {
       index: number,
       signal: AbortSignal,
     ) => Promise<PrefetchOutcome>
+    /** Told of each fetch that ends, with the ID of the session whose window made it, for its log (§16). */
+    note?: (sessionId: string, fetch: AheadFetch) => void
     now?: () => number
   }) {
     this.#prefetch = options.prefetch
+    this.#note = options.note
     this.#now = options.now ?? (() => performance.now())
   }
 
@@ -275,6 +279,9 @@ export class ReadAheads {
         chunkSize: version.chunk_size,
         chunkCount: version.chunk_count,
         prefetch: (index, signal) => this.#prefetch(version, index, signal),
+        onFetched: (fetch) => {
+          this.#note?.(sessionId, fetch)
+        },
         now: this.#now,
       })
       // A read that begins as the API closes gets a window that fetches nothing.

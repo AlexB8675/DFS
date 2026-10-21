@@ -414,6 +414,39 @@ describe('ReadAheads', () => {
     expect(calls[2]?.version).toBe(second)
   })
 
+  it('tells the session of each fetch ahead that ends', async () => {
+    const clock = { now: 1000 }
+    const noted: [string, AheadFetch][] = []
+    const settles: ((outcome: PrefetchOutcome) => void)[] = []
+    const reads = new ReadAheads({
+      prefetch: () =>
+        new Promise<PrefetchOutcome>((resolve) => {
+          settles.push(resolve)
+        }),
+      note: (sessionId, fetch) => {
+        noted.push([sessionId, fetch])
+      },
+      now: () => clock.now,
+    })
+    // Two sessions, each with its own window, which tell their own IDs.
+    reads.follow('s', film('v1')).ahead.reached(0, 2 * MiB)
+    reads.follow('t', film('v2')).ahead.reached(0, 2 * MiB)
+    expect(settles).toHaveLength(4)
+
+    clock.now += 40
+    settles[0]?.('fetched')
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(noted).toEqual([['s', { from: 2 * MiB, bytes: MiB, ms: 40, outcome: 'fetched' }]])
+
+    clock.now += 10
+    settles[2]?.('failed')
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(noted[1]).toEqual(['t', { from: 2 * MiB, bytes: MiB, ms: 50, outcome: 'failed' }])
+    expect(noted).toHaveLength(2)
+  })
+
   it('forgets a window idle past two minutes, once its reads are over', () => {
     const { reads, clock } = windows()
     // Reached, but not enough to read ahead: nothing under way.

@@ -603,6 +603,113 @@ describe('stream sessions (§6.2, §16)', () => {
     expect(firstKept?.t).toBe(extra * 2)
   })
 
+  it('notes a fetch ahead in its session’s timeline', async () => {
+    const harness = setup()
+    const { clock, calls, sessions } = harness
+    const id = serve(harness, { playId: 'play-1' }, 1000, 0)
+    clock.now += 3000
+    // The milliseconds are kept whole, as a read's are.
+    sessions.note(id, { from: 20_971_520, bytes: 20_971_520, ms: 640.4, outcome: 'fetched' })
+    // A session that is not known writes nothing, and makes none.
+    sessions.note('no-such-session', { from: 0, bytes: 1, ms: 1, outcome: 'failed' })
+    expect(sessions.live).toBe(1)
+
+    await sessions.flush()
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.id).toBe(id)
+    expect(calls[0]?.batch.events).toMatchObject([
+      { type: 'served', t: 0 },
+      {
+        type: 'ahead',
+        t: 3000,
+        from: 20_971_520,
+        bytes: 20_971_520,
+        ms: 640,
+        outcome: 'fetched',
+      },
+    ])
+  })
+
+  it('finds each session by its ID, and takes a note for it only', async () => {
+    const harness = setup()
+    const { clock, calls, sessions } = harness
+    const first = serve(harness, { playId: 'play-1' }, 1000, 0)
+    clock.now += 100
+    const second = serve(harness, { playId: 'play-2' }, 1000, 0)
+    clock.now += 50
+    sessions.note(second, { from: 0, bytes: 10, ms: 2, outcome: 'busy' })
+    sessions.note(first, { from: 10, bytes: 10, ms: 3, outcome: 'failed' })
+
+    await sessions.flush()
+    const ahead = (id: string) =>
+      calls
+        .filter((call) => call.id === id)
+        .flatMap((call) => call.batch.events)
+        .filter((event) => event.type === 'ahead')
+    expect(ahead(first)).toMatchObject([{ t: 150, from: 10, outcome: 'failed' }])
+    expect(ahead(second)).toMatchObject([{ t: 50, from: 0, outcome: 'busy' }])
+  })
+
+  it('takes no note for a session that has ended or stopped', async () => {
+    const harness = setup()
+    const { behaviour, clock, calls, sessions } = harness
+    const note = { from: 0, bytes: 10, ms: 2, outcome: 'fetched' } as const
+
+    // Ended: idle past two minutes and written, so forgotten.
+    const ended = serve(harness, { playId: 'play-1' })
+    clock.now += SESSION_IDLE_MS + 1
+    await sessions.flush()
+    expect(sessions.live).toBe(0)
+    expect(calls).toHaveLength(1)
+    sessions.note(ended, note)
+    await sessions.flush()
+    expect(calls).toHaveLength(1)
+
+    // Stopped: the store refused it, so it collects nothing more.
+    behaviour.outcome = 'full'
+    const stopped = serve(harness, { playId: 'play-2' })
+    await sessions.flush()
+    expect(calls).toHaveLength(2)
+    behaviour.outcome = 'stored'
+    sessions.note(stopped, note)
+    await sessions.flush()
+    expect(calls).toHaveLength(2)
+  })
+
+  it('takes no note once the sessions are stopped', async () => {
+    vi.useFakeTimers()
+    const harness = setup()
+    const { calls, sessions } = harness
+    const running = sessions.start()
+    const id = serve(harness, { playId: 'play-1' })
+    await running.stop()
+    expect(calls).toHaveLength(1)
+    sessions.note(id, { from: 0, bytes: 10, ms: 2, outcome: 'fetched' })
+    await sessions.flush()
+    expect(calls).toHaveLength(1)
+  })
+
+  it('drops the oldest events past the pending limit whether they were reads or fetches ahead', async () => {
+    const harness = setup()
+    const { clock, calls, sessions } = harness
+    const id = serve(harness, { playId: 'play-1' }, 1000, 0)
+    const extra = 4
+    for (let i = 0; i < MAX_PENDING_EVENTS - 1 + extra; i++) {
+      clock.now += 1
+      sessions.note(id, { from: i * 1000, bytes: 1000, ms: 1, outcome: 'fetched' })
+    }
+
+    await sessions.flush()
+    const events = calls.flatMap((call) => call.batch.events)
+    expect(events[0]).toMatchObject({ type: 'dropped', events: extra })
+    const kept = events.filter((event) => event.type !== 'dropped')
+    expect(kept).toHaveLength(MAX_PENDING_EVENTS)
+    // The read and the first fetches went; the newest stayed, in order.
+    expect(kept.every((event) => event.type === 'ahead')).toBe(true)
+    expect(kept[0]).toMatchObject({ from: (extra - 1) * 1000 })
+    expect(kept.at(-1)).toMatchObject({ from: (MAX_PENDING_EVENTS - 2 + extra) * 1000 })
+  })
+
   it('forgets a session idle past two minutes once it is written', async () => {
     const harness = setup()
     serve(harness)

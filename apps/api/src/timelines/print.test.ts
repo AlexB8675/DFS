@@ -413,6 +413,46 @@ describe('printTimeline', () => {
     expect(text).toMatch(/^\+2\.900s server dropped events=3 invalid=0$/m)
   })
 
+  it('prints a fetch ahead', () => {
+    const ahead = {
+      type: 'ahead',
+      t: 1200,
+      from: 20_971_520,
+      bytes: 20_971_520,
+      ms: 640,
+      outcome: 'fetched',
+    }
+    const text = printTimeline(withSession([ahead]))
+    // On the play's clock, with the label a session's events have.
+    expect(text).toMatch(/^\+3\.200s server ahead at=20\.0MiB 20\.0MiB 640ms fetched$/m)
+    // Alone, on a stream session's own clock: no label.
+    const alone = printTimeline({
+      timeline: row({ id: SESSION_ID, kind: 'stream', via: 'stream', batches: 1 }),
+      batches: [batch(0, [{ ...ahead, bytes: 300_000, outcome: 'busy' }], { sentMs: null })],
+      sessions: [],
+    })
+    expect(alone).toMatch(/^\+1\.200s ahead at=20\.0MiB 293\.0KiB 640ms busy$/m)
+  })
+
+  it('prints a fetch ahead with a field missing or wrong as the generic line', () => {
+    const ahead = { type: 'ahead', t: 1200, from: 1024, bytes: 2048, ms: 640, outcome: 'fetched' }
+    const lineOf = (event: unknown) =>
+      lines(printTimeline(withSession([event]))).find((l) => l.includes('server ahead'))
+    const noMs = { type: 'ahead', t: 1200, from: 1024, bytes: 2048, outcome: 'fetched' }
+    expect(lineOf(noMs)).toBe('+3.200s server ahead from=1024 bytes=2048 outcome=fetched')
+    expect(lineOf({ ...ahead, bytes: '2048' })).toBe(
+      '+3.200s server ahead from=1024 bytes=2048 ms=640 outcome=fetched',
+    )
+    expect(lineOf({ ...ahead, from: null })).toBe(
+      '+3.200s server ahead from=null bytes=2048 ms=640 outcome=fetched',
+    )
+    expect(lineOf({ ...ahead, outcome: 'lost' })).toBe(
+      '+3.200s server ahead from=1024 bytes=2048 ms=640 outcome=lost',
+    )
+    // What is valid has the figures, not the keys.
+    expect(lineOf(ahead)).toBe('+3.200s server ahead at=1.0KiB 2.0KiB 640ms fetched')
+  })
+
   it('says when there are no events', () => {
     const text = printTimeline({
       timeline: row({ batches: 0, bytes: 0 }),

@@ -1,5 +1,5 @@
 import type { BatchRow, TimelineRead, TimelineRow } from '@dfs/db'
-import type { ServedEvent } from '@dfs/shared'
+import type { AheadEvent, ServedEvent } from '@dfs/shared'
 
 // What `dfs timelines` and `dfs timeline` print (DESIGN.md §16): the play
 // timelines and stream sessions the API keeps, as text an admin reads. Pure,
@@ -157,6 +157,17 @@ function asServed(record: Record<string, unknown>): ServedEvent | null {
     : null
 }
 
+/** The event as an `ahead` one, if it has every field the printer reads. */
+function asAhead(record: Record<string, unknown>): AheadEvent | null {
+  const valid =
+    record.type === 'ahead' &&
+    isNumber(record.from) &&
+    isNumber(record.bytes) &&
+    isNumber(record.ms) &&
+    (record.outcome === 'fetched' || record.outcome === 'failed' || record.outcome === 'busy')
+  return valid ? (record as unknown as AheadEvent) : null
+}
+
 /** A read the server answered, on one line; `address` only where it is new to the session. */
 function servedFields(read: ServedEvent, showAddress: boolean): string {
   const parts = [
@@ -240,6 +251,10 @@ function eventLines(entries: readonly Entry[]): string[] {
       const showAddress = lastAddress.get(entry.source) !== read.address
       lastAddress.set(entry.source, read.address)
       return `${clock(entry.at)} ${entry.label}${type} ${servedFields(read, showAddress)}`
+    }
+    const ahead = asAhead(record)
+    if (ahead) {
+      return `${clock(entry.at)} ${entry.label}${type} at=${size(ahead.from)} ${size(ahead.bytes)} ${String(ahead.ms)}ms ${ahead.outcome}`
     }
     const fields = Object.entries(record)
       .filter(([key]) => key !== 'type' && key !== 't')

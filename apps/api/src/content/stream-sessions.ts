@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import type { AppendOutcome, TimelineOwner } from '@dfs/db'
-import { TIMELINE_MAX_EVENTS, type ServedEvent, type StreamEvent } from '@dfs/shared'
+import {
+  TIMELINE_MAX_EVENTS,
+  type AheadEvent,
+  type ServedEvent,
+  type StreamEvent,
+} from '@dfs/shared'
 import { addressKey, RateLimiter } from '../auth/rate-limit.ts'
 import type { ReadSources } from './reader.ts'
 
@@ -11,7 +16,9 @@ import type { ReadSources } from './reader.ts'
 // `SESSION_IDLE_MS` without one. Each read becomes a `served` event when its
 // response closes, and what a session has collected is written to the
 // timeline store every `FLUSH_EVERY_MS` and when the API stops, so a slow play
-// can be read afterwards from the server's side as well as the page's. The
+// can be read afterwards from the server's side as well as the page's; so does
+// each chunk read ahead of the stream (§6.2), which its window reports through
+// `note` as an `ahead` event. The
 // content routes of links and stream links have no request limiter, so how many
 // sessions are held, and how many one reader may begin, are bounded here: past
 // either, a read is served as always but not logged.
@@ -82,6 +89,9 @@ interface Batch {
   events: StreamEvent[]
 }
 
+/** What a session collects between flushes: its reads, and the chunks read ahead of them. */
+type Pending = ServedEvent | AheadEvent
+
 interface Session {
   id: string
   key: string
@@ -98,7 +108,7 @@ interface Session {
   /** The last open or close. */
   lastActivity: number
   /** Events not in a batch yet. */
-  pending: ServedEvent[]
+  pending: Pending[]
   /** How many of the oldest `pending` dropped; the next batch begins by saying so. */
   dropped: number
   nextSeq: number
@@ -117,6 +127,8 @@ export class StreamSessions {
   readonly #sessions = new Set<Session>()
   /** The latest session of each key, which a request may join. */
   readonly #byKey = new Map<string, Session>()
+  /** Every session in `#sessions`, by ID, for the notes the read-ahead sends. */
+  readonly #byId = new Map<string, Session>()
   readonly #maxLive: number
   readonly #newPerReader: RateLimiter
   /** Reads served without a session since the last flush, because of the two limits above. */
@@ -230,13 +242,28 @@ export class StreamSessions {
         rewindBytes,
         gapMs,
       })
-      if (session.pending.length > MAX_PENDING_EVENTS) {
-        const excess = session.pending.length - MAX_PENDING_EVENTS
-        session.pending.splice(0, excess)
-        session.dropped += excess
-      }
+      this.#capPending(session)
     }
     return { sessionId: session.id, close }
+  }
+
+  /**
+   * Records a chunk the read-ahead fetched for the session, `t` after its start
+   * as a read's is, under the same cap. A session that is unknown, ended or
+   * stopped takes nothing: it has no timeline to write it to.
+   */
+  note(sessionId: string, fetch: Omit<AheadEvent, 't' | 'type'>): void {
+    const session = this.#byId.get(sessionId)
+    if (!session || session.stopped) return
+    session.pending.push({
+      type: 'ahead',
+      t: Math.round(this.#now() - session.startedAt),
+      from: fetch.from,
+      bytes: fetch.bytes,
+      ms: Math.round(fetch.ms),
+      outcome: fetch.outcome,
+    })
+    this.#capPending(session)
   }
 
   /** Writes what each session collected; forgets sessions idle past `SESSION_IDLE_MS`. */
@@ -277,6 +304,7 @@ export class StreamSessions {
         await this.#flushQuietly()
         this.#sessions.clear()
         this.#byKey.clear()
+        this.#byId.clear()
       },
     }
   }
@@ -347,7 +375,17 @@ export class StreamSessions {
     }
     this.#sessions.add(session)
     this.#byKey.set(key, session)
+    this.#byId.set(session.id, session)
     return session
+  }
+
+  /** Drops the oldest of a session's pending events past `MAX_PENDING_EVENTS`, counted. */
+  #capPending(session: Session): void {
+    if (session.pending.length > MAX_PENDING_EVENTS) {
+      const excess = session.pending.length - MAX_PENDING_EVENTS
+      session.pending.splice(0, excess)
+      session.dropped += excess
+    }
   }
 
   #remember(session: Session, served: Served): void {
@@ -430,6 +468,7 @@ export class StreamSessions {
       return
     }
     this.#sessions.delete(session)
+    this.#byId.delete(session.id)
     if (this.#byKey.get(session.key) === session) this.#byKey.delete(session.key)
   }
 }

@@ -243,6 +243,9 @@ export async function buildApp({
     'readAheads',
     new ReadAheads({
       prefetch: (version, index, signal) => prefetchChunk(app, version, index, signal),
+      note: (sessionId, fetch) => {
+        app.streamSessions.note(sessionId, fetch)
+      },
     }),
   )
   app.decorate(
