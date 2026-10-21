@@ -80,7 +80,8 @@ export function sendFile(
         () => servedResult(stats, false),
       )
     : null
-  // Only a read that began a stream session reads ahead: the sessions' bounds bound it too (§6.2).
+  // Only a read that has a stream session, joining one as much as beginning it, reads ahead:
+  // the sessions' bounds bound it too (§6.2).
   // Its window is kept while the read is open, however long the client leaves it unread.
   const readAhead = opened?.sessionId ? app.readAheads.follow(opened.sessionId, file) : null
   const ahead = readAhead?.ahead ?? null
