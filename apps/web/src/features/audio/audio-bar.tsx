@@ -25,6 +25,7 @@ import {
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet'
 import { Spinner } from '@/components/ui/spinner'
 import { usePlayerPreferences } from '@/features/player/preferences'
+import { seekBarTime, type SeekDrag } from '@/features/player/seek-position'
 import { Slider } from '@/features/player/slider'
 import { formatPlayTime, loadedUntil } from '@/features/player/time'
 import { useMediaState } from '@/features/player/use-media-state'
@@ -96,6 +97,8 @@ function usePlayState(track: QueuedTrack) {
   const state = useMediaState(loaded ? audio : null)
   const known = loaded && Number.isFinite(state.duration) && state.duration > 0
   return {
+    /** The element's state as read last, which the seek bar holds a let-go drag against. */
+    media: state,
     // Before the first Play after a reload, where it was.
     time: loaded ? state.currentTime : savedPosition(track.key),
     duration: known ? state.duration : (track.durationMs ?? 0) / 1000,
@@ -417,10 +420,13 @@ function Transport({
 
 /** The seek bar, with the time and the length on either side. */
 function Seek({ track, className }: { track: QueuedTrack; className?: string }) {
-  const { time, duration, loaded } = usePlayState(track)
-  /** Where a drag would go, shown while it lasts. */
-  const [dragTo, setDragTo] = useState<number | null>(null)
-  const shown = dragTo ?? time
+  const { media, time, duration, loaded } = usePlayState(track)
+  /**
+   * Where a drag would go, shown while it lasts and held where it was let go
+   * until the track's state changes, since it still says the old time.
+   */
+  const [drag, setDrag] = useState<SeekDrag | null>(null)
+  const shown = seekBarTime(drag, media, time)
   return (
     <div
       className={cn(
@@ -437,10 +443,10 @@ function Seek({ track, className }: { track: QueuedTrack; className?: string }) 
         step={duration > 0 ? 5 / duration : 0.01}
         valueText={`${formatPlayTime(shown, duration)} of ${formatPlayTime(duration)}`}
         onChange={(value) => {
-          setDragTo(value * duration)
+          setDrag({ time: value * duration, letGoAt: null })
         }}
         onCommit={(value) => {
-          setDragTo(null)
+          setDrag({ time: value * duration, letGoAt: media })
           if (duration > 0) seekTo(value * duration)
         }}
         under={

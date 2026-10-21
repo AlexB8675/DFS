@@ -40,4 +40,16 @@ describe('seekBarTime', () => {
   it("shows the video's time with no drag", () => {
     expect(seekBarTime(null, stateAt(42))).toBe(42)
   })
+
+  it('shows the time it is given instead of the state when no drag holds', () => {
+    // The audio bar's time is a saved position before the track has loaded.
+    expect(seekBarTime(null, stateAt(0), 95)).toBe(95)
+    const old = stateAt(10)
+    const drag = { time: 300, letGoAt: old }
+    // Held where it was let go until the state changes, whatever time it is given.
+    expect(seekBarTime({ time: 300, letGoAt: null }, old, 95)).toBe(300)
+    expect(seekBarTime(drag, old, 95)).toBe(300)
+    // Then the given time takes over, not the state's.
+    expect(seekBarTime(drag, stateAt(298), 297)).toBe(297)
+  })
 })
