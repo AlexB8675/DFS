@@ -1118,6 +1118,33 @@ describe('reading from Discord', () => {
     expect(discord.cdnRanges).toHaveLength(0)
   })
 
+  it('answers failed for a chunk fetched ahead that the cache then didn’t keep', async () => {
+    const session = await storedFile('Ahead dropped', 1)
+    const file = await downloadableFile(app.db, session.nodeId)
+    const cache = app.frameCache
+    if (!cache) throw new Error('No frame cache.')
+    discord.cdnRequests = 0
+    // The cache takes the frame it is given and keeps none, as when its writes are backed up.
+    const info = vi.spyOn(app.log, 'info')
+    const put = vi.spyOn(cache, 'put').mockImplementation(() => undefined)
+    try {
+      expect(await prefetchChunk(app, file, 0, new AbortController().signal)).toBe('failed')
+      expect(discord.cdnRequests).toBe(1)
+      expect(info).toHaveBeenCalledWith(
+        expect.objectContaining({ versionId: session.versionId, chunk: 0 }),
+        'a chunk fetched ahead wasn’t kept',
+      )
+    } finally {
+      put.mockRestore()
+      info.mockRestore()
+    }
+    await cache.idle()
+    expect(cache.has(await frameOf(session.versionId, 0))).toBe(false)
+    // Fetched again by the next that asks, as the reader would.
+    expect(await prefetchChunk(app, file, 0, new AbortController().signal)).toBe('fetched')
+    expect(discord.cdnRequests).toBe(2)
+  })
+
   it('gives up a chunk fetched ahead when its signal aborts, caching nothing', async () => {
     const session = await storedFile('Ahead aborted', 1)
     const file = await downloadableFile(app.db, session.nodeId)

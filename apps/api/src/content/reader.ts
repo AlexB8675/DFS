@@ -506,14 +506,15 @@ export async function warmVideo(app: FastifyInstance, version: ReadableVersion):
 
 /**
  * What fetching a chunk ahead came to (§6.2). `fetched`: its own fetches have
- * ended. `kept`: the cache holds the frame, whole or every segment of it:
+ * ended and the cache has what they fetched. `kept`: the cache holds the frame, whole or every segment of it:
  * nothing was fetched. `shared`: nothing was fetched either, but some of what
  * the cache lacks is being fetched by other reads, which may be a client's, and
  * a seek or a reconnect cancels that and caches nothing, so the chunk is worth
  * trying again. `skipped`: nothing to fetch, with no frame cache, a store that
  * can't stream, or a chunk that isn't stored in segments (staged, still
  * syncing, or format 1). `busy`: no room for the frame in the read budget or
- * the cache. `failed`: a fetch failed or was aborted.
+ * the cache. `failed`: a fetch failed or was aborted, or the cache didn't keep
+ * what was fetched.
  */
 export type PrefetchOutcome = 'fetched' | 'kept' | 'shared' | 'skipped' | 'busy' | 'failed'
 
@@ -573,27 +574,37 @@ export async function prefetchChunk(
       app.keys.unwrapDek(version.wrapped_dek, version.key_id, uuidBytes(versionId)),
     )
     const fetch: SegmentFetch = { app, versionId, key, chunk, layout, signal, reader: false }
-    const sources = [...planSegments(fetch, 0, last, false).values()]
-    const own = sources.flatMap((source) => (source.kind === 'fetch' ? [source] : []))
+    const planned = [...planSegments(fetch, 0, last, false)]
+    const own = planned.flatMap(([at, source]) => (source.kind === 'fetch' ? [{ at, source }] : []))
     // Nothing of its own to fetch: all of it kept, or some of it fetched by others meanwhile,
     // which may be a client's read, cancelled by a seek or a reconnect before it caches anything.
     if (own.length === 0) {
-      return sources.some((source) => source.kind === 'shared') ? 'shared' : 'kept'
+      return planned.some(([, source]) => source.kind === 'shared') ? 'shared' : 'kept'
     }
     // The runs end once the frame is the cache's, which is later than their last segment.
-    await Promise.all(own.map((source) => source.ended))
-    const settled = await Promise.allSettled(own.map((source) => source.plaintext))
+    await Promise.all(own.map(({ source }) => source.ended))
+    const settled = await Promise.allSettled(own.map(({ source }) => source.plaintext))
     const failure = settled.find((result): result is PromiseRejectedResult => {
       return result.status === 'rejected'
     })
-    if (!failure) return 'fetched'
-    if (!signal.aborted) {
-      app.log.info(
-        { err: failure.reason, versionId, chunk: index },
-        'could not fetch a chunk ahead',
-      )
+    if (failure) {
+      if (!signal.aborted) {
+        app.log.info(
+          { err: failure.reason, versionId, chunk: index },
+          'could not fetch a chunk ahead',
+        )
+      }
+      return 'failed'
     }
-    return 'failed'
+    // What it fetched is the cache's now, whole or by segment, unless the cache had no room
+    // when it was handed over: then the reader fetches it again from Discord, which a log of
+    // fetches ahead mustn't call a success. (What it leaned on is another read's business.)
+    const frame = chunk.frame_sha256
+    if (!own.every(({ at }) => cache.has(frame) || cache.hasSegment(frame, at))) {
+      app.log.info({ versionId, chunk: index }, 'a chunk fetched ahead wasn’t kept')
+      return 'failed'
+    }
+    return 'fetched'
   } catch (error) {
     if (!signal.aborted) {
       app.log.info({ err: error, versionId, chunk: index }, 'could not fetch a chunk ahead')
