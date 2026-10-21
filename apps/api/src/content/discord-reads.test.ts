@@ -1238,6 +1238,58 @@ describe('reading from Discord', () => {
     }
   })
 
+  it('fetches each chunk of a played video once, with the window and the read’s own read-ahead together', async () => {
+    const { chunkSize } = app.config.sizes
+    const chunks = 8
+    const session = await storedFilm('Film once', chunks * chunkSize)
+    discord.cdnRequests = 0
+    // An open-ended read of a play, taken to the end: its own read-ahead and the window both
+    // want the chunks after the one it is in, from the same moment on.
+    const response = await client.fetch(
+      'GET',
+      `/files/${session.nodeId}/content?play=${crypto.randomUUID()}`,
+      { headers: { Range: 'bytes=0-' } },
+    )
+    expect(Buffer.from(await response.arrayBuffer()).equals(Buffer.from(session.bytes))).toBe(true)
+    // Whatever the window still has under way has ended, and every chunk is the cache's, whole.
+    await vi.waitFor(
+      async () => {
+        await app.frameCache?.idle()
+        for (let index = 0; index < chunks; index++) {
+          expect(app.frameCache?.has(await frameOf(session.versionId, index))).toBe(true)
+        }
+      },
+      { timeout: 5000 },
+    )
+    await setTimeout(300)
+    expect(discord.cdnRequests).toBe(chunks)
+  })
+
+  it('starts no fetch ahead for a video read left before it sent 2 MiB', async () => {
+    const { chunkSize } = app.config.sizes
+    const layout = new ChunkFrameLayout(chunkSize)
+    const session = await storedFilm('Film left', 8 * chunkSize)
+    discord.cdnRequests = 0
+    // Two segments of the first chunk come, 512 KiB, and its CDN body holds.
+    discord.holdNextBodyAt = 14 + 2 * layout.segmentLength(0)
+    try {
+      const response = await client.fetch(
+        'GET',
+        `/files/${session.nodeId}/content?play=${crypto.randomUUID()}`,
+        { headers: { Range: 'bytes=0-' } },
+      )
+      const body = response.body?.getReader()
+      if (!body) throw new Error('No body.')
+      await receive(body, 2 * 256 * 1024)
+      await body.cancel()
+    } finally {
+      discord.releaseCdn()
+    }
+    // The read was left too soon for its own read-ahead and for the window: nothing but its own chunk.
+    await setTimeout(500)
+    expect(discord.cdnRequests).toBe(1)
+  })
+
   it('reads nothing ahead of a download that isn’t audio or video', async () => {
     const session = await storedFile('Download ahead', 8)
     discord.cdnRequests = 0
