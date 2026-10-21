@@ -17,7 +17,7 @@ import { buildApp } from '../app.ts'
 import { downloadableFile } from '../routes/content.ts'
 import { testConfig } from '../testing/config.ts'
 import { seedUser } from '../testing/seed.ts'
-import { readSources, readVersion } from './reader.ts'
+import { prefetchChunk, readSources, readVersion } from './reader.ts'
 
 // Reading back from Discord (DESIGN.md §6.2), over real HTTP: a ZIP of a
 // folder of small files costs one CDN request per pack, not one per file, and
@@ -706,6 +706,108 @@ describe('reading from Discord', () => {
       Buffer.from(bytes.subarray(size - 3_000_000, size - 2_900_000 + 1)),
     )
     expect(discord.cdnRanges).toEqual([])
+  })
+
+  /** The SHA-256 of the frame of chunk `idx` of a version, which is what the cache keeps it under. */
+  async function frameOf(versionId: string, idx: number): Promise<Buffer> {
+    const [chunk] = (
+      await app.db.execute<{ frame_sha256: Buffer }>(sql`
+        SELECT frame_sha256 FROM chunks WHERE version_id = ${versionId} AND idx = ${idx}`)
+    ).rows
+    if (!chunk) throw new Error('No chunk.')
+    return chunk.frame_sha256
+  }
+
+  it('fetches a chunk ahead whole into the cache, once', async () => {
+    const session = await storedFile('Ahead', 2)
+    const file = await downloadableFile(app.db, session.nodeId)
+    discord.cdnRanges.length = 0
+    expect(await prefetchChunk(app, file, 1, new AbortController().signal)).toBe('fetched')
+    expect(discord.cdnRanges).toHaveLength(1)
+    await app.frameCache?.idle()
+    expect(app.frameCache?.has(await frameOf(session.versionId, 1))).toBe(true)
+    expect(await prefetchChunk(app, file, 1, new AbortController().signal)).toBe('kept')
+    expect(discord.cdnRanges).toHaveLength(1)
+  })
+
+  it('two fetches ahead of one chunk at once fetch it once', async () => {
+    const session = await storedFile('Ahead twice', 1)
+    const file = await downloadableFile(app.db, session.nodeId)
+    discord.cdnRanges.length = 0
+    const signal = new AbortController().signal
+    const [first, second] = await Promise.all([
+      prefetchChunk(app, file, 0, signal),
+      prefetchChunk(app, file, 0, signal),
+    ])
+    expect([first, second].sort()).toEqual(['fetched', 'kept'])
+    expect(discord.cdnRanges).toHaveLength(1)
+  })
+
+  it('fetches nothing ahead for a chunk still syncing, or without room in the read budget', async () => {
+    const signal = new AbortController().signal
+    const session = await storedFile('Ahead without room', 1)
+    const stored = await downloadableFile(app.db, session.nodeId)
+    // An upload not settled, which `storedFile` would do: its chunk is in staging.
+    const folder = await createFolder(client, (await workspace(client)).id, 'Ahead syncing')
+    const syncing = await uploadFile(
+      client,
+      folder.id,
+      'syncing.bin',
+      new Uint8Array(300_000).map((_, i) => i % 233),
+    )
+    const staged = await downloadableFile(app.db, syncing.nodeId)
+    discord.cdnRanges.length = 0
+    expect(await prefetchChunk(app, staged, 0, signal)).toBe('skipped')
+    const giveBack = app.readBudget?.tryTake(256 * 1024 * 1024)
+    try {
+      expect(await prefetchChunk(app, stored, 0, signal)).toBe('busy')
+    } finally {
+      giveBack?.()
+    }
+    expect(discord.cdnRanges).toHaveLength(0)
+    // Room again, the same chunk is fetched.
+    expect(await prefetchChunk(app, stored, 0, signal)).toBe('fetched')
+  })
+
+  it('fetches nothing ahead the cache wouldn’t keep', async () => {
+    const session = await storedFile('Ahead unkept', 1)
+    const stored = await downloadableFile(app.db, session.nodeId)
+    discord.cdnRanges.length = 0
+    if (!app.frameCache) throw new Error('No frame cache.')
+    const canKeep = vi.spyOn(app.frameCache, 'canKeep').mockReturnValue(false)
+    try {
+      expect(await prefetchChunk(app, stored, 0, new AbortController().signal)).toBe('busy')
+    } finally {
+      canKeep.mockRestore()
+    }
+    expect(discord.cdnRanges).toHaveLength(0)
+  })
+
+  it('gives up a chunk fetched ahead when its signal aborts, caching nothing', async () => {
+    const session = await storedFile('Ahead aborted', 1)
+    const file = await downloadableFile(app.db, session.nodeId)
+    discord.cdnRequests = 0
+    discord.cdnAborted = 0
+    discord.holdCdnFrom = 1
+    try {
+      const controller = new AbortController()
+      const fetching = prefetchChunk(app, file, 0, controller.signal)
+      await vi.waitFor(() => {
+        expect(discord.cdnRequests).toBe(1)
+      })
+      controller.abort()
+      expect(await fetching).toBe('failed')
+      await vi.waitFor(() => {
+        expect(discord.cdnAborted).toBe(1)
+      })
+    } finally {
+      discord.holdCdnFrom = Infinity
+      discord.releaseCdn()
+    }
+    await app.frameCache?.idle()
+    expect(app.frameCache?.has(await frameOf(session.versionId, 0))).toBe(false)
+    // Its read budget came back: the chunk is fetched ahead again.
+    expect(await prefetchChunk(app, file, 0, new AbortController().signal)).toBe('fetched')
   })
 
   /** Reads bytes `from` to `to` of a file straight from the reader, with what it counted by source. */

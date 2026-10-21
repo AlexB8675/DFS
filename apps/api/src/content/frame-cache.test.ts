@@ -313,6 +313,27 @@ describe('part of a frame kept whole (§6.2)', () => {
   })
 })
 
+describe('FrameCache.canKeep', () => {
+  it('says whether it would keep a frame of a given size now', () => {
+    const cache = open(1024 * 1024)
+    expect(cache.canKeep(512 * 1024)).toBe(true)
+    expect(cache.canKeep(1024 * 1024)).toBe(true)
+    expect(cache.canKeep(2 * 1024 * 1024)).toBe(false)
+  })
+
+  it('says no while too much waits for the disk, and yes again once it is written', async () => {
+    const cache = open(1024 * 1024 * 1024)
+    const mebibyte = 1024 * 1024
+    const { bytes, hash } = await frame(7, 40 * mebibyte)
+    // Put at once, before the cache has found its folder: it waits for the disk.
+    cache.put(hash, bytes)
+    expect(cache.canKeep(24 * mebibyte)).toBe(true)
+    expect(cache.canKeep(24 * mebibyte + 1)).toBe(false)
+    await cache.idle()
+    expect(cache.canKeep(64 * mebibyte)).toBe(true)
+  })
+})
+
 describe('FrameCache.clear', () => {
   it('lets every frame go, and caches what is read after', async () => {
     const cache = open(10_000)

@@ -211,6 +211,16 @@ export class FrameCache {
     for (const segment of this.#segmentsOf.get(key) ?? []) this.#forget(segment)
   }
 
+  /**
+   * Whether a frame of `bytes` would be kept if put now: not larger than the
+   * cache, and not so much waiting for the disk that it would be skipped. For
+   * whoever would fetch a frame ahead of anyone reading it, and mustn't
+   * spend memory and bandwidth on one that is then thrown away.
+   */
+  canKeep(bytes: number): boolean {
+    return bytes <= this.#maxBytes && this.#writingBytes + bytes <= MAX_WRITING_BYTES
+  }
+
   /** Whether a segment of a frame is kept on its own, as far as the cache knows. */
   hasSegment(frameSha256: Uint8Array, index: number): boolean {
     const key = segmentKey(frameSha256, index)
@@ -301,9 +311,7 @@ export class FrameCache {
 
   /** Writes `bytes` under `key` in the background; `false` if too much waits for the disk. */
   #keep(key: string, bytes: Uint8Array): boolean {
-    if (bytes.length > this.#maxBytes || this.#writingBytes + bytes.length > MAX_WRITING_BYTES) {
-      return false
-    }
+    if (!this.canKeep(bytes.length)) return false
     this.#writing.set(key, bytes)
     this.#writingBytes += bytes.length
     const write = this.#write(key, bytes).finally(() => {

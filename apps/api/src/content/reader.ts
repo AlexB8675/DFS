@@ -476,6 +476,99 @@ export async function warmEnd(
 }
 
 /**
+ * What fetching a chunk ahead came to (§6.2). `fetched`: its own fetches have
+ * ended. `kept`: the cache holds the frame, whole or every segment of it, or
+ * other reads are fetching all that is missing: nothing was fetched. `skipped`:
+ * nothing to fetch, with no frame cache, a store that can't stream, or a chunk
+ * that isn't stored in segments (staged, still syncing, or format 1). `busy`:
+ * no room for the frame in the read budget or the cache. `failed`: a fetch
+ * failed or was aborted.
+ */
+export type PrefetchOutcome = 'fetched' | 'kept' | 'skipped' | 'busy' | 'failed'
+
+/**
+ * Fetches chunk `index` of a stored version whole into the frame cache, ahead
+ * of whoever will read it (a video's first chunk as its player opens, the
+ * chunks a stream is about to want). It takes the frame's size from the read
+ * budget until its fetches have ended and starts only if the cache would keep
+ * the frame, so memory and Discord's bandwidth never go on one that is then
+ * thrown away; what is kept already is left as it is, and what other reads
+ * are fetching is shared rather than fetched twice. Once `signal` aborts,
+ * what it fetches is given up on and nothing of it is cached. Resolves once
+ * the frame has been handed to the cache, and never rejects.
+ */
+export async function prefetchChunk(
+  app: FastifyInstance,
+  version: ReadableVersion,
+  index: number,
+  signal: AbortSignal,
+): Promise<PrefetchOutcome> {
+  const cache = app.frameCache
+  const { version_id: versionId } = version
+  if (!cache || !app.blobStore.stream || index < 0 || index >= version.chunk_count) {
+    return 'skipped'
+  }
+  let giveBack: () => void = NOTHING_TO_GIVE_BACK
+  try {
+    let chunk: ChunkLocation | undefined
+    for await (const found of chunksBetween(app, versionId, index, index)) {
+      chunk = found
+      break
+    }
+    if (!chunk || !streamable(app, chunk)) return 'skipped'
+    const layout = chunkFrameLayout(chunk.plain_size, chunk.frame_size)
+    if (!layout) return 'skipped'
+    const last = layout.segments - 1
+    if (
+      cache.has(chunk.frame_sha256) ||
+      Array.from({ length: layout.segments }, (_, i) => i).every((i) =>
+        cache.hasSegment(chunk.frame_sha256, i),
+      )
+    ) {
+      return 'kept'
+    }
+    if (!cache.canKeep(chunk.frame_size)) return 'busy'
+    // Given up on already: nothing is fetched.
+    signal.throwIfAborted()
+    if (app.readBudget) {
+      const taken = app.readBudget.tryTake(chunk.frame_size)
+      if (!taken) return 'busy'
+      giveBack = taken
+    }
+    const key = await app.dataKeys.get(versionId, () =>
+      app.keys.unwrapDek(version.wrapped_dek, version.key_id, uuidBytes(versionId)),
+    )
+    const fetch: SegmentFetch = { app, versionId, key, chunk, layout, signal, reader: false }
+    const own = [...planSegments(fetch, 0, last, false).values()].flatMap((source) =>
+      source.kind === 'fetch' ? [source] : [],
+    )
+    // All of it kept, or fetched by others meanwhile.
+    if (own.length === 0) return 'kept'
+    // The runs end once the frame is the cache's, which is later than their last segment.
+    await Promise.all(own.map((source) => source.ended))
+    const settled = await Promise.allSettled(own.map((source) => source.plaintext))
+    const failure = settled.find((result): result is PromiseRejectedResult => {
+      return result.status === 'rejected'
+    })
+    if (!failure) return 'fetched'
+    if (!signal.aborted) {
+      app.log.info(
+        { err: failure.reason, versionId, chunk: index },
+        'could not fetch a chunk ahead',
+      )
+    }
+    return 'failed'
+  } catch (error) {
+    if (!signal.aborted) {
+      app.log.info({ err: error, versionId, chunk: index }, 'could not fetch a chunk ahead')
+    }
+    return 'failed'
+  } finally {
+    giveBack()
+  }
+}
+
+/**
  * Segments read past the end of a small range, into the cache, so the reads
  * that follow it (a PDF's next pages, ffmpeg's next look) find them there.
  * A range that runs to the end of its chunk, as a player's does, gets none:
@@ -521,11 +614,15 @@ const segmentsUnderWay = new WeakMap<FastifyInstance, Map<string, UnderWay[]>>()
  * fetch's plaintext. The cache's is read when the reader reaches that segment,
  * not when it is planned, so planning reads nothing and a frame's ciphertext
  * is never held whole; `whole` says it is part of a frame kept whole, rather
- * than a segment kept on its own.
+ * than a segment kept on its own. The segments of a run this plan started
+ * share its `ended`, which settles, and never rejects, once the run is over
+ * and its frame, if it was read whole, handed to the cache: after the last
+ * segment's plaintext, which whoever fetches ahead mustn't stop at.
  */
 type SegmentSource =
   | { kind: 'cache'; whole: boolean; ciphertext: () => Promise<Uint8Array | null> }
-  | { kind: 'fetch' | 'shared'; plaintext: Promise<Uint8Array> }
+  | { kind: 'fetch'; plaintext: Promise<Uint8Array>; ended: Promise<void> }
+  | { kind: 'shared'; plaintext: Promise<Uint8Array> }
 
 /**
  * Reads the segments of a stored chunk that a range covers, each checked by
@@ -732,6 +829,7 @@ function startRun(
   const registry = underWay
   const whole = from === 0 && to === layout.segments - 1
   const pending = new Map<number, PromiseWithResolvers<Uint8Array>>()
+  const ended = Promise.withResolvers<undefined>()
   // How far the run has got, for the readers who would share what it has under way.
   const progress: RunProgress = { next: from }
   for (let index = from; index <= to; index += 1) {
@@ -739,7 +837,7 @@ function startRun(
     // Segments read around a range have no reader waiting.
     void deferred.promise.catch(() => undefined)
     pending.set(index, deferred)
-    sources.set(index, { kind: 'fetch', plaintext: deferred.promise })
+    sources.set(index, { kind: 'fetch', plaintext: deferred.promise, ended: ended.promise })
     const key = `${hex}-${String(index)}`
     registry.set(key, [
       ...(registry.get(key) ?? []),
@@ -760,7 +858,7 @@ function startRun(
     }
     return deferred
   }
-  void fetchRun(fetch, from, to, whole, progress, (index, plaintext, ciphertext) => {
+  const finished = fetchRun(fetch, from, to, whole, progress, (index, plaintext, ciphertext) => {
     // Kept before it is let go of, so readers who look next find it.
     if (!whole) app.frameCache?.putSegment(chunk.frame_sha256, index, ciphertext)
     const deferred = whole ? pending.get(index) : settle(index)
@@ -787,6 +885,10 @@ function startRun(
       for (const deferred of failed) deferred?.reject(error)
     },
   )
+  // However it went, the run is over, and a whole frame is the cache's, after its last segment.
+  void finished.finally(() => {
+    ended.resolve(undefined)
+  })
 }
 
 /**
