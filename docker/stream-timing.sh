@@ -9,14 +9,19 @@
 # back with each read's first byte, sources and waits. Reads ask for a preview
 # (`?preview=1`), so they don't count as downloads of the link.
 #
-# Usage: stream-timing.sh <base-url> <link-token> <node-id> <size> [label]
+# With `burst` after the label, it reads as a viewer dragging the seek bar
+# does instead: ten reads at scattered places, each given up after 0.3 s, so
+# the session's timeline shows whether any of them set the server reading
+# ahead (§6.2: a read must send 2 MiB first).
+#
+# Usage: stream-timing.sh <base-url> <link-token> <node-id> <size> [label] [burst]
 set -euo pipefail
 
 if [ "$#" -lt 4 ]; then
-  echo "usage: $0 <base-url> <link-token> <node-id> <size> [label]" >&2
+  echo "usage: $0 <base-url> <link-token> <node-id> <size> [label] [burst]" >&2
   exit 2
 fi
-base=$1 token=$2 node=$3 size=$4 label=${5:-run}
+base=$1 token=$2 node=$3 size=$4 label=${5:-run} mode=${6:-play}
 files="$base/api/s/$token/files/$node"
 agent="dfs-stream-timing ($label)"
 
@@ -34,6 +39,13 @@ read_range() {
 }
 
 at() { echo $((size * $1 / 100)); }
+
+if [ "$mode" = burst ]; then
+  for percent in 12 47 23 81 35 66 9 58 92 74; do
+    read_range "s-$percent" "$(at "$percent")-" 15M 0.3
+  done
+  exit 0
+fi
 
 printf '%-8s %-22s ' playback ''
 curl -sS -o /dev/null -A "$agent" -w '%{http_code} total=%{time_total}s\n' "$files/playback"
