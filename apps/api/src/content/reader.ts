@@ -922,9 +922,15 @@ function startRun(
     },
   )
   // However it went, the run is over, and a whole frame is the cache's, after its last segment.
-  void finished.finally(() => {
-    ended.resolve(undefined)
-  })
+  // Not `finally`: a handler above that threw would make this an unhandled rejection.
+  void finished.then(
+    () => {
+      ended.resolve(undefined)
+    },
+    () => {
+      ended.resolve(undefined)
+    },
+  )
 }
 
 /**
