@@ -17,6 +17,7 @@ import { buildApp } from '../app.ts'
 import { downloadableFile } from '../routes/content.ts'
 import { testConfig } from '../testing/config.ts'
 import { seedUser } from '../testing/seed.ts'
+import { ReadAheads } from './read-ahead.ts'
 import { prefetchChunk, readSources, readVersion } from './reader.ts'
 
 // Reading back from Discord (DESIGN.md §6.2), over real HTTP: a ZIP of a
@@ -818,14 +819,14 @@ describe('reading from Discord', () => {
     expect(discord.cdnRanges).toEqual([])
   })
 
-  /** A stored video of `size` bytes, never read yet. */
+  /** A stored video of `size` bytes, never read yet, and its bytes. */
   async function storedFilm(name: string, size: number) {
     const bytes = new Uint8Array(size).map((_, i) => i % 229)
     const folder = await createFolder(client, (await workspace(client)).id, name)
     const session = await uploadFile(client, folder.id, `${name}.mp4`, bytes)
     const store = app.blobStore as DiscordBlobStore
     await settleBlobs({ db: app.db, staging: app.staging, store, sizes: app.config.sizes })
-    return session
+    return { ...session, bytes }
   }
 
   it('warms nothing of a video the cache wouldn’t keep', async () => {
@@ -989,6 +990,103 @@ describe('reading from Discord', () => {
     expect(app.frameCache?.has(await frameOf(session.versionId, 0))).toBe(false)
     // Its read budget came back: the chunk is fetched ahead again.
     expect(await prefetchChunk(app, file, 0, new AbortController().signal)).toBe('fetched')
+  })
+
+  it('reads ahead of a stream across its requests, into the cache', async () => {
+    const { chunkSize } = app.config.sizes
+    const chunks = 8
+    const session = await storedFilm('Film ahead', chunks * chunkSize)
+    const play = crypto.randomUUID()
+    // 2.5 MiB, read whole: a run the window follows, and a read that never reaches past its range.
+    const sent = 2.5 * 1024 * 1024
+    // Four times what the run sent, in whole chunks, after the one it is in.
+    const n = Math.ceil((4 * sent) / chunkSize)
+    expect(n + 1).toBeLessThan(chunks)
+
+    discord.cdnRequests = 0
+    const first = await client.fetch('GET', `/files/${session.nodeId}/content?play=${play}`, {
+      headers: { Range: `bytes=0-${String(sent - 1)}` },
+    })
+    expect(Buffer.from(await first.arrayBuffer())).toEqual(
+      Buffer.from(session.bytes.subarray(0, sent)),
+    )
+    await vi.waitFor(
+      async () => {
+        await app.frameCache?.idle()
+        for (let index = 1; index <= n; index++) {
+          expect(app.frameCache?.has(await frameOf(session.versionId, index))).toBe(true)
+        }
+      },
+      { timeout: 5000 },
+    )
+    // Nothing past the window. The read made one request, for its chunk; the window made one
+    // for each chunk it holds, whole.
+    await setTimeout(500)
+    expect(discord.cdnRequests).toBe(1 + n)
+    const past = await frameOf(session.versionId, n + 1)
+    expect(app.frameCache?.has(past)).toBe(false)
+    expect(app.frameCache?.hasSegment(past, 0)).toBe(false)
+
+    // The play reads on at chunk 2, where the cache holds it: the right bytes, nothing from Discord.
+    const from = 2 * chunkSize
+    const next = await client.fetch('GET', `/files/${session.nodeId}/content?play=${play}`, {
+      headers: { Range: `bytes=${String(from)}-${String(from + 99_999)}` },
+    })
+    expect(Buffer.from(await next.arrayBuffer())).toEqual(
+      Buffer.from(session.bytes.subarray(from, from + 100_000)),
+    )
+    expect(discord.cdnRequests).toBe(1 + n)
+  })
+
+  it('reads nothing ahead of a download that isn’t audio or video', async () => {
+    const session = await storedFile('Download ahead', 8)
+    discord.cdnRequests = 0
+    const sent = 2.5 * 1024 * 1024
+    const response = await client.fetch('GET', `/files/${session.nodeId}/content`, {
+      headers: { Range: `bytes=0-${String(sent - 1)}` },
+    })
+    expect(Buffer.from(await response.arrayBuffer())).toEqual(
+      Buffer.from(contentOf(8).subarray(0, sent)),
+    )
+    // The one request for its own chunk, and nothing after it.
+    await setTimeout(500)
+    expect(discord.cdnRequests).toBe(1)
+  })
+
+  it('stops reading ahead as the API closes', async () => {
+    const session = await storedFile('Closing ahead', 4)
+    const file = await downloadableFile(app.db, session.nodeId)
+    // Built as app.ts builds it, so the app's own keeps working for the other tests.
+    const reads = new ReadAheads({
+      prefetch: (version, index, signal) => prefetchChunk(app, version, index, signal),
+    })
+    discord.cdnRequests = 0
+    discord.cdnAborted = 0
+    // The first fetch ahead is under way, and held.
+    discord.holdCdnFrom = 1
+    try {
+      reads.follow('a session made up', file).reached(0, 2.5 * 1024 * 1024)
+      await vi.waitFor(() => {
+        expect(discord.cdnRequests).toBe(2)
+      })
+      reads.stop()
+      await vi.waitFor(() => {
+        expect(discord.cdnAborted).toBe(2)
+      })
+    } finally {
+      reads.stop()
+      discord.holdCdnFrom = Infinity
+      discord.releaseCdn()
+    }
+    // Neither chunk it held is the cache's, and nothing more is fetched.
+    await app.frameCache?.idle()
+    await setTimeout(200)
+    expect(discord.cdnRequests).toBe(2)
+    for (const index of [1, 2]) {
+      const frame = await frameOf(session.versionId, index)
+      expect(app.frameCache?.has(frame)).toBe(false)
+      expect(app.frameCache?.hasSegment(frame, 0)).toBe(false)
+    }
   })
 
   /** Reads bytes `from` to `to` of a file straight from the reader, with what it counted by source. */

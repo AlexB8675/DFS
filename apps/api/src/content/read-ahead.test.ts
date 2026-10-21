@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import type { PrefetchOutcome } from './reader.ts'
-import { type AheadFetch, BUSY_RETRY_MS, MAX_RUNS, ReadAhead } from './read-ahead.ts'
+import type { PrefetchOutcome, ReadableVersion } from './reader.ts'
+import { type AheadFetch, BUSY_RETRY_MS, MAX_RUNS, ReadAhead, ReadAheads } from './read-ahead.ts'
+import { SESSION_IDLE_MS } from './stream-sessions.ts'
 
 const MiB = 1024 * 1024
 
@@ -354,5 +355,127 @@ describe('ReadAhead', () => {
     } finally {
       process.off('unhandledRejection', listen)
     }
+  })
+})
+
+/** A version of `chunks` chunks of 1 MiB, which no reader reads. */
+function film(id: string, chunks = 300): ReadableVersion {
+  return {
+    version_id: id,
+    size_bytes: chunks * MiB,
+    chunk_size: MiB,
+    chunk_count: chunks,
+    wrapped_dek: Buffer.alloc(0),
+    key_id: 'key',
+  }
+}
+
+/** The windows of a session on a fake clock, whose fetches never end by themselves. */
+function windows() {
+  const clock = { now: 1000 }
+  const calls: { version: ReadableVersion; index: number; signal: AbortSignal }[] = []
+  const reads = new ReadAheads({
+    prefetch: (version, index, signal) =>
+      new Promise<PrefetchOutcome>(() => {
+        calls.push({ version, index, signal })
+      }),
+    now: () => clock.now,
+  })
+  return { reads, clock, calls }
+}
+
+describe('ReadAheads', () => {
+  it('keeps one window per session and version', () => {
+    const { reads } = windows()
+    const first = film('v1')
+    const window = reads.follow('s', first)
+    expect(reads.follow('s', first)).toBe(window)
+    // The same version from another row, as a later request reads it.
+    expect(reads.follow('s', film('v1'))).toBe(window)
+    // A file replaced in the middle of a play, and another session's play.
+    expect(reads.follow('s', film('v2'))).not.toBe(window)
+    expect(reads.follow('t', first)).not.toBe(window)
+    expect(reads.size).toBe(3)
+  })
+
+  it('fetches through the prefetch it was given, for the version the window is of', () => {
+    const { reads, calls } = windows()
+    const first = film('v1')
+    reads.follow('s', first).reached(0, 2 * MiB)
+    const second = film('v2')
+    reads.follow('s', second).reached(0, 2 * MiB)
+    expect(calls.map((call) => [call.version.version_id, call.index])).toEqual([
+      ['v1', 2],
+      ['v1', 3],
+      ['v2', 2],
+      ['v2', 3],
+    ])
+    expect(calls[0]?.version).toBe(first)
+    expect(calls[2]?.version).toBe(second)
+  })
+
+  it('forgets a window idle past two minutes', () => {
+    const { reads, clock } = windows()
+    // Reached, but not enough to read ahead: nothing under way.
+    reads.follow('idle', film('v1')).reached(0, MiB)
+    clock.now += SESSION_IDLE_MS
+    reads.follow('other', film('v1'))
+    // Idle for exactly two minutes is not past them.
+    expect(reads.size).toBe(2)
+    clock.now += 1
+    reads.follow('another', film('v1'))
+    expect(reads.size).toBe(2)
+    // Dropped, so asking for it again makes a new window.
+    const before = reads.size
+    reads.follow('idle', film('v1'))
+    expect(reads.size).toBe(before + 1)
+  })
+
+  it('keeps a window that has been reached lately, however long it was followed ago', () => {
+    const { reads, clock } = windows()
+    const window = reads.follow('long', film('v1'))
+    clock.now += SESSION_IDLE_MS
+    // A request that has carried on for minutes still reports what it sends.
+    window.reached(0, MiB)
+    clock.now += SESSION_IDLE_MS
+    reads.follow('other', film('v1'))
+    expect(reads.size).toBe(2)
+    expect(reads.follow('long', film('v1'))).toBe(window)
+  })
+
+  it('keeps an idle window with a fetch under way, and stops one it drops', () => {
+    const { reads, clock, calls } = windows()
+    const busy = reads.follow('busy', film('v1'))
+    busy.reached(0, 2 * MiB)
+    expect(busy.fetching).toEqual([2, 3])
+    const idle = reads.follow('idle', film('v1'))
+    idle.reached(0, MiB)
+
+    clock.now += SESSION_IDLE_MS + 1
+    reads.follow('other', film('v1'))
+    // `idle` is gone (stopped, so it fetches nothing more); `busy` has fetches under way.
+    expect(reads.size).toBe(2)
+    expect(reads.follow('busy', film('v1'))).toBe(busy)
+    expect(calls.every((call) => !call.signal.aborted)).toBe(true)
+    idle.reached(0, 64 * MiB)
+    expect(calls).toHaveLength(2)
+  })
+
+  it('stops every window: the fetches under way are aborted, and none starts after', () => {
+    const { reads, calls } = windows()
+    reads.follow('a', film('v1')).reached(0, 2 * MiB)
+    reads.follow('b', film('v2')).reached(0, 2 * MiB)
+    expect(calls).toHaveLength(4)
+    expect(calls.every((call) => !call.signal.aborted)).toBe(true)
+
+    reads.stop()
+    expect(calls.every((call) => call.signal.aborted)).toBe(true)
+    expect(reads.size).toBe(0)
+
+    // A read that begins as the API closes finds a window that is already stopped.
+    const late = reads.follow('c', film('v3'))
+    late.reached(0, 4 * MiB)
+    expect(calls).toHaveLength(4)
+    expect(reads.size).toBe(0)
   })
 })

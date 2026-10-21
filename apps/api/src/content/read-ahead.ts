@@ -1,13 +1,15 @@
-import { READ_AHEAD_AFTER_BYTES, type PrefetchOutcome } from './reader.ts'
+import { READ_AHEAD_AFTER_BYTES, type PrefetchOutcome, type ReadableVersion } from './reader.ts'
+import { SESSION_IDLE_MS } from './stream-sessions.ts'
 
 // A stream's read-ahead window (DESIGN.md §6.2): while a player's reads carry
 // on through a file, the chunks after them are fetched from Discord into the
-// frame cache, so a read that gets there finds them kept. This holds the rules
-// alone, with no I/O: it is told what the stream's reads have sent, and says
-// which chunks to fetch through the function it is given. A single request's
-// own read-ahead (the reader's, at most 2 chunks) is a separate thing and
-// stays; this one works across the requests of a stream, which a player makes
-// one after another (and a seek makes one for each).
+// frame cache, so a read that gets there finds them kept. `ReadAhead` holds the
+// rules alone, with no I/O: it is told what the stream's reads have sent, and
+// says which chunks to fetch through the function it is given. A single
+// request's own read-ahead (the reader's, at most 2 chunks) is a separate thing
+// and stays; this one works across the requests of a stream, which a player
+// makes one after another (and a seek makes one for each). `ReadAheads` keeps a
+// window for each stream session and version, for `sendFile` to feed.
 
 /** The window ahead is never longer than this. */
 export const WINDOW_BYTES = 128 * 1024 * 1024
@@ -61,6 +63,7 @@ export class ReadAhead {
   /** Chunks reported busy, once each. */
   readonly #busyReported = new Set<number>()
   #stopped = false
+  #lastReachedAt: number
 
   constructor(options: {
     size: number
@@ -81,11 +84,17 @@ export class ReadAhead {
     this.#now = options.now ?? (() => performance.now())
     this.#windowBytes = options.windowBytes ?? WINDOW_BYTES
     this.#parallel = options.parallel ?? PARALLEL_FETCHES
+    this.#lastReachedAt = this.#now()
   }
 
-  /** Chunks being fetched, in order, for tests. */
+  /** Chunks being fetched, in order. */
   get fetching(): readonly number[] {
     return [...this.#underway.keys()].sort((a, b) => a - b)
+  }
+
+  /** When a read last reported what it had sent, on this window's clock; its creation before any did. */
+  get lastReachedAt(): number {
+    return this.#lastReachedAt
   }
 
   /**
@@ -97,6 +106,7 @@ export class ReadAhead {
    */
   reached(from: number, to: number): void {
     if (this.#stopped) return
+    this.#lastReachedAt = this.#now()
     const carries = (run: Run) => run.start <= from && from <= run.reach
     // The followed run too, though short reads elsewhere have pushed it off the
     // runs kept: a request that goes on where it reached isn't a new run.
@@ -195,6 +205,92 @@ export class ReadAhead {
         // The recorder is not the window's business: what it throws mustn't
         // stop the window, nor become an unhandled rejection in the API.
       }
+    }
+  }
+}
+
+/** A session's window of a version, and when a read of it last began. */
+interface Followed {
+  ahead: ReadAhead
+  followedAt: number
+}
+
+/**
+ * The windows of the API's stream sessions (DESIGN.md §6.2): one for each
+ * session and version, made when a read of it first begins and fed by every
+ * read of the session as it sends, so the chunks after what a stream has sent
+ * are fetched across its requests. It runs the fetches through `prefetch`, which
+ * never rejects.
+ */
+export class ReadAheads {
+  readonly #prefetch: (
+    version: ReadableVersion,
+    index: number,
+    signal: AbortSignal,
+  ) => Promise<PrefetchOutcome>
+  readonly #now: () => number
+  readonly #windows = new Map<string, Followed>()
+  #stopped = false
+
+  constructor(options: {
+    prefetch: (
+      version: ReadableVersion,
+      index: number,
+      signal: AbortSignal,
+    ) => Promise<PrefetchOutcome>
+    now?: () => number
+  }) {
+    this.#prefetch = options.prefetch
+    this.#now = options.now ?? (() => performance.now())
+  }
+
+  /** Windows held, for tests. */
+  get size(): number {
+    return this.#windows.size
+  }
+
+  /**
+   * The window of a session's reads of a version, made at its first read. Keyed
+   * by both, so a play whose file is replaced mid-play gets a window of its own
+   * for the new version. Windows not reached for `SESSION_IDLE_MS`, with nothing
+   * under way, are forgotten here, and stopped: they were of a session that has
+   * ended, or of one whose request has sent nothing for as long.
+   */
+  follow(sessionId: string, version: ReadableVersion): ReadAhead {
+    const now = this.#now()
+    this.#forgetIdle(now)
+    const key = `${sessionId}|${version.version_id}`
+    const held = this.#windows.get(key)
+    if (held) {
+      held.followedAt = now
+      return held.ahead
+    }
+    const ahead = new ReadAhead({
+      size: version.size_bytes,
+      chunkSize: version.chunk_size,
+      chunkCount: version.chunk_count,
+      prefetch: (index, signal) => this.#prefetch(version, index, signal),
+      now: this.#now,
+    })
+    // A read that begins as the API closes gets a window that fetches nothing.
+    if (this.#stopped) ahead.stop()
+    else this.#windows.set(key, { ahead, followedAt: now })
+    return ahead
+  }
+
+  /** Stops every window, aborting the fetches under way: the API is closing. */
+  stop(): void {
+    this.#stopped = true
+    for (const { ahead } of this.#windows.values()) ahead.stop()
+    this.#windows.clear()
+  }
+
+  #forgetIdle(now: number): void {
+    for (const [key, { ahead, followedAt }] of this.#windows) {
+      if (now - Math.max(followedAt, ahead.lastReachedAt) <= SESSION_IDLE_MS) continue
+      if (ahead.fetching.length > 0) continue
+      ahead.stop()
+      this.#windows.delete(key)
     }
   }
 }

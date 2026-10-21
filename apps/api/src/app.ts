@@ -19,6 +19,8 @@ import { JournalFlusher } from './journal.ts'
 import { CdnBlobReader } from './content/cdn-reader.ts'
 import { Deliveries } from './content/deliveries.ts'
 import { FrameCache, MemoryBudget } from './content/frame-cache.ts'
+import { ReadAheads } from './content/read-ahead.ts'
+import { prefetchChunk } from './content/reader.ts'
 import { StreamSessions } from './content/stream-sessions.ts'
 import { registerErrorHandling } from './errors.ts'
 import { EventHub } from './events/hub.ts'
@@ -90,6 +92,8 @@ declare module 'fastify' {
     deliveries: Deliveries
     /** Each stream's range reads, grouped and logged to the timeline store (§6.2, §16). */
     streamSessions: StreamSessions
+    /** The chunks fetched ahead of each stream session's reads, across its requests (§6.2). */
+    readAheads: ReadAheads
   }
 }
 
@@ -236,6 +240,12 @@ export async function buildApp({
   metrics.gauge('downloads.active', () => downloads.sample())
   app.decorate('readBudget', new MemoryBudget(READ_AHEAD_BYTES))
   app.decorate(
+    'readAheads',
+    new ReadAheads({
+      prefetch: (version, index, signal) => prefetchChunk(app, version, index, signal),
+    }),
+  )
+  app.decorate(
     'media',
     config.mediaInternalUrl
       ? new MediaExaminer({
@@ -258,9 +268,12 @@ export async function buildApp({
   // has ended, a video read in play is almost always still open, and the
   // process exits after its grace, so the last reads would never be written.
   // They go last, after the journal's last flush: that matters more, and a
-  // slow timeline store must not eat into the grace before it.
+  // slow timeline store must not eat into the grace before it. The windows
+  // reading ahead of the streams stop first, before anything awaits: what they
+  // fetch is for reads that are about to end.
   app.addHook('preClose', async () => {
     events.endStreams()
+    app.readAheads.stop()
     await checks.stop()
     await journalFlusher.stop()
     await savingSessions.stop()

@@ -1,6 +1,7 @@
 import { Readable, type Writable } from 'node:stream'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { z } from 'zod'
+import type { ReadAhead } from './read-ahead.ts'
 import { readSources, readVersion, type ReadableVersion, type ReadSources } from './reader.ts'
 import type { ServedResult, StreamRequest } from './stream-sessions.ts'
 import { writeZip, zipLength, zipTimeZone, type ZipEntry } from './zip.ts'
@@ -79,6 +80,8 @@ export function sendFile(
         () => servedResult(stats, false),
       )
     : null
+  // Only a read that began a stream session reads ahead: the sessions' bounds bound it too (§6.2).
+  const ahead = opened?.sessionId ? app.readAheads.follow(opened.sessionId, file) : null
   reply.raw.once('close', () => {
     followed?.()
     opened?.close(servedResult(stats, reply.raw.writableFinished))
@@ -97,7 +100,29 @@ export function sendFile(
     forMediaService ? 'media.read_bytes' : 'downloads.bytes',
     stats.sources,
   )
-  return reply.send(Readable.from(paced(reply.raw, pieces, stats)))
+  return reply.send(
+    Readable.from(paced(reply.raw, ahead ? following(pieces, start, ahead) : pieces, stats)),
+  )
+}
+
+/**
+ * `source`'s pieces, each reported to the stream's read-ahead window as it has
+ * been taken: the read that began at `start` has sent that much (§6.2). It
+ * reports when its consumer asks for the next piece, which `paced` does only
+ * once the socket has taken the last, so what the window follows is what has
+ * been handed to the connection, and the last piece of a read is reported too.
+ */
+async function* following(
+  source: AsyncIterable<Uint8Array>,
+  start: number,
+  ahead: ReadAhead,
+): AsyncGenerator<Uint8Array> {
+  let sent = 0
+  for await (const piece of source) {
+    yield piece
+    sent += piece.length
+    ahead.reached(start, start + sent)
+  }
 }
 
 /** How sending a response went: for its log line, which says which side was slow. */
