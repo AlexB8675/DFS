@@ -890,6 +890,28 @@ describe('reading from Discord', () => {
     }
   })
 
+  it('warms a chunk it fetches whole only with room for twice its frame', async () => {
+    // Under a megabyte, four segments or fewer: its one chunk is fetched whole, not by parts.
+    const size = 700_000
+    const frame = chunkFrameLength(size)
+    const session = await storedFilm('Film tiny', size)
+    const taken = app.readBudget?.tryTake(256 * 1024 * 1024 - Math.ceil(1.5 * frame))
+    if (!taken) throw new Error('The read budget is in use.')
+    discord.cdnRanges.length = 0
+    try {
+      await client.call('GET', `/files/${session.nodeId}/playback`, playbackSchema)
+      await setTimeout(400)
+      expect(discord.cdnRanges).toEqual([])
+    } finally {
+      taken()
+    }
+    // Room again: opened once more, it is fetched.
+    await client.call('GET', `/files/${session.nodeId}/playback`, playbackSchema)
+    await vi.waitFor(() => {
+      expect(discord.cdnRanges).toEqual([`bytes=0-${String(frame - 1)}`])
+    })
+  })
+
   /** The SHA-256 of the frame of chunk `idx` of a version, which is what the cache keeps it under. */
   async function frameOf(versionId: string, idx: number): Promise<Buffer> {
     const [chunk] = (
@@ -949,6 +971,70 @@ describe('reading from Discord', () => {
     expect(discord.cdnRanges).toHaveLength(0)
     // Room again, the same chunk is fetched.
     expect(await prefetchChunk(app, stored, 0, signal)).toBe('fetched')
+  })
+
+  it('counts a chunk fetched ahead whole at twice its frame in the read budget', async () => {
+    const { chunkSize } = app.config.sizes
+    const frame = chunkFrameLength(chunkSize)
+    const budget = 256 * 1024 * 1024
+    const session = await storedFile('Ahead counted twice', 1)
+    const file = await downloadableFile(app.db, session.nodeId)
+    const signal = new AbortController().signal
+    discord.cdnRequests = 0
+    // While it runs it holds the frame it fetches and, until that is the cache's, every
+    // segment it has opened: about two frames, which is what it takes.
+    let taken = app.readBudget?.tryTake(budget - Math.ceil(1.5 * frame))
+    if (!taken) throw new Error('The read budget is in use.')
+    try {
+      expect(await prefetchChunk(app, file, 0, signal)).toBe('busy')
+      expect(discord.cdnRequests).toBe(0)
+      taken()
+      taken = app.readBudget?.tryTake(budget - 2 * frame)
+      if (!taken) throw new Error('The read budget is in use.')
+      expect(await prefetchChunk(app, file, 0, signal)).toBe('fetched')
+      expect(discord.cdnRequests).toBe(1)
+    } finally {
+      taken?.()
+    }
+  })
+
+  it('reads the next chunk ahead of a download only with room for twice its frame', async () => {
+    const { chunkSize } = app.config.sizes
+    const layout = new ChunkFrameLayout(chunkSize)
+    const frame = chunkFrameLength(chunkSize)
+    const budget = 256 * 1024 * 1024
+    // Ten segments of the first chunk come, more than the client needs to take to start the
+    // next chunk's read, then its CDN body holds.
+    const ahead = async (name: string, left: number) => {
+      const session = await storedFile(name, 3)
+      const taken = app.readBudget?.tryTake(budget - left)
+      if (!taken) throw new Error('The read budget is in use.')
+      discord.cdnRequests = 0
+      discord.holdNextBodyAt = 14 + 10 * layout.segmentLength(0)
+      try {
+        const response = await client.fetch('GET', `/files/${session.nodeId}/content`, {
+          headers: { Range: 'bytes=0-' },
+        })
+        const body = response.body?.getReader()
+        if (!body) throw new Error('No body.')
+        const first = await receive(body, 2.5 * 1024 * 1024)
+        await setTimeout(300)
+        const requests = discord.cdnRequests
+        // Read to its end, whole: nothing is left held or cancelled.
+        discord.releaseCdn()
+        const rest = await receive(body, 3 * chunkSize, 10_000)
+        const bytes = [...first, ...rest].reduce((total, piece) => total + piece.length, 0)
+        expect(bytes).toBe(3 * chunkSize)
+        return requests
+      } finally {
+        discord.releaseCdn()
+        taken()
+      }
+    }
+    // Room for 1.5 frames: the chunk after is read once the first has been sent.
+    expect(await ahead('Read ahead short', Math.ceil(1.5 * frame))).toBe(1)
+    // For two, it is read at once.
+    expect(await ahead('Read ahead roomy', 2 * frame)).toBe(2)
   })
 
   it('fetches nothing ahead the cache wouldn’t keep', async () => {

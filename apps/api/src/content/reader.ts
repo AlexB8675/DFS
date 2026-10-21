@@ -147,10 +147,12 @@ export async function* readVersion(
   const startReads = async (count: number, sending: boolean) => {
     while (!upcoming.done && reading.length < count) {
       const chunk = upcoming.value
+      // A chunk read ahead holds its frame and the plaintext of the segments it has opened,
+      // about twice its frame, until it is sent or its frame is the cache's.
       const giveBack =
         (!sending && reading.length === 0) || !app.readBudget
           ? NOTHING_TO_GIVE_BACK
-          : app.readBudget.tryTake(chunk.frame_size)
+          : app.readBudget.tryTake(2 * chunk.frame_size)
       if (!giveBack) break
       const chunkStart = chunk.idx * chunkSize
       const from = Math.max(0, start - chunkStart)
@@ -410,7 +412,8 @@ const warming = new WeakMap<FastifyInstance, Set<string>>()
  * of its own; one of a single chunk has all of it fetched, the same last
  * megabyte first and the rest on another request, never whole. A chunk is
  * fetched only if the cache would keep what is fetched of it, and holds that
- * much of the read budget until its fetches are over. What is kept, staged or
+ * much of the read budget until its fetches are over, twice that for a frame
+ * fetched whole, which holds the plaintext of its segments too. What is kept, staged or
  * being fetched is left as it is, nothing is sent anywhere, and it runs on if
  * the viewer leaves, into the cache. Best effort: it never throws.
  */
@@ -466,15 +469,18 @@ export async function warmVideo(app: FastifyInstance, version: ReadableVersion):
       }
       const split =
         chunk.idx === chunkCount - 1 ? Math.max(first, last - INDEX_SEGMENTS + 1) : first
-      // What the runs hold meanwhile and then keep: a frame fetched whole, all of it; otherwise
-      // the segments from `first`, each kept on its own.
-      const held =
+      // What the runs hold meanwhile and then the cache keeps: a frame fetched whole, all of it;
+      // otherwise the segments from `first`, each kept on its own.
+      const kept =
         split === 0
           ? chunk.frame_size
           : layout.segmentStart(last) + layout.segmentLength(last) - layout.segmentStart(first)
-      // Nothing is fetched to be thrown away, nor held from the read-ahead budget beyond that.
-      if (!cache.canKeep(held)) continue
-      const giveBack = app.readBudget ? app.readBudget.tryTake(held) : NOTHING_TO_GIVE_BACK
+      // Nothing is fetched to be thrown away. A frame fetched whole also holds the plaintext of
+      // the segments it has opened until it is the cache's: twice its size from the read budget.
+      if (!cache.canKeep(kept)) continue
+      const giveBack = app.readBudget
+        ? app.readBudget.tryTake(split === 0 ? 2 * kept : kept)
+        : NOTHING_TO_GIVE_BACK
       if (!giveBack) continue
       const fetch: SegmentFetch = { app, versionId, key, chunk, layout, signal, reader: false }
       const sources = [
@@ -512,8 +518,9 @@ export type PrefetchOutcome = 'fetched' | 'kept' | 'skipped' | 'busy' | 'failed'
 /**
  * Fetches chunk `index` of a stored version whole into the frame cache, ahead
  * of whoever will read it (a video's first chunk as its player opens, the
- * chunks a stream is about to want). It takes the frame's size from the read
- * budget until its fetches have ended and starts only if the cache would keep
+ * chunks a stream is about to want). It takes twice the frame's size from the
+ * read budget (the frame, and the plaintext of the segments opened from it)
+ * until its fetches have ended and starts only if the cache would keep
  * the frame, so memory and Discord's bandwidth never go on one that is then
  * thrown away; what is kept already is left as it is, and what other reads
  * are fetching is shared rather than fetched twice. Once `signal` aborts,
@@ -553,8 +560,10 @@ export async function prefetchChunk(
     if (!cache.canKeep(chunk.frame_size)) return 'busy'
     // Given up on already: nothing is fetched.
     signal.throwIfAborted()
+    // Until its frame is the cache's it holds that frame and the plaintext of every segment
+    // it has opened: twice the frame's size.
     if (app.readBudget) {
-      const taken = app.readBudget.tryTake(chunk.frame_size)
+      const taken = app.readBudget.tryTake(2 * chunk.frame_size)
       if (!taken) return 'busy'
       giveBack = taken
     }
