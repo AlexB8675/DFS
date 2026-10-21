@@ -427,6 +427,98 @@ describe('reading from Discord', () => {
     }
   })
 
+  it('doesn’t share a far fetch through segments the cache holds', async () => {
+    const { chunkSize } = app.config.sizes
+    const layout = new ChunkFrameLayout(chunkSize)
+    const session = await storedFile('Kept then far', 1)
+    const content = Buffer.from(contentOf(1))
+    // The first twelve segments kept on their own, by a read that ends before the chunk does.
+    await bytesOf(session.nodeId, 0, layout.plaintextStart(12) - 1)
+    await app.frameCache?.idle()
+    const [chunk] = (
+      await app.db.execute<{ frame_sha256: Buffer }>(sql`
+        SELECT frame_sha256 FROM chunks WHERE version_id = ${session.versionId}`)
+    ).rows
+    if (!chunk) throw new Error('No chunk.')
+    let kept = 0
+    while (app.frameCache?.hasSegment(chunk.frame_sha256, kept)) kept += 1
+    expect(kept).toBeGreaterThanOrEqual(10)
+    discord.cdnRanges.length = 0
+    // A whole-chunk read, its CDN body held after the header and the first segment.
+    discord.holdNextBodyAt = 14 + layout.segmentLength(0)
+    try {
+      const whole = await client.fetch('GET', `/files/${session.nodeId}/content`, {
+        headers: { Range: 'bytes=0-' },
+      })
+      const held = whole.body?.getReader()
+      if (!held) throw new Error('No body.')
+      await receive(held, layout.plaintextSize(0))
+      // The same chunk from its start to its end: the kept segments from the cache, and the
+      // first that isn't kept is far from the fetch under way, so it is fetched on its own.
+      const all = await client.fetch('GET', `/files/${session.nodeId}/content`, {
+        headers: { Range: `bytes=0-${String(chunkSize - 1)}` },
+      })
+      const body = all.body?.getReader()
+      if (!body) throw new Error('No body.')
+      const received = await receive(body, chunkSize)
+      expect(Buffer.concat(received).equals(content)).toBe(true)
+      expect(discord.cdnRanges).toHaveLength(2)
+      expect(discord.cdnRanges[1]).toMatch(
+        new RegExp(`^bytes=${String(layout.segmentStart(kept))}-`),
+      )
+      await held.cancel()
+    } finally {
+      discord.releaseCdn()
+    }
+  })
+
+  it('keeps a far fetch shared after a read that fetched over part of it is cancelled', async () => {
+    const { chunkSize } = app.config.sizes
+    const layout = new ChunkFrameLayout(chunkSize)
+    const session = await storedFile('Far then cancelled', 1)
+    const content = Buffer.from(contentOf(1))
+    discord.cdnRequests = 0
+    discord.cdnAborted = 0
+    // The second request, the far read's own, is held; the first is a whole-chunk read's,
+    // its CDN body held after the header and the first segment.
+    discord.holdCdnFrom = 2
+    discord.holdNextBodyAt = 14 + layout.segmentLength(0)
+    try {
+      const whole = await client.fetch('GET', `/files/${session.nodeId}/content`, {
+        headers: { Range: 'bytes=0-' },
+      })
+      const held = whole.body?.getReader()
+      if (!held) throw new Error('No body.')
+      await receive(held, layout.plaintextSize(0))
+      const controller = new AbortController()
+      const far = client.fetch('GET', `/files/${session.nodeId}/content`, {
+        headers: { Range: `bytes=${String(layout.plaintextStart(10))}-` },
+        signal: controller.signal,
+      })
+      await vi.waitFor(() => {
+        expect(discord.cdnRequests).toBe(2)
+      })
+      // Cancelled, as a scrub leaves a seek: its fetch ends, the one it fetched over goes on.
+      controller.abort()
+      await expect(far).rejects.toThrow()
+      await vi.waitFor(() => {
+        expect(discord.cdnAborted).toBe(1)
+      })
+      await setTimeout(100)
+      const from = layout.plaintextStart(2)
+      const onward = bytesOf(session.nodeId, from, chunkSize - 1)
+      await setTimeout(200)
+      // Everything of it is shared with the fetch under way: no request of its own.
+      expect(discord.cdnRequests).toBe(2)
+      discord.releaseCdn()
+      expect(await onward).toEqual(content.subarray(from, chunkSize))
+      await held.cancel()
+    } finally {
+      discord.holdCdnFrom = Infinity
+      discord.releaseCdn()
+    }
+  })
+
   it('fetches again a kept segment that fails its tag', async () => {
     const session = await storedFile('Spoiled', 1)
     const content = Buffer.from(contentOf(1))
