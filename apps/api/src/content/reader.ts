@@ -772,15 +772,19 @@ function planSegments(
     const shared = shareable(index)
     return shared ? { kind: 'shared', plaintext: shared.plaintext } : null
   }
-  // The whole chunk is fetched whole, kept segments or not, so it is kept
-  // as one frame in their place; unless the cache holds it whole already,
-  // or another reader is fetching some of it, which is shared instead.
+  // The whole chunk is fetched whole, so it is kept as one frame in place of
+  // the segments kept on their own; unless the cache holds it whole already,
+  // or another reader is fetching some of it, which is shared instead, or
+  // half or more of its segments are kept on their own: then, as for any
+  // range, only the missing ones are fetched, rather than the chunk again.
+  const indexes = Array.from({ length: layout.segments }, (_, i) => i)
   const wholeChunk =
-    !fresh && from === 0 && last === layout.segments - 1 && !cache?.has(chunk.frame_sha256)
-  if (
-    wholeChunk &&
-    !Array.from({ length: layout.segments }, (_, i) => i).some((i) => underWay?.has(keyOf(i)))
-  ) {
+    !fresh &&
+    from === 0 &&
+    last === layout.segments - 1 &&
+    !cache?.has(chunk.frame_sha256) &&
+    indexes.filter((i) => cache?.hasSegment(chunk.frame_sha256, i)).length * 2 < layout.segments
+  if (wholeChunk && !indexes.some((i) => underWay?.has(keyOf(i)))) {
     startRun(fetch, 0, last, sources)
     return sources
   }

@@ -443,6 +443,14 @@ describe('reading from Discord', () => {
     let kept = 0
     while (app.frameCache?.hasSegment(chunk.frame_sha256, kept)) kept += 1
     expect(kept).toBeGreaterThanOrEqual(10)
+    // A chunk mostly kept isn't fetched whole, so to have a whole-chunk fetch under way with
+    // these kept too, they go from the cache now and come back once it has started.
+    const cache = app.frameCache
+    if (!cache) throw new Error('No frame cache.')
+    const segments = await Promise.all(
+      Array.from({ length: kept }, (_, index) => cache.segment(chunk.frame_sha256, index)),
+    )
+    await cache.clear()
     discord.cdnRanges.length = 0
     // A whole-chunk read, its CDN body held after the header and the first segment.
     discord.holdNextBodyAt = 14 + layout.segmentLength(0)
@@ -453,6 +461,11 @@ describe('reading from Discord', () => {
       const held = whole.body?.getReader()
       if (!held) throw new Error('No body.')
       await receive(held, layout.plaintextSize(0))
+      segments.forEach((bytes, index) => {
+        if (bytes) cache.putSegment(chunk.frame_sha256, index, bytes)
+      })
+      await cache.idle()
+      expect(cache.hasSegment(chunk.frame_sha256, kept - 1)).toBe(true)
       // The same chunk from its start to its end: the kept segments from the cache, and the
       // first that isn't kept is far from the fetch under way, so it is fetched on its own.
       const all = await client.fetch('GET', `/files/${session.nodeId}/content`, {
@@ -565,6 +578,57 @@ describe('reading from Discord', () => {
         `${hex}.frame`,
       ])
     })
+  })
+
+  it('reads a chunk whose segments are all kept from the cache, fetching nothing', async () => {
+    const { chunkSize } = app.config.sizes
+    const layout = new ChunkFrameLayout(chunkSize)
+    const session = await storedFile('All kept', 1)
+    const content = Buffer.from(contentOf(1))
+    const sha = await frameOf(session.versionId, 0)
+    // Two reads, neither of the whole chunk, keep every segment on its own: the first
+    // its first eight, the second the rest.
+    await bytesOf(session.nodeId, 0, layout.plaintextStart(8) - 1)
+    await app.frameCache?.idle()
+    let first = 0
+    while (app.frameCache?.hasSegment(sha, first)) first += 1
+    expect(first).toBeLessThan(layout.segments)
+    await bytesOf(session.nodeId, layout.plaintextStart(first), chunkSize - 1)
+    await app.frameCache?.idle()
+    for (let index = 0; index < layout.segments; index += 1) {
+      expect(app.frameCache?.hasSegment(sha, index)).toBe(true)
+    }
+    expect(app.frameCache?.has(sha)).toBe(false)
+    // The whole chunk read, as a stream reading ahead does: nothing is fetched to keep it as one frame.
+    discord.cdnRequests = 0
+    expect(await bytesOf(session.nodeId, 0, chunkSize - 1)).toEqual(content)
+    expect(discord.cdnRequests).toBe(0)
+  })
+
+  it('fetches only the missing segments of a chunk mostly kept', async () => {
+    const { chunkSize } = app.config.sizes
+    const layout = new ChunkFrameLayout(chunkSize)
+    const session = await storedFile('Mostly kept', 1)
+    const content = Buffer.from(contentOf(1))
+    const sha = await frameOf(session.versionId, 0)
+    const kept = 10
+    expect(kept * 2).toBeGreaterThanOrEqual(layout.segments)
+    expect(kept).toBeLessThan(layout.segments)
+    await bytesOf(session.nodeId, 0, layout.plaintextStart(kept) - 1)
+    await app.frameCache?.idle()
+    for (let index = 0; index < layout.segments; index += 1) {
+      expect(app.frameCache?.hasSegment(sha, index)).toBe(index < kept)
+    }
+    discord.cdnRanges.length = 0
+    expect(await bytesOf(session.nodeId, 0, chunkSize - 1)).toEqual(content)
+    // One request, from the first segment that wasn't kept: not the whole chunk again.
+    expect(discord.cdnRanges).toHaveLength(1)
+    expect(discord.cdnRanges[0]).toMatch(new RegExp(`^bytes=${String(layout.segmentStart(kept))}-`))
+    // Those it fetched are kept too, so the chunk is read from the cache after.
+    await app.frameCache?.idle()
+    for (let index = 0; index < layout.segments; index += 1) {
+      expect(app.frameCache?.hasSegment(sha, index)).toBe(true)
+    }
   })
 
   it('fails a range the CDN cuts short, rather than sending it as whole', async () => {
