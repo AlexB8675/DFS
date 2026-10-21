@@ -1049,6 +1049,8 @@ async function streamRun(
 
       // Only the network is retried: opening the stream and reading from it.
       let piece: Uint8Array<ArrayBuffer> | undefined
+      // The browser's reason when the stream broke off, for the timeline; empty when it just ended.
+      let cause = ''
       const began = performance.now()
       try {
         if (!reader) {
@@ -1066,15 +1068,16 @@ async function streamRun(
         const { done, value } = await reader.read()
         // A stream that ends before the part asked for has broken off too.
         if (!done) piece = value
-      } catch {
+      } catch (error) {
         // An abort isn't a broken connection.
+        if (!over()) cause = clipText(error instanceof Error ? error.message : String(error))
       }
       // Also for a piece that came as the run was replaced: the feeder was cleared meanwhile.
       if (over()) return false
       stats.readingMs += performance.now() - began
 
       if (!piece) {
-        endRead('failed', 'The connection broke off.')
+        endRead('failed', cause.length > 0 ? cause : 'The connection broke off.')
         // What was collected goes to mp4box now: the stream may be a while in coming back.
         feeder.feed()
         holds.check()
