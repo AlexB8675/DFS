@@ -484,16 +484,19 @@ export async function warmEnd(
 const READ_AROUND_SEGMENTS = 4
 
 /**
- * A client's read shares another's fetch of a segment only when the fetch is
- * this close to it (about 1 MiB, some 30 to 40 ms of Discord): a fetch brings
- * its segments in order, so a read wanting one further on would wait for every
- * segment before it, and fetches its own instead (§6.2). A fetch ahead shares
- * anything.
+ * A client's read shares another's fetch only when the fetch will reach the
+ * first segment the read wants from it within this many (about 1 MiB, some 30
+ * to 40 ms of Discord): a fetch brings its segments in order, so a read
+ * wanting one further on would wait for every segment before it, and fetches
+ * its own instead (§6.2). Once the fetch is that close, the read shares all
+ * of its later segments too, which come ahead of the read. A fetch ahead
+ * shares anything.
  */
 export const SHARE_WITHIN_SEGMENTS = 4
 
-/** Where a run of segments being fetched has got to: the next it will deliver. */
+/** Where a run of segments being fetched started and has got to: the next it will deliver. */
 interface RunProgress {
+  from: number
   next: number
 }
 
@@ -600,17 +603,17 @@ interface SegmentFetch {
   chunk: ChunkLocation
   layout: ChunkFrameLayout
   signal: AbortSignal | undefined
-  /** A client's read, rather than a fetch ahead of one: it shares only fetches near what it wants. */
+  /** A client's read, rather than a fetch ahead of one: it shares only fetches that will soon reach what it wants. */
   reader: boolean
 }
 
 /**
  * Where segments `from` to `last` come from, starting the fetches needed: a
  * frame the cache holds whole first, then segments it keeps on their own,
- * then fetches under way (for a client's read, those within
- * `SHARE_WITHIN_SEGMENTS` of the segment they are at; a fetch ahead shares
- * any). With `fresh`, segment `from` is fetched whatever the cache or another
- * reader says of it.
+ * then fetches under way (for a client's read, those that will reach where it
+ * starts to share them within `SHARE_WITHIN_SEGMENTS`, and all of their later
+ * segments then; a fetch ahead shares any). With `fresh`, segment `from` is
+ * fetched whatever the cache or another reader says of it.
  */
 function planSegments(
   fetch: SegmentFetch,
@@ -648,8 +651,9 @@ function planSegments(
     }
     const shared = underWay?.get(keyOf(index))
     if (!shared) return null
-    // Further ahead of that fetch than a read will wait: it fetches its own.
-    if (fetch.reader && index - shared.run.next > SHARE_WITHIN_SEGMENTS) return null
+    // That fetch is further from where this read starts than it will wait: it fetches its own.
+    const reaches = Math.max(from, shared.run.from)
+    if (fetch.reader && reaches - shared.run.next > SHARE_WITHIN_SEGMENTS) return null
     return { kind: 'shared', plaintext: shared.plaintext }
   }
   // The whole chunk is fetched whole, kept segments or not, so it is kept
@@ -710,7 +714,7 @@ function startRun(
   const whole = from === 0 && to === layout.segments - 1
   const pending = new Map<number, PromiseWithResolvers<Uint8Array>>()
   // How far the run has got, for the readers who would share what it has under way.
-  const progress: RunProgress = { next: from }
+  const progress: RunProgress = { from, next: from }
   for (let index = from; index <= to; index += 1) {
     const deferred = Promise.withResolvers<Uint8Array>()
     // Segments read around a range have no reader waiting.

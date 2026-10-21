@@ -398,6 +398,35 @@ describe('reading from Discord', () => {
     }
   })
 
+  it('shares the whole of a fetch under way from where a read starts close to it', async () => {
+    const { chunkSize } = app.config.sizes
+    const layout = new ChunkFrameLayout(chunkSize)
+    const session = await storedFile('Whole and near', 1)
+    const content = Buffer.from(contentOf(1))
+    discord.cdnRanges.length = 0
+    // A whole-chunk read, its CDN body held after the header and the first segment.
+    discord.holdNextBodyAt = 14 + layout.segmentLength(0)
+    try {
+      const whole = await client.fetch('GET', `/files/${session.nodeId}/content`, {
+        headers: { Range: 'bytes=0-' },
+      })
+      const body = whole.body?.getReader()
+      if (!body) throw new Error('No body.')
+      await receive(body, layout.plaintextSize(0))
+      // Starting where that fetch has got to, to the chunk's end: all of it is shared.
+      const from = layout.plaintextStart(1)
+      const onward = bytesOf(session.nodeId, from, chunkSize - 1)
+      await setTimeout(200)
+      expect(discord.cdnRanges).toHaveLength(1)
+      discord.releaseCdn()
+      expect(await onward).toEqual(content.subarray(from, chunkSize))
+      expect(discord.cdnRanges).toHaveLength(1)
+      await body.cancel()
+    } finally {
+      discord.releaseCdn()
+    }
+  })
+
   it('fetches again a kept segment that fails its tag', async () => {
     const session = await storedFile('Spoiled', 1)
     const content = Buffer.from(contentOf(1))
