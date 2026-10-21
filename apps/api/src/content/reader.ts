@@ -506,14 +506,16 @@ export async function warmVideo(app: FastifyInstance, version: ReadableVersion):
 
 /**
  * What fetching a chunk ahead came to (§6.2). `fetched`: its own fetches have
- * ended. `kept`: the cache holds the frame, whole or every segment of it, or
- * other reads are fetching all that is missing: nothing was fetched. `skipped`:
- * nothing to fetch, with no frame cache, a store that can't stream, or a chunk
- * that isn't stored in segments (staged, still syncing, or format 1). `busy`:
- * no room for the frame in the read budget or the cache. `failed`: a fetch
- * failed or was aborted.
+ * ended. `kept`: the cache holds the frame, whole or every segment of it:
+ * nothing was fetched. `shared`: nothing was fetched either, but some of what
+ * the cache lacks is being fetched by other reads, which may be a client's, and
+ * a seek or a reconnect cancels that and caches nothing, so the chunk is worth
+ * trying again. `skipped`: nothing to fetch, with no frame cache, a store that
+ * can't stream, or a chunk that isn't stored in segments (staged, still
+ * syncing, or format 1). `busy`: no room for the frame in the read budget or
+ * the cache. `failed`: a fetch failed or was aborted.
  */
-export type PrefetchOutcome = 'fetched' | 'kept' | 'skipped' | 'busy' | 'failed'
+export type PrefetchOutcome = 'fetched' | 'kept' | 'shared' | 'skipped' | 'busy' | 'failed'
 
 /**
  * Fetches chunk `index` of a stored version whole into the frame cache, ahead
@@ -571,11 +573,13 @@ export async function prefetchChunk(
       app.keys.unwrapDek(version.wrapped_dek, version.key_id, uuidBytes(versionId)),
     )
     const fetch: SegmentFetch = { app, versionId, key, chunk, layout, signal, reader: false }
-    const own = [...planSegments(fetch, 0, last, false).values()].flatMap((source) =>
-      source.kind === 'fetch' ? [source] : [],
-    )
-    // All of it kept, or fetched by others meanwhile.
-    if (own.length === 0) return 'kept'
+    const sources = [...planSegments(fetch, 0, last, false).values()]
+    const own = sources.flatMap((source) => (source.kind === 'fetch' ? [source] : []))
+    // Nothing of its own to fetch: all of it kept, or some of it fetched by others meanwhile,
+    // which may be a client's read, cancelled by a seek or a reconnect before it caches anything.
+    if (own.length === 0) {
+      return sources.some((source) => source.kind === 'shared') ? 'shared' : 'kept'
+    }
     // The runs end once the frame is the cache's, which is later than their last segment.
     await Promise.all(own.map((source) => source.ended))
     const settled = await Promise.allSettled(own.map((source) => source.plaintext))

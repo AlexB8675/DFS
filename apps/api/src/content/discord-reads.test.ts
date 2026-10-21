@@ -943,8 +943,46 @@ describe('reading from Discord', () => {
       prefetchChunk(app, file, 0, signal),
       prefetchChunk(app, file, 0, signal),
     ])
-    expect([first, second].sort()).toEqual(['fetched', 'kept'])
+    // The one that came second leaned on the other's fetch: it kept nothing itself.
+    expect([first, second].sort()).toEqual(['fetched', 'shared'])
     expect(discord.cdnRanges).toHaveLength(1)
+  })
+
+  it('answers shared, not kept, for a chunk another read is fetching', async () => {
+    const { chunkSize } = app.config.sizes
+    const layout = new ChunkFrameLayout(chunkSize)
+    const session = await storedFile('Ahead shared', 1)
+    const file = await downloadableFile(app.db, session.nodeId)
+    const signal = new AbortController().signal
+    discord.cdnRequests = 0
+    // A client's whole-chunk read, its CDN body held after the header and the first segment.
+    discord.holdNextBodyAt = 14 + layout.segmentLength(0)
+    let body: ReadableStreamDefaultReader<Uint8Array> | undefined
+    try {
+      const whole = await client.fetch('GET', `/files/${session.nodeId}/content`, {
+        headers: { Range: 'bytes=0-' },
+      })
+      body = whole.body?.getReader()
+      if (!body) throw new Error('No body.')
+      const first = await receive(body, layout.plaintextSize(0))
+      // That read may be cancelled, caching nothing: the chunk isn't the cache's yet, so it
+      // isn't kept, and nothing of its own is fetched.
+      expect(await prefetchChunk(app, file, 0, signal)).toBe('shared')
+      expect(discord.cdnRequests).toBe(1)
+      discord.releaseCdn()
+      const rest = await receive(body, chunkSize, 10_000)
+      expect(Buffer.concat([...first, ...rest]).equals(Buffer.from(contentOf(1)))).toBe(true)
+      const frame = await frameOf(session.versionId, 0)
+      await vi.waitFor(() => {
+        expect(app.frameCache?.has(frame)).toBe(true)
+      })
+      await app.frameCache?.idle()
+      expect(await prefetchChunk(app, file, 0, signal)).toBe('kept')
+      expect(discord.cdnRequests).toBe(1)
+    } finally {
+      discord.releaseCdn()
+      await body?.cancel().catch(() => undefined)
+    }
   })
 
   it('shares a client’s fetch under way with a fetch ahead of the same chunk', async () => {

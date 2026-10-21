@@ -214,6 +214,32 @@ describe('ReadAhead', () => {
     expect(calls.map((call) => call.index)).toEqual([2, 3, 2])
   })
 
+  it('tries a chunk again after a second when its fetch leaned on another', async () => {
+    // Chunks 2 and 3 are all the window reaches.
+    const { ahead, calls, clock, fetched, settle } = setup({ chunkCount: 4 })
+    ahead.reached(0, 2 * MiB)
+    await settle(2, 'shared')
+    await settle(3, 'skipped')
+    expect(calls).toHaveLength(2)
+    // Nothing is said of it: the read it leaned on may be cancelled, and it fetched nothing itself.
+    expect(fetched).toEqual([])
+
+    clock.now += BUSY_RETRY_MS - 1
+    ahead.reached(0, 2 * MiB)
+    expect(calls).toHaveLength(2)
+
+    clock.now += 1
+    ahead.reached(0, 2 * MiB)
+    expect(calls.map((call) => call.index)).toEqual([2, 3, 2])
+
+    // The cache has it by then: it is never tried again, and nothing is said of it.
+    await settle(2, 'kept')
+    clock.now += 10 * BUSY_RETRY_MS
+    ahead.reached(0, 2 * MiB)
+    expect(calls).toHaveLength(3)
+    expect(fetched).toEqual([])
+  })
+
   it('stops: aborts what is under way and does nothing after', async () => {
     const { ahead, calls, fetched, settle } = setup()
     ahead.reached(0, 2 * MiB)

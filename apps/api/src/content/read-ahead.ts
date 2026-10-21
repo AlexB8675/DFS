@@ -17,7 +17,7 @@ export const WINDOW_BYTES = 128 * 1024 * 1024
 export const WINDOW_GROWTH = 4
 /** Chunks fetched at once for a stream. */
 export const PARALLEL_FETCHES = 2
-/** A chunk that found no room is tried again no sooner than this. */
+/** A chunk that found no room, or leaned on another read's fetch, is tried again no sooner than this. */
 export const BUSY_RETRY_MS = 1000
 /** Runs of reads kept to tell which a read carries on, the most recently updated. */
 export const MAX_RUNS = 8
@@ -56,9 +56,9 @@ export class ReadAhead {
   /** The run the window follows, held here even once it is no longer among the kept. */
   #followed: Run | null = null
   readonly #underway = new Map<number, Underway>()
-  /** Chunks whose fetch ended in anything but `busy`: this window fetches them no more. */
+  /** Chunks whose fetch ended in anything but `busy` or `shared`: this window fetches them no more. */
   readonly #finished = new Set<number>()
-  /** Chunks that were busy, and when each may be tried again. */
+  /** Chunks that were busy or shared, and when each may be tried again. */
   readonly #busyUntil = new Map<number, number>()
   /** Chunks reported busy, once each. */
   readonly #busyReported = new Set<number>()
@@ -134,7 +134,7 @@ export class ReadAhead {
   /**
    * Starts fetches for the chunks the followed run's window reaches, nearest
    * first, while fewer than `parallel` are under way. Chunks fetched, kept or
-   * skipped before, under way, or busy not long ago are passed over. A window
+   * skipped before, under way, or busy or shared not long ago are passed over. A window
    * that has moved leaves what is under way for the old one to finish into the
    * cache (the fetch isn't wasted), and only what isn't started is dropped.
    */
@@ -181,10 +181,14 @@ export class ReadAhead {
     this.#underway.delete(index)
     const ms = this.#now() - entry.startedAt
     let reported: AheadFetch['outcome'] | null = null
-    if (outcome === 'busy') {
+    if (outcome === 'busy' || outcome === 'shared') {
       this.#busyUntil.set(index, this.#now() + BUSY_RETRY_MS)
-      if (!this.#busyReported.has(index)) reported = 'busy'
-      this.#busyReported.add(index)
+      // A chunk without room is reported once; one that leaned on another read's fetch, not
+      // at all: it fetched nothing, and may be tried again.
+      if (outcome === 'busy' && !this.#busyReported.has(index)) {
+        this.#busyReported.add(index)
+        reported = 'busy'
+      }
     } else {
       this.#busyUntil.delete(index)
       this.#finished.add(index)
