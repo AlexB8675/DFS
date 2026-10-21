@@ -1,0 +1,192 @@
+import { READ_AHEAD_AFTER_BYTES, type PrefetchOutcome } from './reader.ts'
+
+// A stream's read-ahead window (DESIGN.md §6.2): while a player's reads carry
+// on through a file, the chunks after them are fetched from Discord into the
+// frame cache, so a read that gets there finds them kept. This holds the rules
+// alone, with no I/O: it is told what the stream's reads have sent, and says
+// which chunks to fetch through the function it is given. A single request's
+// own read-ahead (the reader's, at most 2 chunks) is a separate thing and
+// stays; this one works across the requests of a stream, which a player makes
+// one after another (and a seek makes one for each).
+
+/** The window ahead is never longer than this. */
+export const WINDOW_BYTES = 128 * 1024 * 1024
+/** The window ahead is at most this many times what its run has sent. */
+export const WINDOW_GROWTH = 4
+/** Chunks fetched at once for a stream. */
+export const PARALLEL_FETCHES = 2
+/** A chunk that found no room is tried again no sooner than this. */
+export const BUSY_RETRY_MS = 1000
+/** Runs of reads kept to tell which a read carries on, the most recently updated. */
+export const MAX_RUNS = 8
+
+/** A fetch ahead that ended, for the session's log: not one the cache had, nor one skipped. */
+export interface AheadFetch {
+  /** The chunk's first byte in the file, and its plaintext bytes. */
+  from: number
+  bytes: number
+  ms: number
+  outcome: 'fetched' | 'failed' | 'busy'
+}
+
+/** Reads that follow one another: `start` is where the first began, `reach` how far they have sent. */
+interface Run {
+  start: number
+  reach: number
+}
+
+interface Underway {
+  controller: AbortController
+  startedAt: number
+}
+
+export class ReadAhead {
+  readonly #size: number
+  readonly #chunkSize: number
+  readonly #chunkCount: number
+  readonly #prefetch: (index: number, signal: AbortSignal) => Promise<PrefetchOutcome>
+  readonly #onFetched: ((fetch: AheadFetch) => void) | undefined
+  readonly #now: () => number
+  readonly #windowBytes: number
+  readonly #parallel: number
+  /** The runs kept, the most recently updated first. */
+  readonly #runs: Run[] = []
+  /** The run the window follows, held here even once it is no longer among the kept. */
+  #followed: Run | null = null
+  readonly #underway = new Map<number, Underway>()
+  /** Chunks whose fetch ended in anything but `busy`: this window fetches them no more. */
+  readonly #finished = new Set<number>()
+  /** Chunks that were busy, and when each may be tried again. */
+  readonly #busyUntil = new Map<number, number>()
+  /** Chunks reported busy, once each. */
+  readonly #busyReported = new Set<number>()
+  #stopped = false
+
+  constructor(options: {
+    size: number
+    chunkSize: number
+    chunkCount: number
+    /** Never rejects. */
+    prefetch: (index: number, signal: AbortSignal) => Promise<PrefetchOutcome>
+    onFetched?: (fetch: AheadFetch) => void
+    now?: () => number
+    windowBytes?: number
+    parallel?: number
+  }) {
+    this.#size = options.size
+    this.#chunkSize = options.chunkSize
+    this.#chunkCount = options.chunkCount
+    this.#prefetch = options.prefetch
+    this.#onFetched = options.onFetched
+    this.#now = options.now ?? (() => performance.now())
+    this.#windowBytes = options.windowBytes ?? WINDOW_BYTES
+    this.#parallel = options.parallel ?? PARALLEL_FETCHES
+  }
+
+  /** Chunks being fetched, in order, for tests. */
+  get fetching(): readonly number[] {
+    return [...this.#underway.keys()].sort((a, b) => a - b)
+  }
+
+  /**
+   * A read that began at byte `from` has sent bytes up to `to` (not included).
+   * It carries on the run that reaches `from`, or begins one; the window
+   * follows a run once it has sent `READ_AHEAD_AFTER_BYTES`, the one most
+   * recently read of, so a storm of short reads (a player probing a file) moves
+   * nothing, and a jump to somewhere the player then plays on from does.
+   */
+  reached(from: number, to: number): void {
+    if (this.#stopped) return
+    const run = this.#runs.find((each) => each.start <= from && from <= each.reach) ?? {
+      start: from,
+      reach: from,
+    }
+    run.reach = Math.max(run.reach, to)
+    // The run read of last goes first; with a new one, the oldest may fall off.
+    const at = this.#runs.indexOf(run)
+    if (at >= 0) this.#runs.splice(at, 1)
+    this.#runs.unshift(run)
+    if (this.#runs.length > MAX_RUNS) this.#runs.length = MAX_RUNS
+    if (run.reach - run.start < READ_AHEAD_AFTER_BYTES) return
+    this.#followed = run
+    this.#fill()
+  }
+
+  /** Aborts the fetches under way; `reached` does nothing after, nor does anything that ends later. */
+  stop(): void {
+    if (this.#stopped) return
+    this.#stopped = true
+    for (const { controller } of this.#underway.values()) controller.abort()
+    this.#underway.clear()
+  }
+
+  /**
+   * Starts fetches for the chunks the followed run's window reaches, nearest
+   * first, while fewer than `parallel` are under way. Chunks fetched, kept or
+   * skipped before, under way, or busy not long ago are passed over. A window
+   * that has moved leaves what is under way for the old one to finish into the
+   * cache (the fetch isn't wasted), and only what isn't started is dropped.
+   */
+  #fill(): void {
+    const run = this.#followed
+    if (run === null || this.#stopped) return
+    const last = this.#chunkCount - 1
+    const current = Math.min(last, Math.floor(run.reach / this.#chunkSize))
+    const count = Math.max(
+      1,
+      Math.ceil(
+        Math.min(this.#windowBytes, WINDOW_GROWTH * (run.reach - run.start)) / this.#chunkSize,
+      ),
+    )
+    const end = Math.min(last, current + count)
+    const now = this.#now()
+    for (let index = current + 1; index <= end; index += 1) {
+      if (this.#underway.size >= this.#parallel) return
+      if (this.#underway.has(index) || this.#finished.has(index)) continue
+      const busyUntil = this.#busyUntil.get(index)
+      if (busyUntil !== undefined && now < busyUntil) continue
+      this.#start(index)
+    }
+  }
+
+  #start(index: number): void {
+    const entry: Underway = { controller: new AbortController(), startedAt: this.#now() }
+    this.#underway.set(index, entry)
+    const settled = (outcome: PrefetchOutcome) => {
+      this.#settled(index, entry, outcome)
+    }
+    // `prefetch` never rejects; one that does is a fetch that failed, not an
+    // unhandled rejection in the API.
+    void this.#prefetch(index, entry.controller.signal).then(settled, () => {
+      settled('failed')
+    })
+  }
+
+  /** A fetch ended: what became of the chunk, the window filled again, and a report of it. */
+  #settled(index: number, entry: Underway, outcome: PrefetchOutcome): void {
+    if (this.#stopped || this.#underway.get(index) !== entry) return
+    this.#underway.delete(index)
+    const ms = this.#now() - entry.startedAt
+    let reported: AheadFetch['outcome'] | null = null
+    if (outcome === 'busy') {
+      this.#busyUntil.set(index, this.#now() + BUSY_RETRY_MS)
+      if (!this.#busyReported.has(index)) reported = 'busy'
+      this.#busyReported.add(index)
+    } else {
+      this.#busyUntil.delete(index)
+      this.#finished.add(index)
+      if (outcome === 'fetched' || outcome === 'failed') reported = outcome
+    }
+    // Filled before it reports, so a recorder that throws can't stall the window.
+    this.#fill()
+    if (reported !== null) {
+      const from = index * this.#chunkSize
+      this.#onFetched?.({
+        from,
+        bytes: Math.min(this.#chunkSize, this.#size - from),
+        ms,
+        outcome: reported,
+      })
+    }
+  }
+}
