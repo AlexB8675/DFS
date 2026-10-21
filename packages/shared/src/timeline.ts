@@ -284,6 +284,7 @@ export interface ServedEvent {
 /** The server read a chunk of the file ahead of the stream into its frame cache (§6.2). */
 export interface AheadEvent {
   type: 'ahead'
+  /** When the fetch began, as a `served` read's is when it began, not when it ended. */
   t: number
   /** The chunk's first byte in the file. */
   from: number

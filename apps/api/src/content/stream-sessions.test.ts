@@ -621,7 +621,8 @@ describe('stream sessions (§6.2, §16)', () => {
       { type: 'served', t: 0 },
       {
         type: 'ahead',
-        t: 3000,
+        // Stamped when the fetch began, 640 ms before it was noted.
+        t: 2360,
         from: 20_971_520,
         bytes: 20_971_520,
         ms: 640,
@@ -646,8 +647,27 @@ describe('stream sessions (§6.2, §16)', () => {
         .filter((call) => call.id === id)
         .flatMap((call) => call.batch.events)
         .filter((event) => event.type === 'ahead')
-    expect(ahead(first)).toMatchObject([{ t: 150, from: 10, outcome: 'failed' }])
-    expect(ahead(second)).toMatchObject([{ t: 50, from: 0, outcome: 'busy' }])
+    // Each fetch began as long before its note as it took.
+    expect(ahead(first)).toMatchObject([{ t: 147, from: 10, outcome: 'failed' }])
+    expect(ahead(second)).toMatchObject([{ t: 48, from: 0, outcome: 'busy' }])
+  })
+
+  it('stamps a fetch ahead with when it began, never before its session did', async () => {
+    const harness = setup()
+    const { clock, calls, sessions } = harness
+    const id = serve(harness, { playId: 'play-1' }, 1000, 0)
+    clock.now += 3000
+    // Noted 3000 ms after the session began, 1000 ms after the fetch did.
+    sessions.note(id, { from: 0, bytes: 10, ms: 1000, outcome: 'fetched' })
+    // A fetch that took longer than the session has lasted began before it: at its start.
+    sessions.note(id, { from: 10, bytes: 10, ms: 4500, outcome: 'fetched' })
+
+    await sessions.flush()
+    expect(calls[0]?.batch.events).toMatchObject([
+      { type: 'served', t: 0 },
+      { type: 'ahead', t: 2000, from: 0, ms: 1000 },
+      { type: 'ahead', t: 0, from: 10, ms: 4500 },
+    ])
   })
 
   it('takes no note for a session that has ended or stopped', async () => {

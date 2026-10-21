@@ -248,16 +248,18 @@ export class StreamSessions {
   }
 
   /**
-   * Records a chunk the read-ahead fetched for the session, `t` after its start
-   * as a read's is, under the same cap. A session that is unknown, ended or
-   * stopped takes nothing: it has no timeline to write it to.
+   * Records a chunk the read-ahead fetched for the session, under the same
+   * cap, with `t` as of when the fetch began (not when it ended, which is when
+   * this is told), as a read's is: so it sorts beside the reads it ran with, and
+   * never before the session began. A session that is unknown, ended or stopped
+   * takes nothing: it has no timeline to write it to.
    */
   note(sessionId: string, fetch: Omit<AheadEvent, 't' | 'type'>): void {
     const session = this.#byId.get(sessionId)
     if (!session || session.stopped) return
     session.pending.push({
       type: 'ahead',
-      t: Math.round(this.#now() - session.startedAt),
+      t: Math.max(0, Math.round(this.#now() - fetch.ms - session.startedAt)),
       from: fetch.from,
       bytes: fetch.bytes,
       ms: Math.round(fetch.ms),
