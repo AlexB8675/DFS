@@ -48,6 +48,7 @@ function isTable(type: string): type is TableType {
 
 export interface TrackHeader {
   id: number
+  /** From `hdlr`, which is read first: a track with a `problem` keeps its kind unless its `hdlr` is what can't be read (then `'other'`). */
   kind: 'video' | 'audio' | 'other'
   /** From `hdlr`. */
   handler: string
@@ -262,21 +263,24 @@ function readTrack(moov: Uint8Array, trak: Box): TrackHeader {
   }
   try {
     const inTrak = childrenOf(moov, trak)
+    const mdia = need(inTrak, trak, 'mdia')
+    const inMdia = childrenOf(moov, mdia)
+    // The handler first, so that a track that fails in any box after it still says what it is:
+    // a picture that can't be read is a picture that refuses the file, not one to pass over.
+    // The `hdlr` that is a child of `mdia`: a MOV's `minf` has one of its own, for data.
+    track.handler = readHandler(moov, need(inMdia, mdia, 'hdlr'))
+    track.kind = track.handler === 'vide' ? 'video' : track.handler === 'soun' ? 'audio' : 'other'
+
     const header = readTrackHeader(moov, need(inTrak, trak, 'tkhd'))
     track.id = header.id
     track.width = header.width
     track.height = header.height
     track.matrix = header.matrix
 
-    const mdia = need(inTrak, trak, 'mdia')
-    const inMdia = childrenOf(moov, mdia)
     const media = readMediaHeader(moov, need(inMdia, mdia, 'mdhd'))
     track.timescale = media.timescale
     track.durationTicks = media.durationTicks
     track.language = media.language
-    // The `hdlr` that is a child of `mdia`: a MOV's `minf` has one of its own, for data.
-    track.handler = readHandler(moov, need(inMdia, mdia, 'hdlr'))
-    track.kind = track.handler === 'vide' ? 'video' : track.handler === 'soun' ? 'audio' : 'other'
 
     // The edit list is the one box that a track may do without: it is in the boxes that were read, or the track has none.
     const edts = inTrak.boxes.find((box) => box.type === 'edts')

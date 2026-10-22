@@ -413,7 +413,11 @@ describe('what a movie that is not sound refuses, and what only a track does (§
     const goodMinf = box('minf', stbl)
     const cases: [string, Uint8Array, string][] = [
       ['no tkhd', box('trak', wholeMedia(mdhd(), hdlr('vide'), goodMinf)), "no 'tkhd'"],
-      ['a tkhd cut short', box('trak', box('tkhd', [0, 0, 0, 0, 1, 2])), 'runs past'],
+      [
+        'a tkhd cut short',
+        box('trak', box('tkhd', [0, 0, 0, 0, 1, 2]), wholeMedia(mdhd(), hdlr('vide'), goodMinf)),
+        'runs past',
+      ],
       ['no mdia', box('trak', tkhd({ id: 1 })), "no 'mdia'"],
       ['no mdhd', box('trak', tkhd(), wholeMedia(hdlr('vide'), goodMinf)), "no 'mdhd'"],
       [
@@ -629,6 +633,54 @@ describe('what a track needs, and what it does not (§10.4)', () => {
     expect(Object.keys(fine?.tables ?? {})).toEqual(['stts'])
     expect(table1?.problem).toContain("'stco'")
     expect(table2?.problem).toContain("'stsd'")
+  })
+
+  it("keeps a broken track's kind when its handler can be read", () => {
+    const stbl = box('stbl', stsd([sampleEntry('avc1')]))
+    const media = (handler: string, ...first: Uint8Array[]) =>
+      box('mdia', ...first, hdlr(handler), box('minf', stbl))
+    const cutTkhd = box('tkhd', [0, 0, 0, 0, 1, 2])
+    const read = readMovie(
+      movie({
+        tracks: [
+          // A picture whose media says a timescale of 0: its `mdhd` is read before the rest and fails.
+          { id: 1, handler: 'vide', timescale: 0 },
+          // A picture and a sound whose `tkhd` can't be read, before their `mdia`.
+          box('trak', cutTkhd, media('vide', mdhd())),
+          box('trak', cutTkhd, media('soun', mdhd())),
+          // An `mdhd` that is missing, and an edit list that is wrong, after the handler.
+          box('trak', tkhd(), media('vide')),
+          box(
+            'trak',
+            tkhd(),
+            box('edts', fullBox('elst', 0, 0, u32(1000), u32(1), i32(0), u32(0x10000))),
+            media('soun', mdhd()),
+          ),
+          // The handler is what can't be found or read: nothing says what the track is.
+          box('trak', tkhd(), box('mdia', mdhd(), box('minf', stbl))),
+          box(
+            'trak',
+            tkhd(),
+            box('mdia', mdhd(), box('hdlr', [0, 0, 0, 0, 0, 0]), box('minf', stbl)),
+          ),
+          // A handler that is neither, and a track that fails after it.
+          box('trak', cutTkhd, media('tmcd', mdhd())),
+        ],
+      }),
+    )
+    expect(read.tracks.map((track) => [track.kind, track.problem !== null])).toEqual([
+      ['video', true],
+      ['video', true],
+      ['audio', true],
+      ['video', true],
+      ['audio', true],
+      ['other', true],
+      ['other', true],
+      ['other', true],
+    ])
+    expect(trackOf(read, 0).handler).toBe('vide')
+    expect(trackOf(read, 1).handler).toBe('vide')
+    expect(trackOf(read, 5).handler).toBe('')
   })
 
   it('reads a movie that is followed by bytes that are not boxes', () => {

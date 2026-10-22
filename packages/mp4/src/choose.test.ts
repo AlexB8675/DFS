@@ -12,6 +12,8 @@ import {
   box,
   esds,
   frma,
+  hdlr,
+  mdhd,
   movie,
   quickTimeAudioEntry,
   sampleEntry,
@@ -21,6 +23,7 @@ import {
   stss,
   stsz,
   stts,
+  trak,
   visualEntry,
   wave,
 } from './testing/build.ts'
@@ -328,6 +331,44 @@ describe('the tracks a video plays (§10.4, D45)', () => {
     expect(trackOf(parsed, 0).kind).toBe('video')
     expect(trackOf(parsed, 0).problem).not.toBeNull()
     refusal('damaged', () => chooseTracks(parsed))
+  })
+
+  it("refuses a file whose first picture is broken before its handler's place in the file, with that track's reason", () => {
+    // Broken in `mdhd`, and in `tkhd`: both are read before the track's handler in the file's order.
+    const cutTkhd = box(
+      'trak',
+      box('tkhd', [0, 0, 0, 0, 1, 2]),
+      box(
+        'mdia',
+        mdhd({ timescale: 30000 }),
+        hdlr('vide'),
+        box('minf', box('stbl', stsd([PICTURE]))),
+      ),
+    )
+    const files = [
+      { what: 'a zero timescale', first: picture({ id: 1, timescale: 0 }), reason: /timescale/ },
+      { what: 'a tkhd cut short', first: cutTkhd, reason: /runs past/ },
+    ]
+    for (const { what, first, reason } of files) {
+      const tracks = [first, picture({ id: 2 })].map((track) =>
+        track instanceof Uint8Array ? track : trak(track),
+      )
+      const parsed = readMovie(movie({ timescale: 1000, tracks }))
+      expect(trackOf(parsed, 0).kind, what).toBe('video')
+      expect(trackOf(parsed, 0).problem, what).not.toBeNull()
+      expect(trackOf(parsed, 1).problem, what).toBeNull()
+      const error = refusal('damaged', () => chooseTracks(parsed))
+      expect(error.message, what).toMatch(/^The picture track can't be played: /)
+      expect(error.message, what).toMatch(reason)
+    }
+    // Where nothing says what the first track is, it is not a picture, and the second is the first.
+    const nameless = box(
+      'trak',
+      box('tkhd', [0, 0, 0, 0, 1, 2]),
+      box('mdia', mdhd({ timescale: 30000 }), box('minf', box('stbl', stsd([PICTURE])))),
+    )
+    const parsed = readMovie(movie({ tracks: [nameless, trak(picture({ id: 2 }))] }))
+    expect(chooseTracks(parsed).video.header.id).toBe(2)
   })
 
   it('refuses a file whose first sound is refused, and does not try the next', () => {
