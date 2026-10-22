@@ -370,7 +370,7 @@ export function stts(runs: readonly Run[], count = runs.length): Uint8Array {
   return fullBox('stts', 0, 0, u32(count), words(runs.flat()))
 }
 
-/** `ctts`: the composition offset of each run of samples, unsigned in version 0 and signed in 1. */
+/** `ctts`: the composition offset of each run of samples. Version 1 writes it signed; version 0 as the 32 bits a QuickTime-style file holds, so a negative offset is given as its two's complement (-1024 as 0xFFFFFC00). */
 export function ctts(version: Version, runs: readonly Run[], count = runs.length): Uint8Array {
   return fullBox('ctts', version, 0, u32(count), words(runs.flat(), version === 1))
 }

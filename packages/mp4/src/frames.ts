@@ -7,9 +7,11 @@ import type { TableType, TrackHeader } from './movie.ts'
 // long, how far its composition time is from that, and whether it is a
 // keyframe. The tables of a movie are tiny next to what they describe (an
 // `stts` of one entry says 432 000 durations), so what is read is checked first
-// and cheaply: every table's counts are read and made to agree with the sample
-// count of `stsz` (or `stz2`) before any array is allocated, and only then is
-// each array filled, in one pass over its table, with no object for a frame.
+// and cheaply: the counts of `stts`, `ctts` and `stsc` with its chunk table are
+// read and made to agree with the sample count of `stsz` (or `stz2`) before any
+// array of frames is made, and only then is each array filled, in one pass over
+// its table, with no object for a frame. The numbers of `stss` are the one
+// thing checked as the arrays are filled: each must be a sample the track has.
 // Offsets and decode times are doubles (exact to 2^53) and never go through
 // 32-bit arithmetic: a file past 4 GiB has chunks that don't fit in it.
 
@@ -128,22 +130,24 @@ interface Runs {
   total: number
 }
 
-/** The runs of `stts` (durations, unsigned) or of `ctts` (offsets, unsigned in version 0 and signed in 1), or null when the track has no such table. */
+/**
+ * The runs of `stts` (durations, unsigned) or of `ctts` (offsets, signed), or
+ * null when the track has no such table. A `ctts` offset is signed in version 0
+ * as in version 1: the standard says unsigned for version 0, but QuickTime-style
+ * files carry negative offsets there, as 32 bits two's complement, and FFmpeg
+ * reads them signed, so a file that plays there plays here.
+ */
 function readRuns(track: TrackHeader, type: 'stts' | 'ctts'): Runs | null {
   const table = open(track, type, type === 'ctts' ? 1 : 0)
   if (!table) return null
   const count = countEntries(table, type, 8)
-  const signed = type === 'ctts' && table.version === 1
+  const signed = type === 'ctts'
   const counts = new Uint32Array(count)
   const values = signed ? new Int32Array(count) : new Uint32Array(count)
   let total = 0
   for (let index = 0; index < count; index += 1) {
     const samples = table.reader.u32()
     const value = signed ? table.reader.i32() : table.reader.u32()
-    // Version 0 is unsigned, and a value that only a signed number of 32 bits could hold is not read as one.
-    if (type === 'ctts' && !signed && value > 2 ** 31 - 1) {
-      throw damaged(`The 'ctts' box of version 0 holds an offset of ${value}, more than 2^31 - 1.`)
-    }
     counts[index] = samples
     values[index] = value
     total += samples

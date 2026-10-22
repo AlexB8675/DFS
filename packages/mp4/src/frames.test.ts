@@ -122,7 +122,7 @@ describe("a track's frames (§10.4)", () => {
   it('reads ctts v0 and v1, negative offsets included', () => {
     const rest = [stts([[5, 1000]]), stsz([1, 1, 1, 1, 1]), stsc([[1, 5]]), stco([0])]
 
-    const unsigned = frameTable(
+    const version0 = frameTable(
       trackWith([
         ctts(0, [
           [2, 2002],
@@ -131,7 +131,7 @@ describe("a track's frames (§10.4)", () => {
         ...rest,
       ]),
     )
-    expect(ints(unsigned.cts)).toEqual([2002, 2002, 0, 0, 0])
+    expect(ints(version0.cts)).toEqual([2002, 2002, 0, 0, 0])
 
     const signed = frameTable(
       trackWith([
@@ -147,7 +147,7 @@ describe("a track's frames (§10.4)", () => {
     expect(signed.cts).toBeInstanceOf(Int32Array)
     expect(ints(signed.cts)).toEqual([-2002, 4004, 4004, -1001, 0])
 
-    // The ends of what 32 bits hold: the largest of version 0 and both of version 1.
+    // The ends of what 32 bits hold as a signed number: the largest of version 0 and both of version 1.
     const high = frameTable(trackWith([ctts(0, [[5, 2 ** 31 - 1]]), ...rest]))
     expect(ints(high.cts)).toEqual(new Array<number>(5).fill(2 ** 31 - 1))
     const ends = frameTable(
@@ -160,6 +160,25 @@ describe("a track's frames (§10.4)", () => {
       ]),
     )
     expect(ints(ends.cts)).toEqual([-(2 ** 31), -(2 ** 31), 2 ** 31 - 1, 2 ** 31 - 1, 2 ** 31 - 1])
+  })
+
+  it("reads a version 0 ctts's offsets as signed, as FFmpeg does", () => {
+    const rest = [stts([[5, 1000]]), stsz([1, 1, 1, 1, 1]), stsc([[1, 5]]), stco([0])]
+    // QuickTime-style files carry a negative offset in version 0 as 32 bits two's complement:
+    // 0xFFFFFC00 is -1024, and 0x80000000 is the most negative, which is not a large positive.
+    const frames = frameTable(
+      trackWith([
+        ctts(0, [
+          [1, 0xfffffc00],
+          [2, 2002],
+          [1, 0x80000000],
+          [1, 0xffffffff],
+        ]),
+        ...rest,
+      ]),
+    )
+    expect(frames.cts).toBeInstanceOf(Int32Array)
+    expect(ints(frames.cts)).toEqual([-1024, 2002, 2002, -(2 ** 31), -1])
   })
 
   it('treats every frame as a keyframe without stss', () => {
@@ -322,11 +341,6 @@ describe("a track's frames (§10.4)", () => {
         /'stsc'.*chunk 3.*'stco'.*2/,
       ],
       ['an stsc that says nothing of the chunks there are', { stsc: stsc([]) }, /'stsc'.*no entry/],
-      [
-        'a ctts of version 0 above 2^31 - 1',
-        { ctts: ctts(0, [[4, 2 ** 31]]) },
-        /'ctts'.*2147483648/,
-      ],
       [
         'an stts that claims more entries than it holds',
         { stts: stts([[4, 1000]], 99_999) },
