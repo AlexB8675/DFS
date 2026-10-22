@@ -35,3 +35,6 @@ Thumbs.db
 
 # Claude Code personal settings
 .claude/settings.local.json
+
+# The MP4 reader's test corpus: a manifest, synthetic files and the ffprobe cache (never committed)
+packages/mp4/corpus/
