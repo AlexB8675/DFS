@@ -154,12 +154,44 @@ describe("a track's timing (§10.4)", () => {
     expect(aac([]).track.edits).toEqual([])
   })
 
-  it("doesn't use how long the media edit lasts: a trim at the end is not applied", () => {
-    // 10 frames of 1024 are 0.21 s, and the edit says 1 s, or 1 ms: the start is all that is read.
+  it('gives the same offset however long the media edit lasts', () => {
+    // 10 frames of 1024 are 0.21 s, and the edit says 1 s, or 1 ms: the start is all the offset reads.
     for (const duration of [1000, 1]) {
       const { track, movieTimescale } = aac([{ duration, mediaTime: 1024 }])
       expect(trackTiming(track, movieTimescale).offsetSeconds).toBeCloseTo(-1024 / 48000, 12)
     }
+  })
+
+  it("says where the media edit ends in presentation time, after the empty edit's pause", () => {
+    // A pause of 0.5 s, then 10 s of the media: it ends at 10.5 s, where the player's append window does.
+    const paused = aac([
+      { duration: 500, mediaTime: -1 },
+      { duration: 10000, mediaTime: 1024 },
+    ])
+    expect(trackTiming(paused.track, paused.movieTimescale).endSeconds).toBeCloseTo(10.5, 12)
+
+    const plain = aac([{ duration: 5000, mediaTime: 1024 }])
+    expect(trackTiming(plain.track, plain.movieTimescale).endSeconds).toBeCloseTo(5, 12)
+
+    // The movie's timescale is what the duration is in.
+    const slow = built({
+      movieTimescale: 600,
+      timescale: 48000,
+      edits: [{ duration: 1200, mediaTime: 0 }],
+      tables: [stts([[10, 1024]]), stsz({ size: 100, count: 10 }), stsc([[1, 10]]), stco([1000])],
+    })
+    expect(trackTiming(slow.track, slow.movieTimescale).endSeconds).toBeCloseTo(2, 12)
+  })
+
+  it('gives no end to a track without an edit list, or whose media edit has no duration', () => {
+    for (const edits of [undefined, [], [{ duration: 0, mediaTime: 1024 }]]) {
+      const { track, movieTimescale } = aac(edits)
+      expect(trackTiming(track, movieTimescale).endSeconds, JSON.stringify(edits)).toBeNull()
+    }
+    // With a movie timescale of 0 there are no seconds to say it in, and the offset, which doesn't need it, is still given.
+    const unscaled = trackTiming(aac([{ duration: 5000, mediaTime: 1024 }]).track, 0)
+    expect(unscaled.endSeconds).toBeNull()
+    expect(unscaled.offsetSeconds).toBeCloseTo(-1024 / 48000, 12)
   })
 
   it("ignores an empty edit's rate, which has nothing to play at", () => {
@@ -269,7 +301,7 @@ describe("a track's timing (§10.4)", () => {
 
   it('refuses a presentation time of a frame the table does not have', () => {
     const { table } = aac(undefined)
-    const timing = { offsetSeconds: 0 }
+    const timing = { offsetSeconds: 0, endSeconds: null }
     expect(() => presentationSeconds(table, timing, 10)).toThrow(RangeError)
     expect(() => presentationSeconds(table, timing, -1)).toThrow(RangeError)
     expect(() => presentationSeconds(table, timing, 1.5)).toThrow(RangeError)
@@ -313,6 +345,50 @@ describe('where a time is in a track (§10.4)', () => {
     expect(at(-1)).toBe(0)
     // Frame 7 is decoded 5 frames in, but not shown before 7: by presentation 6 frames is still in the first group.
     expect(at((6 * FRAME) / VIDEO_TIMESCALE)).toBe(0)
+  })
+
+  it('finds a keyframe by decode time when the keyframes are not shown in the order they are decoded', () => {
+    // 8 frames of 1 s, decoded in turn and shown in the order 0 3 1 2 4 7 5 6, and with no stss every one is a keyframe.
+    const { table, track, movieTimescale } = built({
+      tables: [
+        stts([[8, 1000]]),
+        ctts(1, runsOf([0, 2000, -1000, -1000, 0, 2000, -1000, -1000])),
+        stsz([10, 20, 30, 40, 50, 60, 70, 80]),
+        stsc([[1, 8]]),
+        stco([1000]),
+      ],
+    })
+    const timing = trackTiming(track, movieTimescale)
+    const keyframes = keyframeIndexes(table)
+    expect(keyframes).toHaveLength(8)
+    expect(Array.from({ length: 8 }, (_, i) => presentationSeconds(table, timing, i))).toEqual([
+      0, 3, 1, 2, 4, 7, 5, 6,
+    ])
+    const at = (seconds: number): number => keyframeAtOrBefore(table, timing, keyframes, seconds)
+
+    // The last one decoded by then, or the last before it that is shown by then: frame 1 is decoded at 1 s but not shown until 3.
+    expect(at(0)).toBe(0)
+    expect(at(1)).toBe(0)
+    expect(at(1.5)).toBe(0)
+    expect(at(2)).toBe(2)
+    expect(at(2.5)).toBe(2)
+    expect(at(3.5)).toBe(3)
+    expect(at(4.5)).toBe(4)
+    expect(at(5)).toBe(4)
+    expect(at(5.5)).toBe(4)
+    expect(at(6)).toBe(6)
+    expect(at(100)).toBe(7)
+    // Before the first, the first.
+    expect(at(-1)).toBe(0)
+
+    // Whatever the time: the keyframe is shown at or before it, and decoded at or before it, so decoding from it reaches it.
+    for (let seconds = 0; seconds <= 8; seconds += 0.25) {
+      const found = at(seconds)
+      expect(presentationSeconds(table, timing, found), `${seconds} s`).toBeLessThanOrEqual(seconds)
+      expect((table.dts[found] ?? 0) / table.timescale + timing.offsetSeconds).toBeLessThanOrEqual(
+        seconds,
+      )
+    }
   })
 
   it('gives the first keyframe, by frame index, for a time before it', () => {
@@ -429,5 +505,26 @@ describe('the bytes of a run of frames (§10.4)', () => {
     expect(() => byteSpan([{ table: video, from: 0, to: 5 }])).toThrow(RangeError)
     expect(() => byteSpan([{ table: video, from: -1, to: 2 }])).toThrow(RangeError)
     expect(() => byteSpan([{ table: video, from: 0.5, to: 2 }])).toThrow(RangeError)
+  })
+
+  it('refuses a range that is wrong even where it is empty, before leaving the empty ones out', () => {
+    // From after to: not an empty range, but a wrong one.
+    expect(() => byteSpan([{ table: video, from: 5, to: 2 }])).toThrow(RangeError)
+    expect(() => byteSpan([{ table: video, from: 3, to: 2 }])).toThrow(RangeError)
+    // Empty, but not at a frame boundary of the table: 10 to 10 on 4 frames, below 0, or not whole.
+    expect(() => byteSpan([{ table: video, from: 10, to: 10 }])).toThrow(RangeError)
+    expect(() => byteSpan([{ table: video, from: -1, to: -1 }])).toThrow(RangeError)
+    expect(() => byteSpan([{ table: video, from: 1.5, to: 1.5 }])).toThrow(RangeError)
+    expect(() => byteSpan([{ table: video, from: NaN, to: NaN }])).toThrow(RangeError)
+    // One wrong range is refused among right ones.
+    expect(() =>
+      byteSpan([
+        { table: sound, from: 0, to: 2 },
+        { table: video, from: 10, to: 10 },
+      ]),
+    ).toThrow(RangeError)
+    // The ends of the table are in range: an empty range at 0 or at the count is empty and left out.
+    expect(byteSpan([{ table: video, from: 0, to: 0 }])).toEqual({ start: 0, end: 0 })
+    expect(byteSpan([{ table: video, from: 4, to: 4 }])).toEqual({ start: 0, end: 0 })
   })
 })

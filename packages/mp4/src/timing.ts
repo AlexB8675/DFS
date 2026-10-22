@@ -5,15 +5,25 @@ import type { Edit, TrackHeader } from './movie.ts'
 // Where a track's frames are in time, and where in the file (DESIGN.md §10.4,
 // D45). The fragments the repackager writes carry raw decode times, with no edit
 // list in the init segment, so what a track's edit list says is not in them: it
-// is one number for each track, `offsetSeconds`, which the player gives its
-// SourceBuffer as `timestampOffset`. Seeking and splitting then work in seconds
-// of the movie's time, found through that offset: the keyframe to start a seek
-// at, the sound that goes with it, and the bytes of both, which are read from
-// the file in one Range request.
+// is two numbers for each track, which the player gives its SourceBuffer, the
+// offset (as `timestampOffset`) and where the track ends (as `appendWindowEnd`).
+// Seeking and splitting then work in seconds of the movie's time, found through
+// that offset: the keyframe to start a seek at, the sound that goes with it, and
+// the bytes of both, which are read from the file in one Range request.
 
-/** What a track's SourceBuffer's timestampOffset takes, in seconds: the leading empty edit, less the media edit's start. */
 export interface TrackTiming {
+  /** What a track's SourceBuffer's timestampOffset takes, in seconds: the leading empty edit, less the media edit's start. */
   offsetSeconds: number
+  /**
+   * Where the track's media edit ends, in seconds of presentation time with the
+   * offset applied: the leading empty edit and the media edit's duration. The
+   * player sets its SourceBuffer's `appendWindowEnd` to it, so that a trimmed
+   * end isn't played (QuickTime and iOS keep the footage they cut behind an
+   * edit list). Null for a track without an edit list, or whose media edit has
+   * no duration (or the movie no timescale to say it in): it plays to its last
+   * frame.
+   */
+  endSeconds: number | null
 }
 
 /** The rate 1, as an edit holds it: 16.16 fixed point. */
@@ -61,15 +71,19 @@ function placeable(edits: readonly Edit[]): { empty: Edit | null; media: Edit } 
  * list, or an optional leading empty edit and then one media edit at rate 1 (the
  * only shapes the videos in use have, as surveyed), and refuses any other as
  * `Mp4Error('edit-list')` with a sentence that says what the list is. How long
- * the media edit lasts is not used: a trim at its end is not applied, and the
- * track plays to its last frame. An empty edit's rate is not read either, for it
+ * the media edit lasts is no part of the offset: it gives `endSeconds`, where
+ * the player applies a trim at the end. An empty edit's rate is not read, for it
  * plays nothing. A track timescale of 0 (which `readMovie` keeps as the track's
  * problem, so it doesn't come here) is refused as `damaged`, and so is a movie
- * timescale of 0 when an empty edit has to be turned into seconds with it.
+ * timescale of 0 when an empty edit has to be turned into seconds with it; a
+ * media edit alone doesn't need the movie's timescale for the offset, and has no
+ * `endSeconds` without it.
  */
 export function trackTiming(track: TrackHeader, movieTimescale: number): TrackTiming {
   if (track.timescale === 0) throw damaged(`The track counts its time in ticks of 0 seconds.`)
-  if (track.edits === null || track.edits.length === 0) return { offsetSeconds: 0 }
+  if (track.edits === null || track.edits.length === 0) {
+    return { offsetSeconds: 0, endSeconds: null }
+  }
 
   const { empty, media } = placeable(track.edits)
   if (media.rate !== NORMAL_RATE) {
@@ -87,15 +101,31 @@ export function trackTiming(track: TrackHeader, movieTimescale: number): TrackTi
     }
     paused = empty.durationMovieTicks / movieTimescale
   }
+  // A media edit of no duration (some writers leave it 0) says no end, as does a movie that can't count seconds.
+  const endSeconds =
+    media.durationMovieTicks > 0 && movieTimescale !== 0
+      ? paused + media.durationMovieTicks / movieTimescale
+      : null
   // From 0, and not negated, so that a start of 0 is 0 and not -0.
-  return { offsetSeconds: paused - media.mediaTime / track.timescale }
+  return { offsetSeconds: paused - media.mediaTime / track.timescale, endSeconds }
+}
+
+/** Frame `i` must be one of the table's: a frame it doesn't have is a RangeError, the caller's mistake and not the file's. */
+function checkFrame(table: FrameTable, i: number): void {
+  if (!Number.isInteger(i) || i < 0 || i >= table.count) {
+    throw new RangeError(`Frame ${i} is not one of the ${table.count} frames of the track.`)
+  }
+}
+
+/** Frame i's decode time in seconds, the offset applied: dts / timescale + offset. */
+function decodeSeconds(table: FrameTable, timing: TrackTiming, i: number): number {
+  checkFrame(table, i)
+  return (table.dts[i] ?? 0) / table.timescale + timing.offsetSeconds
 }
 
 /** Frame i's presentation time in seconds, the offset applied: (dts + cts) / timescale + offset. A frame the table doesn't have is a RangeError: it is the caller's mistake, and not the file's. */
 export function presentationSeconds(table: FrameTable, timing: TrackTiming, i: number): number {
-  if (!Number.isInteger(i) || i < 0 || i >= table.count) {
-    throw new RangeError(`Frame ${i} is not one of the ${table.count} frames of the track.`)
-  }
+  checkFrame(table, i)
   return ((table.dts[i] ?? 0) + (table.cts[i] ?? 0)) / table.timescale + timing.offsetSeconds
 }
 
@@ -115,12 +145,16 @@ export function keyframeIndexes(table: FrameTable): Uint32Array {
 }
 
 /**
- * The keyframe to decode from to show `seconds`: the last keyframe whose
- * presentation time is at or before it, as a frame index (an element of
- * `keyframes`, not a place in it), or the first keyframe when there is none
- * that early. A keyframe is shown after the keyframe decoded before it, so
- * their presentation times ascend, and a binary search finds it. A table with no
- * keyframe has nowhere to decode from and is refused as `damaged`.
+ * The keyframe to decode from to show `seconds`, as a frame index (an element of
+ * `keyframes`, not a place in it): the last keyframe decoded at or before it
+ * that is also shown at or before it, or the first keyframe when there is none
+ * that early. Decode times ascend with the frames, so a binary search over them
+ * finds the last keyframe decoded by then; presentation times don't always (a
+ * track with B-frames and no `stss` makes every frame a keyframe, and these are
+ * shown in another order than they are decoded), so from there it steps back
+ * over the keyframes that are shown after `seconds`, which in an ordinary file
+ * are none or a few. A table with no keyframe has nowhere to decode from and is
+ * refused as `damaged`.
  */
 export function keyframeAtOrBefore(
   table: FrameTable,
@@ -129,15 +163,20 @@ export function keyframeAtOrBefore(
   seconds: number,
 ): number {
   if (keyframes.length === 0) throw damaged(`The track has no keyframe to decode from.`)
-  // How many keyframes are shown at or before `seconds`: the first that isn't is where the search ends.
+  // How many keyframes are decoded at or before `seconds`: the first that isn't is where the search ends.
   let low = 0
   let high = keyframes.length
   while (low < high) {
     const middle = (low + high) >>> 1
-    if (presentationSeconds(table, timing, keyframes[middle] ?? 0) <= seconds) low = middle + 1
+    if (decodeSeconds(table, timing, keyframes[middle] ?? 0) <= seconds) low = middle + 1
     else high = middle
   }
-  return keyframes[Math.max(low - 1, 0)] ?? 0
+  // With none that early the first is all there is: decoding has to start somewhere.
+  let found = Math.max(low - 1, 0)
+  while (found > 0 && presentationSeconds(table, timing, keyframes[found] ?? 0) > seconds) {
+    found -= 1
+  }
+  return keyframes[found] ?? 0
 }
 
 /**
@@ -151,7 +190,7 @@ export function frameAtOrAfter(table: FrameTable, timing: TrackTiming, seconds: 
   let high = table.count
   while (low < high) {
     const middle = (low + high) >>> 1
-    if ((table.dts[middle] ?? 0) / table.timescale + timing.offsetSeconds >= seconds) high = middle
+    if (decodeSeconds(table, timing, middle) >= seconds) high = middle
     else low = middle + 1
   }
   return low
@@ -161,10 +200,11 @@ export function frameAtOrAfter(table: FrameTable, timing: TrackTiming, seconds: 
  * The bytes that hold frames [from, to) of each table given: the least offset
  * and the greatest end, for one Range read of interleaved tracks. Each frame of
  * each range is looked at, for the offsets of a track don't have to ascend with
- * its frames. A range with no frame (`from` at or past `to`) holds no bytes and
- * is left out, and when there is nothing left the span is `{ start: 0, end: 0 }`:
- * nothing to read. A range that is not within the table's frames is a
- * RangeError, the caller's mistake and not the file's.
+ * its frames. Each range is checked first, empty or not: `from` and `to` must be
+ * whole numbers with 0 <= from <= to <= the table's count, or it is a RangeError,
+ * the caller's mistake and not the file's. A range with no frame (`from` at `to`)
+ * holds no bytes and is then left out, and when there is nothing left the span is
+ * `{ start: 0, end: 0 }`: nothing to read.
  */
 export function byteSpan(parts: readonly { table: FrameTable; from: number; to: number }[]): {
   start: number
@@ -173,12 +213,18 @@ export function byteSpan(parts: readonly { table: FrameTable; from: number; to: 
   let start = Infinity
   let end = 0
   for (const { table, from, to } of parts) {
-    if (!(from < to)) continue
-    if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 || to > table.count) {
+    if (
+      !Number.isInteger(from) ||
+      !Number.isInteger(to) ||
+      from < 0 ||
+      from > to ||
+      to > table.count
+    ) {
       throw new RangeError(
-        `Frames ${from} to ${to} are not within the ${table.count} frames of the track.`,
+        `Frames ${from} to ${to} are not a range within the ${table.count} frames of the track.`,
       )
     }
+    if (from === to) continue
     for (let i = from; i < to; i += 1) {
       const offset = table.offsets[i] ?? 0
       start = Math.min(start, offset)
