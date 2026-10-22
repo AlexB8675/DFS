@@ -27,8 +27,8 @@ import type { FastifyInstance } from 'fastify'
 // keeps up, never past the requested range. A response asks for its next
 // piece only once its socket has taken the last (`paced`, send.ts), and gives
 // up on what is being read once its client has gone (`cancellation`), so a
-// cancelled seek stops fetching at once. A video's first chunk and end, where
-// its index usually is, are fetched into the cache as its player opens (`warmVideo`).
+// cancelled seek stops fetching at once. A video's first two chunks and its end,
+// where its index usually is, are fetched into the cache as its player opens (`warmVideo`).
 
 /** What reading needs to know about a file version. */
 export interface ReadableVersion extends Record<string, unknown> {
@@ -398,6 +398,12 @@ export const WARM_END_BYTES = 4 * 1024 * 1024
  * with the rest would come last.
  */
 const INDEX_SEGMENTS = 4
+/**
+ * A video's first chunks fetched whole as its player opens, at most: its head,
+ * and the chunk after it, which a player that has taken the first asks for next
+ * (bandwidth is cheap if it prevents a stall, the user's rule, 2026-10-22).
+ */
+const WARM_WHOLE_CHUNKS = 2
 /** A fetch of a video's start and end given up after this long: nobody waits for it. */
 const WARM_TIMEOUT_MS = 30_000
 /** Videos fetched at once per API at most; more are left to their players. */
@@ -409,10 +415,12 @@ const warming = new WeakMap<FastifyInstance, Set<string>>()
  * Fetches a stored version's start and end from Discord into the frame
  * cache, ahead of the reader who will want them: a player reads a video's
  * first bytes, looks at its end for the index, then plays from the start. A
- * video of several chunks has its first chunk fetched whole, and the last
- * `WARM_END_BYTES` that aren't in it, the last megabyte first, on a request
- * of its own; one of a single chunk has all of it fetched, the same last
- * megabyte first and the rest on another request, never whole. A chunk is
+ * video of three chunks or more has its first two chunks fetched whole, and
+ * the last `WARM_END_BYTES` that aren't in them, the last megabyte first, on a
+ * request of its own; one of two has its first chunk fetched whole and its
+ * second, which is its end, the same way; one of a single chunk has all of it
+ * fetched, the same last megabyte first and the rest on another request,
+ * never whole. A chunk is
  * fetched only if the cache would keep what is fetched of it, and holds that
  * much of the read budget until its fetches are over, twice that for a frame
  * fetched whole, which holds the plaintext of its segments too. What is kept, staged or
@@ -441,9 +449,10 @@ export async function warmVideo(app: FastifyInstance, version: ReadableVersion):
       app.keys.unwrapDek(version.wrapped_dek, version.key_id, uuidBytes(versionId)),
     )
     const signal = AbortSignal.timeout(WARM_TIMEOUT_MS)
-    // The end of a longer video starts after its first chunk, which comes whole.
-    const several = chunkCount > 1
-    const start = several ? Math.max(chunkSize, size - WARM_END_BYTES) : 0
+    // The end of a longer video starts after the chunks that come whole: any part of it inside
+    // them is theirs. A video of two chunks has only its first whole, and its second as its end.
+    const whole = Math.min(WARM_WHOLE_CHUNKS, chunkCount - 1)
+    const start = whole > 0 ? Math.max(whole * chunkSize, size - WARM_END_BYTES) : 0
     const chunks: ChunkLocation[] = []
     for await (const chunk of chunksBetween(
       app,
@@ -495,8 +504,10 @@ export async function warmVideo(app: FastifyInstance, version: ReadableVersion):
       ).then(giveBack)
       settled.push(done)
     }
-    // After the index's request is made, and not awaited: nothing of the end waits for it.
-    if (several) settled.push(prefetchChunk(app, version, 0, signal))
+    // After the index's request is made, and not awaited: nothing of the end waits for them.
+    for (let index = 0; index < whole; index += 1) {
+      settled.push(prefetchChunk(app, version, index, signal))
+    }
     await Promise.all(settled)
   } catch (error) {
     app.log.info({ err: error, versionId }, 'could not fetch a video’s start and end ahead')
@@ -522,7 +533,7 @@ export type PrefetchOutcome = 'fetched' | 'kept' | 'shared' | 'skipped' | 'busy'
 
 /**
  * Fetches chunk `index` of a stored version whole into the frame cache, ahead
- * of whoever will read it (a video's first chunk as its player opens, the
+ * of whoever will read it (a video's first two chunks as its player opens, the
  * chunks a stream is about to want). It takes twice the frame's size from the
  * read budget (the frame, and the plaintext of the segments opened from it)
  * until its fetches have ended and starts only if the cache would keep

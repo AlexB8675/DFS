@@ -8,18 +8,22 @@ import { SESSION_IDLE_MS } from './stream-sessions.ts'
 // says which chunks to fetch through the function it is given. It follows a run
 // of reads that has sent 2 MiB and has gone on for a second, so a seek bar
 // dragged, each step of which is given up within a second whatever it sent, sets
-// nothing reading. A single request's own read-ahead (the reader's, at most 2
-// chunks) is a separate thing and stays; this one works across the requests of a
-// stream, which a player makes one after another (and a seek makes one for
-// each). `ReadAheads` keeps a window for each stream session and version, for
-// `sendFile` to feed.
+// nothing reading; a run that qualifies gets the whole window at once, as a
+// short read has already been kept from setting much reading. A single request's
+// own read-ahead (the reader's, at most 2 chunks) is a separate thing and
+// stays; this one works across the requests of a stream, which a player makes
+// one after another (and a seek makes one for each). `ReadAheads` keeps a window
+// for each stream session and version, for `sendFile` to feed.
 
-/** The window ahead is never longer than this. */
+/** The window ahead: the chunks after the last byte sent, this many bytes of them (the whole of it, once a run is followed). */
 export const WINDOW_BYTES = 128 * 1024 * 1024
-/** The window ahead is at most this many times what its run has sent. */
-export const WINDOW_GROWTH = 4
-/** Chunks fetched at once for a stream. */
-export const PARALLEL_FETCHES = 2
+/**
+ * Chunks fetched at once for a stream. The lab (DESIGN.md §6.2) showed two at
+ * once coming about as fast as a video plays, on a fast link, so a read still
+ * waited on Discord; and bandwidth is cheap if it prevents a stall (the user's
+ * rule, 2026-10-22), where memory is bounded by the read budget.
+ */
+export const PARALLEL_FETCHES = 3
 /** A chunk that found no room, or leaned on another read's fetch, is tried again no sooner than this. */
 export const BUSY_RETRY_MS = 1000
 /** Runs of reads kept to tell which a read carries on, the most recently updated. */
@@ -150,8 +154,9 @@ export class ReadAhead {
   }
 
   /**
-   * Starts fetches for the chunks the followed run's window reaches, nearest
-   * first, while fewer than `parallel` are under way. Chunks fetched, kept or
+   * Starts fetches for the chunks the followed run's window reaches (the whole
+   * of it, whatever the run has sent), nearest first, while fewer than
+   * `parallel` are under way. Chunks fetched, kept or
    * skipped before, under way, or busy or shared not long ago are passed over. A window
    * that has moved leaves what is under way for the old one to finish into the
    * cache (the fetch isn't wasted), and only what isn't started is dropped.
@@ -163,12 +168,7 @@ export class ReadAhead {
     // The chunk holding the last byte sent, the one before `reach`: when a read
     // stops exactly where a chunk ends, the chunk that begins there is next.
     const current = Math.min(last, Math.floor((run.reach - 1) / this.#chunkSize))
-    const count = Math.max(
-      1,
-      Math.ceil(
-        Math.min(this.#windowBytes, WINDOW_GROWTH * (run.reach - run.start)) / this.#chunkSize,
-      ),
-    )
+    const count = Math.max(1, Math.ceil(this.#windowBytes / this.#chunkSize))
     const end = Math.min(last, current + count)
     const now = this.#now()
     for (let index = current + 1; index <= end; index += 1) {

@@ -106,7 +106,7 @@ export function mediaRoutes(app: FastifyInstance, _options: object, done: () => 
         const played = await playedFile(app, request, request.params)
         const file = await servedVersion(app.db, played)
         const { userId, node } = played
-        // Its first chunk, and its index, usually at the end, which the browser reads next (§6.2).
+        // Its first two chunks, and its index, usually at the end, which the browser reads next (§6.2).
         if (mediaKind(node.name, node.mime_type) === 'video') {
           void warmVideo(app, file)
         }

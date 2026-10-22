@@ -99,11 +99,13 @@ declare module 'fastify' {
 
 /**
  * Frames in flight ahead of what downloads have sent, across all of them:
- * about 6 chunks fetched whole, each holding its 20 MiB frame and the
+ * about 12 chunks fetched whole, each holding its 20 MiB frame and the
  * plaintext of its segments, about as much again, until its frame is the
- * cache's. A download that finds no room reads one frame at a time instead.
+ * cache's. The VPS has 12 GB of RAM, shared by production and the lab, each its
+ * own API, and bandwidth is cheap if it prevents a stall (the user's rule,
+ * 2026-10-22). A download that finds no room reads one frame at a time instead.
  */
-const READ_AHEAD_BYTES = 256 * 1024 * 1024
+export const READ_AHEAD_BYTES = 512 * 1024 * 1024
 
 /**
  * Routes that stay open or take as long as the bytes they move: counted, but

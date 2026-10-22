@@ -5,12 +5,17 @@ import {
   BUSY_RETRY_MS,
   FOLLOW_AFTER_MS,
   MAX_RUNS,
+  PARALLEL_FETCHES,
   ReadAhead,
   ReadAheads,
 } from './read-ahead.ts'
 import { SESSION_IDLE_MS } from './stream-sessions.ts'
 
 const MiB = 1024 * 1024
+
+/** The chunk numbers `from` to `to`, both included. */
+const chunksFrom = (from: number, to: number) =>
+  Array.from({ length: to - from + 1 }, (_, at) => from + at)
 
 /**
  * Reads as a play does, which a window follows: a first byte, then, once
@@ -87,7 +92,7 @@ describe('ReadAhead', () => {
     ahead.reached(0, 2 * MiB - 1)
     expect(calls).toHaveLength(0)
     ahead.reached(0, 2 * MiB)
-    expect(ahead.fetching).toEqual([2, 3])
+    expect(ahead.fetching).toEqual([2, 3, 4])
   })
 
   it('reads ahead from the chunk after the last byte sent, at a chunk boundary too', () => {
@@ -95,15 +100,15 @@ describe('ReadAhead', () => {
     // exactly where a chunk ends has the chunk that begins there next.
     const boundary = setup()
     boundary.play(0, 3 * MiB)
-    expect(boundary.ahead.fetching).toEqual([3, 4])
+    expect(boundary.ahead.fetching).toEqual([3, 4, 5])
 
     const inside = setup()
     inside.play(0, 3 * MiB + 1)
-    expect(inside.ahead.fetching).toEqual([4, 5])
+    expect(inside.ahead.fetching).toEqual([4, 5, 6])
 
     const before = setup()
     before.play(0, 3 * MiB - 1)
-    expect(before.ahead.fetching).toEqual([3, 4])
+    expect(before.ahead.fetching).toEqual([3, 4, 5])
 
     // The last chunk has nothing after it; the one before it has that.
     const end = setup({ chunkCount: 4, parallel: Infinity })
@@ -114,33 +119,32 @@ describe('ReadAhead', () => {
     expect(beforeEnd.started()).toEqual([3])
   })
 
-  it('reads ahead at most four times what the run has sent, up to 128 MiB, never past the last chunk', () => {
+  it('reads ahead the whole window once a run qualifies, never past the last chunk', () => {
+    // 128 MiB of 1 MiB chunks after the one holding the last byte sent, whatever the run has sent.
     const first = setup({ parallel: Infinity })
     first.play(0, 2 * MiB)
-    expect(first.ahead.fetching).toEqual([2, 3, 4, 5, 6, 7, 8, 9])
+    expect(first.started()).toEqual(chunksFrom(2, 129))
 
-    // 2 to 9 are under way still; the window now reaches from 64 to 191.
+    // The window moves with the run: 2 to 129 are under way still; it now reaches 64 to 191.
     const before = first.calls.length
     first.ahead.reached(0, 64 * MiB)
-    const next = first.calls.slice(before).map((call) => call.index)
-    expect(next).toHaveLength(191 - 64 + 1)
-    expect(next[0]).toBe(64)
-    expect(next.at(-1)).toBe(191)
+    expect(first.calls.slice(before).map((call) => call.index)).toEqual(chunksFrom(130, 191))
 
     const short = setup({ chunkCount: 70, parallel: Infinity })
-    short.play(0, 64 * MiB)
-    const indexes = short.started()
-    expect(indexes[0]).toBe(64)
-    expect(indexes.at(-1)).toBe(69)
-    expect(Math.max(...indexes)).toBe(69)
+    short.play(0, 2 * MiB)
+    expect(short.started()).toEqual(chunksFrom(2, 69))
+    const long = setup({ chunkCount: 70, parallel: Infinity })
+    long.play(0, 64 * MiB)
+    expect(long.started()).toEqual(chunksFrom(64, 69))
   })
 
-  it('fetches two chunks at once, nearest first, and the next as one ends', async () => {
+  it('fetches three chunks at once, nearest first, and the next as one ends', async () => {
+    expect(PARALLEL_FETCHES).toBe(3)
     const { ahead, play, settle } = setup()
     play(0, 2 * MiB)
-    expect(ahead.fetching).toEqual([2, 3])
+    expect(ahead.fetching).toEqual([2, 3, 4])
     await settle(2, 'fetched')
-    expect(ahead.fetching).toEqual([3, 4])
+    expect(ahead.fetching).toEqual([3, 4, 5])
   })
 
   it('carries a run across reads that follow one another', () => {
@@ -149,7 +153,7 @@ describe('ReadAhead', () => {
     expect(calls).toHaveLength(0)
     clock.now += FOLLOW_AFTER_MS
     ahead.reached(MiB, 2 * MiB)
-    expect(ahead.fetching).toEqual([2, 3])
+    expect(ahead.fetching).toEqual([2, 3, 4])
 
     // A reconnect starts a little behind the reach, and the run it joins has
     // sent 2.25 MiB; as a run of its own it would have sent 1.75 MiB.
@@ -157,23 +161,23 @@ describe('ReadAhead', () => {
     reconnect.ahead.reached(0, MiB)
     reconnect.clock.now += FOLLOW_AFTER_MS
     reconnect.ahead.reached(MiB - 512 * 1024, 2 * MiB + 256 * 1024)
-    expect(reconnect.ahead.fetching).toEqual([3, 4])
+    expect(reconnect.ahead.fetching).toEqual([3, 4, 5])
   })
 
   it('joins the followed run, though the runs kept have forgotten it', () => {
     const { ahead, play, started } = setup({ parallel: Infinity })
     play(0, 2 * MiB)
-    expect(started()).toEqual([2, 3, 4, 5, 6, 7, 8, 9])
+    expect(started()).toEqual(chunksFrom(2, 129))
     // Short reads elsewhere push it off the eight kept.
     for (let run = 1; run <= MAX_RUNS + 2; run += 1) {
       ahead.reached((100 + run * 10) * MiB, (101 + run * 10) * MiB)
     }
-    expect(started()).toHaveLength(8)
+    expect(started()).toHaveLength(128)
 
     // The player's request goes on where the run reached, with 1 MiB more: the
     // window moves on at once, as it would had the run been kept.
     ahead.reached(2 * MiB, 3 * MiB)
-    expect(started().slice(8)).toEqual([10, 11, 12, 13, 14])
+    expect(started().slice(128)).toEqual([130])
   })
 
   it('a storm of short reads moves nothing', async () => {
@@ -181,7 +185,7 @@ describe('ReadAhead', () => {
     const { ahead, calls, play, settle, started } = setup({ parallel: Infinity })
     play(0, 2 * MiB)
     const first = started()
-    expect(first).toEqual([2, 3, 4, 5, 6, 7, 8, 9])
+    expect(first).toEqual(chunksFrom(2, 129))
     for (let at = 50; at <= 240; at += 10) {
       ahead.reached(at * MiB, (at + 1) * MiB)
     }
@@ -213,7 +217,7 @@ describe('ReadAhead', () => {
     expect(calls).toHaveLength(0)
     clock.now += 1
     ahead.reached(0, 5 * MiB)
-    expect(ahead.fetching).toEqual([5, 6])
+    expect(ahead.fetching).toEqual([5, 6, 7])
   })
 
   it('a read that carries on a run keeps the run’s time', () => {
@@ -225,22 +229,22 @@ describe('ReadAhead', () => {
     // again, which would have to be read for a second more.
     clock.now += FOLLOW_AFTER_MS
     ahead.reached(2.5 * MiB, 3.5 * MiB)
-    expect(ahead.fetching).toEqual([4, 5])
+    expect(ahead.fetching).toEqual([4, 5, 6])
   })
 
   it('follows the newest run that has sent 2 MiB over a second, and lets the fetches under way finish', async () => {
     const { ahead, calls, play, settle, started } = setup()
     play(0, 2 * MiB)
-    expect(started()).toEqual([2, 3])
+    expect(started()).toEqual([2, 3, 4])
 
     play(100 * MiB, 102 * MiB)
-    expect(calls.slice(0, 2).every((call) => !call.signal.aborted)).toBe(true)
-    // Both fetches are still under way: no new one starts until one ends.
-    expect(started()).toEqual([2, 3])
+    expect(calls.slice(0, 3).every((call) => !call.signal.aborted)).toBe(true)
+    // All three fetches are still under way: no new one starts until one ends.
+    expect(started()).toEqual([2, 3, 4])
 
     await settle(2, 'fetched')
-    expect(started()).toEqual([2, 3, 102])
-    expect(ahead.fetching).toEqual([3, 102])
+    expect(started()).toEqual([2, 3, 4, 102])
+    expect(ahead.fetching).toEqual([3, 4, 102])
   })
 
   it('never fetches a chunk twice', async () => {
@@ -257,7 +261,7 @@ describe('ReadAhead', () => {
 
     const counts = new Map<number, number>()
     for (const call of calls) counts.set(call.index, (counts.get(call.index) ?? 0) + 1)
-    for (const index of [2, 3, 4, 5, 6, 7, 8, 9]) expect(counts.get(index)).toBe(1)
+    for (const index of chunksFrom(2, 129)) expect(counts.get(index)).toBe(1)
     expect([...counts.values()].every((count) => count === 1)).toBe(true)
   })
 
@@ -308,18 +312,18 @@ describe('ReadAhead', () => {
   it('stops: aborts what is under way and does nothing after', async () => {
     const { ahead, calls, fetched, play, settle } = setup()
     play(0, 2 * MiB)
-    expect(calls).toHaveLength(2)
+    expect(calls).toHaveLength(3)
     ahead.stop()
     expect(calls.every((call) => call.signal.aborted)).toBe(true)
 
     ahead.reached(0, 64 * MiB)
     play(100 * MiB, 102 * MiB)
-    expect(calls).toHaveLength(2)
+    expect(calls).toHaveLength(3)
 
     await settle(2, 'fetched')
     await settle(3, 'failed')
     expect(fetched).toEqual([])
-    expect(calls).toHaveLength(2)
+    expect(calls).toHaveLength(3)
   })
 
   it('reports each fetch that ends, but not one the cache had', async () => {
@@ -351,9 +355,9 @@ describe('ReadAhead', () => {
     const { ahead, play, settle, started } = setup()
     play(0, 2 * MiB)
     await settle(2, 'busy')
-    // Chunk 2 waits for its second; 4 is the nearest the window may fetch.
-    expect(ahead.fetching).toEqual([3, 4])
-    expect(started()).toEqual([2, 3, 4])
+    // Chunk 2 waits for its second; 5 is the nearest the window may fetch.
+    expect(ahead.fetching).toEqual([3, 4, 5])
+    expect(started()).toEqual([2, 3, 4, 5])
   })
 
   it('reports a chunk that is busy only the first time', async () => {
@@ -373,19 +377,19 @@ describe('ReadAhead', () => {
   it('keeps the newest eight runs, which a read may join', () => {
     const { ahead, calls, clock, play } = setup({ parallel: Infinity })
     play(0, 2 * MiB)
-    expect(calls).toHaveLength(8)
+    expect(calls).toHaveLength(128)
     // Ten runs of 1 MiB, 10 MiB apart: the first two are dropped.
     for (let run = 1; run <= MAX_RUNS + 2; run += 1) {
       ahead.reached((100 + run * 10) * MiB, (101 + run * 10) * MiB)
     }
-    expect(calls).toHaveLength(8)
+    expect(calls).toHaveLength(128)
 
     // A read joining the oldest run kept (the third), a second after it began, makes it 2.25 MiB, and the window follows it.
     clock.now += FOLLOW_AFTER_MS
     ahead.reached(130 * MiB + 512 * 1024, 132 * MiB + 256 * 1024)
-    expect(calls[8]?.index).toBe(133)
+    expect(calls[128]?.index).toBe(133)
     const followed = calls.length
-    expect(followed).toBeGreaterThan(8)
+    expect(followed).toBeGreaterThan(128)
     // One that would join a run dropped (the second) begins a run of its own, of 1.75 MiB.
     ahead.reached(120 * MiB + 512 * 1024, 122 * MiB + 256 * 1024)
     expect(calls).toHaveLength(followed)
@@ -397,9 +401,9 @@ describe('ReadAhead', () => {
     for (let run = 1; run <= MAX_RUNS + 2; run += 1) {
       ahead.reached((100 + run * 10) * MiB, (101 + run * 10) * MiB)
     }
-    expect(started()).toEqual([2, 3])
-    await settle(2, 'fetched')
     expect(started()).toEqual([2, 3, 4])
+    await settle(2, 'fetched')
+    expect(started()).toEqual([2, 3, 4, 5])
   })
 
   it('counts a fetch whose promise rejects as failed', async () => {
@@ -438,9 +442,9 @@ describe('ReadAhead', () => {
       play(0, 2 * MiB)
       await settle(2, 'fetched')
       // The window filled again, whatever the recorder did.
-      expect(started()).toEqual([2, 3, 4])
-      await settle(3, 'failed')
       expect(started()).toEqual([2, 3, 4, 5])
+      await settle(3, 'failed')
+      expect(started()).toEqual([2, 3, 4, 5, 6])
       expect(reports).toBe(2)
       // An unhandled rejection is raised once the microtasks are over.
       await new Promise((resolve) => setTimeout(resolve, 0))
@@ -500,11 +504,13 @@ describe('ReadAheads', () => {
     expect(calls.map((call) => [call.version.version_id, call.index])).toEqual([
       ['v1', 2],
       ['v1', 3],
+      ['v1', 4],
       ['v2', 2],
       ['v2', 3],
+      ['v2', 4],
     ])
     expect(calls[0]?.version).toBe(first)
-    expect(calls[2]?.version).toBe(second)
+    expect(calls[3]?.version).toBe(second)
   })
 
   it('tells the session of each fetch ahead that ends', async () => {
@@ -530,7 +536,7 @@ describe('ReadAheads', () => {
     clock.now += FOLLOW_AFTER_MS
     s.reached(0, 2 * MiB)
     t.reached(0, 2 * MiB)
-    expect(settles).toHaveLength(4)
+    expect(settles).toHaveLength(6)
 
     clock.now += 40
     settles[0]?.('fetched')
@@ -539,7 +545,8 @@ describe('ReadAheads', () => {
     expect(noted).toEqual([['s', { from: 2 * MiB, bytes: MiB, ms: 40, outcome: 'fetched' }]])
 
     clock.now += 10
-    settles[2]?.('failed')
+    // The second session's first chunk: the first session's three come before it.
+    settles[3]?.('failed')
     await Promise.resolve()
     await Promise.resolve()
     expect(noted[1]).toEqual(['t', { from: 2 * MiB, bytes: MiB, ms: 50, outcome: 'failed' }])
@@ -574,7 +581,7 @@ describe('ReadAheads', () => {
     expect(reads.size).toBe(2)
     // Not stopped: it reads ahead as the request carries on.
     playTo(first.ahead, clock, 0, 2 * MiB)
-    expect(first.ahead.fetching).toEqual([2, 3])
+    expect(first.ahead.fetching).toEqual([2, 3, 4])
     expect(calls.every((call) => !call.signal.aborted)).toBe(true)
     expect(reads.follow('s', film('v1')).ahead).toBe(first.ahead)
   })
@@ -629,7 +636,7 @@ describe('ReadAheads', () => {
     const busy = reads.follow('busy', film('v1'))
     playTo(busy.ahead, clock, 0, 2 * MiB)
     busy.done()
-    expect(busy.ahead.fetching).toEqual([2, 3])
+    expect(busy.ahead.fetching).toEqual([2, 3, 4])
     const idle = reads.follow('idle', film('v1'))
     idle.ahead.reached(0, MiB)
     idle.done()
@@ -641,14 +648,14 @@ describe('ReadAheads', () => {
     expect(reads.follow('busy', film('v1')).ahead).toBe(busy.ahead)
     expect(calls.every((call) => !call.signal.aborted)).toBe(true)
     idle.ahead.reached(0, 64 * MiB)
-    expect(calls).toHaveLength(2)
+    expect(calls).toHaveLength(3)
   })
 
   it('stops every window: the fetches under way are aborted, and none starts after', () => {
     const { reads, calls, clock } = windows()
     playTo(reads.follow('a', film('v1')).ahead, clock, 0, 2 * MiB)
     playTo(reads.follow('b', film('v2')).ahead, clock, 0, 2 * MiB)
-    expect(calls).toHaveLength(4)
+    expect(calls).toHaveLength(6)
     expect(calls.every((call) => !call.signal.aborted)).toBe(true)
 
     reads.stop()
@@ -659,7 +666,7 @@ describe('ReadAheads', () => {
     const late = reads.follow('c', film('v3'))
     playTo(late.ahead, clock, 0, 4 * MiB)
     late.done()
-    expect(calls).toHaveLength(4)
+    expect(calls).toHaveLength(6)
     expect(reads.size).toBe(0)
   })
 })
