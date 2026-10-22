@@ -8,6 +8,7 @@ import {
   ctts,
   fullBox,
   movie,
+  sampleEntry,
   stco,
   stsc,
   stss,
@@ -240,6 +241,35 @@ describe("a track's frames (§10.4)", () => {
     expect(ints(crossing.offsets)).toEqual([4_294_967_000, 4_294_967_100, 4_294_967_300])
   })
 
+  it('prefers co64 to an stco beside it, which a file past 4 GiB may hold as a dummy', () => {
+    // 4 samples of 10, 20, 30 and 40 bytes in 2 chunks; the stco says other places, and fewer than 2^32.
+    const frames = frameTable(
+      trackWith([...tablesOf({ stco: stco([100, 200]) }), co64([2n ** 32n + 5n, 2n ** 33n])]),
+    )
+    expect(ints(frames.offsets)).toEqual([2 ** 32 + 5, 2 ** 32 + 15, 2 ** 33, 2 ** 33 + 30])
+
+    // Whatever the stco says is not read: it can be one chunk, none, or not a table at all.
+    const bare = frameTable(trackWith([...tablesOf({ stco: stco([]) }), co64([7n, 9n])]))
+    expect(ints(bare.offsets)).toEqual([7, 17, 9, 39])
+  })
+
+  it("takes each chunk's sample description as one of the stsd's, counting from 1", () => {
+    // Two descriptions, so 2 is one the track has: the chunks may use either.
+    const entries = [sampleEntry('avc1'), sampleEntry('avc3')]
+    const tables = tablesOf({
+      stsc: stsc([
+        [1, 1, 1],
+        [2, 1, 2],
+      ]),
+      stco: stco([100, 200]),
+      stsz: stsz([10, 20]),
+      stts: stts([[2, 1000]]),
+    })
+    const track = readMovie(movie({ tracks: [{ entries, tables }] })).tracks[0]
+    if (!track) throw new Error('expected a track')
+    expect(ints(frameTable(track).offsets)).toEqual([100, 200])
+  })
+
   it('reads the tables of a track with no samples as no frames', () => {
     const frames = frameTable(trackWith([stts([]), stsz([]), stsc([]), stco([])]))
     expect(frames.count).toBe(0)
@@ -304,6 +334,11 @@ describe("a track's frames (§10.4)", () => {
       ],
       ['an stss that numbers a sample past the last', { stss: stss([1, 5]) }, /'stss'.*5.*4/],
       ['an stss that numbers sample 0, which counts from 1', { stss: stss([0, 1]) }, /'stss'.*0/],
+      [
+        'an stss that lists more samples than the track has, though each is one it has',
+        { stss: stss([1, 2, 3, 4, 1]) },
+        /'stss'.*5.*4/,
+      ],
       ['no stsz or stz2', { stsz: null }, /'stsz'/],
       ['no stts', { stts: null }, /'stts'/],
       ['no stsc', { stsc: null }, /'stsc'/],
@@ -332,6 +367,26 @@ describe("a track's frames (§10.4)", () => {
         /'stsc'.*ascend/,
       ],
       ['an stsc of no samples in a chunk', { stsc: stsc([[1, 0]]) }, /'stsc'.*0 samples/],
+      [
+        'an stsc that uses sample description 0, which counts from 1',
+        { stsc: stsc([[1, 2, 0]]) },
+        /'stsc'.*description 0/,
+      ],
+      [
+        'an stsc that uses a sample description past the stsd entries',
+        { stsc: stsc([[1, 2, 2]]) },
+        /'stsc'.*description 2.*1/,
+      ],
+      [
+        'an stsc whose later entry uses a description the track does not have',
+        {
+          stsc: stsc([
+            [1, 1, 1],
+            [2, 1, 7],
+          ]),
+        },
+        /'stsc'.*chunk 2.*description 7/,
+      ],
       [
         'an stsc entry for a chunk that stco does not have',
         {

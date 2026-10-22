@@ -8,10 +8,11 @@ import type { TableType, TrackHeader } from './movie.ts'
 // keyframe. The tables of a movie are tiny next to what they describe (an
 // `stts` of one entry says 432 000 durations), so what is read is checked first
 // and cheaply: the counts of `stts`, `ctts` and `stsc` with its chunk table are
-// read and made to agree with the sample count of `stsz` (or `stz2`) before any
-// array of frames is made, and only then is each array filled, in one pass over
-// its table, with no object for a frame. The numbers of `stss` are the one
-// thing checked as the arrays are filled: each must be a sample the track has.
+// read and made to agree with the sample count of `stsz` (or `stz2`), and the
+// count of `stss` made to fit in it, before any array of frames is made; only
+// then is each array filled, in one pass over its table, with no object for a
+// frame. What each entry says is checked as it is read: each number of `stss`
+// must be a sample the track has, and each description of `stsc` one of its own.
 // Offsets and decode times are doubles (exact to 2^53) and never go through
 // 32-bit arithmetic: a file past 4 GiB has chunks that don't fit in it.
 
@@ -155,7 +156,7 @@ function readRuns(track: TrackHeader, type: 'stts' | 'ctts'): Runs | null {
   return { counts, values, total }
 }
 
-/** Where the chunks are: `stco`, or `co64` when there is no `stco`. */
+/** Where the chunks are: `co64`, or `stco` when there is no `co64`. */
 interface Chunks {
   box: 'stco' | 'co64'
   /** At the first offset. */
@@ -163,13 +164,18 @@ interface Chunks {
   count: number
 }
 
+/**
+ * The chunk offsets. A track with both tables is read from `co64`: the writers
+ * of a file past 4 GiB may leave a dummy or stale `stco` beside it, whose 32 bits
+ * would cut the offsets short, where a `co64` is never the narrower of the two.
+ */
 function openChunks(track: TrackHeader): Chunks {
-  const stco = open(track, 'stco', 0)
-  const co64 = stco ? null : open(track, 'co64', 0)
-  const table = stco ?? co64
-  if (!table) throw damaged(`The track has no 'stco' or 'co64' box.`)
-  const box = stco ? 'stco' : 'co64'
-  return { box, reader: table.reader, count: countEntries(table, box, stco ? 4 : 8) }
+  const co64 = open(track, 'co64', 0)
+  const stco = co64 ? null : open(track, 'stco', 0)
+  const table = co64 ?? stco
+  if (!table) throw damaged(`The track has no 'co64' or 'stco' box.`)
+  const box = co64 ? 'co64' : 'stco'
+  return { box, reader: table.reader, count: countEntries(table, box, co64 ? 8 : 4) }
 }
 
 /** The runs of chunks of `stsc`: the chunk each starts at, counting from 1, and how many samples each of its chunks holds. */
@@ -183,7 +189,8 @@ interface ChunkRuns {
 /**
  * The runs of `stsc`, which must be as the standard has them: the first starts
  * at chunk 1, each starts after the one before it, none holds 0 samples, none
- * starts past the last chunk, and a track with chunks has at least one.
+ * starts past the last chunk, each uses a sample description that the `stsd`
+ * has (counting from 1), and a track with chunks has at least one.
  */
 function readChunkRuns(track: TrackHeader, chunks: Chunks): ChunkRuns {
   const table = open(track, 'stsc', 0)
@@ -198,7 +205,7 @@ function readChunkRuns(track: TrackHeader, chunks: Chunks): ChunkRuns {
   for (let index = 0; index < count; index += 1) {
     const chunk = table.reader.u32()
     const samples = table.reader.u32()
-    table.reader.skip(4) // which sample description the samples have
+    const description = table.reader.u32()
     if (chunk === 0) throw damaged(`The 'stsc' box has an entry for chunk 0: chunks count from 1.`)
     if (index === 0 && chunk !== 1) {
       throw damaged(`The 'stsc' box starts at chunk ${chunk}, so chunk 1 has no entry.`)
@@ -209,6 +216,11 @@ function readChunkRuns(track: TrackHeader, chunks: Chunks): ChunkRuns {
       )
     }
     if (samples === 0) throw damaged(`The 'stsc' box has chunk ${chunk} holding 0 samples.`)
+    if (description < 1 || description > track.entries.length) {
+      throw damaged(
+        `The 'stsc' box has chunk ${chunk} using sample description ${description}, but the track has ${track.entries.length}, counting from 1.`,
+      )
+    }
     if (chunk > chunks.count) {
       throw damaged(
         `The 'stsc' box has an entry for chunk ${chunk}, but '${chunks.box}' counts ${chunks.count} chunks.`,
@@ -249,12 +261,28 @@ function fillSizes(sizes: Sizes): Uint32Array {
   return out
 }
 
-/** The marks of `stss`: 1 for each listed sample (counting from 1), or for every sample when the track has no `stss`. */
-function fillSync(track: TrackHeader, count: number): Uint8Array {
-  const out = new Uint8Array(count)
+/** The keyframes `stss` lists: its cursor at the first, and how many it lists. */
+interface Keyframes {
+  table: OpenTable
+  listed: number
+}
+
+/** `stss`, or null when the track has none; it can't list more samples than the track has. */
+function openKeyframes(track: TrackHeader, count: number): Keyframes | null {
   const table = open(track, 'stss', 0)
-  if (!table) return out.fill(1)
+  if (!table) return null
   const listed = countEntries(table, 'stss', 4)
+  if (listed > count) {
+    throw damaged(`The 'stss' box lists ${listed} samples, but the track has ${count}.`)
+  }
+  return { table, listed }
+}
+
+/** The marks of `stss`: 1 for each listed sample (counting from 1), or for every sample when the track has no `stss`. */
+function fillSync(keyframes: Keyframes | null, count: number): Uint8Array {
+  const out = new Uint8Array(count)
+  if (!keyframes) return out.fill(1)
+  const { table, listed } = keyframes
   for (let index = 0; index < listed; index += 1) {
     const sample = table.reader.u32()
     if (sample < 1 || sample > count) {
@@ -295,9 +323,11 @@ export function frameTable(track: TrackHeader): FrameTable {
     )
   }
 
+  const keyframes = openKeyframes(track, count)
+
   // Then each array, in one pass over its table.
   const sizeArray = fillSizes(sizes)
-  const sync = fillSync(track, count)
+  const sync = fillSync(keyframes, count)
 
   const durations = new Uint32Array(count)
   const dts = new Float64Array(count)
@@ -333,7 +363,7 @@ export function frameTable(track: TrackHeader): FrameTable {
   let run = 0
   for (let chunk = 1; chunk <= chunks.count; chunk += 1) {
     while ((first[run + 1] ?? Infinity) <= chunk) run += 1
-    let offset = chunks.box === 'stco' ? chunks.reader.u32() : chunks.reader.u64()
+    let offset = chunks.box === 'co64' ? chunks.reader.u64() : chunks.reader.u32()
     for (const end = sample + (perChunk[run] ?? 0); sample < end; sample += 1) {
       offsets[sample] = offset
       offset += sizeArray[sample] ?? 0
