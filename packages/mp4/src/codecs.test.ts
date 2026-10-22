@@ -411,6 +411,72 @@ describe('the codec string of a sound (§10.4)', () => {
     refusal('damaged', () => initEntry(entryOf(entry)))
   })
 
+  it('refuses a rewritten sound entry that has no channels or no sample rate', () => {
+    const inner = esds()
+    // Version 1, version 2, and a version 0 entry whose esds is in wave: each is rewritten, so each is checked.
+    const noChannels = [
+      quickTimeAudioEntry('mp4a', { version: 1, channels: 0 }, wave(frma('mp4a'), inner)),
+      quickTimeAudioEntry('mp4a', { version: 2, channels: 0 }, wave(frma('mp4a'), inner)),
+      audioEntry('mp4a', { channels: 0 }, wave(frma('mp4a'), inner)),
+    ]
+    const noRate = [
+      quickTimeAudioEntry('mp4a', { version: 1, sampleRate: 0 }, wave(frma('mp4a'), inner)),
+      quickTimeAudioEntry('mp4a', { version: 2, sampleRate: 0 }, wave(frma('mp4a'), inner)),
+      audioEntry('mp4a', { sampleRate: 0 }, wave(frma('mp4a'), inner)),
+    ]
+    for (const bytes of [...noChannels, ...noRate]) {
+      const entry = entryOf(bytes)
+      // The codec is as good as ever; it is the entry that can't be written.
+      expect(codecString(entry)).toBe('mp4a.40.2')
+      refusal('damaged', () => initEntry(entry))
+    }
+    // A rate below what 16.16 can hold rounds to 0, which is no rate either.
+    const tiny = quickTimeAudioEntry('mp4a', { version: 2, sampleRate: 1e-9 }, wave(inner))
+    refusal('damaged', () => initEntry(entryOf(tiny)))
+  })
+
+  it('keeps the other boxes of a rewritten sound entry, after the esds and in their order', () => {
+    const inner = esds()
+    const chan = fullBox('chan', 0, 0, u32(100), u32(0), u32(0))
+    const btrt = box('btrt', u32(0), u32(96000), u32(96000))
+    // Version 1, with the wave first as QuickTime writes it: the esds, then the chan.
+    const v1 = quickTimeAudioEntry(
+      'mp4a',
+      { version: 1, channels: 2, sampleRate: 48000 },
+      wave(frma('mp4a'), inner),
+      chan,
+    )
+    const fromV1 = audioFields(initEntry(entryOf(v1)))
+    expect(fromV1.children.map((entry) => entry.type)).toEqual(['esds', 'chan'])
+    expect(fromV1.children[0]?.bytes).toEqual(inner)
+    expect(fromV1.children[1]?.bytes).toEqual(chan)
+    // An esds that is a direct child comes first, whatever its place was; the others follow in theirs.
+    const v2 = quickTimeAudioEntry(
+      'mp4a',
+      { version: 2, channels: 6, sampleRate: 48000 },
+      chan,
+      inner,
+      btrt,
+    )
+    const fromV2 = audioFields(initEntry(entryOf(v2)))
+    expect(fromV2.children.map((entry) => entry.type)).toEqual(['esds', 'chan', 'btrt'])
+    expect(fromV2.children.map((entry) => entry.bytes)).toEqual([inner, chan, btrt])
+    // A version 0 entry whose esds is in wave, between two others.
+    const v0 = audioEntry('mp4a', {}, btrt, wave(frma('mp4a'), inner), chan)
+    const fromV0 = audioFields(initEntry(entryOf(v0)))
+    expect(fromV0.children.map((entry) => entry.bytes)).toEqual([inner, btrt, chan])
+    // The size of the box is the size of what it holds.
+    const out = initEntry(entryOf(v0))
+    expect(out.length).toBe(8 + 28 + inner.length + btrt.length + chan.length)
+  })
+
+  it('refuses to rewrite an entry with a box after its esds that is cut short', () => {
+    // The esds is found first, so the codec is named; the rest is carried, so it has to be whole.
+    const cut = quickTimeAudioEntry('mp4a', { version: 1 }, esds(), [0, 0, 0, 9, 0x63, 0x68, 0x61])
+    expect(codecString(entryOf(cut))).toBe('mp4a.40.2')
+    refusal('damaged', () => initEntry(entryOf(cut)))
+  })
+
   it('refuses a sound entry of a version it does not know, or cut short', () => {
     const bytes = audioEntry('mp4a', {}, esds()).slice()
     bytes[8 + 8 + 1] = 3 // the version, at 8 bytes into the body

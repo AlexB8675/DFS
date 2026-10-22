@@ -1,4 +1,4 @@
-import { child, firstBox, Reader } from './boxes.ts'
+import { child, childBoxes, firstBox, Reader } from './boxes.ts'
 import type { Box } from './boxes.ts'
 import { Mp4Error } from './errors.ts'
 import type { SampleEntry } from './movie.ts'
@@ -329,9 +329,9 @@ export function codecString(entry: SampleEntry): string {
   }
 }
 
-/** An ISO version 0 `mp4a` for this many channels and this sample rate (16.16), followed by the `esds` box given. */
-function isoMp4a(channels: number, rate: number, esds: Uint8Array): Uint8Array {
-  const out = new Uint8Array(8 + AUDIO_FIELDS + esds.length)
+/** An ISO version 0 `mp4a` for this many channels and this sample rate (16.16), followed by the boxes given. */
+function isoMp4a(channels: number, rate: number, boxes: readonly Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(8 + AUDIO_FIELDS + boxes.reduce((sum, part) => sum + part.length, 0))
   const view = new DataView(out.buffer)
   view.setUint32(0, out.length)
   out.set([0x6d, 0x70, 0x34, 0x61], 4) // 'mp4a'; the 6 reserved bytes after it are 0
@@ -341,7 +341,11 @@ function isoMp4a(channels: number, rate: number, esds: Uint8Array): Uint8Array {
   view.setUint16(26, 16) // the size of a sample
   // The compression ID and the size of a packet are 0.
   view.setUint32(32, rate)
-  out.set(esds, 8 + AUDIO_FIELDS)
+  let at = 8 + AUDIO_FIELDS
+  for (const part of boxes) {
+    out.set(part, at)
+    at += part.length
+  }
   return out
 }
 
@@ -350,9 +354,12 @@ function isoMp4a(channels: number, rate: number, esds: Uint8Array): Uint8Array {
  * the entry's own bytes, as the view `readMovie` gave, except a QuickTime sound
  * entry (an `mp4a` of version 1 or 2, or one whose `esds` is inside a `wave`
  * box), which Chrome's and Firefox's Media Source don't take and which is
- * written as an ISO version 0 `mp4a` that holds that `esds` and nothing else:
- * data reference index 1, the channels, 16 bits to a sample and the rate in
- * 16.16. A version 2 rate that doesn't fit in 16 bits is refused as
+ * written as an ISO version 0 `mp4a`: data reference index 1, the channels,
+ * 16 bits to a sample and the rate in 16.16, then that `esds` and, in their
+ * order, the entry's other boxes (a `chan`, a `btrt`) but not the `wave`. It is
+ * `damaged` when a box of the entry can't be read, or when the channels or the
+ * rate are 0 (or the rate isn't a number), which an entry that plays doesn't
+ * say; a rate that doesn't fit in the 16 bits ISO has for it is
  * `unsupported-codec`. An entry that `codecString` refuses is refused here for
  * the same reason, so that what is carried is always what was asked about.
  */
@@ -363,22 +370,25 @@ export function initEntry(entry: SampleEntry): Uint8Array {
   const found = findEsds(entry, audio.inside)
   if (audio.version === 0 && found.direct) return entry.bytes
 
-  // The rate in 16.16, as the entry has it in version 0 or 1, which is copied as it is; version 2 has a float to be put in the 16 bits ISO gives the whole part.
+  // The rate in 16.16: version 0 and 1 have it so, and it comes out as it was; version 2 has a float to be put in the 16 bits ISO gives the whole part.
   const rate = Math.round(audio.sampleRate * 0x10000)
-  if (audio.version === 2) {
-    if (!Number.isFinite(audio.sampleRate) || audio.sampleRate <= 0) {
-      throw damaged(
-        `The '${entry.type}' sample description gives a sample rate of ${audio.sampleRate}.`,
-      )
-    }
-    if (rate > 0xffffffff) {
-      throw unsupported(
-        `The sound's sample rate of ${audio.sampleRate} Hz does not fit in the 16 bits that an ISO sound entry has for it.`,
-      )
-    }
+  if (!Number.isFinite(audio.sampleRate) || !(rate > 0)) {
+    throw damaged(
+      `The '${entry.type}' sample description gives a sample rate of ${audio.sampleRate}.`,
+    )
   }
-  if (audio.channels > 0xffff) {
+  if (rate > 0xffffffff) {
+    throw unsupported(
+      `The sound's sample rate of ${audio.sampleRate} Hz does not fit in the 16 bits that an ISO sound entry has for it.`,
+    )
+  }
+  if (audio.channels === 0 || audio.channels > 0xffff) {
     throw damaged(`The '${entry.type}' sample description gives ${audio.channels} channels.`)
   }
-  return isoMp4a(audio.channels, rate, entry.bytes.subarray(found.esds.start, found.esds.end))
+  // The `esds`, then what else the entry holds, as it was: the `wave` is what the `esds` came out of, and any other `esds` would be a second.
+  const others = childBoxes(entry.bytes, audio.inside.body, audio.inside.end)
+    .filter((other) => other.type !== 'wave' && other.type !== 'esds')
+    .map((other) => entry.bytes.subarray(other.start, other.end))
+  const esds = entry.bytes.subarray(found.esds.start, found.esds.end)
+  return isoMp4a(audio.channels, rate, [esds, ...others])
 }
