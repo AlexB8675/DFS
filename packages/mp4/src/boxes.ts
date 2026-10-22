@@ -45,18 +45,26 @@ function checkRange(bytes: Uint8Array, from: number, to: number): void {
   }
 }
 
+/** Whether the 4 bytes at `at` are the zero that QuickTime writes after some lists of atoms. */
+function isTerminator(bytes: Uint8Array, at: number): boolean {
+  return bytes[at] === 0 && bytes[at + 1] === 0 && bytes[at + 2] === 0 && bytes[at + 3] === 0
+}
+
 /**
- * The boxes directly inside [from, to) of `bytes`. A box of size 0 runs to
- * `to`; a box of size 1 has its size in the 8 bytes after its type. A header
- * that is cut short, a size smaller than its own header or a box that claims
- * more than the range holds is a damaged file.
+ * The boxes directly inside [from, to) of `bytes`, one at a time as the walk
+ * reaches them, so a caller that has what it wants stops before the rest is
+ * checked. A box of size 0 runs to `to`; a box of size 1 has its size in the 8
+ * bytes after its type. A list may end with exactly 4 zero bytes, which is
+ * QuickTime's terminator and not a header. Any other header that is cut short,
+ * a size smaller than its own header or a box that claims more than the range
+ * holds is a damaged file.
  */
-export function childBoxes(bytes: Uint8Array, from: number, to: number): Box[] {
+function* walk(bytes: Uint8Array, from: number, to: number): Generator<Box, void, undefined> {
   checkRange(bytes, from, to)
   const view = viewOf(bytes)
-  const boxes: Box[] = []
   let at = from
   while (at < to) {
+    if (to - at === 4 && isTerminator(bytes, at)) return
     if (to - at < 8) {
       throw new Mp4Error(
         'damaged',
@@ -97,15 +105,29 @@ export function childBoxes(bytes: Uint8Array, from: number, to: number): Box[] {
         `The '${type}' box at offset ${at} claims ${size} bytes, but ${to - at} are left in its range.`,
       )
     }
-    boxes.push({ type, start: at, body: at + header, end: at + size })
+    yield { type, start: at, body: at + header, end: at + size }
     at += size
   }
-  return boxes
 }
 
-/** The first child of `parent` of a type, or null. */
+/**
+ * The boxes directly inside [from, to) of `bytes`, all of them: a damaged box
+ * anywhere in the range is a damaged file (see `walk` for what is damaged).
+ */
+export function childBoxes(bytes: Uint8Array, from: number, to: number): Box[] {
+  return [...walk(bytes, from, to)]
+}
+
+/**
+ * The first child of `parent` of a type, or null. It stops at the first box of
+ * that type, so a damaged box after the one wanted does not fail the lookup;
+ * one before it, or anywhere when there is no such box, still does.
+ */
 export function child(bytes: Uint8Array, parent: Box, type: string): Box | null {
-  return childBoxes(bytes, parent.body, parent.end).find((entry) => entry.type === type) ?? null
+  for (const entry of walk(bytes, parent.body, parent.end)) {
+    if (entry.type === type) return entry
+  }
+  return null
 }
 
 /**
@@ -163,19 +185,21 @@ export class Reader {
     return this.#view.getInt32(this.#take(4))
   }
 
-  /** 64-bit, refused as damaged above `Number.MAX_SAFE_INTEGER`. */
+  /** 64-bit, refused as damaged above `Number.MAX_SAFE_INTEGER`, with the cursor left where the value starts. */
   u64(): number {
-    const at = this.#take(8)
+    const at = this.#check(8)
     const value = this.#view.getBigUint64(at)
     if (value > MAX_SAFE) this.#tooLarge(at)
+    this.#at += 8
     return Number(value)
   }
 
-  /** Signed 64-bit, refused as damaged beyond `Number.MAX_SAFE_INTEGER` either way. */
+  /** Signed 64-bit, refused as damaged beyond `Number.MAX_SAFE_INTEGER` either way, with the cursor left where the value starts. */
   i64(): number {
-    const at = this.#take(8)
+    const at = this.#check(8)
     const value = this.#view.getBigInt64(at)
     if (value > MAX_SAFE || value < -MAX_SAFE) this.#tooLarge(at)
+    this.#at += 8
     return Number(value)
   }
 
@@ -193,15 +217,20 @@ export class Reader {
     return this.#bytes.subarray(at, at + count)
   }
 
-  /** Moves past `count` bytes and returns where they started. */
-  #take(count: number): number {
+  /** Where the next `count` bytes start, refusing a count that isn't there and moving nothing. */
+  #check(count: number): number {
     if (!Number.isInteger(count) || count < 0 || count > this.#to - this.#at) {
       throw new Mp4Error(
         'damaged',
         `A read of ${count} bytes at offset ${this.#at} runs past the end of its box at ${this.#to}.`,
       )
     }
-    const at = this.#at
+    return this.#at
+  }
+
+  /** Moves past `count` bytes and returns where they started. */
+  #take(count: number): number {
+    const at = this.#check(count)
     this.#at += count
     return at
   }

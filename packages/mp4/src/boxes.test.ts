@@ -121,6 +121,61 @@ describe('the boxes in a range (§10.4)', () => {
     damaged(() => childBoxes(bytes, 0, bytes.length + 1))
     damaged(() => childBoxes(bytes, 9, 8))
   })
+
+  it('finds a child without walking past it, so a damaged box after it does not fail the lookup', () => {
+    const wanted = box('mdia', [1, 2, 3])
+    // A sibling after the wanted box that claims 100 bytes where 12 are left.
+    const parent = box('trak', wanted, u32(100), fourcc('udta'), [0, 0, 0, 0])
+    const [trak] = childBoxes(parent, 0, parent.length)
+    expect(trak?.type).toBe('trak')
+    if (!trak) return
+
+    expect(child(parent, trak, 'mdia')).toEqual({
+      type: 'mdia',
+      start: 8,
+      body: 16,
+      end: 8 + wanted.length,
+    })
+    // The list as a whole is still strict, and so is a lookup that has to walk to the damage.
+    damaged(() => childBoxes(parent, trak.body, trak.end))
+    damaged(() => child(parent, trak, 'zzzz'))
+    damaged(() => child(parent, trak, 'udta'))
+  })
+
+  it('still refuses a damaged box before the one a lookup wants', () => {
+    const parent = box('trak', u32(100), fourcc('udta'), [0, 0, 0, 0], box('mdia'))
+    const [trak] = childBoxes(parent, 0, parent.length)
+    if (!trak) throw new Error('expected a box')
+    damaged(() => child(parent, trak, 'mdia'))
+  })
+
+  it("accepts QuickTime's 4 zero bytes at the end of a list, and only exactly that", () => {
+    const free = box('free', [1, 2])
+    // QuickTime writes a 32-bit zero after some lists of atoms.
+    const ended = concat(free, u32(0))
+    expect(childBoxes(ended, 0, ended.length)).toEqual([
+      { type: 'free', start: 0, body: 8, end: free.length },
+    ])
+    // A range that is only the terminator holds no boxes.
+    expect(childBoxes(Uint8Array.from(u32(0)), 0, 4)).toEqual([])
+    // The terminator ends a list inside a box as well.
+    const parent = box('moov', free, u32(0))
+    const [moov] = childBoxes(parent, 0, parent.length)
+    if (!moov) throw new Error('expected a box')
+    expect(childBoxes(parent, moov.body, moov.end).map((entry) => entry.type)).toEqual(['free'])
+    expect(child(parent, moov, 'free')?.type).toBe('free')
+    expect(child(parent, moov, 'trak')).toBeNull()
+
+    // Any other short remainder is a header cut short: not all zeros, 3 zeros, 5 zeros, 7 zeros.
+    damaged(() => childBoxes(concat(free, [0, 0, 0, 1]), 0, free.length + 4))
+    damaged(() => childBoxes(concat(free, [0, 0, 1, 0]), 0, free.length + 4))
+    // (3 zeros, in bytes that go on with another zero past the range: the range is what counts.)
+    damaged(() => childBoxes(concat(free, [0, 0, 0, 0]), 0, free.length + 3))
+    damaged(() => childBoxes(concat(free, [0, 0, 0, 0, 0]), 0, free.length + 5))
+    damaged(() => childBoxes(concat(free, [0, 0, 0, 0, 0, 0, 0]), 0, free.length + 7))
+    // Four zeros in the middle of a list are a box of size 0 that runs to the end, as before.
+    expect(childBoxes(concat(u32(0), fourcc('mdat'), [0, 0, 0, 0]), 0, 12)).toHaveLength(1)
+  })
 })
 
 describe('reading a box body (§10.4)', () => {
@@ -216,5 +271,27 @@ describe('reading a box body (§10.4)', () => {
     damaged(() => readI64(i64(-(2n ** 63n))))
     // All ones is a value of 64 bits for `u64`, and -1 for `i64`.
     expect(readI64(u64(2n ** 64n - 1n))).toBe(-1)
+  })
+
+  it('leaves the cursor where it was when it refuses a 64-bit value', () => {
+    const largest = BigInt(Number.MAX_SAFE_INTEGER)
+    const unsigned = new Reader(concat([1], u64(largest + 1n), u32(7)), 0, 13)
+    expect(unsigned.u8()).toBe(1)
+    damaged(() => unsigned.u64())
+    expect(unsigned.position).toBe(1)
+    expect(unsigned.remaining).toBe(12)
+    // What follows the refused value can still be read from where it started.
+    expect(unsigned.bytes(8)).toEqual(Uint8Array.from(u64(largest + 1n)))
+    expect(unsigned.u32()).toBe(7)
+
+    const signed = new Reader(concat([1], i64(-largest - 1n), u32(7)), 0, 13)
+    expect(signed.u8()).toBe(1)
+    damaged(() => signed.i64())
+    expect(signed.position).toBe(1)
+    expect(signed.remaining).toBe(12)
+    // The same for a value that is positive and too large.
+    const positive = new Reader(concat(i64(largest + 1n)), 0, 8)
+    damaged(() => positive.i64())
+    expect(positive.position).toBe(0)
   })
 })
