@@ -119,6 +119,41 @@ export function childBoxes(bytes: Uint8Array, from: number, to: number): Box[] {
 }
 
 /**
+ * The first box in [from, to), or null when there is none. It reads that box's
+ * header and nothing after it, so bytes that follow are never checked; the box
+ * itself is (see `walk` for what is damaged).
+ */
+export function firstBox(bytes: Uint8Array, from: number, to: number): Box | null {
+  const first = walk(bytes, from, to).next()
+  return first.done ? null : first.value
+}
+
+/** The boxes of a range that could be read, and what stopped the walk, if something did. */
+export interface LeadingBoxes {
+  boxes: Box[]
+  /** Null when the whole range was read; else why it wasn't, and the type of the box that couldn't be, when its header says one. */
+  damage: { type: string | null; error: Mp4Error } | null
+}
+
+/**
+ * The boxes of [from, to) up to the first that can't be read, for a reader that
+ * takes what it needs from them and doesn't fail on damage that comes after.
+ * The damage is reported, with the type of the box that holds it, so that a
+ * caller can tell damage in a box it needs from damage in one it doesn't.
+ */
+export function leadingBoxes(bytes: Uint8Array, from: number, to: number): LeadingBoxes {
+  const boxes: Box[] = []
+  try {
+    for (const entry of walk(bytes, from, to)) boxes.push(entry)
+  } catch (error) {
+    if (!(error instanceof Mp4Error)) throw error
+    const at = boxes.at(-1)?.end ?? from
+    return { boxes, damage: { type: to - at >= 8 ? fourccAt(bytes, at + 4) : null, error } }
+  }
+  return { boxes, damage: null }
+}
+
+/**
  * The first child of `parent` of a type, or null. It stops at the first box of
  * that type, so a damaged box after the one wanted does not fail the lookup;
  * one before it, or anywhere when there is no such box, still does.
@@ -236,6 +271,9 @@ export class Reader {
   }
 
   #tooLarge(at: number): never {
-    throw new Mp4Error('damaged', `The 64-bit number at offset ${at} is larger than any file's.`)
+    throw new Mp4Error(
+      'damaged',
+      `The 64-bit number at offset ${at} is outside the range a number can hold exactly.`,
+    )
   }
 }

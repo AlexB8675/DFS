@@ -1,5 +1,5 @@
-import { child, childBoxes, Reader } from './boxes.ts'
-import type { Box } from './boxes.ts'
+import { child, childBoxes, firstBox, leadingBoxes, Reader } from './boxes.ts'
+import type { Box, LeadingBoxes } from './boxes.ts'
 import { Mp4Error } from './errors.ts'
 
 // The movie in a `moov`, and the header of each of its tracks (DESIGN.md §10.4,
@@ -42,6 +42,10 @@ const TABLE_TYPES: readonly string[] = [
   'co64',
 ]
 
+function isTable(type: string): type is TableType {
+  return TABLE_TYPES.includes(type)
+}
+
 export interface TrackHeader {
   id: number
   kind: 'video' | 'audio' | 'other'
@@ -78,12 +82,21 @@ function damaged(message: string): Mp4Error {
   return new Mp4Error('damaged', message)
 }
 
-/** The first child of a type, which what is being read can't do without. */
-function need(moov: Uint8Array, parent: Box, type: string): Box {
-  const found = child(moov, parent, type)
-  if (!found)
-    throw damaged(`The '${parent.type}' box at offset ${parent.start} has no '${type}' box.`)
-  return found
+/** The boxes inside `parent`, as far as they can be read: damage after the ones a track needs is not the track's problem. */
+function childrenOf(moov: Uint8Array, parent: Box): LeadingBoxes {
+  return leadingBoxes(moov, parent.body, parent.end)
+}
+
+/**
+ * The first child of a type among `found`, which what is being read can't do
+ * without. When it isn't there, the damage that stopped the walk is the reason,
+ * if the walk was stopped; else it is simply not in the box.
+ */
+function need(found: LeadingBoxes, parent: Box, type: string): Box {
+  const entry = found.boxes.find((box) => box.type === type)
+  if (entry) return entry
+  if (found.damage) throw found.damage.error
+  throw damaged(`The '${parent.type}' box at offset ${parent.start} has no '${type}' box.`)
 }
 
 function bodyOf(moov: Uint8Array, box: Box): Reader {
@@ -150,6 +163,10 @@ function readMediaHeader(
   const wide = wideVersion(reader, box)
   reader.skip(wide ? 16 : 8) // when it was made and changed
   const timescale = reader.u32()
+  // A track that counts time in ticks of 0 seconds can't tell any time at all.
+  if (timescale === 0) {
+    throw damaged(`The 'mdhd' box at offset ${box.start} gives a timescale of 0.`)
+  }
   const durationTicks = timeOf(reader, wide)
   return { timescale, durationTicks, language: languageOf(reader.u16() & 0x7fff) }
 }
@@ -195,26 +212,30 @@ function readEntries(moov: Uint8Array, stsd: Box): SampleEntry[] {
       `The 'stsd' box at offset ${stsd.start} counts ${count} entries and holds ${found.length}.`,
     )
   }
+  // A track that describes no sample can't be played: the description is what the decoder is made from.
+  if (found.length === 0) {
+    throw damaged(`The 'stsd' box at offset ${stsd.start} holds no sample description.`)
+  }
   return found.map((entry) => ({ type: entry.type, bytes: moov.subarray(entry.start, entry.end) }))
 }
 
-/** The sample descriptions and the tables of an `stbl`: the first of each kind of box, as `child` finds the first. */
+/**
+ * The sample descriptions and the tables of an `stbl`: the first of each kind
+ * of box, as `child` finds the first. A damaged box that comes after them is
+ * not the track's problem, unless it is one of these.
+ */
 function readSampleTables(
   moov: Uint8Array,
   stbl: Box,
 ): { entries: SampleEntry[]; tables: Partial<Record<TableType, Uint8Array>> } {
-  let stsd: Box | undefined
+  const found = childrenOf(moov, stbl)
   const tables: Partial<Record<TableType, Uint8Array>> = {}
-  for (const box of childBoxes(moov, stbl.body, stbl.end)) {
-    if (box.type === 'stsd') {
-      stsd ??= box
-    } else if (TABLE_TYPES.includes(box.type)) {
-      const type = box.type as TableType
-      tables[type] ??= moov.subarray(box.start, box.end)
-    }
+  for (const box of found.boxes) {
+    if (isTable(box.type)) tables[box.type] ??= moov.subarray(box.start, box.end)
   }
-  if (!stsd) throw damaged(`The 'stbl' box at offset ${stbl.start} has no 'stsd' box.`)
-  return { entries: readEntries(moov, stsd), tables }
+  const { damage } = found
+  if (damage?.type && (damage.type === 'stsd' || isTable(damage.type))) throw damage.error
+  return { entries: readEntries(moov, need(found, stbl, 'stsd')), tables }
 }
 
 /**
@@ -240,26 +261,29 @@ function readTrack(moov: Uint8Array, trak: Box): TrackHeader {
     problem: null,
   }
   try {
-    const header = readTrackHeader(moov, need(moov, trak, 'tkhd'))
+    const inTrak = childrenOf(moov, trak)
+    const header = readTrackHeader(moov, need(inTrak, trak, 'tkhd'))
     track.id = header.id
     track.width = header.width
     track.height = header.height
     track.matrix = header.matrix
 
-    const mdia = need(moov, trak, 'mdia')
-    const media = readMediaHeader(moov, need(moov, mdia, 'mdhd'))
+    const mdia = need(inTrak, trak, 'mdia')
+    const inMdia = childrenOf(moov, mdia)
+    const media = readMediaHeader(moov, need(inMdia, mdia, 'mdhd'))
     track.timescale = media.timescale
     track.durationTicks = media.durationTicks
     track.language = media.language
     // The `hdlr` that is a child of `mdia`: a MOV's `minf` has one of its own, for data.
-    track.handler = readHandler(moov, need(moov, mdia, 'hdlr'))
+    track.handler = readHandler(moov, need(inMdia, mdia, 'hdlr'))
     track.kind = track.handler === 'vide' ? 'video' : track.handler === 'soun' ? 'audio' : 'other'
 
-    const edts = child(moov, trak, 'edts')
+    // The edit list is the one box that a track may do without: it is in the boxes that were read, or the track has none.
+    const edts = inTrak.boxes.find((box) => box.type === 'edts')
     if (edts) track.edits = readEdits(moov, edts)
 
-    const minf = need(moov, mdia, 'minf')
-    const { entries, tables } = readSampleTables(moov, need(moov, minf, 'stbl'))
+    const minf = need(inMdia, mdia, 'minf')
+    const { entries, tables } = readSampleTables(moov, need(childrenOf(moov, minf), minf, 'stbl'))
     track.entries = entries
     track.tables = tables
   } catch (error) {
@@ -272,11 +296,14 @@ function readTrack(moov: Uint8Array, trak: Box): TrackHeader {
 /**
  * The movie in a `moov` box's bytes, header included. Refuses a fragmented file
  * (an `mvex` in the `moov`: it has nothing to split) and a `moov` that can't be
- * walked or whose `mvhd` can't be read, both with `Mp4Error`. A track that
- * can't be read is in the result with its `problem`, never refused.
+ * walked or whose `mvhd` can't be read, both with `Mp4Error`. The `moov` is the
+ * first box of `moov`, and what follows it is not looked at. A track that can't
+ * be read is in the result with its `problem`, never refused: its media
+ * timescale is 0, it holds no sample description, or a box it needs is missing
+ * or damaged, but not a damaged box that comes after the ones it needs.
  */
 export function readMovie(moov: Uint8Array): Movie {
-  const [first] = childBoxes(moov, 0, moov.length)
+  const first = firstBox(moov, 0, moov.length)
   if (first?.type !== 'moov') throw damaged(`The bytes of the index don't start with a 'moov' box.`)
   const children = childBoxes(moov, first.body, first.end)
   if (children.some((entry) => entry.type === 'mvex')) {

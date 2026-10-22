@@ -3,9 +3,11 @@ import { childBoxes } from './boxes.ts'
 import { Mp4Error } from './errors.ts'
 import { readMovie } from './movie.ts'
 import type { Movie } from './movie.ts'
+import type { Part } from './testing/build.ts'
 import {
   box,
   concat,
+  edts,
   fourcc,
   fullBox,
   hdlr,
@@ -458,6 +460,24 @@ describe('what a movie that is not sound refuses, and what only a track does (§
         '2 entries',
       ],
       [
+        'an stsd with no entries',
+        box('trak', tkhd(), wholeMedia(mdhd(), hdlr('vide'), box('minf', box('stbl', stsd([]))))),
+        'no sample description',
+      ],
+      [
+        'an stsd that counts 0 entries and holds 1',
+        box(
+          'trak',
+          tkhd(),
+          wholeMedia(
+            mdhd(),
+            hdlr('vide'),
+            box('minf', box('stbl', stsd([sampleEntry('avc1')], 0))),
+          ),
+        ),
+        '0 entries',
+      ],
+      [
         'an stsd cut short',
         box(
           'trak',
@@ -511,6 +531,112 @@ describe('what a movie that is not sound refuses, and what only a track does (§
     expect(only.edits).toEqual([{ durationMovieTicks: 30, mediaTime: 5, rate: 0x10000 }])
     expect(only.entries).toEqual([])
     expect(only.tables).toEqual({})
+  })
+})
+
+describe('what a track needs, and what it does not (§10.4)', () => {
+  it('gives a track whose media timescale is 0 a problem, and leaves the others', () => {
+    const clean = readMovie(movie({ tracks: [{ id: 1 }, { id: 3, handler: 'soun' }] }))
+    const read = readMovie(
+      movie({
+        tracks: [{ id: 1 }, { id: 2, timescale: 0, duration: 500 }, { id: 3, handler: 'soun' }],
+      }),
+    )
+    expect(read.tracks).toHaveLength(3)
+    expect(read.tracks[0]).toEqual(clean.tracks[0])
+    expect(read.tracks[2]).toEqual(clean.tracks[1])
+    const zero = trackOf(read, 1)
+    expect(zero.problem).toContain("'mdhd'")
+    expect(zero.problem).toContain('timescale')
+    expect(zero.id).toBe(2)
+    // A movie's own timescale of 0 is left as it is: what reads edit lists guards it.
+    expect(readMovie(movie({ timescale: 0, tracks: [{ id: 1 }] })).timescale).toBe(0)
+  })
+
+  it('reads a track clean when a box that is damaged comes after the ones it needs', () => {
+    // A box that claims more bytes than are left in the box it is in.
+    const vendor = concat(u32(500), fourcc('udta'), [1, 2, 3])
+    const tables = [table('stts', u32(1), u32(30), u32(1001)), table('stco', u32(1), u32(4096))]
+    const avc1 = sampleEntry('avc1', [1, 2])
+    const stbl = (...after: Part[]) => box('stbl', stsd([avc1]), ...tables, ...after)
+    const minf = (...after: Part[]) => box('minf', stbl(), ...after)
+    const mdia = (...after: Part[]) =>
+      box('mdia', mdhd({ timescale: 90000 }), hdlr('vide'), minf(), ...after)
+    const withStbl = (...after: Part[]) =>
+      box('mdia', mdhd({ timescale: 90000 }), hdlr('vide'), box('minf', stbl(...after)))
+    const edits = edts(0, [{ duration: 600, mediaTime: 1001 }])
+
+    const clean = trackOf(readMovie(movie({ tracks: [box('trak', tkhd({ id: 4 }), mdia())] })), 0)
+    expect(clean.problem).toBeNull()
+    expect(clean.entries).toEqual([{ type: 'avc1', bytes: avc1 }])
+    expect(Object.keys(clean.tables)).toEqual(['stts', 'stco'])
+
+    // After `mdia`, in the trak: the `edts` that is looked for isn't there, or is before `mdia`.
+    const afterMedia = readMovie(
+      movie({
+        tracks: [
+          box('trak', tkhd({ id: 4 }), mdia(), vendor),
+          box('trak', tkhd({ id: 4 }), edits, mdia(), vendor),
+        ],
+      }),
+    )
+    expect(trackOf(afterMedia, 0)).toEqual(clean)
+    expect(trackOf(afterMedia, 1)).toEqual({
+      ...clean,
+      edits: [{ durationMovieTicks: 600, mediaTime: 1001, rate: 0x10000 }],
+    })
+
+    // After the last box read, in `mdia`, in `minf` and in `stbl`.
+    const deeper = readMovie(
+      movie({
+        tracks: [
+          box('trak', tkhd({ id: 4 }), mdia(vendor)),
+          box(
+            'trak',
+            tkhd({ id: 4 }),
+            box('mdia', mdhd({ timescale: 90000 }), hdlr('vide'), minf(vendor)),
+          ),
+          box('trak', tkhd({ id: 4 }), withStbl(vendor)),
+        ],
+      }),
+    )
+    expect(deeper.tracks).toEqual([clean, clean, clean])
+
+    // Damage in front of a box that is needed hides it, and that is the track's problem.
+    const before = readMovie(movie({ tracks: [box('trak', tkhd({ id: 4 }), vendor, mdia())] }))
+    expect(trackOf(before, 0).problem).toContain("'udta'")
+  })
+
+  it('gives a track a problem when what is damaged is a table, or the descriptions, in its stbl', () => {
+    const vendor = concat(u32(500), fourcc('udta'), [1, 2, 3])
+    const aTable = (type: string) => concat(u32(500), fourcc(type), [1, 2, 3])
+    const inStbl = (...children: Part[]) =>
+      box('trak', tkhd(), box('mdia', mdhd(), hdlr('vide'), box('minf', box('stbl', ...children))))
+    const read = readMovie(
+      movie({
+        tracks: [
+          // The damage is of another kind of box, after the descriptions and a table: not a problem.
+          inStbl(stsd([sampleEntry('avc1')]), table('stts', u32(0)), vendor),
+          // The damage is of a table, or of the descriptions.
+          inStbl(stsd([sampleEntry('avc1')]), table('stts', u32(0)), aTable('stco')),
+          inStbl(table('stts', u32(0)), aTable('stsd')),
+        ],
+      }),
+    )
+    const [fine, table1, table2] = read.tracks
+    expect(fine?.problem).toBeNull()
+    expect(fine?.entries).toHaveLength(1)
+    expect(Object.keys(fine?.tables ?? {})).toEqual(['stts'])
+    expect(table1?.problem).toContain("'stco'")
+    expect(table2?.problem).toContain("'stsd'")
+  })
+
+  it('reads a movie that is followed by bytes that are not boxes', () => {
+    const moov = movie({ timescale: 600, tracks: [{ id: 1 }, { id: 2, handler: 'soun' }] })
+    const expected = readMovie(moov)
+    expect(readMovie(concat(moov, [1, 2, 3]))).toEqual(expected)
+    expect(readMovie(concat(moov, u32(500), fourcc('mdat'), [1, 2, 3]))).toEqual(expected)
+    expect(readMovie(concat(moov, box('free', [1])))).toEqual(expected)
   })
 })
 

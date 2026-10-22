@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { child, childBoxes, Reader } from './boxes.ts'
+import { child, childBoxes, firstBox, leadingBoxes, Reader } from './boxes.ts'
 import { Mp4Error } from './errors.ts'
 import { box, concat, fourcc, fullBox, i16, i32, i64, u16, u32, u64 } from './testing/build.ts'
 
@@ -178,6 +178,57 @@ describe('the boxes in a range (§10.4)', () => {
   })
 })
 
+describe('the boxes a lenient reader takes from a range (§10.4)', () => {
+  it('reads the first box of a range without looking past it', () => {
+    const first = box('moov', [1, 2, 3])
+    // After the first box, bytes that are no box at all: 3 of them, then a box that claims too much.
+    expect(firstBox(concat(first, [1, 2, 3]), 0, first.length + 3)).toEqual({
+      type: 'moov',
+      start: 0,
+      body: 8,
+      end: first.length,
+    })
+    const long = concat(first, u32(500), fourcc('mdat'))
+    expect(firstBox(long, 0, long.length)?.type).toBe('moov')
+    // None in an empty range, or one that is only QuickTime's terminator.
+    expect(firstBox(first, 4, 4)).toBeNull()
+    expect(firstBox(Uint8Array.from(u32(0)), 0, 4)).toBeNull()
+    // The first box itself, though, is checked.
+    damaged(() => firstBox(first, 0, first.length - 1))
+    damaged(() => firstBox(Uint8Array.of(0, 0, 0), 0, 3))
+  })
+
+  it('reads the boxes of a range as far as they can be read, and says where it stopped and why', () => {
+    const free = box('free', [1])
+    const trak = box('trak', [1, 2])
+    const clean = concat(free, trak)
+    expect(leadingBoxes(clean, 0, clean.length)).toEqual({
+      boxes: childBoxes(clean, 0, clean.length),
+      damage: null,
+    })
+
+    // A box that claims 500 bytes after two that are whole.
+    const torn = concat(free, trak, u32(500), fourcc('udta'), [1, 2, 3])
+    const stopped = leadingBoxes(torn, 0, torn.length)
+    expect(stopped.boxes.map((entry) => entry.type)).toEqual(['free', 'trak'])
+    expect(stopped.damage?.type).toBe('udta')
+    expect(stopped.damage?.error).toBeInstanceOf(Mp4Error)
+    expect(stopped.damage?.error.reason).toBe('damaged')
+    expect(stopped.damage?.error.message).toContain("'udta'")
+
+    // A header cut short has no type to give, and nothing before it is lost.
+    const cut = concat(free, [0, 0, 0, 9, 1])
+    const cutShort = leadingBoxes(cut, 0, cut.length)
+    expect(cutShort.boxes.map((entry) => entry.type)).toEqual(['free'])
+    expect(cutShort.damage?.type).toBeNull()
+
+    // Damage at the very start leaves no boxes.
+    const first = leadingBoxes(torn, free.length + trak.length, torn.length)
+    expect(first.boxes).toEqual([])
+    expect(first.damage?.type).toBe('udta')
+  })
+})
+
 describe('reading a box body (§10.4)', () => {
   it('reads big-endian integers and refuses a read past the end', () => {
     const body = concat(
@@ -271,6 +322,17 @@ describe('reading a box body (§10.4)', () => {
     damaged(() => readI64(i64(-(2n ** 63n))))
     // All ones is a value of 64 bits for `u64`, and -1 for `i64`.
     expect(readI64(u64(2n ** 64n - 1n))).toBe(-1)
+  })
+
+  it('says a 64-bit value is outside the range a number holds exactly, whichever way it is out', () => {
+    const largest = BigInt(Number.MAX_SAFE_INTEGER)
+    const outside = 'outside the range a number can hold exactly'
+    const readU64 = (bytes: number[]) => new Reader(Uint8Array.from(bytes), 0, 8).u64()
+    const readI64 = (bytes: number[]) => new Reader(Uint8Array.from(bytes), 0, 8).i64()
+    expect(damaged(() => readU64(u64(largest + 1n))).message).toContain(outside)
+    expect(damaged(() => readI64(i64(largest + 1n))).message).toContain(outside)
+    expect(damaged(() => readI64(i64(-largest - 1n))).message).toContain(outside)
+    expect(damaged(() => readI64(i64(-largest - 1n))).message).toContain('offset 0')
   })
 
   it('leaves the cursor where it was when it refuses a 64-bit value', () => {

@@ -252,7 +252,9 @@ describe("a track's frames (§10.4)", () => {
   })
 
   it('keeps the track timescale, 0 included, without dividing by it', () => {
-    expect(frameTable(trackWith(tablesOf({}), 0)).timescale).toBe(0)
+    // `readMovie` gives a track that counts in ticks of 0 a problem, so the 0 is put in by hand.
+    const track = { ...trackWith(tablesOf({})), timescale: 0 }
+    expect(frameTable(track).timescale).toBe(0)
   })
 
   describe('refuses tables whose counts disagree', () => {
