@@ -330,3 +330,114 @@ export function movie({ tracks = [], extra = [], ...header }: MovieSpec = {}): U
     ...extra,
   )
 }
+
+// The sample tables of a track, laid out as the standard lays them out. A
+// table of a whole movie is long (a two-hour film at 60 frames a second has
+// 432 000 sizes), so each one writes its entries into one array of bytes
+// instead of one part for each, which `concat` and `box` would have to spread.
+// The ones that count their entries take `count` to say another number than
+// the entries there are, for a table that lies.
+
+/** Numbers of 32 bits, one after the other, as unsigned or signed. */
+function words(values: readonly number[], signed = false): Uint8Array {
+  const out = new Uint8Array(values.length * 4)
+  const view = new DataView(out.buffer)
+  const [low, high] = signed ? [-(2 ** 31), 2 ** 31 - 1] : [0, 2 ** 32 - 1]
+  values.forEach((value, index) => {
+    if (!Number.isInteger(value) || value < low || value > high) {
+      throw new RangeError(`${value} doesn't fit in 32 bits${signed ? ', signed' : ''}.`)
+    }
+    if (signed) view.setInt32(index * 4, value)
+    else view.setUint32(index * 4, value)
+  })
+  return out
+}
+
+/** Numbers of 64 bits, one after the other. */
+function longs(values: readonly (number | bigint)[]): Uint8Array {
+  const out = new Uint8Array(values.length * 8)
+  values.forEach((value, index) => {
+    out.set(u64(value), index * 8)
+  })
+  return out
+}
+
+/** A run of samples: how many there are, then what each has (a duration for `stts`, an offset for `ctts`). */
+export type Run = readonly [count: number, value: number]
+
+/** `stts`: the duration of each run of samples. */
+export function stts(runs: readonly Run[], count = runs.length): Uint8Array {
+  return fullBox('stts', 0, 0, u32(count), words(runs.flat()))
+}
+
+/** `ctts`: the composition offset of each run of samples, unsigned in version 0 and signed in 1. */
+export function ctts(version: Version, runs: readonly Run[], count = runs.length): Uint8Array {
+  return fullBox('ctts', version, 0, u32(count), words(runs.flat(), version === 1))
+}
+
+/** `stss`: the numbers of the keyframes, counting from 1. */
+export function stss(samples: readonly number[], count = samples.length): Uint8Array {
+  return fullBox('stss', 0, 0, u32(count), words(samples))
+}
+
+/** What `stsz` says of sizes when there is one for all: the size, and how many samples have it. */
+export interface ConstantSize {
+  size: number
+  count: number
+}
+
+/** `stsz`: the size of each sample, or one size for all of `count`. `count` says another number of samples than there are. */
+export function stsz(sizes: readonly number[] | ConstantSize, count?: number): Uint8Array {
+  if ('size' in sizes) {
+    if (sizes.size === 0) throw new RangeError('A size of 0 says that each sample has its own.')
+    return fullBox('stsz', 0, 0, u32(sizes.size), u32(count ?? sizes.count))
+  }
+  return fullBox('stsz', 0, 0, u32(0), u32(count ?? sizes.length), words(sizes))
+}
+
+/** `stz2`: the sizes in 4, 8 or 16 bits each. At 4 the first of a pair is the high half, and an odd one out has the low half left at 0. */
+export function stz2(bits: 4 | 8 | 16, sizes: readonly number[], count = sizes.length): Uint8Array {
+  for (const size of sizes) {
+    if (!Number.isInteger(size) || size < 0 || size >= 2 ** bits) {
+      throw new RangeError(`${size} doesn't fit in ${bits} bits.`)
+    }
+  }
+  const entries = new Uint8Array(Math.ceil((sizes.length * bits) / 8))
+  sizes.forEach((size, index) => {
+    if (bits === 4) {
+      const at = index >> 1
+      entries[at] = (entries[at] ?? 0) | (index % 2 === 0 ? size << 4 : size)
+    } else if (bits === 8) {
+      entries[index] = size
+    } else {
+      entries[index * 2] = size >> 8
+      entries[index * 2 + 1] = size & 0xff
+    }
+  })
+  // 24 bits reserved, then the field size, then the count.
+  return fullBox('stz2', 0, 0, [0, 0, 0, bits], u32(count), entries)
+}
+
+/** A run of chunks of `stsc`: the first chunk, counting from 1, how many samples each has, and which description they use. */
+export type ChunkRun = readonly [firstChunk: number, samplesPerChunk: number, description?: number]
+
+/** `stsc`: how many samples are in each chunk, from the chunk each run starts at. */
+export function stsc(runs: readonly ChunkRun[], count = runs.length): Uint8Array {
+  return fullBox(
+    'stsc',
+    0,
+    0,
+    u32(count),
+    words(runs.flatMap(([first, perChunk, description = 1]) => [first, perChunk, description])),
+  )
+}
+
+/** `stco`: where each chunk starts, in 32 bits. */
+export function stco(offsets: readonly number[], count = offsets.length): Uint8Array {
+  return fullBox('stco', 0, 0, u32(count), words(offsets))
+}
+
+/** `co64`: where each chunk starts, in 64 bits. */
+export function co64(offsets: readonly (number | bigint)[], count = offsets.length): Uint8Array {
+  return fullBox('co64', 0, 0, u32(count), longs(offsets))
+}
