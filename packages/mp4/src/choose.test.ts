@@ -223,6 +223,25 @@ describe('the tracks a video plays (§10.4, D45)', () => {
     expect(audio?.header.id).toBe(2)
   })
 
+  it('has no sound for a first sound track that has no frames', () => {
+    // A SourceBuffer with nothing appended to it would stall the video at 0: a sound with nothing to play is none.
+    const emptyTables = [stts([]), stsz([]), stsc([]), stco([])]
+    const parsed = read([
+      picture({ id: 1 }),
+      sound({ id: 2, tables: emptyTables }),
+      sound({ id: 3 }),
+    ])
+    const { video, audio } = chooseTracks(parsed)
+    expect(video.header.id).toBe(1)
+    expect(audio).toBeNull()
+    // The rules come first: an empty sound that the player couldn't take is a reason all the same.
+    refusal('unsupported-codec', () =>
+      chooseTracks(
+        read([picture(), sound({ entries: [audioEntry('ac-3')], tables: emptyTables })]),
+      ),
+    )
+  })
+
   it('refuses a file with no picture, a chosen track with two entries, an unaccepted edit list or an unknown codec, each with its reason', () => {
     const cases: { what: string; tracks: TrackSpec[]; reason: Mp4Refusal; says?: string }[] = [
       { what: 'no tracks', tracks: [], reason: 'no-picture' },

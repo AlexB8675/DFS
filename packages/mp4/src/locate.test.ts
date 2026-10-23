@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { Mp4Error } from './errors.ts'
 import type { Mp4Refusal } from './errors.ts'
-import { locateMoov } from './locate.ts'
-import { box, concat, fourcc, u32, u64 } from './testing/build.ts'
+import { locateMoov, moovIn } from './locate.ts'
+import { readMovie } from './movie.ts'
+import { box, concat, fourcc, movie, u32, u64 } from './testing/build.ts'
 
 /** What `run` throws, which must be an `Mp4Error` of this reason. */
 function refusal(reason: Mp4Refusal, run: () => unknown): Mp4Error {
@@ -182,5 +183,116 @@ describe('where the index is (§10.4)', () => {
       expect(() => locateMoov(FTYP, size)).toThrow(RangeError)
     }
     expect(locateMoov(FTYP, 0)).toBeNull()
+  })
+})
+
+describe('where the index is when the head ends close to the end of the mdat (§10.4)', () => {
+  it('finds the moov after an mdat that ends exactly at the end of the head', () => {
+    const head = concat(FTYP, plain('mdat', 100))
+    expect(head.length).toBe(140)
+    expect(locateMoov(head, 5000)).toEqual({ start: 140, end: 5000 })
+  })
+
+  it("finds the moov after an mdat that ends within 8 bytes of the head's end, where the next header isn't whole", () => {
+    for (const cut of [1, 3, 4, 7]) {
+      const head = concat(FTYP, plain('mdat', 100), new Uint8Array(cut))
+      expect(locateMoov(head, 5000), `${cut} bytes`).toEqual({ start: 140, end: 5000 })
+    }
+    // A 64-bit header is not whole until 16 bytes of it are there.
+    const wideCut = concat(FTYP, plain('mdat', 100), u32(1), fourcc('moov'), [0, 0, 0, 0])
+    expect(locateMoov(wideCut, 5000)).toEqual({ start: 140, end: 5000 })
+  })
+
+  it('does not take a damaged header after an mdat for the start of the moov', () => {
+    // The head goes on after the mdat, but with a box that is smaller than its own header: no moov begins there.
+    const head = concat(FTYP, plain('mdat', 100), u32(4), fourcc('free'), new Uint8Array(40))
+    expect(locateMoov(head, 5000)).toBeNull()
+    const huge = concat(FTYP, plain('mdat', 100), wide('moov', 2n ** 60n, 20))
+    expect(locateMoov(huge, 5000)).toBeNull()
+  })
+
+  it('finds the moov after an mdat that ends at the head and is the last box, though a free or skip comes before it', () => {
+    const head = concat(FTYP, plain('free', 12), plain('skip', 4), plain('mdat', 100))
+    expect(locateMoov(head, 5000)).toEqual({ start: head.length, end: 5000 })
+  })
+
+  it('has no moov after an mdat that is the whole of the file, or that leaves less than a header', () => {
+    const head = concat(FTYP, plain('mdat', 100))
+    expect(locateMoov(head, head.length)).toBeNull()
+    // A tail of 3 bytes holds no header, and neither do 7; 8 are a header.
+    expect(locateMoov(head, head.length + 3)).toBeNull()
+    expect(locateMoov(head, head.length + 7)).toBeNull()
+    expect(locateMoov(head, head.length + 8)).toEqual({ start: 140, end: 148 })
+    // The same for an mdat that runs past the head.
+    const past = concat(FTYP, open('mdat', 1000, 40))
+    expect(locateMoov(past, 1032 + 7)).toBeNull()
+    expect(locateMoov(past, 1032 + 8)).toEqual({ start: 1032, end: 1040 })
+  })
+
+  it('reads only as much of a head as the file has', () => {
+    // The head is longer than the file, which is only its first 36 bytes: the moov header at 32 is not whole in them.
+    const head = concat(FTYP, toTheEnd('moov', 4))
+    expect(head.length).toBe(44)
+    expect(locateMoov(head, 36)).toBeNull()
+    // With 8 bytes it is whole, and the moov is those 8 bytes; no more than that.
+    expect(locateMoov(head, 40)).toEqual({ start: 32, end: 40 })
+    // A moov that the file cuts short is damaged, not found with an end past the file.
+    refusal('damaged', () => locateMoov(concat(FTYP, plain('moov', 100)), 100))
+    // A moof that the file cuts off is not listed either.
+    expect(locateMoov(concat(FTYP, plain('moof', 100)), 36)).toBeNull()
+    // And an mdat that the file cuts short has no moov after it.
+    expect(locateMoov(concat(FTYP, open('mdat', 1000, 100)), 100)).toBeNull()
+  })
+
+  it("has no moov in a range of the file that is shorter than a box's header", () => {
+    expect(locateMoov(concat(FTYP, toTheEnd('moov')), 40)).toEqual({ start: 32, end: 40 })
+    expect(locateMoov(concat(FTYP, toTheEnd('moov')), 39)).toBeNull()
+  })
+})
+
+describe('the moov in the range that was read (§10.4)', () => {
+  const index = movie({ tracks: [{ handler: 'vide' }, { handler: 'soun' }] })
+
+  it('is the first box when the range starts with the moov', () => {
+    expect(moovIn(index)).toEqual(index)
+    // And what follows the moov, such as the trailer a writer leaves, is not part of it.
+    expect(moovIn(concat(index, plain('free', 30)))).toEqual(index)
+  })
+
+  it('walks past the free, skip, wide and udta boxes before it, and any others', () => {
+    for (const before of [
+      [plain('free', 12)],
+      [plain('wide', 0), plain('skip', 3), plain('udta', 40), plain('free', 0)],
+      [plain('mdat', 100)],
+      [wide('free', 20, 4)],
+    ]) {
+      const range = concat(...before, index)
+      const found = moovIn(range)
+      expect(found, String(before.length)).toEqual(index)
+      // A view onto the range that was read, not a copy.
+      expect(found.buffer).toBe(range.buffer)
+      expect(readMovie(found).tracks).toHaveLength(2)
+    }
+  })
+
+  it('takes a moov with no size to run to the end of the range', () => {
+    const toTheRangeEnd = toTheEnd('moov', 100)
+    expect(moovIn(concat(plain('free', 8), toTheRangeEnd))).toEqual(toTheRangeEnd)
+  })
+
+  it('is damaged when the range holds no moov, is empty, or is damaged before the moov', () => {
+    refusal('damaged', () => moovIn(new Uint8Array(0)))
+    refusal('damaged', () => moovIn(concat(plain('free', 100), plain('mdat', 20))))
+    expect(refusal('damaged', () => moovIn(plain('free', 100))).message).toContain('moov')
+    // A box that claims more than the range holds, and one smaller than its header, before the moov.
+    refusal('damaged', () => moovIn(concat(open('free', 1000, 8), index)))
+    refusal('damaged', () => moovIn(concat(u32(4), fourcc('free'), index)))
+    // Bytes that are cut off in the middle of a header.
+    refusal('damaged', () => moovIn(index.subarray(0, 5)))
+  })
+
+  it('is found, whatever comes after it', () => {
+    // A damaged box after the moov is not looked at: the moov is what was asked for.
+    expect(moovIn(concat(index, u32(3), fourcc('free')))).toEqual(index)
   })
 })

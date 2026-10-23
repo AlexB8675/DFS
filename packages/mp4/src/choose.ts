@@ -73,8 +73,9 @@ function playTrack(
  * second. A file with no picture track is refused as `no-picture`; a file with
  * no sound track plays without sound (`audio` is null), but a first sound track
  * that fails the rules refuses it too: a sound the browser can't play is a
- * reason to play elsewhere (D45). The picture is checked first, so its reason is
- * the one given when both fail.
+ * reason to play elsewhere (D45), unless it has no frames, which makes it no
+ * sound at all. The picture is checked first, so its reason is the one given
+ * when both fail.
  */
 export function chooseTracks(movie: Movie): { video: PlayTrack; audio: PlayTrack | null } {
   const picture = movie.tracks.find((track) => track.kind === 'video')
@@ -83,5 +84,7 @@ export function chooseTracks(movie: Movie): { video: PlayTrack; audio: PlayTrack
   }
   const video = playTrack(picture, movie.timescale, 'picture')
   const sound = movie.tracks.find((track) => track.kind === 'audio')
-  return { video, audio: sound ? playTrack(sound, movie.timescale, 'sound') : null }
+  const audio = sound ? playTrack(sound, movie.timescale, 'sound') : null
+  // A sound with no frames is no sound: a SourceBuffer with nothing appended to it would stall the video at 0.
+  return { video, audio: audio && audio.table.count > 0 ? audio : null }
 }

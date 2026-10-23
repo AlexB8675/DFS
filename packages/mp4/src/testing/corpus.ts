@@ -11,7 +11,7 @@ import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Mp4Error } from '../errors.ts'
 import type { Mp4Refusal } from '../errors.ts'
-import { locateMoov } from '../locate.ts'
+import { locateMoov, moovIn } from '../locate.ts'
 import { readMovie } from '../movie.ts'
 import type { Movie } from '../movie.ts'
 
@@ -148,12 +148,13 @@ export const HEAD_BYTES = 1024 * 1024
 
 /**
  * A file's movie, read in place as the player will read it: the first 1 MiB to
- * find the `moov`, then that range only. Throws what `locateMoov` and `readMovie`
- * throw (`Mp4Error` for a file that is turned away), and an `Mp4Error('damaged')`
- * for a file with no `moov` to be found.
+ * find the `moov`, then that range only, from which `moovIn` takes the `moov`
+ * (past the `free` or other boxes that may come before it). Throws what
+ * `locateMoov`, `moovIn` and `readMovie` throw (`Mp4Error` for a file that is
+ * turned away), and an `Mp4Error('damaged')` for a file with no `moov` to be found.
  */
 export function readIndex(path: string, fileSize: number): Movie {
   const found = locateMoov(readRange(path, 0, Math.min(HEAD_BYTES, fileSize)), fileSize)
   if (!found) throw new Mp4Error('damaged', 'No moov was found in the file.')
-  return readMovie(readRange(path, found.start, found.end - found.start))
+  return readMovie(moovIn(readRange(path, found.start, found.end - found.start)))
 }
