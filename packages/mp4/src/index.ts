@@ -6,3 +6,5 @@ export * from './frames.ts'
 export * from './locate.ts'
 export * from './movie.ts'
 export * from './timing.ts'
+// Named, unlike the others: `write.ts` also exports `fragmentHead`, which only its tests use.
+export { fragment, initSegment } from './write.ts'
