@@ -12,6 +12,7 @@ coverage/
 # Test reports
 playwright-report/
 test-results/
+.vitest/
 
 # Local data (LocalBlobStore, staging, cache)
 .data/

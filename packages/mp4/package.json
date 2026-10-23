@@ -7,15 +7,18 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.node.json && tsc -p tsconfig.browser.json",
     "lint": "eslint .",
     "test": "vitest run",
     "test:corpus": "vitest run --config vitest.corpus.config.ts",
+    "test:browser": "vitest run --config vitest.browser.config.ts",
     "corpus:make": "node scripts/make-corpus.ts",
     "corpus:list": "node scripts/list-corpus.ts"
   },
   "devDependencies": {
     "@types/node": "^24.19.1",
+    "@vitest/browser-playwright": "^5.0.3",
+    "playwright": "^1.64.1",
     "vitest": "^5.0.3"
   }
 }

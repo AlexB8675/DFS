@@ -1,4 +1,4 @@
 {
-  "extends": "../../tsconfig.node.json",
-  "include": ["src", "scripts", "*.ts"]
+  "files": [],
+  "references": [{ "path": "./tsconfig.node.json" }, { "path": "./tsconfig.browser.json" }]
 }
