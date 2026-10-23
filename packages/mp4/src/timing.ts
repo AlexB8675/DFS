@@ -67,10 +67,27 @@ function placeable(edits: readonly Edit[]): { empty: Edit | null; media: Edit } 
  * The offset a track's edit list gives. The media edit starts at `mediaTime` of
  * the media, and shows it from where the empty edit before it, if there is one,
  * ends: so a frame at media time t is shown at `t - mediaTime + pause` of the
- * movie, and the offset is `pause - mediaTime`, in seconds. Accepts no edit
- * list, or an optional leading empty edit and then one media edit at rate 1 (the
- * only shapes the videos in use have, as surveyed), and refuses any other as
- * `Mp4Error('edit-list')` with a sentence that says what the list is. How long
+ * movie, and the offset is `pause - mediaTime`, in seconds.
+ *
+ * `firstPresentedTicks` is the track's first presentation time (the least
+ * `dts + cts` of its frames, in the track's ticks), and moves the start of the
+ * media edit to it when the edit begins earlier: the offset is then
+ * `pause - max(mediaTime, firstPresentedTicks) / timescale`. By the standard
+ * such an edit shows nothing for the time between its start and the first frame,
+ * but the writers (phones, mostly) meant the first frame to sit at the edit's
+ * start: the edit lasts as long as the frames do, and FFmpeg, and so Chrome's
+ * own player, places the frame there. The corpus of phone videos has 192
+ * pictures with an edit list, and in 154 of them the edit starts before the
+ * first frame, by 0.007 to 0.198 s. An edit that starts at the first frame or
+ * later (a sound's priming comes first; a trim cuts frames) is where it says;
+ * without `firstPresentedTicks` the start is the edit's own. `endSeconds` does
+ * not move: the footage is still cut at the edit's end.
+ *
+ * Accepts no edit list, or an optional leading empty edit and then one media
+ * edit at rate 1 (the only shapes the videos in use have, as surveyed), and
+ * refuses any other as `Mp4Error('edit-list')` with a sentence that says what
+ * the list is; a `firstPresentedTicks` that is no number is a RangeError, the
+ * caller's mistake. How long
  * the media edit lasts is no part of the offset: it gives `endSeconds`, where
  * the player applies a trim at the end. An empty edit's rate is not read, for it
  * plays nothing. A track timescale of 0 (which `readMovie` keeps as the track's
@@ -79,7 +96,14 @@ function placeable(edits: readonly Edit[]): { empty: Edit | null; media: Edit } 
  * media edit alone doesn't need the movie's timescale for the offset, and has no
  * `endSeconds` without it.
  */
-export function trackTiming(track: TrackHeader, movieTimescale: number): TrackTiming {
+export function trackTiming(
+  track: TrackHeader,
+  movieTimescale: number,
+  firstPresentedTicks?: number,
+): TrackTiming {
+  if (firstPresentedTicks !== undefined && !Number.isFinite(firstPresentedTicks)) {
+    throw new RangeError(`${firstPresentedTicks} is not a time that a frame is shown at.`)
+  }
   if (track.timescale === 0) throw damaged(`The track counts its time in ticks of 0 seconds.`)
   if (track.edits === null || track.edits.length === 0) {
     return { offsetSeconds: 0, endSeconds: null }
@@ -106,8 +130,10 @@ export function trackTiming(track: TrackHeader, movieTimescale: number): TrackTi
     media.durationMovieTicks > 0 && movieTimescale !== 0
       ? paused + media.durationMovieTicks / movieTimescale
       : null
+  // The edit starts where it says, or where the first frame is shown if that is later (see above).
+  const start = Math.max(media.mediaTime, firstPresentedTicks ?? media.mediaTime)
   // From 0, and not negated, so that a start of 0 is 0 and not -0.
-  return { offsetSeconds: paused - media.mediaTime / track.timescale, endSeconds }
+  return { offsetSeconds: paused - start / track.timescale, endSeconds }
 }
 
 /** Frame `i` must be one of the table's: a frame it doesn't have is a RangeError, the caller's mistake and not the file's. */

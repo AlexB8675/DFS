@@ -17,9 +17,7 @@ import type { ProbePacket, ProbeStream } from '../testing/ffprobe.ts'
 // in the stream's ticks, keyframes); so are the codec (against ffprobe's name,
 // profile and own string), the rotation and the time scale; and so are the
 // times with the edit list applied, which is what `offsetSeconds` has to get
-// right: the start of each track, and the first 300 frames, within a tick. FFmpeg
-// differs from the standard in one thing there, which is named at `ffmpegGap`
-// and counted in the totals. For each synthetic file the writer's output for
+// right: the start of each track, and the first 300 frames, within a tick. For each synthetic file the writer's output for
 // the first 10 s is read back by ffprobe, and a file expected to be refused gives
 // that reason. Run with `pnpm --filter @dfs/mp4 test:corpus`.
 
@@ -29,7 +27,7 @@ const WHOLE_FILE_LIMIT = 500 * 1024 * 1024
 const entries = loadManifest()
 
 // What the run compared, said once at the end.
-const totals = { files: 0, refused: 0, windowed: 0, frames: 0, written: 0, gaps: 0, widestGap: 0 }
+const totals = { files: 0, refused: 0, windowed: 0, frames: 0, written: 0 }
 
 /** A description of a difference that is too long for a line is cut. */
 function shown(value: unknown): string {
@@ -146,7 +144,7 @@ const EDITED_PACKETS = 300
 
 /**
  * The first packets of a track with its edit list applied, against its frames
- * shifted by `offsetSeconds` (less FFmpeg's gap, see `ffmpegGap`): the offset the
+ * shifted by `offsetSeconds`: the offset the
  * player gives its SourceBuffer has to put every frame where FFmpeg puts it,
  * within a tick (ffprobe rounds each time to a whole tick, as the offset need
  * not be one). The packets are matched to frames by `pos`.
@@ -157,7 +155,7 @@ function compareEdited(label: string, track: PlayTrack, packets: ProbePacket[]):
   for (let i = Math.min(table.count, EDITED_PACKETS * 10) - 1; i >= 0; i -= 1) {
     byOffset.set(table.offsets[i] ?? 0, i)
   }
-  const shift = timing.offsetSeconds * table.timescale - ffmpegGap(track)
+  const shift = timing.offsetSeconds * table.timescale
   const found = new Differences()
   let matched = 0
   for (const packet of packets) {
@@ -211,36 +209,6 @@ function firstShown(track: PlayTrack): number {
     if (ends > 1e-9) first = Math.min(first, begins)
   }
   return Math.max(first, 0)
-}
-
-/**
- * How long, in ticks of the track, FFmpeg takes off the start of a picture that
- * has an edit list: the time between where the media edit starts (its
- * `mediaTime`) and the track's first frame, when the frame is the later. The
- * standard puts the first frame that far into the edit, after nothing, but
- * FFmpeg's demuxer shifts the whole track earlier by that gap, so that the first
- * frame is at the edit's start (the end of the empty edit, if there is one) and
- * its decode time is negative. A track without an edit list is not shifted, and
- * a sound's first frame is never after the edit's start (an encoder's priming
- * comes first). The frames FFmpeg shows are the same ones as under the standard
- * (it still cuts the footage at the edit's end), only earlier by the gap.
- *
- * This is a difference between FFmpeg and `trackTiming`'s offset, which follows
- * the standard, and which of them the player wants is for the controller to
- * rule on (the report of task 8 has the evidence: 154 of 192 pictures with an
- * edit list have a gap, up to 0.198 s). Until then it is allowed for here, in the
- * comparison of the start and in the edited timeline, and counted in the totals:
- * without the `- gap` in both, those tracks fail.
- */
-function ffmpegGap(track: PlayTrack): number {
-  const { edits } = track.header
-  if (edits === null || edits.length === 0) return 0
-  const media = edits.find((edit) => edit.mediaTime !== -1)
-  let first = Infinity
-  for (let i = 0; i < track.table.count; i += 1) {
-    first = Math.min(first, (track.table.dts[i] ?? 0) + (track.table.cts[i] ?? 0))
-  }
-  return Math.max(0, first - (media?.mediaTime ?? 0))
 }
 
 /** The display rotation a `tkhd` matrix says, in degrees counter-clockwise, as FFmpeg's `av_display_rotation_get` reads it. */
@@ -379,17 +347,16 @@ function compareStream(
     }
   }
 
-  // Where it starts: the first presentation time with the offset applied, less the gap that FFmpeg takes off a picture's start, within a tick.
+  // Where it starts: the first presentation time with the offset applied, within a tick.
   const start =
     stream.start_pts === undefined
       ? Number(stream.start_time)
       : stream.start_pts * seconds(stream.time_base)
-  const gap = ffmpegGap(track) / track.table.timescale
-  const ours = firstShown(track) - gap
+  const ours = firstShown(track)
   const tick = 1 / track.table.timescale
   if (!(Math.abs(ours - start) <= tick + 1e-6)) {
     problems.push(
-      `${label}: first shown at ${ours} s (offset ${track.timing.offsetSeconds} s, less FFmpeg's gap of ${gap} s), ffprobe's start_time ${start} s (${stream.start_time})`,
+      `${label}: first shown at ${ours} s (offset ${track.timing.offsetSeconds} s), ffprobe's start_time ${start} s (${stream.start_time})`,
     )
   }
   return problems
@@ -434,11 +401,6 @@ async function checkPlays(entry: ManifestEntry): Promise<void> {
     problems.push(
       ...compareEdited(name, track, await probeEditedPackets(entry.path, select, EDITED_PACKETS)),
     )
-    const gap = ffmpegGap(track) / track.table.timescale
-    if (gap > 0) {
-      totals.gaps += 1
-      totals.widestGap = Math.max(totals.widestGap, gap)
-    }
     const packets = await probePackets(entry.path, select, intervals)
     if (windowed) {
       const result = compareWindows(name, track.table, packets)
@@ -465,7 +427,7 @@ function checkRefused(entry: ManifestEntry, reason: Mp4Refusal): void {
 afterAll(() => {
   if (entries.length === 0) return
   console.log(
-    `Corpus: ${totals.files} files compared (${totals.windowed} by windows), ${totals.frames} frames, ${totals.refused} refusals checked, ${totals.written} written tracks read back; FFmpeg takes a gap off the start of ${totals.gaps} tracks, up to ${totals.widestGap.toFixed(4)} s.`,
+    `Corpus: ${totals.files} files compared (${totals.windowed} by windows), ${totals.frames} frames, ${totals.refused} refusals checked, ${totals.written} written tracks read back.`,
   )
 })
 

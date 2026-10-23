@@ -10,6 +10,7 @@ import {
   audioEntry,
   avcC,
   box,
+  ctts,
   esds,
   frma,
   hdlr,
@@ -240,6 +241,61 @@ describe('the tracks a video plays (§10.4, D45)', () => {
         read([picture(), sound({ entries: [audioEntry('ac-3')], tables: emptyTables })]),
       ),
     )
+  })
+
+  it("puts a picture's first frame at its edit's start when the edit begins before it, as FFmpeg does", () => {
+    // Four frames of 3000 at 90000 a second, each shown 21020 after it is decoded; the first is shown at 21020 and the edit starts at 3204.
+    const tables = (shown: number): Uint8Array[] => [
+      stts([[4, 3000]]),
+      ctts(0, [[4, shown]]),
+      stss([1, 3]),
+      stsz([10, 20, 30, 40]),
+      stsc([[1, 2]]),
+      stco([100, 200]),
+    ]
+    const early = chooseTracks(
+      read([
+        picture({
+          timescale: 90000,
+          tables: tables(21020),
+          edits: { version: 0, edits: [{ duration: 133, mediaTime: 3204 }] },
+        }),
+      ]),
+    )
+    expect(early.video.timing.offsetSeconds).toBeCloseTo(-21020 / 90000, 12)
+    expect(early.video.timing.endSeconds).toBeCloseTo(0.133, 12)
+
+    const paused = chooseTracks(
+      read([
+        picture({
+          timescale: 90000,
+          tables: tables(21020),
+          edits: {
+            version: 0,
+            edits: [
+              { duration: 500, mediaTime: -1 },
+              { duration: 133, mediaTime: 3204 },
+            ],
+          },
+        }),
+      ]),
+    )
+    expect(paused.video.timing.offsetSeconds).toBeCloseTo(0.5 - 21020 / 90000, 12)
+    expect(paused.video.timing.endSeconds).toBeCloseTo(0.633, 12)
+
+    // An edit that starts at the first frame's time, or after it, is where it says; so is a sound's, whose first frame comes before it.
+    const later = chooseTracks(
+      read([
+        picture({
+          timescale: 90000,
+          tables: tables(21020),
+          edits: { version: 0, edits: [{ duration: 133, mediaTime: 30000 }] },
+        }),
+        sound({ edits: { version: 0, edits: [{ duration: 133, mediaTime: 1024 }] } }),
+      ]),
+    )
+    expect(later.video.timing.offsetSeconds).toBeCloseTo(-30000 / 90000, 12)
+    expect(later.audio?.timing.offsetSeconds).toBeCloseTo(-1024 / 44100, 12)
   })
 
   it('refuses a file with no picture, a chosen track with two entries, an unaccepted edit list or an unknown codec, each with its reason', () => {

@@ -299,6 +299,87 @@ describe("a track's timing (§10.4)", () => {
     expect(trackTiming(aac(undefined).track, 0).offsetSeconds).toBe(0)
   })
 
+  it("places the first frame at the edit's start when the edit starts before it, as FFmpeg does", () => {
+    // A phone's picture at 90000 ticks a second: 4 frames of 3000, each shown 21020 after it is decoded, so the first is shown at 21020. The media edit starts at 3204 and lasts as long as the frames do (133 ms): the writer meant the first frame to be at its start, and FFmpeg and Chrome's own player put it there.
+    const FIRST_SHOWN = 21020
+    const edit = { duration: 133, mediaTime: 3204 }
+    const pictures = (edits: readonly EditSpec[]): Built =>
+      built({
+        timescale: 90000,
+        edits,
+        tables: [
+          stts([[4, 3000]]),
+          ctts(0, [[4, FIRST_SHOWN]]),
+          stss([1]),
+          stsz([10, 20, 30, 40]),
+          stsc([[1, 4]]),
+          stco([1000]),
+        ],
+      })
+
+    const plain = pictures([edit])
+    const timing = trackTiming(plain.track, plain.movieTimescale, FIRST_SHOWN)
+    expect(timing.offsetSeconds).toBeCloseTo(-FIRST_SHOWN / 90000, 12)
+    expect(presentationSeconds(plain.table, timing, 0)).toBeCloseTo(0, 12)
+    expect(presentationSeconds(plain.table, timing, 1)).toBeCloseTo(3000 / 90000, 12)
+    // The end is where the edit's duration says, whichever the start: the footage is cut there.
+    expect(timing.endSeconds).toBeCloseTo(0.133, 12)
+
+    // After a pause of half a second the first frame is at the pause's end.
+    const paused = pictures([{ duration: 500, mediaTime: -1 }, edit])
+    const pausedTiming = trackTiming(paused.track, paused.movieTimescale, FIRST_SHOWN)
+    expect(pausedTiming.offsetSeconds).toBeCloseTo(0.5 - FIRST_SHOWN / 90000, 12)
+    expect(presentationSeconds(paused.table, pausedTiming, 0)).toBeCloseTo(0.5, 12)
+    expect(pausedTiming.endSeconds).toBeCloseTo(0.633, 12)
+  })
+
+  it("keeps the edit's start when it is the first frame's or later, and without a first frame to compare it with", () => {
+    const tables = [
+      stts([[4, 3000]]),
+      ctts(0, [[4, 6000]]),
+      stss([1]),
+      stsz([10, 20, 30, 40]),
+      stsc([[1, 4]]),
+      stco([1000]),
+    ]
+    // The first frame is shown at 6000. An edit that starts there, or after it (the first frames are cut), is placed where it says.
+    for (const mediaTime of [6000, 9000]) {
+      const { track, movieTimescale } = built({
+        timescale: 90000,
+        edits: [{ duration: 133, mediaTime }],
+        tables,
+      })
+      expect(trackTiming(track, movieTimescale, 6000).offsetSeconds, String(mediaTime)).toBeCloseTo(
+        -mediaTime / 90000,
+        12,
+      )
+      expect(trackTiming(track, movieTimescale, 0).offsetSeconds).toBeCloseTo(
+        -mediaTime / 90000,
+        12,
+      )
+    }
+    // No first frame given: the edit's start, as the standard has it.
+    const early = built({ timescale: 90000, edits: [{ duration: 133, mediaTime: 3204 }], tables })
+    expect(trackTiming(early.track, early.movieTimescale).offsetSeconds).toBeCloseTo(
+      -3204 / 90000,
+      12,
+    )
+    expect(trackTiming(early.track, early.movieTimescale, undefined).offsetSeconds).toBeCloseTo(
+      -3204 / 90000,
+      12,
+    )
+    // A track with no edit list has no start to move.
+    const none = built({ timescale: 90000, tables })
+    expect(trackTiming(none.track, none.movieTimescale, 6000)).toEqual({
+      offsetSeconds: 0,
+      endSeconds: null,
+    })
+    // And a first frame that is no time at all is the caller's mistake.
+    for (const bad of [Number.NaN, Infinity, -Infinity]) {
+      expect(() => trackTiming(early.track, early.movieTimescale, bad)).toThrow(RangeError)
+    }
+  })
+
   it('refuses a presentation time of a frame the table does not have', () => {
     const { table } = aac(undefined)
     const timing = { offsetSeconds: 0, endSeconds: null }
