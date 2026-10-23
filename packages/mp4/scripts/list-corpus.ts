@@ -22,11 +22,29 @@ async function main(folders: string[]): Promise<void> {
     return
   }
   const found: ManifestEntry[] = []
+  let skipped = 0
   for (const folder of folders) {
-    for (const name of readdirSync(folder).sort()) {
+    let names: string[]
+    try {
+      names = readdirSync(folder).sort()
+    } catch (error) {
+      // A folder that can't be listed has nothing to add; the others still have.
+      console.error(
+        `Can't list ${folder}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+      process.exitCode = 1
+      continue
+    }
+    for (const name of names) {
+      if (!VIDEO_EXTENSIONS.includes(extname(name).toLowerCase())) continue
       const path = resolve(folder, name)
-      if (VIDEO_EXTENSIONS.includes(extname(name).toLowerCase()) && statSync(path).isFile()) {
-        found.push({ path, expect: 'plays' })
+      try {
+        // An entry that went away since the listing, or isn't a file, is not one to add.
+        if (statSync(path, { throwIfNoEntry: false })?.isFile())
+          found.push({ path, expect: 'plays' })
+      } catch {
+        // One that can't be read (no permission, a broken link) is passed over, and counted.
+        skipped += 1
       }
     }
   }
@@ -34,7 +52,7 @@ async function main(folders: string[]): Promise<void> {
   const merged = mergeEntries(before, found, false)
   await writeManifest(merged)
   console.log(
-    `Added ${merged.length - before.length} of ${found.length} videos found; the manifest names ${merged.length}.`,
+    `Added ${merged.length - before.length} of ${found.length} videos found (${skipped} entries unreadable and passed over); the manifest names ${merged.length}.`,
   )
 }
 

@@ -37,7 +37,9 @@ export interface ProbeStream {
   codec_tag_string?: string
   mime_codec_string?: string
   time_base?: string
-  start_pts?: number
+  /** A number, or the string "N/A" when ffprobe has none. */
+  start_pts?: number | string
+  /** Seconds as text, or "N/A". */
   start_time?: string
   width?: number
   height?: number
@@ -46,23 +48,67 @@ export interface ProbeStream {
   side_data_list?: { side_data_type?: string; rotation?: number }[]
 }
 
-/** Runs ffprobe with its output in `outPath`; rejects with ffprobe's complaint when it fails. */
-function runToFile(args: string[], outPath: string): Promise<void> {
+/** A time base such as `1/90000` as the length of a tick in seconds, or null when it is not one (ffprobe prints `N/A`, and a base of 1/0 is none). */
+function tickSeconds(timeBase: string | undefined): number | null {
+  const parts = /^(\d+)\/(\d+)$/.exec(timeBase ?? '')
+  const [n, d] = [Number(parts?.[1]), Number(parts?.[2])]
+  return parts && n > 0 && d > 0 ? n / d : null
+}
+
+/**
+ * Where ffprobe says a stream starts, in seconds, with the edit list applied: its
+ * start in ticks of the time base when it has one, else its start time. Null
+ * when it says neither as a number: ffprobe prints `N/A` as a string for a start
+ * it doesn't have, and `Number('N/A')` is not a number to compare with.
+ */
+export function streamStart(stream: ProbeStream): number | null {
+  const tick = tickSeconds(stream.time_base)
+  if (typeof stream.start_pts === 'number' && Number.isFinite(stream.start_pts) && tick !== null) {
+    return stream.start_pts * tick
+  }
+  const text = stream.start_time
+  if (typeof text === 'string' && text.trim() !== '' && Number.isFinite(Number(text))) {
+    return Number(text)
+  }
+  return null
+}
+
+/**
+ * Runs a program (ffprobe) with its output in `outPath`. Rejects with its
+ * complaint when it fails, and with a sentence that says so when it can't be run
+ * at all (not installed, not on the PATH). The output file is closed once, by
+ * whichever of the program's events comes first: a program that can't be run
+ * emits an error and then a close.
+ */
+export function runToFile(program: string, args: string[], outPath: string): Promise<void> {
   return new Promise((done, fail) => {
     const fd = openSync(outPath, 'w')
-    const child = spawn('ffprobe', args, { stdio: ['ignore', fd, 'pipe'] })
+    let finished = false
+    const finish = (then: () => void): void => {
+      if (finished) return
+      finished = true
+      closeSync(fd)
+      then()
+    }
+    const child = spawn(program, args, { stdio: ['ignore', fd, 'pipe'] })
     let complaint = ''
     child.stderr?.on('data', (chunk: Buffer) => {
       if (complaint.length < 4000) complaint += chunk.toString()
     })
     child.on('error', (error) => {
-      closeSync(fd)
-      fail(error)
+      finish(() => {
+        fail(
+          new Error(
+            `${program} could not be run (is it installed and on the PATH?): ${error.message}`,
+          ),
+        )
+      })
     })
     child.on('close', (code) => {
-      closeSync(fd)
-      if (code === 0) done()
-      else fail(new Error(`ffprobe ${args.join(' ')} failed (${code}): ${complaint}`))
+      finish(() => {
+        if (code === 0) done()
+        else fail(new Error(`${program} ${args.join(' ')} failed (${code}): ${complaint}`))
+      })
     })
   })
 }
@@ -82,7 +128,7 @@ export async function probe(path: string, args: string[], cache = true): Promise
   if (!(cache && existsSync(cached))) {
     const partial = `${cached}.${process.pid}.partial`
     try {
-      await runToFile(['-v', 'error', ...args, '-of', 'json', path], partial)
+      await runToFile('ffprobe', ['-v', 'error', ...args, '-of', 'json', path], partial)
       if (cache) renameSync(partial, cached)
       else return JSON.parse(readFileSync(partial, 'utf8')) as unknown
     } finally {
@@ -123,7 +169,11 @@ export async function probePackets(
 /**
  * The first `count` packets of the first picture or sound with the edit list
  * applied, as ffprobe reads it by default: `pts` is then in the edited timeline
- * (in the stream's ticks), where the raw ones are not.
+ * (in the stream's ticks), where the raw ones are not. The interval is the first
+ * 5 s and not `count` packets: ffprobe counts the container's packets, and in a
+ * file whose sound is stored apart from its picture the other stream may have
+ * none among the first ones. Fewer than `count` come back from a stream that
+ * has fewer in 5 s (a sound of 1024-sample packets has 235).
  */
 export async function probeEditedPackets(
   path: string,
@@ -134,9 +184,9 @@ export async function probeEditedPackets(
     '-select_streams',
     select,
     '-read_intervals',
-    `%+#${count}`,
+    '%+5',
     '-show_entries',
     'packet=pos,size,dts,pts,flags',
   ])) as { packets?: ProbePacket[] }
-  return out.packets ?? []
+  return (out.packets ?? []).slice(0, count)
 }

@@ -291,10 +291,17 @@ function topLevelTypes(path: string): string {
     const header = new Uint8Array(16)
     let at = 0
     while (at + 8 <= size) {
-      readSync(fd, header, 0, 16, at)
+      // What was read is what counts: the bytes of the box before are not this box's.
+      header.fill(0)
+      const got = readSync(fd, header, 0, 16, at)
+      if (got < 8) throw new Error(`A box at ${at} has only ${got} bytes of header.`)
       const view = new DataView(header.buffer)
       let length = view.getUint32(0)
-      if (length === 1) length = Number(view.getBigUint64(8))
+      if (length === 1) {
+        if (got < 16)
+          throw new Error(`A box at ${at} has a 64-bit size, and only ${got} bytes of header.`)
+        length = Number(view.getBigUint64(8))
+      }
       if (length === 0) length = size - at
       if (length < 8) throw new Error(`A box at ${at} has a size of ${length}.`)
       const kind = String.fromCharCode(...header.subarray(4, 8))

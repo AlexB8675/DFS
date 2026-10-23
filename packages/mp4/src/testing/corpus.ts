@@ -7,7 +7,7 @@
 
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { isAbsolute, posix, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Mp4Error } from '../errors.ts'
 import type { Mp4Refusal } from '../errors.ts'
@@ -157,4 +157,32 @@ export function readIndex(path: string, fileSize: number): Movie {
   const found = locateMoov(readRange(path, 0, Math.min(HEAD_BYTES, fileSize)), fileSize)
   if (!found) throw new Mp4Error('damaged', 'No moov was found in the file.')
   return readMovie(moovIn(readRange(path, found.start, found.end - found.start)))
+}
+
+/**
+ * Whether a path is a file in the synthetic folder, by where it is and not by how
+ * it is spelled: the separators and, on Windows, the case of the drive letter
+ * don't matter, and a folder that only begins like it (`synthetic-other`) is
+ * not it.
+ */
+export function isSynthetic(path: string): boolean {
+  const from = relative(syntheticDir, path)
+  return from !== '' && from !== '..' && !from.startsWith(`..${sep}`) && !isAbsolute(from)
+}
+
+/**
+ * A title for each path, for the test names: the folder's name and the file's
+ * (`Final/a.mp4`), never the whole path, and different for every path: a title
+ * that an earlier path has is given ` (2)`, ` (3)` and so on.
+ */
+export function uniqueTitles(paths: readonly string[]): string[] {
+  const used = new Set<string>()
+  return paths.map((path) => {
+    const normal = path.replaceAll('\\', '/')
+    const title = `${posix.basename(posix.dirname(normal))}/${posix.basename(normal)}`
+    let unique = title
+    for (let n = 2; used.has(unique); n += 1) unique = `${title} (${n})`
+    used.add(unique)
+    return unique
+  })
 }

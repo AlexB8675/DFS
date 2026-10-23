@@ -1,12 +1,18 @@
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, resolve } from 'node:path'
+import { resolve } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import { chooseTracks, fragment, initSegment, Mp4Error, presentationSeconds } from '../index.ts'
 import type { FrameTable, Mp4Refusal, PlayTrack } from '../index.ts'
-import { loadManifest, readIndex, syntheticDir } from '../testing/corpus.ts'
+import { isSynthetic, loadManifest, readIndex, uniqueTitles } from '../testing/corpus.ts'
 import type { ManifestEntry } from '../testing/corpus.ts'
-import { probe, probeEditedPackets, probePackets, probeStreams } from '../testing/ffprobe.ts'
+import {
+  probe,
+  probeEditedPackets,
+  probePackets,
+  probeStreams,
+  streamStart,
+} from '../testing/ffprobe.ts'
 import type { ProbePacket, ProbeStream } from '../testing/ffprobe.ts'
 
 // The reader and the writer, checked against ffprobe on the corpus (DESIGN.md
@@ -17,9 +23,10 @@ import type { ProbePacket, ProbeStream } from '../testing/ffprobe.ts'
 // in the stream's ticks, keyframes); so are the codec (against ffprobe's name,
 // profile and own string), the rotation and the time scale; and so are the
 // times with the edit list applied, which is what `offsetSeconds` has to get
-// right: the start of each track, and the first 300 frames, within a tick. For each synthetic file the writer's output for
-// the first 10 s is read back by ffprobe, and a file expected to be refused gives
-// that reason. Run with `pnpm --filter @dfs/mp4 test:corpus`.
+// right: the start of each track, and its first frames (up to 300, from the first
+// 5 s), within a tick. For each synthetic file the writer's output for the first
+// 10 s is read back by ffprobe, and a file expected to be refused gives that
+// reason. Run with `pnpm --filter @dfs/mp4 test:corpus`.
 
 /** A file this large (500 MB) is compared by windows and not whole. */
 const WHOLE_FILE_LIMIT = 500 * 1024 * 1024
@@ -27,7 +34,7 @@ const WHOLE_FILE_LIMIT = 500 * 1024 * 1024
 const entries = loadManifest()
 
 // What the run compared, said once at the end.
-const totals = { files: 0, refused: 0, windowed: 0, frames: 0, written: 0 }
+const totals = { files: 0, refused: 0, windowed: 0, frames: 0, written: 0, noStart: 0 }
 
 /** A description of a difference that is too long for a line is cut. */
 function shown(value: unknown): string {
@@ -144,17 +151,16 @@ const EDITED_PACKETS = 300
 
 /**
  * The first packets of a track with its edit list applied, against its frames
- * shifted by `offsetSeconds`: the offset the
- * player gives its SourceBuffer has to put every frame where FFmpeg puts it,
- * within a tick (ffprobe rounds each time to a whole tick, as the offset need
- * not be one). The packets are matched to frames by `pos`.
+ * shifted by `offsetSeconds`: the offset the player gives its SourceBuffer has to
+ * put every frame where FFmpeg puts it, within a tick (ffprobe rounds each time
+ * to a whole tick, as the offset need not be one). The packets are matched to
+ * frames by `pos`, over all the track's frames: the first packets of a file whose
+ * sound is stored apart from its picture are not the first frames' bytes.
  */
 function compareEdited(label: string, track: PlayTrack, packets: ProbePacket[]): string[] {
   const { table, timing } = track
   const byOffset = new Map<number, number>()
-  for (let i = Math.min(table.count, EDITED_PACKETS * 10) - 1; i >= 0; i -= 1) {
-    byOffset.set(table.offsets[i] ?? 0, i)
-  }
+  for (let i = table.count - 1; i >= 0; i -= 1) byOffset.set(table.offsets[i] ?? 0, i)
   const shift = timing.offsetSeconds * table.timescale
   const found = new Differences()
   let matched = 0
@@ -184,12 +190,6 @@ function windowsOf(durationSeconds: number): string {
   const middle = Math.floor(durationSeconds / 2)
   const end = Math.max(0, Math.floor(durationSeconds) - 10)
   return `%+#600,${middle}%+#300,${end}%+#300`
-}
-
-/** `n/d` (a time base) as the ticks' length in seconds. */
-function seconds(timeBase: string | undefined): number {
-  const [n, d] = (timeBase ?? '').split('/').map(Number)
-  return (n ?? Number.NaN) / (d ?? Number.NaN)
 }
 
 /**
@@ -347,11 +347,17 @@ function compareStream(
     }
   }
 
-  // Where it starts: the first presentation time with the offset applied, within a tick.
-  const start =
-    stream.start_pts === undefined
-      ? Number(stream.start_time)
-      : stream.start_pts * seconds(stream.time_base)
+  // Where it starts: the first presentation time with the offset applied, within a tick. A stream that ffprobe gives no start for (it prints N/A) has nothing to be compared with: that is said once, and counted.
+  const start = streamStart(stream)
+  if (start === null) {
+    totals.noStart += 1
+    if (totals.noStart === 1) {
+      console.warn(
+        'ffprobe gives no start time for some streams: where those start is not compared (the count is in the totals line).',
+      )
+    }
+    return problems
+  }
   const ours = firstShown(track)
   const tick = 1 / track.table.timescale
   if (!(Math.abs(ours - start) <= tick + 1e-6)) {
@@ -427,7 +433,7 @@ function checkRefused(entry: ManifestEntry, reason: Mp4Refusal): void {
 afterAll(() => {
   if (entries.length === 0) return
   console.log(
-    `Corpus: ${totals.files} files compared (${totals.windowed} by windows), ${totals.frames} frames, ${totals.refused} refusals checked, ${totals.written} written tracks read back.`,
+    `Corpus: ${totals.files} files compared (${totals.windowed} by windows), ${totals.frames} frames, ${totals.refused} refusals checked, ${totals.written} written tracks read back, ${totals.noStart} streams with no start time from ffprobe.`,
   )
 })
 
@@ -439,9 +445,11 @@ describe('the corpus against ffprobe', () => {
     return
   }
 
-  it.each(entries.map((entry) => [basename(entry.path), entry] as const))(
+  // Two folders can hold files of one name: a title is the folder's name and the file's, and is told apart if it still repeats.
+  const titles = uniqueTitles(entries.map((entry) => entry.path))
+  it.each(entries.map((entry, i) => [titles[i] ?? entry.path, entry] as const))(
     '%s',
-    async (_name, entry) => {
+    async (_title, entry) => {
       if (entry.expect === 'plays') await checkPlays(entry)
       else checkRefused(entry, entry.expect.refused)
     },
@@ -538,9 +546,7 @@ async function checkWritten(
   return problems
 }
 
-const synthetic = entries.filter(
-  (entry) => entry.expect === 'plays' && entry.path.startsWith(syntheticDir.replaceAll('\\', '/')),
-)
+const synthetic = entries.filter((entry) => entry.expect === 'plays' && isSynthetic(entry.path))
 
 describe('the writer against ffprobe, on the synthetic files', () => {
   if (synthetic.length === 0) {
@@ -549,9 +555,10 @@ describe('the writer against ffprobe, on the synthetic files', () => {
     })
     return
   }
-  it.each(synthetic.map((entry) => [basename(entry.path), entry] as const))(
+  const titles = uniqueTitles(synthetic.map((entry) => entry.path))
+  it.each(synthetic.map((entry, i) => [titles[i] ?? entry.path, entry] as const))(
     '%s',
-    async (_name, entry) => {
+    async (_title, entry) => {
       const { video, audio } = chooseTracks(readIndex(entry.path, statSync(entry.path).size))
       const bytes = readFileSync(entry.path)
       const streams = await probeStreams(entry.path)
