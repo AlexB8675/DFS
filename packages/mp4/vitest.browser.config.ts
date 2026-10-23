@@ -4,10 +4,14 @@ import { defineConfig } from 'vitest/config'
 
 // The browser suites (DESIGN.md §10.4, D45) run the repackager's output in real
 // browsers, against a Range server over the corpus (src/testing/serve.ts). Chrome
-// is the one installed on this PC and is the default; `DFS_BROWSERS=chromium,firefox`
-// adds Playwright's Firefox (`pnpm --filter @dfs/mp4 exec playwright install firefox`),
-// and either can be left out. `DFS_HEADED=1` shows the windows: Firefox plays HEVC
-// only then. The unit tests never run these (vitest.config.ts excludes them).
+// is the one installed on this PC and is the default (`DFS_CHROME_CHANNEL` names
+// another installed channel, such as `msedge` on a machine without Chrome);
+// `DFS_BROWSERS=chromium,firefox` adds Playwright's Firefox
+// (`pnpm --filter @dfs/mp4 exec playwright install firefox`), and either can be
+// left out. `DFS_HEADED=1` shows the windows: Firefox plays HEVC only then.
+// `DFS_CORPUS_ALL=1` plays every file expected to play and not a sample of the
+// user's (src/browser/choice.ts). The unit tests never run these
+// (vitest.config.ts excludes them).
 
 const KNOWN = ['chromium', 'firefox']
 const wanted = (process.env.DFS_BROWSERS ?? 'chromium')
@@ -21,14 +25,22 @@ if (wanted.length === 0 || unknown.length > 0) {
   )
 }
 
+const chromeChannel = process.env.DFS_CHROME_CHANNEL?.trim()
+  ? process.env.DFS_CHROME_CHANNEL.trim()
+  : 'chrome'
+
 const instances: BrowserInstanceOption[] = []
 if (wanted.includes('chromium')) {
   instances.push({
     browser: 'chromium',
     provider: playwright({
-      // The installed Google Chrome: nothing is downloaded for it. A page that plays
-      // without a click is allowed to, as the media tests have no user to give one.
-      launchOptions: { channel: 'chrome', args: ['--autoplay-policy=no-user-gesture-required'] },
+      // The installed Google Chrome, unless another channel is named: nothing is
+      // downloaded for it. A page that plays without a click is allowed to, as the
+      // media tests have no user to give one.
+      launchOptions: {
+        channel: chromeChannel,
+        args: ['--autoplay-policy=no-user-gesture-required'],
+      },
     }),
   })
 }

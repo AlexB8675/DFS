@@ -4,7 +4,7 @@
 // can't say anything about the repackager.
 
 import { describe, expect, inject, test } from 'vitest'
-import { appendAll, fetchRange, startsPlaying } from './media.ts'
+import { appendAll, fetchRange, mediaSourceOpened, startsPlaying } from './media.ts'
 
 /** The synthetic H.264 High 720p30 with AAC, which FFmpeg wrote as a fragmented file. */
 const FRAGMENTED_TYPE = 'video/mp4; codecs="avc1.64001f,mp4a.40.2"'
@@ -57,11 +57,7 @@ describe('serves a corpus file by Range, and plays an ffmpeg-made fragmented MP4
     document.body.append(video)
     const objectUrl = URL.createObjectURL(mediaSource)
     try {
-      const opened = new Promise<void>((resolve) => {
-        mediaSource.addEventListener('sourceopen', () => {
-          resolve()
-        })
-      })
+      const opened = mediaSourceOpened(video, mediaSource)
       video.src = objectUrl
       await opened
 
@@ -77,6 +73,49 @@ describe('serves a corpus file by Range, and plays an ffmpeg-made fragmented MP4
       video.load()
       video.remove()
       URL.revokeObjectURL(objectUrl)
+    }
+  })
+})
+
+describe('says at once what a video could not do', () => {
+  /** A video element that is given bytes no browser can decode: it reports a MediaError at once. */
+  function brokenVideo(): { video: HTMLVideoElement; done: () => void } {
+    const video = document.createElement('video')
+    video.muted = true
+    document.body.append(video)
+    const objectUrl = URL.createObjectURL(
+      new Blob([new Uint8Array(64).fill(7)], { type: 'video/mp4' }),
+    )
+    video.src = objectUrl
+    return {
+      video,
+      done: () => {
+        video.removeAttribute('src')
+        video.load()
+        video.remove()
+        URL.revokeObjectURL(objectUrl)
+      },
+    }
+  }
+
+  test('startsPlaying throws with the error’s code and message as soon as the video has one', async () => {
+    const { video, done } = brokenVideo()
+    try {
+      const began = performance.now()
+      await expect(startsPlaying(video, 20_000)).rejects.toThrow(/MediaError 4/)
+      // It did not wait out the 20 s it was given.
+      expect(performance.now() - began).toBeLessThan(10_000)
+    } finally {
+      done()
+    }
+  })
+
+  test('mediaSourceOpened rejects with the video’s error rather than wait for a source that never opens', async () => {
+    const { video, done } = brokenVideo()
+    try {
+      await expect(mediaSourceOpened(video, new MediaSource())).rejects.toThrow(/MediaError 4/)
+    } finally {
+      done()
     }
   })
 })

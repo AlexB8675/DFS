@@ -145,10 +145,25 @@ export interface CorpusServer {
 /**
  * Serves the entries' files at `http://127.0.0.1:<port>/file/<id>`, `id` being the
  * entry's place in the list, on a port the system picks. Only those files can
- * be reached, and only by id.
+ * be reached, and only by id. An entry whose file is gone from the disk (or can't
+ * be looked at) is left out, with one warning for all of them, and the ids are the
+ * places in the list of those that are left.
  */
 export async function startCorpusServer(entries: readonly ManifestEntry[]): Promise<CorpusServer> {
-  const paths = entries.map((entry) => entry.path)
+  const present: { entry: ManifestEntry; size: number }[] = []
+  for (const entry of entries) {
+    try {
+      present.push({ entry, size: statSync(entry.path).size })
+    } catch {
+      // Gone, or not to be read: not a file to serve, and not a reason for the suites not to start.
+    }
+  }
+  if (present.length < entries.length) {
+    console.warn(
+      `${entries.length - present.length} of ${entries.length} corpus files are gone from the disk and left out.`,
+    )
+  }
+  const paths = present.map(({ entry }) => entry.path)
   const server = createServer((req, res) => {
     handle(req, res, paths).catch(() => {
       if (res.headersSent) res.destroy()
@@ -166,11 +181,11 @@ export async function startCorpusServer(entries: readonly ManifestEntry[]): Prom
   return {
     info: {
       url: `http://127.0.0.1:${port}`,
-      files: entries.map((entry, id) => ({
+      files: present.map(({ entry, size }, id) => ({
         id,
         name: basename(entry.path),
         expect: entry.expect,
-        size: statSync(entry.path).size,
+        size,
       })),
     },
     close: () =>

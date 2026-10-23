@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { parseRange, startCorpusServer } from './serve.ts'
 import type { CorpusServer } from './serve.ts'
 
@@ -121,6 +121,42 @@ describe('startCorpusServer', () => {
     const post = await fetch(at(0), { method: 'POST' })
     expect(post.status).toBe(405)
     await post.arrayBuffer()
+  })
+
+  it('leaves out a file that is gone from the disk when it begins, with one warning, and numbers the rest from 0', async () => {
+    const present = resolve(folder, 'present.mp4')
+    writeFileSync(present, bytes)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const other = await startCorpusServer([
+      { path: resolve(folder, 'never-there.mp4'), expect: 'plays' },
+      { path: present, expect: 'plays' },
+      { path: resolve(folder, 'also-gone.mp4'), expect: 'plays' },
+    ])
+    try {
+      expect(other.info.files).toEqual([
+        { id: 0, name: 'present.mp4', expect: 'plays', size: 1000 },
+      ])
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(String(warn.mock.calls[0]?.[0])).toContain('2 of 3')
+      const response = await fetch(`${other.info.url}/file/0`, { headers: { Range: 'bytes=0-3' } })
+      expect(response.status).toBe(206)
+      expect(new Uint8Array(await response.arrayBuffer())).toEqual(bytes.subarray(0, 4))
+    } finally {
+      warn.mockRestore()
+      await other.close()
+    }
+  })
+
+  it('says nothing when every file is there', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      const path = resolve(folder, 'clip.mp4')
+      const other = await startCorpusServer([{ path, expect: 'plays' }])
+      await other.close()
+      expect(warn).not.toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('answers 404 for a file that has gone from the disk since it began', async () => {

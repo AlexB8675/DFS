@@ -58,17 +58,58 @@ export async function appendAll(
 /** How far the clock must move for the video to count as playing: more than a seek to its first frame. */
 const PLAYING_SECONDS = 0.1
 
+/** The video's `MediaError` as an Error that says its code and message, or null while it has none. */
+export function mediaErrorOf(video: HTMLVideoElement): Error | null {
+  const { error } = video
+  if (!error) return null
+  return new Error(
+    `The video reported a MediaError ${error.code}: ${error.message || 'no message'}`,
+  )
+}
+
 /**
  * Whether the video's `currentTime` advances (by {@link PLAYING_SECONDS}) within
  * `ms` milliseconds of the call: true as soon as it has, false if it hasn't by
  * then. Starting the video is for the caller, which knows whether it is muted.
+ * A video that has a `MediaError` is not one that simply hasn't started: it
+ * throws that error at once (see {@link mediaErrorOf}), not at the end of the wait.
  */
 export async function startsPlaying(video: HTMLVideoElement, ms: number): Promise<boolean> {
   const from = video.currentTime
   const until = performance.now() + ms
   for (;;) {
+    const error = mediaErrorOf(video)
+    if (error) throw error
     if (video.currentTime - from >= PLAYING_SECONDS) return true
     if (performance.now() >= until) return false
     await new Promise((resolve) => setTimeout(resolve, 25))
   }
+}
+
+/**
+ * Resolves once the media source has opened, or rejects with the video's
+ * `MediaError` if the video reports one first (see {@link mediaErrorOf}), so that
+ * a failure doesn't wait out the test's timeout. Called before the video is given
+ * the source's URL, as the event comes after it.
+ */
+export function mediaSourceOpened(
+  video: HTMLVideoElement,
+  mediaSource: MediaSource,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const finish = (error?: Error): void => {
+      mediaSource.removeEventListener('sourceopen', onOpen)
+      video.removeEventListener('error', onError)
+      if (error) reject(error)
+      else resolve()
+    }
+    const onOpen = (): void => {
+      finish()
+    }
+    const onError = (): void => {
+      finish(mediaErrorOf(video) ?? new Error('The video reported an error.'))
+    }
+    mediaSource.addEventListener('sourceopen', onOpen)
+    video.addEventListener('error', onError)
+  })
 }
