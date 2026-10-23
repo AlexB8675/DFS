@@ -222,9 +222,15 @@ function firstShown(track: PlayTrack): number {
  * frame is at the edit's start (the end of the empty edit, if there is one) and
  * its decode time is negative. A track without an edit list is not shifted, and
  * a sound's first frame is never after the edit's start (an encoder's priming
- * comes first). It is what the corpus shows of FFmpeg, and not of the reader: it
- * is allowed for in the comparison with ffprobe's times, and said in the totals
- * (DESIGN.md §10.4, D45).
+ * comes first). The frames FFmpeg shows are the same ones as under the standard
+ * (it still cuts the footage at the edit's end), only earlier by the gap.
+ *
+ * This is a difference between FFmpeg and `trackTiming`'s offset, which follows
+ * the standard, and which of them the player wants is for the controller to
+ * rule on (the report of task 8 has the evidence: 154 of 192 pictures with an
+ * edit list have a gap, up to 0.198 s). Until then it is allowed for here, in the
+ * comparison of the start and in the edited timeline, and counted in the totals:
+ * without the `- gap` in both, those tracks fail.
  */
 function ffmpegGap(track: PlayTrack): number {
   const { edits } = track.header
