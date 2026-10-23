@@ -10,6 +10,12 @@ import type { FrameTable } from './frames.ts'
 // arguments: no state is kept between calls, and the only bytes of a file that
 // a fragment holds are those the caller hands over for the frames it asks about.
 
+/** The size of a box's header: its size in 32 bits, then its type. */
+const BOX_HEADER = 8
+
+/** What a `trun` holds before its frames: its box header, version and flags (4), the frame count (4) and the data offset (4). */
+const TRUN_HEAD = BOX_HEADER + 12
+
 /** The width of a frame in a `trun`: its duration, size, flags and composition offset, 4 bytes each. */
 const RUN_FRAME = 16
 
@@ -68,7 +74,7 @@ function concat(parts: readonly Uint8Array[]): Uint8Array {
 /** A box: its size and type, then the parts. */
 function box(type: string, ...parts: Uint8Array[]): Uint8Array {
   const body = concat(parts)
-  return concat([u32(8 + body.length), ascii(type), body])
+  return concat([u32(BOX_HEADER + body.length), ascii(type), body])
 }
 
 /** A box that starts with a version byte and 24 bits of flags. */
@@ -169,6 +175,19 @@ function handler(picture: boolean): Uint8Array {
   )
 }
 
+/**
+ * The sample entry as the init segment holds it: a copy (the entry is a view
+ * onto the file's bytes, and what was read is not written to) whose data
+ * reference index, the 2 bytes after its 8-byte header and 6 reserved bytes, is 1.
+ * The `dref` below has one entry, so an index of another number, as a source with
+ * more references may have, would point past it.
+ */
+function entryOfInit(entry: Uint8Array): Uint8Array {
+  const out = Uint8Array.from(entry)
+  new DataView(out.buffer).setUint16(14, 1)
+  return out
+}
+
 /** `minf`: the media header of a picture (flag 1, as ISO asks) or a sound, a data reference to this same stream, and the sample tables: the one description and no frame. */
 function mediaInformation(track: PlayTrack, picture: boolean): Uint8Array {
   return box(
@@ -177,7 +196,7 @@ function mediaInformation(track: PlayTrack, picture: boolean): Uint8Array {
     box('dinf', fullBox('dref', 0, 0, u32(1), fullBox('url ', 0, 1))),
     box(
       'stbl',
-      fullBox('stsd', 0, 0, u32(1), track.entry),
+      fullBox('stsd', 0, 0, u32(1), entryOfInit(track.entry)),
       fullBox('stts', 0, 0, u32(0)),
       fullBox('stsc', 0, 0, u32(0)),
       fullBox('stsz', 0, 0, u32(0), u32(0)),
@@ -235,7 +254,7 @@ function trackRun(table: FrameTable, from: number, to: number, dataOffset: numbe
 
 /** The header of an `mdat` of `payload` bytes: 8 bytes, or 16 (a size of 1, the type, then the size in 64 bits) when the size doesn't fit in 32. */
 function dataHeader(payload: number): Uint8Array {
-  if (8 + payload <= MAX_BOX) return concat([u32(8 + payload), ascii('mdat')])
+  if (BOX_HEADER + payload <= MAX_BOX) return concat([u32(BOX_HEADER + payload), ascii('mdat')])
   return concat([u32(1), ascii('mdat'), u64(16 + payload)])
 }
 
@@ -280,10 +299,15 @@ export function fragmentHead(
   const mfhd = fullBox('mfhd', 0, 0, u32(sequence))
   const tfhd = fullBox('tfhd', 0, DEFAULT_BASE_IS_MOOF, u32(track.header.id))
   const tfdt = fullBox('tfdt', 1, 0, u64(table.dts[from] ?? 0))
-  const moofWith = (dataOffset: number): Uint8Array =>
-    box('moof', mfhd, box('traf', tfhd, tfdt, trackRun(table, from, to, dataOffset)))
-  // The data starts after the `moof` and the `mdat`'s header, and the `moof`'s size doesn't depend on the number it holds.
-  const moof = moofWith(moofWith(0).length + data.length)
+  // The data starts after the `moof` and the `mdat`'s header. The `moof`'s size is known before its `trun` is
+  // written: the headers of `moof` and `traf`, the boxes of fixed size, and a `trun` of its head and a frame each.
+  const trunSize = TRUN_HEAD + RUN_FRAME * (to - from)
+  const moofSize = 2 * BOX_HEADER + mfhd.length + tfhd.length + tfdt.length + trunSize
+  const moof = box(
+    'moof',
+    mfhd,
+    box('traf', tfhd, tfdt, trackRun(table, from, to, moofSize + data.length)),
+  )
   return { head: concat([moof, data]), payload }
 }
 

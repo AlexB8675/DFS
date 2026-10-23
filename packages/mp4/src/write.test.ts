@@ -400,6 +400,35 @@ describe('the init segment (§10.4)', () => {
     }
   })
 
+  it("points the entry at the init segment's only data reference, and leaves the track's own entry as it was", () => {
+    const { video, audio } = play()
+    // The index of the data reference, which an entry holds after its 8-byte header and 6 reserved bytes.
+    const indexIn = (entry: Uint8Array): number =>
+      new DataView(entry.buffer, entry.byteOffset, entry.byteLength).getUint16(14)
+    for (const track of [video, audio]) {
+      expect(indexIn(track.entry)).toBe(1)
+      for (const index of [0, 2, 0xffff]) {
+        // The entry among other bytes, as a view onto a moov holds it.
+        const space = new Uint8Array(track.entry.length + 8)
+        space.set(track.entry, 4)
+        new DataView(space.buffer).setUint16(4 + 14, index)
+        const entry = space.subarray(4, 4 + track.entry.length)
+        const before = Uint8Array.from(space)
+
+        const init = initSegment({ ...track, entry })
+        const stsd = find(init, 'moov', 'trak', 'mdia', 'minf', 'stbl', 'stsd')
+        const written = init.subarray(stsd.body + 8, stsd.end)
+        expect(indexIn(written), `index ${index}`).toBe(1)
+        // The rest of the entry is as it was, byte for byte.
+        expect(written).toHaveLength(track.entry.length)
+        expect(written.subarray(0, 14)).toEqual(track.entry.subarray(0, 14))
+        expect(written.subarray(16)).toEqual(track.entry.subarray(16))
+        // And nothing that was given is written to: not the entry, and not the bytes around it that it is a view of.
+        expect(space).toEqual(before)
+      }
+    }
+  })
+
   it('packs the language back as it was read, and says und for what is not three letters', () => {
     const { video } = play()
     const languageOf = (track: PlayTrack): number => {
@@ -643,6 +672,27 @@ describe('fragments (§10.4)', () => {
     expect(readFragment(fragment(video, 0, 1, 0xffffffff, recorder().bytesAt)).sequence).toBe(
       0xffffffff,
     )
+  })
+
+  it('writes the bytes it always has for a small fragment', () => {
+    // Pinned, so that a change in how the moof is put together can't change a byte of it unseen: the first three
+    // frames of the picture, a keyframe and then two that depend on others (the second with a negative composition offset).
+    const { video } = play()
+    const bytes = fragment(video, 0, 3, 7, recorder().bytesAt)
+    const pinned = [
+      '000000886d6f6f66', // moof
+      '000000106d6668640000000000000007', // mfhd
+      '0000007074726166', // traf
+      '00000010746668640002000000000003', // tfhd
+      '0000001474666474010000000000000000000000', // tfdt
+      '000000447472756e01000f010000000300000090', // trun: version 1, flags 0xf01, 3 frames, data offset 144
+      '000003e80000000a02000000000007d0', // frame 0: 1000 ticks, 10 bytes, keyframe, offset 2000
+      '000003e80000001401010000fffffc18', // frame 1: 1000 ticks, 20 bytes, depends on others, offset -1000
+      '000005dc0000001e01010000000001f4', // frame 2: 1500 ticks, 30 bytes, depends on others, offset 500
+      '000000446d646174', // mdat
+      'f7f8f9fa000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f3031323334353637', // the 60 bytes of the three frames
+    ].join('')
+    expect(Buffer.from(bytes).toString('hex')).toBe(pinned)
   })
 
   it('refuses a range or a sequence number that is not one, before it asks for any bytes', () => {
