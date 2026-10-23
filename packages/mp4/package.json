@@ -9,7 +9,10 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "lint": "eslint .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:corpus": "vitest run --config vitest.corpus.config.ts",
+    "corpus:make": "node scripts/make-corpus.ts",
+    "corpus:list": "node scripts/list-corpus.ts"
   },
   "devDependencies": {
     "@types/node": "^24.19.1",
