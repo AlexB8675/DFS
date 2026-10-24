@@ -16,6 +16,8 @@ export interface SampleEntry {
   type: string
   /** The whole entry box, header included, as a view onto the `moov`. */
   bytes: Uint8Array
+  /** The version of the `stsd` the entry is in: 0, or 1 for the box that holds ISO's version 1 sound entries, whose layout differs from QuickTime's version 1 (DESIGN.md §10.4). */
+  stsdVersion: number
 }
 
 /** One entry of a track's edit list (`elst`). */
@@ -205,7 +207,8 @@ function readEdits(moov: Uint8Array, edts: Box): Edit[] | null {
 /** The entries of an `stsd` box, which must hold as many as it counts. */
 function readEntries(moov: Uint8Array, stsd: Box): SampleEntry[] {
   const reader = bodyOf(moov, stsd)
-  reader.skip(4) // version and flags
+  const stsdVersion = reader.u8()
+  reader.skip(3) // flags
   const count = reader.u32()
   const found = childBoxes(moov, reader.position, stsd.end)
   if (found.length !== count) {
@@ -217,7 +220,11 @@ function readEntries(moov: Uint8Array, stsd: Box): SampleEntry[] {
   if (found.length === 0) {
     throw damaged(`The 'stsd' box at offset ${stsd.start} holds no sample description.`)
   }
-  return found.map((entry) => ({ type: entry.type, bytes: moov.subarray(entry.start, entry.end) }))
+  return found.map((entry) => ({
+    type: entry.type,
+    bytes: moov.subarray(entry.start, entry.end),
+    stsdVersion,
+  }))
 }
 
 /**

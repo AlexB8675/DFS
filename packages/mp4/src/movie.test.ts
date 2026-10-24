@@ -127,7 +127,7 @@ describe("a movie's header and tracks (§10.4)", () => {
         ...[0x40, 0, 0, 0],
       ),
       edits: null,
-      entries: [{ type: 'avc1', bytes: avc1 }],
+      entries: [{ type: 'avc1', bytes: avc1, stsdVersion: 0 }],
       tables: {
         stts: videoTables[0],
         ctts: videoTables[1],
@@ -160,7 +160,7 @@ describe("a movie's header and tracks (§10.4)", () => {
         ...[0x40, 0, 0, 0],
       ),
       edits: null,
-      entries: [{ type: 'mp4a', bytes: mp4a }],
+      entries: [{ type: 'mp4a', bytes: mp4a, stsdVersion: 0 }],
       tables: {
         stts: audioTables[0],
         stz2: audioTables[1],
@@ -216,9 +216,25 @@ describe("a movie's header and tracks (§10.4)", () => {
     const track = trackOf(read, 0)
     expect(track.problem).toBeNull()
     expect(track.entries).toEqual([
-      { type: 'avc1', bytes: first },
-      { type: 'avc3', bytes: second },
+      { type: 'avc1', bytes: first, stsdVersion: 0 },
+      { type: 'avc3', bytes: second, stsdVersion: 0 },
     ])
+  })
+
+  it("gives each entry the version of the stsd it is in: 0 for a normal one, 1 for ISO's AudioSampleEntryV1", () => {
+    const entry = sampleEntry('fLaC', [1, 2, 3])
+    const versions = [0, 1].map((version) => {
+      const stbl = box('stbl', fullBox('stsd', version, 0, u32(2), entry, entry))
+      const read = readMovie(movie({ tracks: [{ handler: 'soun', stbl }] }))
+      return trackOf(read, 0).entries.map((one) => one.stsdVersion)
+    })
+    expect(versions).toEqual([
+      [0, 0],
+      [1, 1],
+    ])
+    // A normal stsd is the one the builder makes.
+    const plain = readMovie(movie({ tracks: [{ handler: 'soun', entries: [entry] }] }))
+    expect(trackOf(plain, 0).entries.map((one) => one.stsdVersion)).toEqual([0])
   })
 
   it('keeps the first of a sample table that appears twice, and leaves other boxes of the stbl out', () => {
@@ -572,7 +588,7 @@ describe('what a track needs, and what it does not (§10.4)', () => {
 
     const clean = trackOf(readMovie(movie({ tracks: [box('trak', tkhd({ id: 4 }), mdia())] })), 0)
     expect(clean.problem).toBeNull()
-    expect(clean.entries).toEqual([{ type: 'avc1', bytes: avc1 }])
+    expect(clean.entries).toEqual([{ type: 'avc1', bytes: avc1, stsdVersion: 0 }])
     expect(Object.keys(clean.tables)).toEqual(['stts', 'stco'])
 
     // After `mdia`, in the trak: the `edts` that is looked for isn't there, or is before `mdia`.

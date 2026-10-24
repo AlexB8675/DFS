@@ -25,6 +25,7 @@ import {
   hvcC,
   movie,
   quickTimeAudioEntry,
+  srat,
   u32,
   visualEntry,
   vpcC,
@@ -33,13 +34,15 @@ import {
 
 /**
  * The entry as `readMovie` gives it: a view onto bytes that don't start at 0,
- * so that a read that forgets where a view begins reads the wrong bytes.
+ * so that a read that forgets where a view begins reads the wrong bytes, and
+ * the version of the `stsd` it is in.
  */
-function entryOf(bytes: Uint8Array): SampleEntry {
+function entryOf(bytes: Uint8Array, stsdVersion = 0): SampleEntry {
   const padded = concat([9, 9, 9, 9, 9], bytes, [7, 7, 7])
   return {
     type: String.fromCharCode(...bytes.subarray(4, 8)),
     bytes: padded.subarray(5, 5 + bytes.length),
+    stsdVersion,
   }
 }
 
@@ -387,12 +390,12 @@ describe('the codec string of a sound (§10.4)', () => {
     expect(audioFields(initEntry(entryOf(v1))).sampleRate).toBe(44100.5)
   })
 
-  it('refuses a version 2 rate that an ISO entry has no room for, and one that is not a rate', () => {
+  it('halves a version 2 rate that an ISO entry has no room for, and refuses one that is not a rate', () => {
     const inner = esds()
     const high = quickTimeAudioEntry('mp4a', { version: 2, sampleRate: 96000 }, wave(inner))
-    // The codec is as good as ever; it is the entry that can't be rewritten.
+    // The codec is as good as ever, and so is the entry: its rate field takes half, as FFmpeg writes it.
     expect(codecString(entryOf(high))).toBe('mp4a.40.2')
-    refusal('unsupported-codec', () => initEntry(entryOf(high)))
+    expect(audioFields(initEntry(entryOf(high))).sampleRate).toBe(48000)
     for (const rate of [0, -44100, Number.NaN, Number.POSITIVE_INFINITY]) {
       const odd = quickTimeAudioEntry('mp4a', { version: 2, sampleRate: rate }, wave(inner))
       refusal('damaged', () => initEntry(entryOf(odd)))
@@ -765,6 +768,245 @@ describe('codecNames', () => {
   })
 })
 
+/** The `esds` that a QuickTime MP3 entry is given: an ES_Descriptor, a DecoderConfigDescriptor of object type 0x6B (MPEG-1 audio) for an audio stream with no DecoderSpecificInfo, and an SLConfigDescriptor of 2. */
+const MP3_ESDS = Uint8Array.from(
+  '00 00 00 23 65 73 64 73 00 00 00 00 03 15 00 00 00 04 0d 6b 15 00 00 00 00 00 00 00 00 00 00 00 06 01 02'
+    .split(' ')
+    .map((digits) => Number.parseInt(digits, 16)),
+)
+
+describe('initEntry', () => {
+  const chan = fullBox('chan', 0, 0, u32(100), u32(0), u32(0))
+
+  /** The types of the boxes an entry that `initEntry` wrote holds after its fields, and their bytes. */
+  function childrenOf(bytes: Uint8Array): { types: string[]; bytes: Uint8Array[] } {
+    const { children } = audioFields(bytes)
+    return { types: children.map((one) => one.type), bytes: children.map((one) => one.bytes) }
+  }
+
+  it('rewrites a QuickTime version 1 AC-3 entry as ISO version 0, its dac3 out of the wave', () => {
+    const config = dac3()
+    const entry = quickTimeAudioEntry(
+      'ac-3',
+      { version: 1, channels: 6, sampleRate: 48000 },
+      wave(frma('ac-3'), config, [0, 0, 0, 0]),
+      chan,
+    )
+    const out = initEntry(entryOf(entry))
+    expect(audioFields(out)).toMatchObject({
+      type: 'ac-3',
+      dataReferenceIndex: 1,
+      version: 0,
+      channels: 6,
+      sampleSize: 16,
+      compressionId: 0,
+      packetSize: 0,
+      sampleRate: 48000,
+    })
+    expect(childrenOf(out).bytes).toEqual([config, chan])
+    // What is written is what Media Source takes: it names the same codec, and has nothing left to rewrite.
+    const written = entryOf(out)
+    expect(codecNames(written)).toEqual(['ac-3'])
+    expect(initEntry(written)).toBe(written.bytes)
+  })
+
+  it('rewrites QuickTime ALAC at 96 kHz (version 2) with a rate field of 48000', () => {
+    const config = alacConfig()
+    const entry = quickTimeAudioEntry(
+      'alac',
+      { version: 2, channels: 2, sampleRate: 96000 },
+      wave(frma('alac'), config, [0, 0, 0, 0]),
+    )
+    expect(codecNames(entryOf(entry))).toEqual(['alac'])
+    const out = initEntry(entryOf(entry))
+    expect(audioFields(out)).toMatchObject({
+      type: 'alac',
+      version: 0,
+      channels: 2,
+      sampleSize: 16,
+      sampleRate: 48000,
+    })
+    expect(childrenOf(out).bytes).toEqual([config])
+  })
+
+  it('rewrites QuickTime MP3 (.mp3, version 1) as an mp4a with a made esds', () => {
+    const entry = quickTimeAudioEntry('.mp3', { version: 1, channels: 2, sampleRate: 44100 })
+    const out = initEntry(entryOf(entry))
+    expect(audioFields(out)).toMatchObject({
+      type: 'mp4a',
+      dataReferenceIndex: 1,
+      version: 0,
+      channels: 2,
+      sampleSize: 16,
+      sampleRate: 44100,
+    })
+    expect(childrenOf(out).bytes).toEqual([MP3_ESDS])
+    // Read back as an entry, it is MPEG-1 audio layer 3 by its three names.
+    expect(codecNames(entryOf(out))).toEqual(['mp4a.6B', 'mp3', 'mp4a.40.34'])
+    // ISO's version 0 shape of the same type is written the same way; the entry's own boxes follow the esds.
+    const plain = initEntry(entryOf(audioEntry('.mp3', { channels: 1, sampleRate: 22050 }, chan)))
+    expect(audioFields(plain)).toMatchObject({ type: 'mp4a', channels: 1, sampleRate: 22050 })
+    expect(childrenOf(plain).bytes).toEqual([MP3_ESDS, chan])
+    // A wave and an esds of the entry's own are not carried: the made one is the configuration.
+    const stray = quickTimeAudioEntry(
+      '.mp3',
+      { version: 2, channels: 2, sampleRate: 48000 },
+      wave(frma('.mp3'), box('mp4a', u32(0)), esds({ objectType: 0x6b, config: null })),
+      chan,
+      esds(),
+    )
+    expect(childrenOf(initEntry(entryOf(stray))).bytes).toEqual([MP3_ESDS, chan])
+  })
+
+  it('reads an ISO AudioSampleEntryV1 in an stsd of version 1, and writes it as version 0', () => {
+    const config = dfLa()
+    // The 16.16 field of a version 1 entry is a placeholder: the rate is in the srat.
+    const entry = audioEntry(
+      'fLaC',
+      { version: 1, channels: 2, sampleRate: 44100 },
+      srat(96000),
+      config,
+    )
+    const given = entryOf(entry, 1)
+    expect(codecNames(given)).toEqual(['flac', 'fLaC'])
+    const out = initEntry(given)
+    expect(audioFields(out)).toMatchObject({
+      type: 'fLaC',
+      dataReferenceIndex: 1,
+      version: 0,
+      channels: 2,
+      sampleSize: 16,
+      sampleRate: 48000,
+    })
+    expect(childrenOf(out).types).toEqual(['dfLa'])
+    expect(childrenOf(out).bytes).toEqual([config])
+
+    // An srat is 16 bytes, as many as QuickTime's version 1 adds, so the old rule finds the dfLa too: but it takes the rate of the field, and not the srat's.
+    const old = initEntry(entryOf(entry, 0))
+    expect(audioFields(old).sampleRate).toBe(44100)
+    expect(childrenOf(old).bytes).toEqual([config])
+
+    // With no srat the rate is the field's, and the dfLa follows the 28 bytes: the old rule would skip 16 bytes of it.
+    const bare = audioEntry('Opus', { version: 1, channels: 2, sampleRate: 48000 }, dOps())
+    const fromBare = initEntry(entryOf(bare, 1))
+    expect(audioFields(fromBare)).toMatchObject({ type: 'Opus', version: 0, sampleRate: 48000 })
+    expect(childrenOf(fromBare).bytes).toEqual([dOps()])
+    refusal('damaged', () => initEntry(entryOf(bare, 0)))
+  })
+
+  it('refuses an srat that is cut short, or gives no rate, as damaged', () => {
+    const given = (rate: Uint8Array) => entryOf(audioEntry('fLaC', { version: 1 }, rate, dfLa()), 1)
+    refusal('damaged', () => initEntry(given(srat(0))))
+    refusal('damaged', () => initEntry(given(fullBox('srat', 0, 0, [0, 0]))))
+    refusal('damaged', () => initEntry(given(box('srat'))))
+  })
+
+  it('refuses an entry of version 2 in an stsd of version 1, as damaged', () => {
+    const quickTime = quickTimeAudioEntry('fLaC', { version: 2 }, dfLa())
+    for (const bytes of [quickTime, audioEntry('fLaC', { version: 3 }, dfLa())]) {
+      const given = entryOf(bytes, 1)
+      refusal('damaged', () => codecNames(given))
+      refusal('damaged', () => initEntry(given))
+    }
+    // The same bytes in an stsd of version 0 are QuickTime's version 2, and are read so.
+    expect(codecNames(entryOf(quickTime, 0))).toEqual(['flac', 'fLaC'])
+  })
+
+  it('returns an ISO version 0 entry with its config inside as it is', () => {
+    const entries = [
+      audioEntry('fLaC', { sampleRate: 44100.5 }, dfLa()),
+      audioEntry('ac-3', { channels: 6, sampleRate: 48000 }, dac3(), chan),
+      audioEntry('Opus', { sampleRate: 0, sampleSize: 24 }, dOps()),
+      audioEntry('mp4a', { sampleRate: 44100.5 }, esds(), chan),
+      audioEntry('ec-3', {}, dec3()),
+      audioEntry('alac', {}, alacConfig()),
+    ]
+    for (const bytes of entries) {
+      const given = entryOf(bytes, 0)
+      const out = initEntry(given)
+      expect(out, given.type).toBe(given.bytes)
+      expect(out, given.type).toEqual(bytes)
+    }
+  })
+
+  it('writes an entry of an stsd of version 1 afresh, even when it is of version 0', () => {
+    const entry = audioEntry('ac-3', { sampleSize: 24 }, dac3())
+    const given = entryOf(entry, 1)
+    const out = initEntry(given)
+    expect(out).not.toBe(given.bytes)
+    expect(audioFields(out)).toMatchObject({ type: 'ac-3', version: 0, sampleSize: 16 })
+    expect(childrenOf(out).bytes).toEqual([dac3()])
+  })
+
+  it('keeps the 192000 and 88200 rates as 48000 and 44100', () => {
+    const rate = (sampleRate: number) =>
+      audioFields(
+        initEntry(
+          entryOf(
+            quickTimeAudioEntry('fLaC', { version: 2, sampleRate }, wave(frma('fLaC'), dfLa())),
+          ),
+        ),
+      ).sampleRate
+    // As often as it takes to fit the 16 bits: 96000 once, 192000 twice, 88200 once.
+    expect(rate(192000)).toBe(48000)
+    expect(rate(88200)).toBe(44100)
+    expect(rate(96000)).toBe(48000)
+    expect(rate(65536)).toBe(32768)
+    // The widest rate that fits, and one below it, are as they are.
+    expect(rate(65535)).toBe(65535)
+    expect(rate(48000)).toBe(48000)
+    // An ISO version 1 entry has its rate in the srat, which has room for these.
+    const iso = audioEntry('fLaC', { version: 1, sampleRate: 48000 }, srat(192000), dfLa())
+    expect(audioFields(initEntry(entryOf(iso, 1))).sampleRate).toBe(48000)
+    const dsd = audioEntry('fLaC', { version: 1, sampleRate: 48000 }, srat(88200), dfLa())
+    expect(audioFields(initEntry(entryOf(dsd, 1))).sampleRate).toBe(44100)
+  })
+
+  it('refuses a rewritten entry of any sound codec that has no channels or no rate', () => {
+    const entries: [string, Uint8Array][] = [
+      ['ac-3', dac3()],
+      ['ec-3', dec3()],
+      ['alac', alacConfig()],
+      ['fLaC', dfLa()],
+      ['Opus', dOps()],
+      ['.mp3', new Uint8Array()],
+    ]
+    for (const [type, config] of entries) {
+      const wrapped = wave(frma(type), config)
+      for (const bytes of [
+        quickTimeAudioEntry(type, { version: 1, channels: 0 }, wrapped),
+        quickTimeAudioEntry(type, { version: 2, channels: 0 }, wrapped),
+        quickTimeAudioEntry(type, { version: 1, sampleRate: 0 }, wrapped),
+        quickTimeAudioEntry(type, { version: 2, sampleRate: 0 }, wrapped),
+        quickTimeAudioEntry(type, { version: 2, sampleRate: Number.NaN }, wrapped),
+      ]) {
+        refusal('damaged', () => initEntry(entryOf(bytes)))
+      }
+    }
+  })
+
+  it('drops the wave, the srat and a second config box, and keeps the other boxes in their order', () => {
+    const btrt = box('btrt', u32(0), u32(96000), u32(96000))
+    const second = box('dac3', [1, 2, 3])
+    const entry = quickTimeAudioEntry(
+      'ac-3',
+      { version: 1 },
+      btrt,
+      wave(frma('ac-3'), second),
+      dac3(),
+      chan,
+      second,
+    )
+    // The config is the entry's own and not the wave's, and comes first; the second dac3 is gone with the wave.
+    const out = initEntry(entryOf(entry))
+    expect(childrenOf(out).types).toEqual(['dac3', 'btrt', 'chan'])
+    expect(childrenOf(out).bytes).toEqual([dac3(), btrt, chan])
+    // The srat of an ISO version 1 entry is not carried either, wherever it is.
+    const iso = audioEntry('Opus', { version: 1 }, btrt, srat(48000), dOps(), srat(44100), chan)
+    expect(childrenOf(initEntry(entryOf(iso, 1))).types).toEqual(['dOps', 'btrt', 'chan'])
+  })
+})
+
 describe('the entry an init segment carries (§10.4)', () => {
   it('copies other entries verbatim', () => {
     const entry = visualEntry(
@@ -798,7 +1040,6 @@ describe('the entry an init segment carries (§10.4)', () => {
       audioEntry('ac-3', {}, dac3()),
       audioEntry('ec-3', {}, dec3()),
       audioEntry('alac', {}, alacConfig()),
-      audioEntry('.mp3'),
     ]
     for (const bytes of entries) {
       expect(initEntry(entryOf(bytes)), String.fromCharCode(...bytes.subarray(4, 8))).toEqual(bytes)

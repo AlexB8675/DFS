@@ -691,6 +691,8 @@ export function esds({
 }
 
 export interface AudioEntrySpec {
+  /** The entry's version: 0 as ISO has it, or 1 for ISO's AudioSampleEntryV1, which has no more fields than version 0 and is told from QuickTime's version 1 by the `stsd` it is in. */
+  version?: number
   channels?: number
   /** In hertz, written as 16.16. */
   sampleRate?: number
@@ -700,12 +702,12 @@ export interface AudioEntrySpec {
 /** A sound's sample entry as ISO has it (version 0): the 8 bytes every entry starts with, then the 20 of an AudioSampleEntry, then the boxes given. */
 export function audioEntry(
   type: string,
-  { channels = 2, sampleRate = 44100, sampleSize = 16 }: AudioEntrySpec = {},
+  { version = 0, channels = 2, sampleRate = 44100, sampleSize = 16 }: AudioEntrySpec = {},
   ...children: Part[]
 ): Uint8Array {
   return sampleEntry(
     type,
-    u16(0), // version
+    u16(version),
     u16(0), // revision
     u32(0), // vendor
     u16(channels),
@@ -715,6 +717,11 @@ export function audioEntry(
     fixed(sampleRate),
     ...children,
   )
+}
+
+/** `srat`: the sampling rate of an ISO version 1 sound entry, in hertz, as a full box holding one 32-bit number. */
+export function srat(rate: number): Uint8Array {
+  return fullBox('srat', 0, 0, u32(rate))
 }
 
 /** `frma`: the entry type a `wave` box stands in for. */

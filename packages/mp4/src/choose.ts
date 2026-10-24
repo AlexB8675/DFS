@@ -31,7 +31,7 @@ export interface PlayTrack {
   codecNames: readonly string[]
   /** The RFC 6381 string, which is the first of `codecNames`. */
   codec: string
-  /** The sample entry for the init segment's `stsd`: the track's own, or an ISO one made from a QuickTime sound entry. */
+  /** The sample entry for the init segment's `stsd`: the track's own, or an ISO version 0 one made from a sound entry of QuickTime's or of ISO's version 1. */
   entry: Uint8Array
   /** The indexes of the frames that can be decoded from, in decode order. */
   keyframes: Uint32Array

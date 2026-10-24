@@ -205,7 +205,7 @@ describe('the tracks a video plays (§10.4, D45)', () => {
     if (!original) throw new Error('expected an entry')
     expect(audio.entry).toEqual(initEntry(original))
     expect(audio.entry).not.toEqual(original.bytes)
-    expect(codecString({ type: 'mp4a', bytes: audio.entry })).toBe('mp4a.40.2')
+    expect(codecString({ type: 'mp4a', bytes: audio.entry, stsdVersion: 0 })).toBe('mp4a.40.2')
     // Every sound frame is a sync sample, as a table with no `stss` says.
     expect(Array.from(audio.keyframes)).toEqual([0, 1, 2, 3])
     // An empty edit of a quarter second pauses the sound before it starts.

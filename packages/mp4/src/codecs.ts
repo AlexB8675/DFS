@@ -17,8 +17,11 @@ import type { SampleEntry } from './movie.ts'
 // about its own sizes is `damaged`.
 //
 // QuickTime writes its sound entries in a form that Chrome's and Firefox's
-// Media Source don't take (a version 1 or 2 entry, with the `esds` inside a
-// `wave` box), so `initEntry` writes those as the ISO entry they stand for.
+// Media Source don't take (a version 1 or 2 entry, with the codec's
+// configuration box inside a `wave` box, and for MP3 no configuration at all),
+// and ISO's own AudioSampleEntryV1 is no more welcome to them, so `initEntry`
+// writes every sound codec's entry as the ISO version 0 entry that they stand
+// for.
 
 /** What a picture entry holds before its child boxes: the 8 bytes every entry has, then the 70 of a VisualSampleEntry (ISO/IEC 14496-12). */
 const VISUAL_FIELDS = 78
@@ -308,9 +311,9 @@ function audioObjectType(bytes: Uint8Array, config: Descriptor): number {
   return type === 31 ? 32 + bits.read(6) : type
 }
 
-/** What the fields of a sound entry say, and where its `esds` is. */
+/** What the fields of a sound entry say, and where its configuration box is. */
 interface AudioEntry {
-  /** QuickTime's version of the entry: 0, which ISO's is, or 1 or 2. */
+  /** The entry's version: 0, which ISO's and QuickTime's both are, or 1 or 2 (QuickTime's, or ISO's AudioSampleEntryV1, by the version of the `stsd`). */
   version: number
   channels: number
   /** In hertz. */
@@ -319,6 +322,18 @@ interface AudioEntry {
   inside: Box
 }
 
+/**
+ * The fields of a sound entry, laid out as FFmpeg reads them. Version 0 is
+ * ISO's and QuickTime's, with 28 bytes before the boxes. In an `stsd` of
+ * version 0, version 1 is QuickTime's, which adds 16 bytes (samples per
+ * packet, bytes per packet, per frame and per sample), and version 2 is
+ * QuickTime's too, which adds 36 and keeps the rate as a float and the channels
+ * in the bytes it adds. In an `stsd` of version 1, version 1 is ISO's
+ * AudioSampleEntryV1, which adds nothing but may hold an `srat` box with the
+ * rate in hertz (the 16.16 field is the rate when there is none), and version
+ * 2 is not read. An `stsd` of any other version is read as one of version 0,
+ * as it was before ISO's version 1 was.
+ */
 function readAudioEntry(entry: SampleEntry): AudioEntry {
   const whole = entryBox(entry)
   const reader = new Reader(entry.bytes, whole.body, whole.end)
@@ -330,14 +345,18 @@ function readAudioEntry(entry: SampleEntry): AudioEntry {
   }
   reader.skip(8) // reserved, and the data reference index
   const version = reader.u16()
-  if (version > 2) throw damaged(`${sound} is version ${version}, and only 0, 1 and 2 are read.`)
+  const iso = entry.stsdVersion === 1
+  if (version > (iso ? 1 : 2)) {
+    const read = iso ? "0 and 1 are read in an 'stsd' of version 1" : '0, 1 and 2 are read'
+    throw damaged(`${sound} is version ${version}, and only ${read}.`)
+  }
   reader.skip(6) // revision and vendor
   let channels = reader.u16()
   reader.skip(6) // the size of a sample, the compression ID and the size of a packet
   let sampleRate = reader.u32() / 0x10000
-  // Version 1 adds 16 bytes: samples per packet, bytes per packet, per frame and per sample.
-  if (version === 1) reader.skip(16)
-  // Version 2 adds 36.
+  // QuickTime's version 1 adds 16 bytes: samples per packet, bytes per packet, per frame and per sample.
+  if (version === 1 && !iso) reader.skip(16)
+  // Its version 2 adds 36.
   if (version === 2) {
     // The fields above say 3 channels and a rate of 1; the ones that count are these.
     reader.skip(4) // the size of the entry so far
@@ -346,7 +365,17 @@ function readAudioEntry(entry: SampleEntry): AudioEntry {
     channels = reader.u32()
     reader.skip(20) // 0x7F000000, the bits per channel, flags and the sizes of a packet
   }
-  return { version, channels, sampleRate, inside: { ...whole, body: reader.position } }
+  const inside = { ...whole, body: reader.position }
+  if (version === 1 && iso) {
+    // The rate in hertz is in an `srat` box, which has room for more than the 16.16 field does: a full box, so its version and flags, then the rate.
+    const rate = child(entry.bytes, inside, 'srat')
+    if (rate) {
+      const fields = new Reader(entry.bytes, rate.body, rate.end)
+      fields.skip(4) // version and flags
+      sampleRate = fields.u32()
+    }
+  }
+  return { version, channels, sampleRate, inside }
 }
 
 /**
@@ -482,12 +511,17 @@ export function codecString(entry: SampleEntry): string {
   return codecNames(entry)[0]
 }
 
-/** An ISO version 0 `mp4a` for this many channels and this sample rate (16.16), followed by the boxes given. */
-function isoMp4a(channels: number, rate: number, boxes: readonly Uint8Array[]): Uint8Array {
+/** An ISO version 0 sound entry of this type for this many channels and this sample rate (16.16), followed by the boxes given. */
+function isoSound(
+  type: string,
+  channels: number,
+  rate: number,
+  boxes: readonly Uint8Array[],
+): Uint8Array {
   const out = new Uint8Array(8 + AUDIO_FIELDS + boxes.reduce((sum, part) => sum + part.length, 0))
   const view = new DataView(out.buffer)
   view.setUint32(0, out.length)
-  out.set([0x6d, 0x70, 0x34, 0x61], 4) // 'mp4a'; the 6 reserved bytes after it are 0
+  for (let index = 0; index < 4; index += 1) out[4 + index] = type.charCodeAt(index) // the 6 reserved bytes after the type are 0
   view.setUint16(14, 1) // the data reference index: the one `dref` of an init segment
   // The version, the revision and the vendor are 0.
   view.setUint16(24, channels)
@@ -503,45 +537,112 @@ function isoMp4a(channels: number, rate: number, boxes: readonly Uint8Array[]): 
 }
 
 /**
- * The entry that goes in an init segment (`stsd`) for a track's description:
- * the entry's own bytes, as the view `readMovie` gave, except a QuickTime sound
- * entry (an `mp4a` of version 1 or 2, or one whose `esds` is inside a `wave`
- * box), which Chrome's and Firefox's Media Source don't take and which is
- * written as an ISO version 0 `mp4a`: data reference index 1, the channels,
- * 16 bits to a sample and the rate in 16.16, then that `esds` and, in their
- * order, the entry's other boxes (a `chan`, a `btrt`) but not the `wave`. It is
- * `damaged` when a box of the entry can't be read, or when the channels or the
- * rate are 0 (or the rate isn't a number), which an entry that plays doesn't
- * say; a rate that doesn't fit in the 16 bits ISO has for it is
- * `unsupported-codec`. An entry that `codecNames` refuses is refused here for
- * the same reason, so that what is carried is always what was asked about.
+ * The box that a sound codec's decoder is made from, which its entry holds
+ * directly or, in QuickTime's, inside the `wave` box: `esds` for `mp4a` and
+ * for QuickTime's `.mp3` (whose entry has none, so that `mp3Esds` makes it),
+ * and the codec's own for the rest. Null for a type that is not a sound.
+ */
+function audioConfigType(type: string): string | null {
+  switch (type) {
+    case 'mp4a':
+    case '.mp3':
+      return 'esds'
+    case 'ac-3':
+      return 'dac3'
+    case 'ec-3':
+      return 'dec3'
+    case 'alac':
+      return 'alac'
+    case 'fLaC':
+      return 'dfLa'
+    case 'Opus':
+      return 'dOps'
+    case 'iamf':
+      return 'iacb'
+    default:
+      return null
+  }
+}
+
+/**
+ * The `esds` that an `mp4a` entry of MPEG audio layer 3 is given in place of
+ * QuickTime's `.mp3`, which has no configuration box. It is 35 bytes
+ * that say what the type does: an ES_Descriptor (stream 0, no flags) that holds
+ * a DecoderConfigDescriptor of object type 0x6B (MPEG-1 audio) for an audio
+ * stream, with no buffer size, no bit rates and no DecoderSpecificInfo, then
+ * an SLConfigDescriptor of 2, which is what MP4 files carry.
+ */
+function mp3Esds(): Uint8Array {
+  return Uint8Array.of(
+    ...[0x00, 0x00, 0x00, 0x23], // the size of the box
+    ...[0x65, 0x73, 0x64, 0x73], // 'esds'
+    ...[0x00, 0x00, 0x00, 0x00], // version and flags
+    ...[0x03, 0x15], // the ES_Descriptor, of 21 bytes
+    ...[0x00, 0x00, 0x00], // its ID, and no flags
+    ...[0x04, 0x0d], // the DecoderConfigDescriptor, of 13 bytes
+    ...[0x6b, 0x15], // MPEG-1 audio, an audio stream
+    ...[0x00, 0x00, 0x00], // the size of the buffer
+    ...[0x00, 0x00, 0x00, 0x00], // the highest bit rate
+    ...[0x00, 0x00, 0x00, 0x00], // the average bit rate
+    ...[0x06, 0x01, 0x02], // the SLConfigDescriptor
+  )
+}
+
+/**
+ * The rate field of an ISO sound entry for a rate in hertz, in 16.16: the rate
+ * as it is when its whole part fits the 16 bits that ISO has for it, and
+ * otherwise halved as often as it takes, as FFmpeg writes it (96000 as 48000,
+ * 88200 as 44100, 192000 as 48000). A rate that is no number, or is below what
+ * 16.16 can hold, which an entry that plays doesn't say, is `damaged`.
+ */
+function isoRate(entry: SampleEntry, hertz: number): number {
+  let rate = Math.round(hertz * 0x10000)
+  if (!Number.isFinite(hertz) || !(rate > 0)) {
+    throw damaged(`The '${entry.type}' sample description gives a sample rate of ${hertz}.`)
+  }
+  let half = hertz
+  while (rate > 0xffffffff) {
+    half /= 2
+    rate = Math.round(half * 0x10000)
+  }
+  return rate
+}
+
+/**
+ * The entry that goes in an init segment (`stsd`) for a track's description.
+ * It is the entry's own bytes, as the view `readMovie` gave, for a picture and
+ * for an ISO version 0 sound entry (in an `stsd` of version 0) whose
+ * configuration box is directly inside it. Any other sound entry, which Chrome's
+ * and Firefox's Media Source don't take (QuickTime's version 1 or 2, ISO's
+ * version 1, one with its configuration inside a `wave` box, or QuickTime's
+ * `.mp3`), is written as an ISO version 0 one: the same type (`.mp3` becomes
+ * `mp4a`), data reference index 1, the channels, 16 bits to a sample, and the
+ * rate in 16.16 as `isoRate` makes it; then the codec's configuration box (for
+ * `.mp3`, a made `esds`) and, in their order, the entry's other boxes (a
+ * `chan`, a `btrt`), but not the `wave`, the `srat` or a second configuration
+ * box. It is `damaged` when a box of the entry can't be read, or when the
+ * channels or the rate are 0 (or the rate isn't a number). An entry that
+ * `codecNames` refuses is refused here for the same reason, so that what is
+ * carried is always what was asked about.
  */
 export function initEntry(entry: SampleEntry): Uint8Array {
   codecNames(entry)
-  if (entry.type !== 'mp4a') return entry.bytes
+  const configType = audioConfigType(entry.type)
+  if (configType === null) return entry.bytes
   const audio = readAudioEntry(entry)
-  const found = findAudioBox(entry, audio.inside, 'esds')
-  if (audio.version === 0 && found.direct) return entry.bytes
+  // QuickTime's MP3 has no configuration box to find; the one it is given is made.
+  const found = entry.type === '.mp3' ? null : findAudioBox(entry, audio.inside, configType)
+  if (audio.version === 0 && entry.stsdVersion === 0 && found?.direct) return entry.bytes
 
-  // The rate in 16.16: version 0 and 1 have it so, and it comes out as it was; version 2 has a float to be put in the 16 bits ISO gives the whole part.
-  const rate = Math.round(audio.sampleRate * 0x10000)
-  if (!Number.isFinite(audio.sampleRate) || !(rate > 0)) {
-    throw damaged(
-      `The '${entry.type}' sample description gives a sample rate of ${audio.sampleRate}.`,
-    )
-  }
-  if (rate > 0xffffffff) {
-    throw unsupported(
-      `The sound's sample rate of ${audio.sampleRate} Hz does not fit in the 16 bits that an ISO sound entry has for it.`,
-    )
-  }
+  const rate = isoRate(entry, audio.sampleRate)
   if (audio.channels === 0 || audio.channels > 0xffff) {
     throw damaged(`The '${entry.type}' sample description gives ${audio.channels} channels.`)
   }
-  // The `esds`, then what else the entry holds, as it was: the `wave` is what the `esds` came out of, and any other `esds` would be a second.
+  // The configuration, then what else the entry holds, as it was: the `wave` is what the configuration may have come out of, the `srat` has been read, and any other box of the configuration's type would be a second.
   const others = childBoxes(entry.bytes, audio.inside.body, audio.inside.end)
-    .filter((other) => other.type !== 'wave' && other.type !== 'esds')
+    .filter((other) => other.type !== 'wave' && other.type !== 'srat' && other.type !== configType)
     .map((other) => entry.bytes.subarray(other.start, other.end))
-  const esds = entry.bytes.subarray(found.box.start, found.box.end)
-  return isoMp4a(audio.channels, rate, [esds, ...others])
+  const config = found ? entry.bytes.subarray(found.box.start, found.box.end) : mp3Esds()
+  const type = entry.type === '.mp3' ? 'mp4a' : entry.type
+  return isoSound(type, audio.channels, rate, [config, ...others])
 }
