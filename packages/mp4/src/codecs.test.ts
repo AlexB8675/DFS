@@ -1,17 +1,22 @@
 import { describe, expect, it } from 'vitest'
 import { childBoxes, Reader } from './boxes.ts'
-import { codecString, initEntry } from './codecs.ts'
+import { codecNames, codecString, initEntry } from './codecs.ts'
 import { Mp4Error } from './errors.ts'
 import type { Mp4Refusal } from './errors.ts'
 import { readMovie } from './movie.ts'
 import type { SampleEntry } from './movie.ts'
 import {
+  alacConfig,
   audioEntry,
   audioSpecificConfig,
   av1C,
   avcC,
   box,
   concat,
+  dac3,
+  dec3,
+  dfLa,
+  dolbyVisionConfig,
   dOps,
   esds,
   fourcc,
@@ -22,6 +27,7 @@ import {
   quickTimeAudioEntry,
   u32,
   visualEntry,
+  vpcC,
   wave,
 } from './testing/build.ts'
 
@@ -211,7 +217,7 @@ describe('the codec string of a picture (§10.4)', () => {
   })
 
   it('refuses a picture in any other codec, naming it', () => {
-    for (const type of ['mp4v', 'jpeg', 'apch', 'dvh1', 'vp09', 'H264']) {
+    for (const type of ['mp4v', 'jpeg', 'apch', 'H264']) {
       const entry = entryOf(visualEntry(type))
       expect(refusal('unsupported-codec', () => codecString(entry)).message).toContain(type)
       expect(refusal('unsupported-codec', () => initEntry(entry)).message).toContain(type)
@@ -257,16 +263,6 @@ describe('the codec string of a sound (§10.4)', () => {
     // Junk after the ES_Descriptor, in the esds: a stray zero is not a descriptor.
     const trailing = audioEntry('mp4a', {}, box('esds', body, [0]))
     expect(codecString(entryOf(trailing))).toBe('mp4a.40.2')
-  })
-
-  it('refuses a sound that is not MPEG-4 audio, naming its object type', () => {
-    // MP3 has no DecoderSpecificInfo, so the object type has to be checked before one is asked for.
-    const mp3 = audioEntry('mp4a', {}, esds({ objectType: 0x6b, config: null }))
-    expect(refusal('unsupported-codec', () => codecString(entryOf(mp3))).message).toContain('0x6b')
-    expect(refusal('unsupported-codec', () => initEntry(entryOf(mp3))).message).toContain('0x6b')
-    // MPEG-2 AAC, with its config.
-    const mpeg2 = audioEntry('mp4a', {}, esds({ objectType: 0x67 }))
-    refusal('unsupported-codec', () => codecString(entryOf(mpeg2)))
   })
 
   it('refuses a sound entry whose esds is missing, cut short or lying', () => {
@@ -518,9 +514,6 @@ describe('the codec string of a sound (§10.4)', () => {
       audioEntry('lpcm'),
       audioEntry('raw '),
       audioEntry('ulaw'),
-      audioEntry('.mp3'),
-      audioEntry('ac-3'),
-      audioEntry('ec-3'),
       quickTimeAudioEntry('sowt', { version: 1 }),
       visualEntry('mp4v'),
     ]
@@ -528,6 +521,246 @@ describe('the codec string of a sound (§10.4)', () => {
       const entry = entryOf(bytes)
       expect(refusal('unsupported-codec', () => codecString(entry)).message).toContain(entry.type)
       expect(refusal('unsupported-codec', () => initEntry(entry)).message).toContain(entry.type)
+    }
+  })
+})
+
+describe('codecNames', () => {
+  it('gives H.264, HEVC and AV1 their one name, H.264 for all four of its types', () => {
+    for (const type of ['avc1', 'avc2', 'avc3', 'avc4']) {
+      const main = visualEntry(type, {}, avcC({ profile: 0x4d, compatibility: 0x40, level: 0x28 }))
+      expect(codecNames(entryOf(main))).toEqual([`${type}.4d4028`])
+    }
+    expect(codecNames(entryOf(visualEntry('hvc1', {}, hvcC())))).toEqual(['hvc1.2.4.L153.B0'])
+    expect(codecNames(entryOf(visualEntry('av01', {}, av1C())))).toEqual(['av01.0.05M.08'])
+  })
+
+  it('names VP9 from vpcC version 1, long form first', () => {
+    const first = fullBox('vpcC', 1, 0, [0x00, 0x14, 0x82, 0x02, 0x02, 0x02, 0x00, 0x00])
+    const second = fullBox('vpcC', 1, 0, [0x02, 0x14, 0xa2, 0x02, 0x02, 0x09, 0x00, 0x00])
+    // The builder writes what the bytes above are.
+    expect(vpcC()).toEqual(first)
+    expect(vpcC({ profile: 2, bitDepth: 10, matrixCoefficients: 9 })).toEqual(second)
+
+    expect(codecNames(entryOf(visualEntry('vp09', {}, first)))).toEqual([
+      'vp09.00.20.08.01.02.02.02.00',
+      'vp09.00.20.08',
+    ])
+    expect(codecNames(entryOf(visualEntry('vp09', {}, second)))).toEqual([
+      'vp09.02.20.10.01.02.02.09.00',
+      'vp09.02.20.10',
+    ])
+    // VP8 is named the same way.
+    expect(codecNames(entryOf(visualEntry('vp08', {}, first)))).toEqual([
+      'vp08.00.20.08.01.02.02.02.00',
+      'vp08.00.20.08',
+    ])
+    expect(codecNames(entryOf(visualEntry('vp08', {}, second)))).toEqual([
+      'vp08.02.20.10.01.02.02.09.00',
+      'vp08.02.20.10',
+    ])
+  })
+
+  it('names VP9 from vpcC version 0 by its short form only', () => {
+    // Profile 1, level 3.1 and 10 bits, which version 0 holds in the high nibble of its third byte.
+    const old = vpcC({ version: 0, profile: 1, level: 31, bitDepth: 10 })
+    expect(codecNames(entryOf(visualEntry('vp09', {}, old)))).toEqual(['vp09.01.31.10'])
+  })
+
+  it('writes the fields of a VP9 name in decimal, two digits or more', () => {
+    // Colour codes go up to 255, and are not cut to two digits; the flag and the chroma are.
+    const wide = vpcC({
+      profile: 3,
+      level: 120,
+      bitDepth: 12,
+      chromaSubsampling: 3,
+      fullRange: true,
+      colourPrimaries: 100,
+      transferCharacteristics: 255,
+      matrixCoefficients: 99,
+    })
+    expect(codecNames(entryOf(visualEntry('vp09', {}, wide)))).toEqual([
+      'vp09.03.120.12.03.100.255.99.01',
+      'vp09.03.120.12',
+    ])
+  })
+
+  it('names Dolby Vision from its config', () => {
+    // The 4 bytes that the name is read from: the version, then 7 bits of profile and 6 of level.
+    const profile8 = box('dvcC', [0x01, 0x00, 0x10, 0x35])
+    expect(codecNames(entryOf(visualEntry('dvh1', {}, profile8)))).toEqual(['dvh1.08.06'])
+    const profile5 = box('dvcC', [0x01, 0x00, 0x0a, 0x35])
+    expect(codecNames(entryOf(visualEntry('dvhe', {}, profile5)))).toEqual(['dvhe.05.06'])
+    const profile10 = dolbyVisionConfig('dvvC', { profile: 10, level: 9 })
+    expect(codecNames(entryOf(visualEntry('dav1', {}, profile10)))).toEqual(['dav1.10.09'])
+    // The whole record as Dolby writes it, behind the hvcC that the entry is also decoded from; and the third config box.
+    expect(codecNames(entryOf(visualEntry('dvh1', {}, hvcC(), dolbyVisionConfig('dvcC'))))).toEqual(
+      ['dvh1.08.06'],
+    )
+    const wide = dolbyVisionConfig('dvwC', { profile: 127, level: 63 })
+    expect(codecNames(entryOf(visualEntry('dvav', {}, wide)))).toEqual(['dvav.127.63'])
+    const low = dolbyVisionConfig('dvvC', { level: 1 })
+    expect(codecNames(entryOf(visualEntry('dva1', {}, low)))).toEqual(['dva1.08.01'])
+  })
+
+  it('names MPEG audio by its object type', () => {
+    const named = (objectType: number, config?: number[] | null) =>
+      codecNames(
+        entryOf(
+          audioEntry('mp4a', {}, esds({ objectType, ...(config === undefined ? {} : { config }) })),
+        ),
+      )
+    // MPEG-2 AAC, with its AudioSpecificConfig.
+    expect(named(0x66)).toEqual(['mp4a.66'])
+    expect(named(0x67)).toEqual(['mp4a.67'])
+    expect(named(0x68)).toEqual(['mp4a.68'])
+    // MPEG audio layer 3 has no DecoderSpecificInfo, and browsers know it by three names.
+    expect(named(0x6b, null)).toEqual(['mp4a.6B', 'mp3', 'mp4a.40.34'])
+    expect(named(0x69, null)).toEqual(['mp4a.69', 'mp3', 'mp4a.40.34'])
+    // Dolby's AC-3 and E-AC-3.
+    expect(named(0xa5, null)).toEqual(['mp4a.A5', 'ac-3'])
+    expect(named(0xa6, null)).toEqual(['mp4a.A6', 'ec-3'])
+    // Any other object type is named as it is, in two uppercase hex digits, for the browser to say no to.
+    expect(named(0xdd, null)).toEqual(['mp4a.DD'])
+    expect(named(0x05, null)).toEqual(['mp4a.05'])
+    // MPEG-4 audio is as it was.
+    expect(named(0x40)).toEqual(['mp4a.40.2'])
+    // The entry is carried as it is, whatever it holds.
+    const mp3 = audioEntry('mp4a', {}, esds({ objectType: 0x6b, config: null }))
+    expect(initEntry(entryOf(mp3))).toEqual(mp3)
+  })
+
+  it('names FLAC, Opus, Dolby audio and ALAC, the config direct or in wave', () => {
+    const flac = audioEntry('fLaC', {}, dfLa())
+    expect(codecNames(entryOf(flac))).toEqual(['flac', 'fLaC'])
+    const opus = audioEntry('Opus', { sampleRate: 48000 }, dOps())
+    expect(codecNames(entryOf(opus))).toEqual(['opus', 'Opus'])
+    const ac3 = audioEntry('ac-3', {}, dac3())
+    expect(codecNames(entryOf(ac3))).toEqual(['ac-3'])
+    // QuickTime's version 1 entry keeps the config inside its wave box.
+    const wrapped = quickTimeAudioEntry(
+      'ac-3',
+      { version: 1 },
+      wave(frma('ac-3'), dac3(), [0, 0, 0, 0]),
+    )
+    expect(codecNames(entryOf(wrapped))).toEqual(['ac-3'])
+    expect(codecNames(entryOf(audioEntry('ec-3', {}, dec3())))).toEqual(['ec-3'])
+    expect(codecNames(entryOf(audioEntry('alac', {}, alacConfig())))).toEqual(['alac'])
+    // QuickTime's own MP3 entry holds nothing that its name is read from.
+    const mp3 = quickTimeAudioEntry('.mp3', { version: 1 })
+    expect(codecNames(entryOf(mp3))).toEqual(['mp4a.6B', 'mp3', 'mp4a.40.34'])
+    expect(codecNames(entryOf(audioEntry('.mp3')))).toEqual(['mp4a.6B', 'mp3', 'mp4a.40.34'])
+  })
+
+  it("finds a sound's config where the entry's own layout puts it, after the fields of its version", () => {
+    // Version 1 adds 16 bytes before the boxes, and version 2 adds 36: a config looked for 28 bytes in would not be found.
+    for (const version of [1, 2] as const) {
+      const flac = quickTimeAudioEntry('fLaC', { version }, dfLa())
+      expect(codecNames(entryOf(flac)), `fLaC v${version}`).toEqual(['flac', 'fLaC'])
+      const opus = quickTimeAudioEntry('Opus', { version, sampleRate: 48000 }, dOps())
+      expect(codecNames(entryOf(opus)), `Opus v${version}`).toEqual(['opus', 'Opus'])
+      const ec3 = quickTimeAudioEntry('ec-3', { version }, dec3())
+      expect(codecNames(entryOf(ec3)), `ec-3 v${version}`).toEqual(['ec-3'])
+      const alac = quickTimeAudioEntry('alac', { version }, wave(frma('alac'), alacConfig()))
+      expect(codecNames(entryOf(alac)), `alac v${version}`).toEqual(['alac'])
+    }
+    // The same layout rule holds the entry to the versions it reads.
+    const unknown = audioEntry('fLaC', {}, dfLa()).slice()
+    unknown[8 + 8 + 1] = 3 // the version, at 8 bytes into the body
+    refusal('damaged', () => codecNames(entryOf(unknown)))
+  })
+
+  it('gives codecString the first name, and a new array each time', () => {
+    const entries = [
+      visualEntry('avc1', {}, avcC()),
+      visualEntry('vp09', {}, vpcC()),
+      visualEntry('dvh1', {}, dolbyVisionConfig('dvcC')),
+      audioEntry('mp4a', {}, esds({ objectType: 0x6b, config: null })),
+      audioEntry('fLaC', {}, dfLa()),
+      audioEntry('Opus', {}, dOps()),
+      audioEntry('ac-3', {}, dac3()),
+    ].map(entryOf)
+    for (const entry of entries) {
+      const names = codecNames(entry)
+      expect(names.length).toBeGreaterThan(0)
+      expect(codecString(entry), entry.type).toBe(names[0])
+      expect(codecNames(entry)).not.toBe(names)
+    }
+    expect(codecString(entryOf(visualEntry('vp09', {}, vpcC())))).toBe(
+      'vp09.00.20.08.01.02.02.02.00',
+    )
+  })
+
+  it('refuses an entry with its config missing, as damaged', () => {
+    const missing: [Uint8Array, string][] = [
+      [visualEntry('vp09'), 'vpcC'],
+      [visualEntry('vp08'), 'vpcC'],
+      [visualEntry('dvh1'), 'dvcC'],
+      [visualEntry('dav1'), 'dvvC'],
+      [audioEntry('fLaC'), 'dfLa'],
+      [audioEntry('ac-3'), 'dac3'],
+      [audioEntry('ec-3'), 'dec3'],
+      [audioEntry('alac'), 'alac'],
+      [audioEntry('Opus'), 'dOps'],
+    ]
+    for (const [bytes, config] of missing) {
+      const entry = entryOf(bytes)
+      for (const run of [
+        () => codecNames(entry),
+        () => codecString(entry),
+        () => initEntry(entry),
+      ]) {
+        const error = refusal('damaged', run)
+        expect(error.message).toContain(`'${entry.type}'`)
+        expect(error.message).toContain(`'${config}'`)
+      }
+    }
+  })
+
+  it('refuses a config that is cut short or of a version unknown, as damaged', () => {
+    const vp = (...config: Uint8Array[]) => entryOf(visualEntry('vp09', {}, ...config))
+    // A vpcC of version 1 needs its colour fields, and one of version 0 its three bytes; both need their version.
+    refusal('damaged', () => codecNames(vp(fullBox('vpcC', 1, 0, [0, 20, 0x82]))))
+    refusal('damaged', () => codecNames(vp(fullBox('vpcC', 0, 0, [0, 20]))))
+    refusal('damaged', () => codecNames(vp(box('vpcC'))))
+    refusal('damaged', () => codecNames(vp(fullBox('vpcC', 2, 0, [0, 20, 0x82, 2, 2, 2, 0, 0]))))
+    // A Dolby Vision config that stops before its level does.
+    refusal('damaged', () =>
+      codecNames(entryOf(visualEntry('dvh1', {}, box('dvcC', [1, 0, 0x10])))),
+    )
+    // An MPEG-2 AAC sound with no DecoderSpecificInfo, an empty one, or one that is cut short.
+    for (const config of [null, [], [0xf8]]) {
+      const entry = audioEntry('mp4a', {}, esds({ objectType: 0x67, config }))
+      refusal('damaged', () => codecNames(entryOf(entry)))
+    }
+    // A sound entry that ends before its own fields do, whatever its codec.
+    for (const type of ['fLaC', 'ac-3', '.mp3']) {
+      refusal('damaged', () => codecNames(entryOf(box(type, new Array<number>(20).fill(0)))))
+    }
+  })
+
+  it('refuses what no browser takes in MP4', () => {
+    const pictures = ['mp4v', 'vvc1', 'vvi1', 'apch', 'apcn', 'apcs', 'apco', 'ap4h', 'jpeg']
+    const sounds = [
+      ...['ipcm', 'fpcm', 'sowt', 'twos', 'lpcm', 'in24', 'in32', 'fl32', 'fl64', 'raw ', 'NONE'],
+      ...['dtsc', 'dtse', 'dtsh', 'dtsl', 'dtsx', 'ac-4', 'mha1', 'mha2', 'mhm1', 'mhm2'],
+      ...['ulaw', 'alaw', 'enca'],
+    ]
+    const entries = [
+      ...[...pictures, 'mjpa', 'mjpb', 'encv'].map((type) => visualEntry(type)),
+      ...sounds.map((type) => audioEntry(type)),
+    ]
+    for (const bytes of entries) {
+      const entry = entryOf(bytes)
+      for (const run of [
+        () => codecNames(entry),
+        () => codecString(entry),
+        () => initEntry(entry),
+      ]) {
+        const error = refusal('unsupported-codec', run)
+        expect(error.message).toContain(`'${entry.type}'`)
+        expect(error.message).toContain("any browser's Media Source")
+      }
     }
   })
 })
@@ -552,6 +785,23 @@ describe('the entry an init segment carries (§10.4)', () => {
     for (const type of ['avc1', 'avc3', 'hev1', 'av01']) {
       const other = visualEntry(type, {}, avcC(), hvcC(), av1C())
       expect(initEntry(entryOf(other))).toEqual(other)
+    }
+  })
+
+  it('copies the entries of the other codecs it names verbatim', () => {
+    const entries = [
+      visualEntry('vp09', {}, vpcC()),
+      visualEntry('vp08', {}, vpcC()),
+      visualEntry('dvh1', {}, hvcC(), dolbyVisionConfig('dvcC')),
+      visualEntry('avc2', {}, avcC()),
+      audioEntry('fLaC', {}, dfLa()),
+      audioEntry('ac-3', {}, dac3()),
+      audioEntry('ec-3', {}, dec3()),
+      audioEntry('alac', {}, alacConfig()),
+      audioEntry('.mp3'),
+    ]
+    for (const bytes of entries) {
+      expect(initEntry(entryOf(bytes)), String.fromCharCode(...bytes.subarray(4, 8))).toEqual(bytes)
     }
   })
 

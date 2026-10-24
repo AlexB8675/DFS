@@ -3,14 +3,18 @@ import type { Box } from './boxes.ts'
 import { Mp4Error } from './errors.ts'
 import type { SampleEntry } from './movie.ts'
 
-// The name of each picture and sound codec as Media Source asks about it, and
-// the sample entry an init segment carries (DESIGN.md §10.4, D45). The names are
-// RFC 6381's, which `MediaSource.isTypeSupported` and `addSourceBuffer` take:
-// `avc1.64001f`, `hvc1.2.4.L153.B0`, `av01.0.05M.08`, `mp4a.40.2`, `opus`. They
-// are read from the codec's own configuration box, never guessed from the
-// entry's type. What the player doesn't take is refused as
-// `Mp4Error('unsupported-codec')`, with the type in the sentence; a
-// configuration that is cut short or lies about its own sizes is `damaged`.
+// The names of each picture and sound codec as Media Source asks about it, and
+// the sample entry an init segment carries (DESIGN.md §10.4, D45). The first
+// name is RFC 6381's, which `MediaSource.isTypeSupported` and `addSourceBuffer`
+// take: `avc1.64001f`, `hvc1.2.4.L153.B0`, `av01.0.05M.08`,
+// `vp09.00.20.08.01.02.02.02.00`, `dvh1.08.06`, `mp4a.40.2`, `opus`, `flac`.
+// Some codecs have others that a browser may know them by (`Opus` for `opus`,
+// `mp3` and `mp4a.40.34` for MPEG audio layer 3), after it, so that the player
+// can ask the browser about each in turn. They are read from the codec's own
+// configuration box, never guessed from the entry's type. What no browser's
+// Media Source takes in MP4 is refused as `Mp4Error('unsupported-codec')`, with
+// the type in the sentence; a configuration that is missing, cut short or lies
+// about its own sizes is `damaged`.
 //
 // QuickTime writes its sound entries in a form that Chrome's and Firefox's
 // Media Source don't take (a version 1 or 2 entry, with the `esds` inside a
@@ -25,6 +29,22 @@ const AUDIO_FIELDS = 28
 /** `objectTypeIndication` of MPEG-4 audio, the only one that has an `mp4a.40.N` string. */
 const MPEG4_AUDIO = 0x40
 
+/** `objectTypeIndication` of MPEG-2 AAC, in its main, low complexity and scalable sampling rate profiles. */
+const MPEG2_AAC_MAIN = 0x66
+const MPEG2_AAC_LC = 0x67
+const MPEG2_AAC_SSR = 0x68
+
+/** `objectTypeIndication` of MPEG-2 audio (ISO/IEC 13818-3) and of MPEG-1 audio (11172-3), whose layer 3 is MP3. */
+const MPEG2_AUDIO = 0x69
+const MPEG1_AUDIO = 0x6b
+
+/** `objectTypeIndication` of AC-3 and of E-AC-3, as MP4RA registers them. */
+const AC3 = 0xa5
+const EAC3 = 0xa6
+
+/** The names of a codec: never none, the RFC 6381 one first. */
+type Names = [string, ...string[]]
+
 function damaged(message: string): Mp4Error {
   return new Mp4Error('damaged', message)
 }
@@ -37,6 +57,11 @@ function unsupported(message: string): Mp4Error {
 function hex(value: number, width = 1, upper = false): string {
   const digits = value.toString(16).padStart(width, '0')
   return upper ? digits.toUpperCase() : digits
+}
+
+/** A number in decimal with two digits at least, as the fields of `vp09.00.20.08` and `dvh1.08.06` are written: a zero in front of a single digit, and a number of three digits as it is. */
+function decimal(value: number): string {
+  return String(value).padStart(2, '0')
 }
 
 /**
@@ -88,17 +113,30 @@ function afterFields(entry: SampleEntry, whole: Box, skip: number): Box {
   return { type: whole.type, start: whole.start, body: whole.body + skip, end: whole.end }
 }
 
-/** The bytes inside a codec's configuration box in a picture entry, which the codec string is read from. */
-function pictureConfig(entry: SampleEntry, type: string): Uint8Array {
-  const whole = entryBox(entry)
-  const config = child(entry.bytes, afterFields(entry, whole, VISUAL_FIELDS), type)
-  if (!config) throw damaged(`The '${entry.type}' sample description has no '${type}' box.`)
-  return entry.bytes.subarray(config.body, config.end)
+/**
+ * The bytes inside a codec's configuration box in a picture entry, which the
+ * codec's names are read from, and the type of the box that was found: the
+ * first of `types` that the entry has (Dolby Vision's configuration is one of
+ * three, by profile).
+ */
+function pictureConfig(
+  entry: SampleEntry,
+  ...types: [string, ...string[]]
+): { type: string; bytes: Uint8Array } {
+  const inside = afterFields(entry, entryBox(entry), VISUAL_FIELDS)
+  for (const type of types) {
+    const config = child(entry.bytes, inside, type)
+    if (config) return { type, bytes: entry.bytes.subarray(config.body, config.end) }
+  }
+  const quoted = types.map((type) => `'${type}'`)
+  const last = quoted.pop()
+  const named = quoted.length > 0 ? `${quoted.join(', ')} or ${last}` : last
+  throw damaged(`The '${entry.type}' sample description has no ${named} box.`)
 }
 
 /** `avc1.PPCCLL`: the profile, its compatibility flags and the level, which are bytes 1 to 3 of `avcC`, each as two lowercase hex digits. */
 function avcString(entry: SampleEntry): string {
-  const bits = new BitReader(pictureConfig(entry, 'avcC'), "'avcC' box")
+  const bits = new BitReader(pictureConfig(entry, 'avcC').bytes, "'avcC' box")
   bits.read(8) // configurationVersion
   const digits = [bits.read(8), bits.read(8), bits.read(8)].map((byte) => hex(byte, 2))
   return `${entry.type}.${digits.join('')}`
@@ -121,7 +159,7 @@ function reversed(value: number): number {
  * goes and the zero ones at the end left out.
  */
 function hevcString(entry: SampleEntry): string {
-  const bits = new BitReader(pictureConfig(entry, 'hvcC'), "'hvcC' box")
+  const bits = new BitReader(pictureConfig(entry, 'hvcC').bytes, "'hvcC' box")
   bits.read(8) // configurationVersion
   const space = bits.read(2)
   const tier = bits.read(1)
@@ -141,7 +179,7 @@ function hevcString(entry: SampleEntry): string {
 
 /** `av01.0.05M.08`: the profile, then the level and tier (`M` for main, `H` for high) and the bit depth, the last two with two digits. */
 function av1String(entry: SampleEntry): string {
-  const bits = new BitReader(pictureConfig(entry, 'av1C'), "'av1C' box")
+  const bits = new BitReader(pictureConfig(entry, 'av1C').bytes, "'av1C' box")
   bits.read(8) // the marker and the version
   const profile = bits.read(3)
   const level = bits.read(5)
@@ -149,7 +187,48 @@ function av1String(entry: SampleEntry): string {
   const high = bits.read(1)
   const twelve = bits.read(1)
   const depth = twelve ? 12 : high ? 10 : 8
-  return `av01.${profile}.${String(level).padStart(2, '0')}${tier ? 'H' : 'M'}.${String(depth).padStart(2, '0')}`
+  return `av01.${profile}.${decimal(level)}${tier ? 'H' : 'M'}.${decimal(depth)}`
+}
+
+/**
+ * `vp09.00.20.08.01.02.02.02.00` and then `vp09.00.20.08` (`vp08` is the same),
+ * from the `vpcC` of the VP codec binding: the profile, the level, the bit
+ * depth, the chroma subsampling, the three colour codes (primaries, transfer
+ * characteristics, matrix) and the full-range flag, each in decimal with two
+ * digits at least (a colour code goes up to 255 and is written in three). The
+ * short form is the first three of them, which is all that version 0 of the box
+ * (the older one, whose other fields are not the same) gives: the profile, the
+ * level, and the bit depth in the high nibble of the byte after them.
+ */
+function vpNames(entry: SampleEntry): Names {
+  const bits = new BitReader(pictureConfig(entry, 'vpcC').bytes, "'vpcC' box")
+  const version = bits.read(8)
+  bits.read(24) // flags
+  if (version > 1) throw damaged(`The 'vpcC' box is version ${version}, and only 0 and 1 are read.`)
+  const profile = bits.read(8)
+  const level = bits.read(8)
+  const depth = bits.read(4)
+  const short = `${entry.type}.${[profile, level, depth].map(decimal).join('.')}`
+  if (version === 0) return [short]
+  const chroma = bits.read(3)
+  const fullRange = bits.read(1)
+  const colour = [bits.read(8), bits.read(8), bits.read(8)] // the primaries, the transfer characteristics and the matrix
+  return [`${short}.${[chroma, ...colour, fullRange].map(decimal).join('.')}`, short]
+}
+
+/**
+ * `dvh1.08.06`, from the configuration box that Dolby Vision's entries hold
+ * (`dvcC`, `dvvC` or `dvwC`, by profile), which begins with a version of two
+ * bytes, then the profile (7 bits) and the level (6), both in decimal with two
+ * digits at least. The flags of the layers behind them are not in the name.
+ */
+function dolbyVisionNames(entry: SampleEntry): Names {
+  const { type, bytes } = pictureConfig(entry, 'dvcC', 'dvvC', 'dvwC')
+  const bits = new BitReader(bytes, `'${type}' box`)
+  bits.read(16) // the major and the minor version
+  const profile = bits.read(7)
+  const level = bits.read(6)
+  return [`${entry.type}.${decimal(profile)}.${decimal(level)}`]
 }
 
 /** A descriptor of an `esds`: its tag and where its body is. */
@@ -270,63 +349,137 @@ function readAudioEntry(entry: SampleEntry): AudioEntry {
   return { version, channels, sampleRate, inside: { ...whole, body: reader.position } }
 }
 
-/** The `esds` of a sound entry: its own, or the one inside the `wave` box that QuickTime keeps it in. */
-function findEsds(entry: SampleEntry, inside: Box): { esds: Box; direct: boolean } {
-  const direct = child(entry.bytes, inside, 'esds')
-  if (direct) return { esds: direct, direct: true }
+/**
+ * A box that a sound codec is set up from, found where the entry's own layout
+ * puts its boxes (`readAudioEntry`): the entry's own, or the one inside the
+ * `wave` box that QuickTime keeps it in. Every sound codec's configuration is
+ * looked for here, so that a layout that is read differently is read so for all.
+ */
+function findAudioBox(
+  entry: SampleEntry,
+  inside: Box,
+  type: string,
+): { box: Box; direct: boolean } {
+  const direct = child(entry.bytes, inside, type)
+  if (direct) return { box: direct, direct: true }
   const wrapper = child(entry.bytes, inside, 'wave')
-  const wrapped = wrapper ? child(entry.bytes, wrapper, 'esds') : null
-  if (!wrapped) throw damaged(`The '${entry.type}' sample description has no 'esds' box.`)
-  return { esds: wrapped, direct: false }
+  const wrapped = wrapper ? child(entry.bytes, wrapper, type) : null
+  if (!wrapped) throw damaged(`The '${entry.type}' sample description has no '${type}' box.`)
+  return { box: wrapped, direct: false }
 }
 
-function mp4aString(entry: SampleEntry): string {
-  const { inside } = readAudioEntry(entry)
-  const { esds } = findEsds(entry, inside)
-  const { objectType, config } = readStream(entry.bytes, esds)
-  if (objectType !== MPEG4_AUDIO) {
-    throw unsupported(
-      `The sound is of object type 0x${hex(objectType, 2)}, and only MPEG-4 audio (AAC) is a codec that the player takes.`,
-    )
-  }
-  if (!config) {
-    throw damaged(`The 'esds' box at offset ${esds.start} has no DecoderSpecificInfo.`)
-  }
-  return `mp4a.40.${audioObjectType(entry.bytes, config)}`
+/** The names of a sound whose decoder is made from the box `type` of its entry; without that box there is nothing to play. */
+function configured(entry: SampleEntry, type: string, names: Names): Names {
+  findAudioBox(entry, readAudioEntry(entry).inside, type)
+  return names
+}
+
+/** The audio object type of the DecoderSpecificInfo of an `esds`, which is `damaged` when there is none or it is cut short. */
+function specificInfoType(entry: SampleEntry, esds: Box, config: Descriptor | null): number {
+  if (!config) throw damaged(`The 'esds' box at offset ${esds.start} has no DecoderSpecificInfo.`)
+  return audioObjectType(entry.bytes, config)
 }
 
 /**
- * The RFC 6381 string that Media Source is asked about for an entry, read from
- * its configuration. An entry of a codec the player doesn't take (PCM, MPEG-4
- * Visual, MP3, Dolby, anything that isn't H.264, H.265, AV1, AAC or Opus, and an
- * `mp4a` that isn't MPEG-4 audio) is refused as `unsupported-codec`; one whose
- * configuration is missing, cut short or lies about its sizes as `damaged`.
+ * The names of an `mp4a` entry, from the object type of its `esds` (ISO/IEC
+ * 14496-1, and the registry of MP4RA): `mp4a.40.N` for MPEG-4 audio, N being
+ * its audio object type; `mp4a.66`, `.67` and `.68` for MPEG-2 AAC, which have
+ * a DecoderSpecificInfo too; `mp4a.6B` (MPEG-1 audio) and `mp4a.69` (MPEG-2
+ * audio), whose layer 3 is MP3, which browsers also know as `mp3` and as
+ * `mp4a.40.34`; the object types of AC-3 and E-AC-3 (`mp4a.A5`, `mp4a.A6`),
+ * which are `ac-3` and `ec-3` as well. Any other is named as it is, in two
+ * uppercase hex digits, for the browser to answer: that includes Vorbis (0xDD),
+ * which is carried in an `mp4a`, and which no browser takes.
  */
-export function codecString(entry: SampleEntry): string {
+function mp4aNames(entry: SampleEntry): Names {
+  const { inside } = readAudioEntry(entry)
+  const { box: esds } = findAudioBox(entry, inside, 'esds')
+  const { objectType, config } = readStream(entry.bytes, esds)
+  const name = `mp4a.${hex(objectType, 2, true)}`
+  switch (objectType) {
+    case MPEG4_AUDIO:
+      return [`mp4a.40.${specificInfoType(entry, esds, config)}`]
+    case MPEG2_AAC_MAIN:
+    case MPEG2_AAC_LC:
+    case MPEG2_AAC_SSR:
+      specificInfoType(entry, esds, config)
+      return [name]
+    case MPEG2_AUDIO:
+    case MPEG1_AUDIO:
+      return [name, 'mp3', 'mp4a.40.34']
+    case AC3:
+      return [name, 'ac-3']
+    case EAC3:
+      return [name, 'ec-3']
+    default:
+      return [name]
+  }
+}
+
+/**
+ * The names that Media Source is asked about for an entry, read from its
+ * configuration, the RFC 6381 one first, and never none. A codec that browsers
+ * know by others has them after it, in the order to try: `opus` and `Opus`,
+ * `flac` and `fLaC`, and for MPEG audio layer 3 `mp4a.6B`, `mp3` and
+ * `mp4a.40.34`. These are named, for the player to ask the browser about:
+ * `avc1` to `avc4`, `hvc1` and `hev1`, `av01`, VP9 and VP8 (`vp09`, `vp08`),
+ * Dolby Vision (`dvh1`, `dvhe`, `dav1`, `dvav`, `dva1`), every `mp4a` by the
+ * object type of its `esds`, QuickTime's `.mp3`, `Opus`, `fLaC`, `ac-3`, `ec-3`
+ * and `alac`. One whose configuration box is missing, cut short or lies about
+ * its sizes is `damaged`. Every other type is refused as `unsupported-codec`,
+ * because no browser's Media Source takes it in MP4:
+ * - PCM: `ipcm` `fpcm` `sowt` `twos` `lpcm` `in24` `in32` `fl32` `fl64` `raw ` `NONE`;
+ * - MPEG-4 Visual (`mp4v`), VVC (`vvc1` `vvi1`), Motion JPEG (`jpeg` `mjpa` `mjpb`) and ProRes (`apco` `apcs` `apcn` `apch` `ap4h` `ap4x`);
+ * - DTS (`dtsc` `dtse` `dtsh` `dtsl` `dtsx`), AC-4 (`ac-4`), MPEG-H (`mha1` `mha2` `mhm1` `mhm2`), `ulaw` and `alaw`;
+ * - the protected entries `encv` and `enca`.
+ */
+export function codecNames(entry: SampleEntry): Names {
   switch (entry.type) {
     case 'avc1':
+    case 'avc2':
     case 'avc3':
-      return avcString(entry)
+    case 'avc4':
+      return [avcString(entry)]
     case 'hvc1':
     case 'hev1':
-      return hevcString(entry)
+      return [hevcString(entry)]
     case 'av01':
-      return av1String(entry)
+      return [av1String(entry)]
+    case 'vp09':
+    case 'vp08':
+      return vpNames(entry)
+    case 'dvh1':
+    case 'dvhe':
+    case 'dav1':
+    case 'dvav':
+    case 'dva1':
+      return dolbyVisionNames(entry)
     case 'mp4a':
-      return mp4aString(entry)
-    case 'Opus': {
-      // The decoder is made from the `dOps`; without it there is nothing to play.
-      const whole = entryBox(entry)
-      if (!child(entry.bytes, afterFields(entry, whole, AUDIO_FIELDS), 'dOps')) {
-        throw damaged(`The 'Opus' sample description has no 'dOps' box.`)
-      }
-      return 'opus'
-    }
+      return mp4aNames(entry)
+    case '.mp3':
+      // QuickTime's MP3 holds no configuration: the codec is the type, and the entry has to be whole.
+      readAudioEntry(entry)
+      return ['mp4a.6B', 'mp3', 'mp4a.40.34']
+    case 'Opus':
+      return configured(entry, 'dOps', ['opus', 'Opus'])
+    case 'fLaC':
+      return configured(entry, 'dfLa', ['flac', 'fLaC'])
+    case 'ac-3':
+      return configured(entry, 'dac3', ['ac-3'])
+    case 'ec-3':
+      return configured(entry, 'dec3', ['ec-3'])
+    case 'alac':
+      return configured(entry, 'alac', ['alac'])
     default:
       throw unsupported(
-        `The sample description '${entry.type}' is not a codec that the player takes.`,
+        `The sample description '${entry.type}' is not a codec that any browser's Media Source takes in MP4.`,
       )
   }
+}
+
+/** The RFC 6381 string that Media Source is asked about for an entry: the first of its `codecNames`, which refuses what they do. */
+export function codecString(entry: SampleEntry): string {
+  return codecNames(entry)[0]
 }
 
 /** An ISO version 0 `mp4a` for this many channels and this sample rate (16.16), followed by the boxes given. */
@@ -360,14 +513,14 @@ function isoMp4a(channels: number, rate: number, boxes: readonly Uint8Array[]): 
  * `damaged` when a box of the entry can't be read, or when the channels or the
  * rate are 0 (or the rate isn't a number), which an entry that plays doesn't
  * say; a rate that doesn't fit in the 16 bits ISO has for it is
- * `unsupported-codec`. An entry that `codecString` refuses is refused here for
+ * `unsupported-codec`. An entry that `codecNames` refuses is refused here for
  * the same reason, so that what is carried is always what was asked about.
  */
 export function initEntry(entry: SampleEntry): Uint8Array {
-  codecString(entry)
+  codecNames(entry)
   if (entry.type !== 'mp4a') return entry.bytes
   const audio = readAudioEntry(entry)
-  const found = findEsds(entry, audio.inside)
+  const found = findAudioBox(entry, audio.inside, 'esds')
   if (audio.version === 0 && found.direct) return entry.bytes
 
   // The rate in 16.16: version 0 and 1 have it so, and it comes out as it was; version 2 has a float to be put in the 16 bits ISO gives the whole part.
@@ -389,6 +542,6 @@ export function initEntry(entry: SampleEntry): Uint8Array {
   const others = childBoxes(entry.bytes, audio.inside.body, audio.inside.end)
     .filter((other) => other.type !== 'wave' && other.type !== 'esds')
     .map((other) => entry.bytes.subarray(other.start, other.end))
-  const esds = entry.bytes.subarray(found.esds.start, found.esds.end)
+  const esds = entry.bytes.subarray(found.box.start, found.box.end)
   return isoMp4a(audio.channels, rate, [esds, ...others])
 }

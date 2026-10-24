@@ -1,4 +1,4 @@
-import { codecString, initEntry } from './codecs.ts'
+import { codecNames, initEntry } from './codecs.ts'
 import { Mp4Error } from './errors.ts'
 import { frameTable } from './frames.ts'
 import type { FrameTable } from './frames.ts'
@@ -22,12 +22,14 @@ import type { TrackTiming } from './timing.ts'
 // (`frameTable`): they can't number more than a track may have, nor add up to, or
 // end, past the end of the file.
 
-/** A track ready to play: its header, frames, timing, codec string and the entry its init segment carries. */
+/** A track ready to play: its header, frames, timing, codec names and the entry its init segment carries. */
 export interface PlayTrack {
   header: TrackHeader
   table: FrameTable
   timing: TrackTiming
-  /** The RFC 6381 string that Media Source is asked about. */
+  /** The names that Media Source can be asked about, the RFC 6381 one first: the browser is asked about each in turn. */
+  codecNames: readonly string[]
+  /** The RFC 6381 string, which is the first of `codecNames`. */
   codec: string
   /** The sample entry for the init segment's `stsd`: the track's own, or an ISO one made from a QuickTime sound entry. */
   entry: Uint8Array
@@ -73,8 +75,8 @@ function refuseCut(track: TrackHeader, first: number | undefined): void {
 
 /**
  * One chosen track, checked from the cheapest rule to the dearest, and the first
- * that fails is the reason: its `problem`; one sample description; a codec
- * string (and the entry that carries it) and an edit list that can be placed,
+ * that fails is the reason: its `problem`; one sample description; the codec
+ * names (and the entry that carries them) and an edit list that can be placed,
  * both read from a few bytes; and only then its frames, which a sound in PCM
  * (refused above, as an unsupported codec) can number in millions. A picture
  * with no keyframe has nowhere to start decoding. The edit list is placed with
@@ -102,7 +104,7 @@ function playTrack(
         `The track has ${track.entries.length} sample descriptions, and the player's buffer is set up from only one.`,
       )
     }
-    const codec = codecString(only)
+    const names = codecNames(only)
     const entry = initEntry(only)
     trackTiming(track, movieTimescale)
     const table = frameTable(track, fileSize)
@@ -113,7 +115,7 @@ function playTrack(
     if (what === 'picture' && keyframes.length === 0) {
       throw new Mp4Error('damaged', 'The track has no keyframe to decode from.')
     }
-    return { header: track, table, timing, codec, entry, keyframes }
+    return { header: track, table, timing, codecNames: names, codec: names[0], entry, keyframes }
   } catch (error) {
     // Only what is wrong with the file is said again, with the track it is in: anything else is a bug here.
     if (!(error instanceof Mp4Error)) throw error

@@ -11,6 +11,7 @@ import {
   avcC,
   box,
   ctts,
+  dfLa,
   dOps,
   esds,
   frma,
@@ -27,6 +28,7 @@ import {
   stts,
   trak,
   visualEntry,
+  vpcC,
   wave,
 } from './testing/build.ts'
 import type { TrackSpec } from './testing/build.ts'
@@ -188,6 +190,7 @@ describe('the tracks a video plays (§10.4, D45)', () => {
     expect(video.header).toBe(trackOf(parsed, 0))
     expect(video.table).toEqual(frameTable(trackOf(parsed, 0), FILE_SIZE))
     expect(video.codec).toBe('avc1.64001f')
+    expect(video.codecNames).toEqual(['avc1.64001f'])
     expect(video.entry).toEqual(PICTURE)
     expect(Array.from(video.keyframes)).toEqual([0, 2])
     // The media edit starts a second in (30000 of 30000 a second) and ends half a second after it starts being shown.
@@ -197,6 +200,7 @@ describe('the tracks a video plays (§10.4, D45)', () => {
     expect(audio.header).toBe(trackOf(parsed, 1))
     expect(audio.table).toEqual(frameTable(trackOf(parsed, 1), FILE_SIZE))
     expect(audio.codec).toBe('mp4a.40.2')
+    expect(audio.codecNames).toEqual(['mp4a.40.2'])
     const original = trackOf(parsed, 1).entries[0]
     if (!original) throw new Error('expected an entry')
     expect(audio.entry).toEqual(initEntry(original))
@@ -206,6 +210,21 @@ describe('the tracks a video plays (§10.4, D45)', () => {
     expect(Array.from(audio.keyframes)).toEqual([0, 1, 2, 3])
     // An empty edit of a quarter second pauses the sound before it starts.
     expect(audio.timing).toEqual({ offsetSeconds: 0.25, endSeconds: 1 })
+  })
+
+  it('names a picture in VP9 and a sound in FLAC with every name the browser may be asked about', () => {
+    const parsed = read([
+      picture({ entries: [visualEntry('vp09', {}, vpcC())] }),
+      sound({ entries: [audioEntry('fLaC', {}, dfLa())] }),
+    ])
+    const { video, audio } = chooseTracks(parsed, FILE_SIZE)
+    expect(video.codecNames).toEqual(['vp09.00.20.08.01.02.02.02.00', 'vp09.00.20.08'])
+    expect(video.codec).toBe(video.codecNames[0])
+    expect(audio?.codecNames).toEqual(['flac', 'fLaC'])
+    expect(audio?.codec).toBe('flac')
+    // Their entries are carried as they are.
+    expect(video.entry).toEqual(visualEntry('vp09', {}, vpcC()))
+    expect(audio?.entry).toEqual(audioEntry('fLaC', {}, dfLa()))
   })
 
   it('has no sound for a file that has none', () => {
@@ -256,7 +275,7 @@ describe('the tracks a video plays (§10.4, D45)', () => {
     // The rules come first: an empty sound that the player couldn't take is a reason all the same.
     refusal('unsupported-codec', () =>
       chooseTracks(
-        read([picture(), sound({ entries: [audioEntry('ac-3')], tables: emptyTables })]),
+        read([picture(), sound({ entries: [audioEntry('sowt')], tables: emptyTables })]),
         FILE_SIZE,
       ),
     )
@@ -402,16 +421,16 @@ describe('the tracks a video plays (§10.4, D45)', () => {
         reason: 'edit-list',
       },
       {
-        what: 'a picture in a codec the player does not take',
-        tracks: [picture({ entries: [visualEntry('vp09')] })],
+        what: "a picture in a codec that no browser's Media Source takes in MP4",
+        tracks: [picture({ entries: [visualEntry('mp4v')] })],
         reason: 'unsupported-codec',
-        says: 'vp09',
+        says: 'mp4v',
       },
       {
-        what: 'a sound in a codec the player does not take',
-        tracks: [picture(), sound({ entries: [audioEntry('ac-3')] })],
+        what: "a sound in a codec that no browser's Media Source takes in MP4",
+        tracks: [picture(), sound({ entries: [audioEntry('sowt')] })],
         reason: 'unsupported-codec',
-        says: 'ac-3',
+        says: 'sowt',
       },
       {
         what: 'a picture with a configuration that is cut short',
@@ -462,7 +481,7 @@ describe('the tracks a video plays (§10.4, D45)', () => {
   it('names the track that is refused', () => {
     expect(
       refusal('unsupported-codec', () =>
-        chooseTracks(read([picture(), sound({ entries: [audioEntry('ac-3')] })]), FILE_SIZE),
+        chooseTracks(read([picture(), sound({ entries: [audioEntry('sowt')] })]), FILE_SIZE),
       ).message,
     ).toMatch(/^The sound track can't be played: /)
     expect(
@@ -520,7 +539,7 @@ describe('the tracks a video plays (§10.4, D45)', () => {
   it('refuses a file whose first sound is refused, and does not try the next', () => {
     refusal('unsupported-codec', () =>
       chooseTracks(
-        read([picture(), sound({ id: 2, entries: [audioEntry('ac-3')] }), sound({ id: 3 })]),
+        read([picture(), sound({ id: 2, entries: [audioEntry('sowt')] }), sound({ id: 3 })]),
         FILE_SIZE,
       ),
     )
@@ -529,11 +548,11 @@ describe('the tracks a video plays (§10.4, D45)', () => {
   it('refuses for the picture before it looks at the sound', () => {
     const error = refusal('unsupported-codec', () =>
       chooseTracks(
-        read([picture({ entries: [visualEntry('vp09')] }), sound({ entries: [SOUND, SOUND] })]),
+        read([picture({ entries: [visualEntry('mp4v')] }), sound({ entries: [SOUND, SOUND] })]),
         FILE_SIZE,
       ),
     )
-    expect(error.message).toContain('vp09')
+    expect(error.message).toContain('mp4v')
   })
 
   it('checks a track from the cheapest rule to the dearest, so that no frame is expanded for a track that is refused anyway', () => {
@@ -543,7 +562,7 @@ describe('the tracks a video plays (§10.4, D45)', () => {
       chooseTracks(read([picture({ entries: [PICTURE, PICTURE], tables })]), FILE_SIZE),
     )
     refusal('unsupported-codec', () =>
-      chooseTracks(read([picture({ entries: [visualEntry('vp09')], tables })]), FILE_SIZE),
+      chooseTracks(read([picture({ entries: [visualEntry('mp4v')], tables })]), FILE_SIZE),
     )
     refusal('unsupported-codec', () =>
       chooseTracks(read([picture(), sound({ entries: [audioEntry('sowt')], tables })]), FILE_SIZE),

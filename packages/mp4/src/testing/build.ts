@@ -793,3 +793,120 @@ export function quickTimeAudioEntry(
 export function dOps({ channels = 2 }: { channels?: number } = {}): Uint8Array {
   return box('dOps', [0, channels], u16(312), u32(48000), i16(0), [0])
 }
+
+export interface VpConfigSpec {
+  /** Version 1 is the record of the VP codec binding; version 0 is the older one, whose third byte holds the bit depth in its high nibble. */
+  version?: 0 | 1
+  profile?: number
+  /** The level, as the byte stored: 20 is 2.0, which the codec string writes as 20. */
+  level?: number
+  bitDepth?: number
+  /** 0 and 1 are 4:2:0, 2 is 4:2:2 and 3 is 4:4:4. */
+  chromaSubsampling?: number
+  fullRange?: boolean
+  colourPrimaries?: number
+  transferCharacteristics?: number
+  matrixCoefficients?: number
+}
+
+/** `vpcC`: a full box holding the profile, the level, the bit depth and the colour fields, and no codec initialization data. */
+export function vpcC({
+  version = 1,
+  profile = 0,
+  level = 20,
+  bitDepth = 8,
+  chromaSubsampling = 1,
+  fullRange = false,
+  colourPrimaries = 2,
+  transferCharacteristics = 2,
+  matrixCoefficients = 2,
+}: VpConfigSpec = {}): Uint8Array {
+  if (version === 0) {
+    // Version 0 has the bit depth and a colour space, then the chroma subsampling and a transfer function.
+    return fullBox(
+      'vpcC',
+      0,
+      0,
+      [profile, level],
+      bits([bitDepth, 4], [0, 4]),
+      bits([chromaSubsampling, 4], [0, 4]),
+      u16(0),
+    )
+  }
+  return fullBox(
+    'vpcC',
+    1,
+    0,
+    [profile, level],
+    bits([bitDepth, 4], [chromaSubsampling, 3], [fullRange ? 1 : 0, 1]),
+    [colourPrimaries, transferCharacteristics, matrixCoefficients],
+    u16(0), // no codec initialization data
+  )
+}
+
+export interface DolbyVisionSpec {
+  profile?: number
+  level?: number
+}
+
+/**
+ * Dolby Vision's configuration box (`dvcC`, `dvvC` or `dvwC`, which differ by
+ * the profiles they are for): the version, the profile, level and the flags of
+ * the layers, then the 20 bytes that the record keeps for what it is to say.
+ */
+export function dolbyVisionConfig(
+  type: 'dvcC' | 'dvvC' | 'dvwC',
+  { profile = 8, level = 6 }: DolbyVisionSpec = {},
+): Uint8Array {
+  return box(
+    type,
+    [1, 0], // version 1.0
+    bits([profile, 7], [level, 6], [1, 1], [0, 1], [1, 1]), // a base layer and an RPU, no enhancement layer
+    new Array<number>(20).fill(0), // the compatibility ID, the compression and the reserved fields
+  )
+}
+
+/** `dfLa`: a full box holding FLAC's metadata blocks, here the STREAMINFO block alone, as the last of them. */
+export function dfLa({ channels = 2, sampleRate = 44100 } = {}): Uint8Array {
+  return fullBox(
+    'dfLa',
+    0,
+    0,
+    [0x80, 0, 0, 34], // the last block, of type 0 (STREAMINFO), 34 bytes long
+    u16(4096), // the smallest block, in samples
+    u16(4096), // the largest
+    [0, 0, 0], // the smallest frame, in bytes (not known)
+    [0, 0, 0], // the largest
+    bits([sampleRate, 20], [channels - 1, 3], [15, 5], [0, 36]), // the rate, channels, bits per sample, and the length (not known)
+    new Array<number>(16).fill(0), // the MD5 of the audio
+  )
+}
+
+/** `dac3`: AC-3's bit stream information: 48 kHz, bsid 8, a full-bandwidth 5.1 layout (acmod 7 with the LFE) and a rate code of 10. */
+export function dac3(): Uint8Array {
+  return box('dac3', bits([0, 2], [8, 5], [0, 3], [7, 3], [1, 1], [10, 5], [0, 5]))
+}
+
+/** `dec3`: E-AC-3's bit stream information, for one independent substream of 5.1 and no dependent one. */
+export function dec3(): Uint8Array {
+  return box(
+    'dec3',
+    bits([640, 13], [0, 3]), // the data rate, in kbit/s, and one independent substream less one
+    bits([0, 2], [16, 5], [0, 1], [0, 1], [0, 3], [7, 3], [1, 1], [0, 3], [0, 4], [0, 1]),
+  )
+}
+
+/** `alac`, as the child of an `alac` entry: a full box holding ALAC's 24-byte specific configuration (4096 frames of 16 bits, stereo). */
+export function alacConfig(): Uint8Array {
+  return fullBox(
+    'alac',
+    0,
+    0,
+    u32(4096), // the frame length
+    [0, 16, 40, 10, 14, 2], // the compatible version, the bit depth, the Rice parameters, the channels
+    u16(255), // the longest run
+    u32(0), // the largest frame, in bytes (not known)
+    u32(0), // the average bit rate (not known)
+    u32(44100),
+  )
+}

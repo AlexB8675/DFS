@@ -8,7 +8,7 @@
  * - `no-picture`: it has no video track.
  * - `several-descriptions`: its picture or sound has more than one sample description.
  * - `edit-list`: its edit list does something the init segment can't say (§10.4).
- * - `unsupported-codec`: its picture or sound is in a codec that the player doesn't take.
+ * - `unsupported-codec`: its picture or sound is in a codec that no browser's Media Source takes in MP4.
  * - `damaged`: its boxes or tables are cut short, contradict themselves or don't add up.
  */
 export type Mp4Refusal =
