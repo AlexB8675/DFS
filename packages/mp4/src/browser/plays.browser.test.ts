@@ -25,7 +25,7 @@ import {
 } from '../index.ts'
 import type { PlayTrack } from '../index.ts'
 import type { CorpusFile } from '../testing/provided.ts'
-import { filesToPlay, fragmentRuns } from './choice.ts'
+import { filesToPlay, fragmentRuns, pictureEnd } from './choice.ts'
 import {
   appendAll,
   fetchRange,
@@ -48,6 +48,8 @@ const REACH_WITHIN_MS = 10_000
 const MIN_PICTURES = 30
 /** The clock must have moved this far for a video to count as having started. */
 const STARTED_SECONDS = 0.1
+/** How long a paused video is given to answer a new callback with the picture it already shows. */
+const SETTLE_MS = 250
 /** A test reads, appends and plays some megabytes, and the biggest files tens of them. */
 const TEST_TIMEOUT_MS = 90_000
 
@@ -301,19 +303,6 @@ function ranges(buffered: TimeRanges): string {
   return out.length === 0 ? 'none' : out.join(', ')
 }
 
-/** The end of the picture's last frame to be shown, in seconds with the offset applied: the picture's duration. */
-function pictureEnd(track: PlayTrack): number {
-  let end = 0
-  for (let i = 0; i < track.table.count; i += 1) {
-    end = Math.max(
-      end,
-      presentationSeconds(track.table, track.timing, i) +
-        (track.table.durations[i] ?? 0) / track.table.timescale,
-    )
-  }
-  return end
-}
-
 /** How many of the picture's frames are shown at or before the time. */
 function picturesBy(track: PlayTrack, seconds: number): number {
   let count = 0
@@ -385,12 +374,9 @@ function noDecoderHere(tracks: Tracks): boolean {
   )
 }
 
-/** The reason to skip a test for a browser that says it plays a codec and has no decoder for it. */
+/** The reason to skip a test for the one browser setting that says it plays HEVC and has no decoder for it (see `noDecoderHere`). */
 function neverStarted(tracks: Tracks, player: Player): string {
-  const window = noDecoderHere(tracks)
-    ? ' (headless Firefox decodes HEVC only with a window: DFS_HEADED=1)'
-    : ''
-  return `${BROWSER} claims ${tracks.video.codec} but never started playing here${window} [${standing(player)}]`
+  return `${BROWSER} claims ${tracks.video.codec} but never started playing here (headless Firefox decodes HEVC only with a window: DFS_HEADED=1) [${standing(player)}]`
 }
 
 /**
@@ -492,19 +478,27 @@ describe.each(files)('$name', (file) => {
           }
         }
 
-        // Played, muted, until the clock gets to REACH_SECONDS.
-        await guarded(file.name, 'picture', 'starting to play', () => player.video.play())
+        // Played, muted, until the clock gets to REACH_SECONDS. The promise `play()` gives is not awaited:
+        // it settles only once the video is playing, which a browser with no decoder for it never is.
+        let refused: string | undefined
+        player.video.play().catch((error: unknown) => {
+          refused = sentence(error)
+        })
         const played = await guarded(file.name, 'picture', 'playing', () =>
           playsUntil(player.video, REACH_SECONDS, REACH_WITHIN_MS),
         )
+        if (refused !== undefined) fail(file.name, 'picture', 'starting to play', refused)
         if (!played.reached) {
-          // The browser took the fragments and says it plays this, and nothing ever played: it has no decoder here.
-          if (played.highest < STARTED_SECONDS) return { skip: neverStarted(tracks, player) }
+          // The one browser that takes the fragments, says it plays this, and has no decoder for it: it is skipped.
+          // Anywhere else a start that never comes is the output's failure, and says how the page stands.
+          if (played.highest < STARTED_SECONDS && noDecoderHere(tracks)) {
+            return { skip: neverStarted(tracks, player) }
+          }
           fail(
             file.name,
             'picture',
             'playing',
-            `the clock stopped at ${played.highest.toFixed(3)} s, short of ${REACH_SECONDS} s within ${REACH_WITHIN_MS} ms (${standing(player)})`,
+            `${played.highest < STARTED_SECONDS ? 'it never started: the clock stayed at' : 'the clock stopped at'} ${played.highest.toFixed(3)} s, short of ${REACH_SECONDS} s within ${REACH_WITHIN_MS} ms (${standing(player)})`,
           )
         }
         const shown = player.video.getVideoPlaybackQuality().totalVideoFrames
@@ -573,19 +567,25 @@ describe.each(files)('$name', (file) => {
           )
         }
 
-        // Watching for pictures before the seek, so that the one it shows is not missed on a paused video.
+        // Watching for pictures before the seek, so that the one it shows is not missed on a paused video, and
+        // counting them before the time is set: a picture presented with or before `seeked` is the one to take,
+        // and not one to wait for again.
         video.pause()
         const watch = watchFrames(video)
+        // A browser may answer the first callback of a paused video with the picture it already shows (the
+        // first frame, at 0), which it has not told of: that is let come first, to be counted with what
+        // came before the seek, and not taken for the picture the seek shows.
+        await waitUntil(() => watch.shown.length > 0, SETTLE_MS)
+        const before = watch.shown.length
         const seeked = waitFor(video, 'seeked', REACH_WITHIN_MS)
         video.currentTime = target
         await guarded(file.name, 'picture', 'seeking', () => seeked)
         const error = mediaErrorOf(video)
         if (error) fail(file.name, 'picture', 'seeking', error.message)
-        const before = watch.shown.length
-        const arrived = await waitUntil(() => watch.shown.length > before, 2000)
+        await waitUntil(() => watch.shown.length > before, 2000)
         watch.stop()
-        // The first picture presented after `seeked` or, if the browser had presented it before the event, the last one before.
-        const mediaTime = arrived ? watch.shown[before] : watch.shown.at(-1)
+        // The first picture presented since the seek was asked for.
+        const mediaTime = watch.shown[before]
         if (mediaTime === undefined) {
           // A page that is hidden (its window minimized, or covered where the browser tracks that) is shown no pictures.
           if (document.visibilityState === 'hidden') {
@@ -614,7 +614,7 @@ describe.each(files)('$name', (file) => {
     },
   )
 
-  if (file.name === 'portrait-h264.mp4') {
+  if (file.synthetic && file.name.endsWith('/portrait-h264.mp4')) {
     it('a portrait video plays upright', { timeout: TEST_TIMEOUT_MS }, async (ctx) => {
       const tracks = await tracksOf()
       skipUnsupported(ctx, tracks)

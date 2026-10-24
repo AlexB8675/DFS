@@ -1,6 +1,6 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { resolve } from 'node:path'
+import { basename, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { parseRange, playsAll, startCorpusServer } from './serve.ts'
 import type { CorpusServer } from './serve.ts'
@@ -71,12 +71,41 @@ describe('startCorpusServer', () => {
 
   const at = (id: number) => `${server.info.url}/file/${id}`
 
-  it('lists each file by id and base name, with its size, expectation and whether it is a synthetic one, and no path', () => {
+  it('lists each file by id and a title, with its size, expectation and whether it is a synthetic one, and no path', () => {
     // A file outside the corpus's synthetic folder is one of the user's, however it is named.
+    // The title is the folder's name and the file's, as the corpus suite's are (`uniqueTitles`).
     expect(server.info.files).toEqual([
-      { id: 0, name: 'clip.mp4', expect: 'plays', size: 1000, synthetic: false },
+      {
+        id: 0,
+        name: `${basename(folder)}/clip.mp4`,
+        expect: 'plays',
+        size: 1000,
+        synthetic: false,
+      },
     ])
     expect(JSON.stringify(server.info)).not.toContain(folder.replaceAll('\\', '/'))
+  })
+
+  it('makes the titles different when two files have the same folder name and file name', async () => {
+    const one = resolve(folder, 'a', 'same')
+    const two = resolve(folder, 'b', 'same')
+    mkdirSync(one, { recursive: true })
+    mkdirSync(two, { recursive: true })
+    writeFileSync(resolve(one, 'clip.mp4'), bytes)
+    writeFileSync(resolve(two, 'clip.mp4'), bytes)
+    const other = await startCorpusServer([
+      { path: resolve(one, 'clip.mp4'), expect: 'plays' },
+      { path: resolve(two, 'clip.mp4'), expect: 'plays' },
+    ])
+    try {
+      expect(other.info.files.map((file) => file.name)).toEqual([
+        'same/clip.mp4',
+        'same/clip.mp4 (2)',
+      ])
+      expect(JSON.stringify(other.info)).not.toContain(folder.replaceAll('\\', '/'))
+    } finally {
+      await other.close()
+    }
   })
 
   it('answers a range with 206, the bytes asked for and their Content-Range', async () => {
@@ -147,7 +176,13 @@ describe('startCorpusServer', () => {
     ])
     try {
       expect(other.info.files).toEqual([
-        { id: 0, name: 'present.mp4', expect: 'plays', size: 1000, synthetic: false },
+        {
+          id: 0,
+          name: `${basename(folder)}/present.mp4`,
+          expect: 'plays',
+          size: 1000,
+          synthetic: false,
+        },
       ])
       expect(warn).toHaveBeenCalledTimes(1)
       expect(String(warn.mock.calls[0]?.[0])).toContain('2 of 3')

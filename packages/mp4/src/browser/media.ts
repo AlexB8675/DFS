@@ -59,7 +59,7 @@ export async function appendAll(
 const PLAYING_SECONDS = 0.1
 
 /** The video's `MediaError` as an Error that says its code and message, or null while it has none. */
-export function mediaErrorOf(video: HTMLVideoElement): Error | null {
+export function mediaErrorOf(video: HTMLMediaElement): Error | null {
   const { error } = video
   if (!error) return null
   return new Error(
@@ -89,13 +89,18 @@ export async function startsPlaying(video: HTMLVideoElement, ms: number): Promis
 /**
  * Resolves once the media source has opened, or rejects with the video's
  * `MediaError` if the video reports one first (see {@link mediaErrorOf}), so that
- * a failure doesn't wait out the test's timeout. Called before the video is given
- * the source's URL, as the event comes after it.
+ * a failure doesn't wait out the test's timeout. A source that is already open, or
+ * a video that already has its error, settles it at once: the events have come
+ * and gone. Called before the video is given the source's URL for a new one, as
+ * the event comes after it.
  */
 export function mediaSourceOpened(
   video: HTMLVideoElement,
   mediaSource: MediaSource,
 ): Promise<void> {
+  const failed = mediaErrorOf(video)
+  if (failed) return Promise.reject(failed)
+  if (mediaSource.readyState === 'open') return Promise.resolve()
   return new Promise<void>((resolve, reject) => {
     const finish = (error?: Error): void => {
       mediaSource.removeEventListener('sourceopen', onOpen)
@@ -119,7 +124,8 @@ export function mediaSourceOpened(
  * milliseconds from the call or until it reaches `seconds`: whether it did, and
  * the highest it was seen to be (a video that never started stays near where it
  * was). Starting the video is for the caller. Like {@link startsPlaying}, it throws
- * the video's `MediaError` at once if it has one.
+ * the video's `MediaError` at once if it has one, and it returns at once, short of
+ * `seconds`, once the video has ended.
  */
 export async function playsUntil(
   video: HTMLVideoElement,
@@ -133,23 +139,45 @@ export async function playsUntil(
     if (error) throw error
     highest = Math.max(highest, video.currentTime)
     if (highest >= seconds) return { reached: true, highest }
+    // A clip that has ended is not going further, and its test need not wait out the time it was given.
+    if (video.ended) return { reached: false, highest }
     if (performance.now() >= until) return { reached: false, highest }
     await new Promise((resolve) => setTimeout(resolve, 25))
   }
 }
 
-/** Resolves at the next event of the type on the target, or rejects with a sentence if none comes within `ms` milliseconds. */
+/**
+ * Resolves at the next event of the type on the target, or rejects with a
+ * sentence if none comes within `ms` milliseconds. For a video (or audio) element
+ * it rejects at once, with its `MediaError` (see {@link mediaErrorOf}), if it has
+ * one or gets one first: an event that a failed element will never send is not
+ * waited for.
+ */
 export function waitFor(target: EventTarget, type: string, ms: number): Promise<void> {
+  const media = target instanceof HTMLMediaElement ? target : null
+  const failed = media ? mediaErrorOf(media) : null
+  if (failed) return Promise.reject(failed)
   return new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => {
+    const finish = (error?: Error): void => {
+      clearTimeout(timer)
       target.removeEventListener(type, onEvent)
-      reject(new Error(`No '${type}' event came within ${ms} ms.`))
+      media?.removeEventListener('error', onError)
+      if (error) reject(error)
+      else resolve()
+    }
+    const timer = setTimeout(() => {
+      finish(new Error(`No '${type}' event came within ${ms} ms.`))
     }, ms)
     const onEvent = (): void => {
-      clearTimeout(timer)
-      resolve()
+      finish()
+    }
+    const onError = (): void => {
+      finish(
+        (media ? mediaErrorOf(media) : null) ?? new Error('The media element reported an error.'),
+      )
     }
     target.addEventListener(type, onEvent, { once: true })
+    media?.addEventListener('error', onError)
   })
 }
 

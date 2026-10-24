@@ -5,7 +5,7 @@ import { defineConfig } from 'vitest/config'
 // The browser suites (DESIGN.md §10.4, D45) run the repackager's output in real
 // browsers, against a Range server over the corpus (src/testing/serve.ts). Chrome
 // is the one installed on this PC and is the default (`DFS_CHROME_CHANNEL` names
-// another installed channel, such as `msedge` on a machine without Chrome);
+// another installed channel, such as `msedge`, or `none` for Playwright's own Chromium);
 // `DFS_BROWSERS=chromium,firefox` adds Playwright's Firefox
 // (`pnpm --filter @dfs/mp4 exec playwright install firefox`), and either can be
 // left out. `DFS_HEADED=1` shows the windows: Firefox plays HEVC only then.
@@ -25,9 +25,17 @@ if (wanted.length === 0 || unknown.length > 0) {
   )
 }
 
-const chromeChannel = process.env.DFS_CHROME_CHANNEL?.trim()
-  ? process.env.DFS_CHROME_CHANNEL.trim()
-  : 'chrome'
+// Unset, the installed Chrome; `msedge` and the like name another installed browser; an empty value
+// or `none` names none, and leaves the channel out for Playwright's own Chromium (`playwright install
+// chromium`), for a machine without any. That Chromium is built without H.264, AAC and HEVC, so most
+// of the corpus is skipped there, each file saying it can't play its codec.
+const channelValue = process.env.DFS_CHROME_CHANNEL?.trim()
+const chromeChannel =
+  channelValue === undefined
+    ? 'chrome'
+    : channelValue === '' || channelValue === 'none'
+      ? undefined
+      : channelValue
 
 const instances: BrowserInstanceOption[] = []
 if (wanted.includes('chromium')) {
@@ -38,7 +46,7 @@ if (wanted.includes('chromium')) {
       // downloaded for it. A page that plays without a click is allowed to, as the
       // media tests have no user to give one.
       launchOptions: {
-        channel: chromeChannel,
+        ...(chromeChannel === undefined ? {} : { channel: chromeChannel }),
         args: ['--autoplay-policy=no-user-gesture-required'],
       },
     }),

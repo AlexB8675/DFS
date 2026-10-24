@@ -4,14 +4,22 @@
 // can't say anything about the repackager.
 
 import { describe, expect, inject, test } from 'vitest'
-import { appendAll, fetchRange, mediaSourceOpened, startsPlaying } from './media.ts'
+import {
+  appendAll,
+  fetchRange,
+  mediaSourceOpened,
+  playsUntil,
+  startsPlaying,
+  waitFor,
+  waitUntil,
+} from './media.ts'
 
 /** The synthetic H.264 High 720p30 with AAC, which FFmpeg wrote as a fragmented file. */
 const FRAGMENTED_TYPE = 'video/mp4; codecs="avc1.64001f,mp4a.40.2"'
 
 function fragmentedFile(): { url: string; size: number } | undefined {
   const { url, files } = inject('corpus')
-  const file = files.find((entry) => entry.name === 'fragmented.mp4')
+  const file = files.find((entry) => entry.synthetic && entry.name.endsWith('/fragmented.mp4'))
   return file ? { url: `${url}/file/${file.id}`, size: file.size } : undefined
 }
 
@@ -116,6 +124,100 @@ describe('says at once what a video could not do', () => {
       await expect(mediaSourceOpened(video, new MediaSource())).rejects.toThrow(/MediaError 4/)
     } finally {
       done()
+    }
+  })
+
+  /** Rejects if the promise has not settled within `ms`: a wait that would otherwise last the whole test's timeout. */
+  async function within<T>(promise: Promise<T>, ms: number): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            reject(new Error(`Still waiting after ${ms} ms.`))
+          }, ms)
+        }),
+      ])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  test('mediaSourceOpened settles at once for a media source that is already open', async () => {
+    const mediaSource = new MediaSource()
+    const video = document.createElement('video')
+    document.body.append(video)
+    const objectUrl = URL.createObjectURL(mediaSource)
+    try {
+      const opened = mediaSourceOpened(video, mediaSource)
+      video.src = objectUrl
+      await opened
+      expect(mediaSource.readyState).toBe('open')
+      // The event has come and gone: a second call must not wait for another.
+      await within(mediaSourceOpened(video, mediaSource), 3000)
+    } finally {
+      video.removeAttribute('src')
+      video.load()
+      video.remove()
+      URL.revokeObjectURL(objectUrl)
+    }
+  })
+
+  test('mediaSourceOpened rejects at once for a video that already has an error', async () => {
+    const { video, done } = brokenVideo()
+    try {
+      expect(await waitUntil(() => video.error !== null, 10_000)).toBe(true)
+      // The error event has come and gone: the call must see the error, not wait for another.
+      await expect(within(mediaSourceOpened(video, new MediaSource()), 3000)).rejects.toThrow(
+        /MediaError 4/,
+      )
+    } finally {
+      done()
+    }
+  })
+
+  test('waitFor rejects with the video’s error as soon as it has one, rather than wait for the event', async () => {
+    const { video, done } = brokenVideo()
+    try {
+      await expect(within(waitFor(video, 'seeked', 20_000), 3000)).rejects.toThrow(/MediaError 4/)
+    } finally {
+      done()
+    }
+  })
+
+  test('playsUntil returns as soon as the video has ended, short of the time asked for', async (ctx) => {
+    const { url, files } = inject('corpus')
+    const file = files.find((entry) => entry.synthetic && entry.name.endsWith('/fragmented.mp4'))
+    if (!file) return ctx.skip('The corpus has no fragmented.mp4 (run corpus:make).')
+    const mediaSource = new MediaSource()
+    const video = document.createElement('video')
+    video.muted = true
+    video.playsInline = true
+    document.body.append(video)
+    const objectUrl = URL.createObjectURL(mediaSource)
+    try {
+      const opened = mediaSourceOpened(video, mediaSource)
+      video.src = objectUrl
+      await opened
+      const buffer = mediaSource.addSourceBuffer(FRAGMENTED_TYPE)
+      await appendAll(buffer, [await fetchRange(`${url}/file/${file.id}`, 0, file.size - 1)])
+      mediaSource.endOfStream()
+      // Eight times as fast, so that the end of the clip comes in a second or two (headed Firefox does not play at 16).
+      video.playbackRate = 8
+      await video.play()
+      const began = performance.now()
+      const played = await playsUntil(video, 1_000_000, 25_000)
+      expect(played.reached).toBe(false)
+      expect(video.ended).toBe(true)
+      // It did not wait out the 25 s it was given.
+      expect(performance.now() - began).toBeLessThan(10_000)
+    } finally {
+      video.pause()
+      video.removeAttribute('src')
+      video.load()
+      video.remove()
+      URL.revokeObjectURL(objectUrl)
     }
   })
 })

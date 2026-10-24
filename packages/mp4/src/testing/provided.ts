@@ -5,7 +5,7 @@
 
 import type { Mp4Refusal } from '../errors.ts'
 
-/** One corpus file as a browser knows it: served at `${url}/file/${id}`, and named by its base name alone, as paths never reach the browser. */
+/** One corpus file as a browser knows it: served at `${url}/file/${id}`, and named by its title (the folder's name and the file's, as `Final/a.mp4`, different for every file), as paths never reach the browser. */
 export interface CorpusFile {
   id: number
   name: string

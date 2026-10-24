@@ -1,10 +1,15 @@
 // What the browser suites decide before they play anything (DESIGN.md §10.4,
-// D45): which of the corpus's files to play, and how to cut a stretch of frames
-// into fragments. Pure functions of names, sizes and a frame table, so that they
+// D45): which of the corpus's files to play, how to cut a stretch of frames
+// into fragments, and where a picture ends. Pure functions of names, sizes and a
+// frame table, so that they
 // are tested in Node, though only the browser suites use them. They stand in for
 // the player's own choices, which come in step 4.
 
-/** What the choice needs of a corpus file: a base name, the size, whether `corpus:make` made it, and what is expected of it. */
+import type { FrameTable } from '../frames.ts'
+import { presentationSeconds } from '../timing.ts'
+import type { TrackTiming } from '../timing.ts'
+
+/** What the choice needs of a corpus file: its title, the size, whether `corpus:make` made it, and what is expected of it. */
 export interface Candidate {
   name: string
   size: number
@@ -93,4 +98,23 @@ export function fragmentRuns(
   }
   if (to > start) runs.push([start, to])
   return runs
+}
+
+/**
+ * Where the picture ends, in seconds with the track's offset applied: the end of
+ * the frame shown last (which isn't the last one decoded where frames are
+ * reordered), and no later than where the media edit ends when the track has one
+ * (`timing.endSeconds`, the player's `appendWindowEnd`), as footage a trim cut
+ * stays behind the edit list and is not played. A seek is made inside it.
+ */
+export function pictureEnd(track: { table: FrameTable; timing: TrackTiming }): number {
+  const { table, timing } = track
+  let end = 0
+  for (let i = 0; i < table.count; i += 1) {
+    end = Math.max(
+      end,
+      presentationSeconds(table, timing, i) + (table.durations[i] ?? 0) / table.timescale,
+    )
+  }
+  return timing.endSeconds === null ? end : Math.min(end, timing.endSeconds)
 }

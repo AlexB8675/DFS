@@ -10,10 +10,10 @@ import { stat } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { basename, extname } from 'node:path'
+import { extname } from 'node:path'
 import { pipeline } from 'node:stream'
 import type { TestProject } from 'vitest/node'
-import { isSynthetic, loadManifest } from './corpus.ts'
+import { isSynthetic, loadManifest, uniqueTitles } from './corpus.ts'
 import type { ManifestEntry } from './corpus.ts'
 import type { CorpusInfo } from './provided.ts'
 
@@ -164,6 +164,8 @@ export async function startCorpusServer(entries: readonly ManifestEntry[]): Prom
     )
   }
   const paths = present.map(({ entry }) => entry.path)
+  // The same titles as the corpus suite's (the folder's name and the file's, different for every file), never a path.
+  const titles = uniqueTitles(paths)
   const server = createServer((req, res) => {
     handle(req, res, paths).catch(() => {
       if (res.headersSent) res.destroy()
@@ -183,7 +185,7 @@ export async function startCorpusServer(entries: readonly ManifestEntry[]): Prom
       url: `http://127.0.0.1:${port}`,
       files: present.map(({ entry, size }, id) => ({
         id,
-        name: basename(entry.path),
+        name: titles[id] ?? '',
         expect: entry.expect,
         size,
         synthetic: isSynthetic(entry.path),

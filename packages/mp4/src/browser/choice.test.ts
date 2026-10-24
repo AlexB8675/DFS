@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { FrameTable } from '../frames.ts'
-import { filesToPlay, fragmentRuns } from './choice.ts'
+import { filesToPlay, fragmentRuns, pictureEnd } from './choice.ts'
 import type { Candidate } from './choice.ts'
 
 // Which files the browser suites play, and how a stretch of frames is split into
@@ -185,5 +185,33 @@ describe('fragmentRuns', () => {
     // 48 000 ticks a second and 1024 a frame: 46 frames cover 0.981 s, and a 47th would pass the second.
     const runs = fragmentRuns(table(frames(100, 1024), [], 48000), 0, 100, false)
     expect(runs.map(([from, to]) => to - from)).toEqual([46, 46, 8])
+  })
+})
+
+describe('pictureEnd', () => {
+  it('is where the last frame to be shown ends, with the offset applied', () => {
+    // Ten frames of 0.1 s (100 ticks of 1000 a second), the offset -0.2 s: shown from -0.2 s to 0.8 s.
+    const track = {
+      table: table(frames(10), [0]),
+      timing: { offsetSeconds: -0.2, endSeconds: null },
+    }
+    expect(pictureEnd(track)).toBeCloseTo(0.8, 9)
+  })
+
+  it('goes by the frame shown last, which is not the last one decoded when frames are reordered', () => {
+    // The third frame is decoded last but shown at 0.1 s; the second is shown last, at 0.3 s (a composition offset of 200 ticks).
+    const reordered = table(frames(3), [0])
+    reordered.cts[1] = 200
+    reordered.cts[2] = -100
+    const track = { table: reordered, timing: { offsetSeconds: 0, endSeconds: null } }
+    expect(pictureEnd(track)).toBeCloseTo(0.4, 9)
+  })
+
+  it("stops at the edit's end when the track has one, so that a trimmed recording is not sought past it", () => {
+    // Ten frames shown until 1 s, but the media edit ends at 0.6 s: the footage after it is cut by the append window.
+    const track = { table: table(frames(10), [0]), timing: { offsetSeconds: 0, endSeconds: 0.6 } }
+    expect(pictureEnd(track)).toBeCloseTo(0.6, 9)
+    // An edit that ends after the frames do changes nothing.
+    expect(pictureEnd({ ...track, timing: { offsetSeconds: 0, endSeconds: 5 } })).toBeCloseTo(1, 9)
   })
 })
