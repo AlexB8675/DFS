@@ -45,14 +45,9 @@ const SEEK_AHEAD_SECONDS = 2
 /** Where a start must have got to, how long it has to get there, and how many pictures it must have shown by then. */
 const REACH_SECONDS = 1.5
 const REACH_WITHIN_MS = 10_000
-/** How long a start gets to begin on its own before a gap at its start is jumped, and how wide a gap is one. */
-const GAP_GRACE_MS = 1500
-const GAP_SECONDS = 0.001
 const MIN_PICTURES = 30
 /** The clock must have moved this far for a video to count as having started. */
 const STARTED_SECONDS = 0.1
-/** Two times this close (a tenth of a millisecond) are of one frame: the browser keeps them in microseconds. */
-const SAME_FRAME_SECONDS = 1e-4
 /** A test reads, appends and plays some megabytes, and the biggest files tens of them. */
 const TEST_TIMEOUT_MS = 90_000
 
@@ -282,7 +277,7 @@ function firstFrameSeconds(track: PlayTrack): number {
 /** How the player stands, for a failure's sake: the media source's state, the video's error, what is buffered. */
 function standing(player: Player): string {
   const sound = player.sound ? ranges(player.sound.buffered) : 'no sound'
-  return `media source ${player.mediaSource.readyState}, ${mediaErrorOf(player.video)?.message ?? 'no MediaError'}, readyState ${player.video.readyState}, picture buffered ${ranges(player.picture.buffered)}, sound buffered ${sound}`
+  return `page ${document.visibilityState}, media source ${player.mediaSource.readyState}, ${mediaErrorOf(player.video)?.message ?? 'no MediaError'}, readyState ${player.video.readyState}, picture buffered ${ranges(player.picture.buffered)}, sound buffered ${sound}`
 }
 
 /** The first buffered second of a SourceBuffer, which must have some. */
@@ -332,30 +327,21 @@ function picturesBy(track: PlayTrack, seconds: number): number {
  * The picture a seek to `target` should show, by the table: the one shown at the
  * target (the last shown at or before it) is `covering`; `expected` is the first
  * shown at or after half a frame before the target, as the brief puts it; and
- * `half` is half the covering frame's duration, the tolerance. `spanning` are the
- * times of the frames that the table itself gives the target in: a frame that is shown
- * at or before it, and lasts past it by its own duration. For an ordinary picture that is
- * `covering` alone; but a picture with B-frames and irregular durations (a phone's, at a
- * variable rate) has frames whose durations, which are the steps in decode time, run
- * past the ones shown after them, and Chrome's Media Source, which takes a frame's
- * duration from the fragment, shows such a frame for the whole of it.
+ * `half` is half the covering frame's duration, the tolerance.
  */
 function pictureAt(
   track: PlayTrack,
   target: number,
-): { covering: number; expected: number; half: number; spanning: number[] } {
+): { covering: number; expected: number; half: number } {
   const { table, timing } = track
   let covering = -Infinity
   let coveringDuration = 0
-  const spanning: number[] = []
   for (let i = 0; i < table.count; i += 1) {
     const shown = presentationSeconds(table, timing, i)
-    const duration = (table.durations[i] ?? 0) / table.timescale
     if (shown <= target && shown > covering) {
       covering = shown
-      coveringDuration = duration
+      coveringDuration = (table.durations[i] ?? 0) / table.timescale
     }
-    if (shown <= target && target < shown + duration) spanning.push(shown)
   }
   const half = coveringDuration / 2
   let expected = Infinity
@@ -363,7 +349,7 @@ function pictureAt(
     const shown = presentationSeconds(table, timing, i)
     if (shown >= target - half && shown < expected) expected = shown
   }
-  return { covering, expected, half, spanning }
+  return { covering, expected, half }
 }
 
 /**
@@ -508,30 +494,9 @@ describe.each(files)('$name', (file) => {
 
         // Played, muted, until the clock gets to REACH_SECONDS.
         await guarded(file.name, 'picture', 'starting to play', () => player.video.play())
-        let played = await guarded(file.name, 'picture', 'playing', () =>
-          playsUntil(player.video, REACH_SECONDS, GAP_GRACE_MS),
+        const played = await guarded(file.name, 'picture', 'playing', () =>
+          playsUntil(player.video, REACH_SECONDS, REACH_WITHIN_MS),
         )
-        // A sound that an empty edit puts later leaves no data at 0 for the two buffers together, and Firefox
-        // then waits (at readyState 1) while Chrome plays on. A player jumps such a gap at the start, to where
-        // the buffers begin, and so does this: the buffers' starts are checked above, not by waiting here.
-        const { video } = player
-        if (
-          !played.reached &&
-          played.highest < STARTED_SECONDS &&
-          video.buffered.length > 0 &&
-          video.buffered.start(0) > video.currentTime + GAP_SECONDS
-        ) {
-          const gapEnd = video.buffered.start(0)
-          await ctx.annotate(
-            `${file.name}: ${BROWSER} waited at readyState ${video.readyState} for data at 0, the buffers beginning at ${gapEnd.toFixed(3)} s; jumped the gap`,
-          )
-          video.currentTime = gapEnd
-        }
-        if (!played.reached) {
-          played = await guarded(file.name, 'picture', 'playing', () =>
-            playsUntil(video, REACH_SECONDS, REACH_WITHIN_MS),
-          )
-        }
         if (!played.reached) {
           // The browser took the fragments and says it plays this, and nothing ever played: it has no decoder here.
           if (played.highest < STARTED_SECONDS) return { skip: neverStarted(tracks, player) }
@@ -636,15 +601,13 @@ describe.each(files)('$name', (file) => {
           )
         }
 
-        const { covering, expected, half, spanning } = pictureAt(picture, target)
-        // A frame the table's own durations make last past the target is one that may be shown there (see pictureAt).
-        const spans = spanning.some((time) => Math.abs(mediaTime - time) < SAME_FRAME_SECONDS)
-        if (Math.abs(mediaTime - expected) > half && !spans) {
+        const { covering, expected, half } = pictureAt(picture, target)
+        if (Math.abs(mediaTime - expected) > half) {
           fail(
             file.name,
             'picture',
             'the frame shown after the seek',
-            `mediaTime ${mediaTime.toFixed(4)} s after a seek to ${target.toFixed(4)} s; the table has the frame at that time at ${covering.toFixed(4)} s and the first at or after half a frame before it at ${expected.toFixed(4)} s (half a frame is ${half.toFixed(4)} s), and frames lasting past it from ${spanning.map((time) => time.toFixed(4)).join(', ')}; every mediaTime seen: ${watch.shown.map((time) => time.toFixed(4)).join(', ')}`,
+            `mediaTime ${mediaTime.toFixed(4)} s after a seek to ${target.toFixed(4)} s; the table has the frame at that time at ${covering.toFixed(4)} s and the first at or after half a frame before it at ${expected.toFixed(4)} s (half a frame is ${half.toFixed(4)} s); every mediaTime seen: ${watch.shown.map((time) => time.toFixed(4)).join(', ')}`,
           )
         }
       })
