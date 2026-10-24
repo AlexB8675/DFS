@@ -154,8 +154,56 @@ describe('startCorpusServer', () => {
     await response.arrayBuffer()
   })
 
-  it('has nothing at any other path, for another id, or for another method', async () => {
-    for (const path of ['/', '/file/1', '/file/-1', '/file/0/extra', '/file/../0']) {
+  it('puts a random token of 32 hex characters in the path of its URL', () => {
+    // The browser page is on another origin and is given this URL: the token is what keeps any other page from the files.
+    expect(new URL(server.info.url).pathname).toMatch(/^\/[0-9a-f]{32}$/)
+  })
+
+  it('serves a file only under its token: not without it, nor under another one, nor one of another length', async () => {
+    const { origin, pathname } = new URL(server.info.url)
+    const token = pathname.slice(1)
+    // Every character different, so that it can never be the token itself.
+    const other = token.replaceAll(/./g, (digit) => (digit === '0' ? '1' : '0'))
+    for (const path of [
+      '/file/0',
+      `/${other}/file/0`,
+      `/${token.slice(0, -1)}/file/0`,
+      `/${token}0/file/0`,
+    ]) {
+      const response = await fetch(`${origin}${path}`, { headers: { Range: 'bytes=0-3' } })
+      expect(response.status, path).toBe(404)
+      expect((await response.arrayBuffer()).byteLength, path).toBe(0)
+    }
+    const served = await fetch(`${server.info.url}/file/0`, { headers: { Range: 'bytes=0-3' } })
+    expect(served.status).toBe(206)
+    expect(new Uint8Array(await served.arrayBuffer())).toEqual(bytes.subarray(0, 4))
+  })
+
+  it('gives each server its own token, which no other server answers to', async () => {
+    const other = await startCorpusServer([{ path: resolve(folder, 'clip.mp4'), expect: 'plays' }])
+    try {
+      const mine = new URL(server.info.url)
+      const theirs = new URL(other.info.url)
+      expect(theirs.pathname).not.toBe(mine.pathname)
+      for (const [on, under] of [
+        [mine, theirs],
+        [theirs, mine],
+      ] as const) {
+        const refused = await fetch(`${on.origin}${under.pathname}/file/0`)
+        expect(refused.status, `${on.origin}${under.pathname}`).toBe(404)
+        await refused.arrayBuffer()
+        const served = await fetch(`${on.origin}${on.pathname}/file/0`)
+        expect(served.status, `${on.origin}${on.pathname}`).toBe(200)
+        await served.arrayBuffer()
+      }
+    } finally {
+      await other.close()
+    }
+  })
+
+  it('has nothing at any other path under the token, for another id, or for another method', async () => {
+    // The URL is the token's path, so each of these is under it: `''` is the token alone, and `/` is the token with a slash.
+    for (const path of ['', '/', '/file/1', '/file/-1', '/file/0/extra', '/file/../0']) {
       const response = await fetch(`${server.info.url}${path}`)
       expect(response.status, path).toBe(404)
       await response.arrayBuffer()

@@ -17,6 +17,7 @@ export interface CorpusFile {
 
 /** The Range server over the corpus: where it is, and the files of the manifest that are there. */
 export interface CorpusInfo {
+  /** Its address, ending in the run's random token (`http://127.0.0.1:<port>/<token>`): files are served only under it, so build their URLs from this, not from its origin. */
   url: string
   files: CorpusFile[]
 }

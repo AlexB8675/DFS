@@ -2,9 +2,13 @@
 // Vitest runs this as the browser config's `globalSetup`: it serves the
 // manifest's files where the browser can fetch them (the player reads a file by
 // Range, so does this), and `provide`s `corpus` for the tests to `inject`. Paths
-// stay here: the browser is given an id and a base name for each file. Tests and
-// scripts only: the package itself does no I/O.
+// stay here: the browser is given an id and a base name for each file. The files
+// are served at `http://127.0.0.1:<port>/<token>/file/<id>`, under a random token
+// of each run, so that no other page on the computer can read them: they include
+// the user's videos, which never leave it. Tests and scripts only: the package
+// itself does no I/O.
 
+import { randomBytes } from 'node:crypto'
 import { createReadStream, statSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { createServer } from 'node:http'
@@ -61,7 +65,11 @@ const TYPES: Readonly<Record<string, string>> = {
   '.mov': 'video/quicktime',
 }
 
-/** The page that runs the tests is on another port, so another origin: it may fetch by Range and read the headers a player needs. */
+/**
+ * The page that runs the tests is on another port, so another origin, and which one isn't known when the server starts: so any origin may fetch by
+ * Range and read the headers a player needs. What keeps another page from the files is the token in their path (`startCorpusServer`), which
+ * only this run's page is given: a page that can't name the path has nothing to fetch.
+ */
 const CORS: Readonly<Record<string, string>> = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
@@ -79,10 +87,12 @@ function reply(
   res.end()
 }
 
+/** Answers a request: a file of `paths` at `/<token>/file/<id>`, and nothing at any other path, one under another token included. */
 async function handle(
   req: IncomingMessage,
   res: ServerResponse,
   paths: readonly string[],
+  token: string,
 ): Promise<void> {
   if (req.method === 'OPTIONS') {
     reply(res, 204)
@@ -92,7 +102,11 @@ async function handle(
     reply(res, 405, { Allow: 'GET, HEAD, OPTIONS' })
     return
   }
-  const id = /^\/file\/(\d+)$/.exec(new URL(req.url ?? '/', 'http://localhost').pathname)?.[1]
+  const match = /^\/([^/]+)\/file\/(\d+)$/.exec(
+    new URL(req.url ?? '/', 'http://localhost').pathname,
+  )
+  // A wrong token is a path the server never had, as a missing one is.
+  const id = match?.[1] === token ? match[2] : undefined
   const path = id === undefined ? undefined : paths[Number(id)]
   if (path === undefined) {
     reply(res, 404)
@@ -143,11 +157,15 @@ export interface CorpusServer {
 }
 
 /**
- * Serves the entries' files at `http://127.0.0.1:<port>/file/<id>`, `id` being the
- * entry's place in the list, on a port the system picks. Only those files can
- * be reached, and only by id. An entry whose file is gone from the disk (or can't
- * be looked at) is left out, with one warning for all of them, and the ids are the
- * places in the list of those that are left.
+ * Serves the entries' files at `http://127.0.0.1:<port>/<token>/file/<id>`, `id`
+ * being the entry's place in the list, on a port the system picks. The token is
+ * 128 random bits (32 hex characters), new for each server, and is part of the
+ * `url` that `info` gives: the files are served nowhere else, so the page that is
+ * given the URL can read them and no other page can, whatever its origin (CORS
+ * allows any, as the test page's isn't known when this starts). Only those files
+ * can be reached, and only by id. An entry whose file is gone from the disk (or
+ * can't be looked at) is left out, with one warning for all of them, and the ids
+ * are the places in the list of those that are left.
  */
 export async function startCorpusServer(entries: readonly ManifestEntry[]): Promise<CorpusServer> {
   const present: { entry: ManifestEntry; size: number }[] = []
@@ -166,8 +184,9 @@ export async function startCorpusServer(entries: readonly ManifestEntry[]): Prom
   const paths = present.map(({ entry }) => entry.path)
   // The same titles as the corpus suite's (the folder's name and the file's, different for every file), never a path.
   const titles = uniqueTitles(paths)
+  const token = randomBytes(16).toString('hex')
   const server = createServer((req, res) => {
-    handle(req, res, paths).catch(() => {
+    handle(req, res, paths, token).catch(() => {
       if (res.headersSent) res.destroy()
       else reply(res, 500)
     })
@@ -182,7 +201,7 @@ export async function startCorpusServer(entries: readonly ManifestEntry[]): Prom
   const { port } = server.address() as AddressInfo
   return {
     info: {
-      url: `http://127.0.0.1:${port}`,
+      url: `http://127.0.0.1:${port}/${token}`,
       files: present.map(({ entry, size }, id) => ({
         id,
         name: titles[id] ?? '',
