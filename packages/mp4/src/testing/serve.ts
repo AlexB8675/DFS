@@ -13,7 +13,7 @@ import type { AddressInfo } from 'node:net'
 import { basename, extname } from 'node:path'
 import { pipeline } from 'node:stream'
 import type { TestProject } from 'vitest/node'
-import { loadManifest } from './corpus.ts'
+import { isSynthetic, loadManifest } from './corpus.ts'
 import type { ManifestEntry } from './corpus.ts'
 import type { CorpusInfo } from './provided.ts'
 
@@ -186,6 +186,7 @@ export async function startCorpusServer(entries: readonly ManifestEntry[]): Prom
         name: basename(entry.path),
         expect: entry.expect,
         size,
+        synthetic: isSynthetic(entry.path),
       })),
     },
     close: () =>
@@ -199,9 +200,15 @@ export async function startCorpusServer(entries: readonly ManifestEntry[]): Prom
   }
 }
 
-/** Vitest's `globalSetup`: starts the server over the manifest, provides `corpus`, and closes the server at the end. */
+/** Whether the environment asks for every file that is expected to play to be played, and not the sample of them (`DFS_CORPUS_ALL=1`): the browser has no environment to ask. */
+export function playsAll(env: Readonly<Record<string, string | undefined>>): boolean {
+  return env.DFS_CORPUS_ALL === '1'
+}
+
+/** Vitest's `globalSetup`: starts the server over the manifest, provides `corpus` and `playAll`, and closes the server at the end. */
 export default async function setup(project: TestProject): Promise<() => Promise<void>> {
   const server = await startCorpusServer(loadManifest())
   project.provide('corpus', server.info)
+  project.provide('playAll', playsAll(process.env))
   return server.close
 }

@@ -113,3 +113,82 @@ export function mediaSourceOpened(
     video.addEventListener('error', onError)
   })
 }
+
+/**
+ * How far `video.currentTime` gets, polled every 25 ms for up to `ms`
+ * milliseconds from the call or until it reaches `seconds`: whether it did, and
+ * the highest it was seen to be (a video that never started stays near where it
+ * was). Starting the video is for the caller. Like {@link startsPlaying}, it throws
+ * the video's `MediaError` at once if it has one.
+ */
+export async function playsUntil(
+  video: HTMLVideoElement,
+  seconds: number,
+  ms: number,
+): Promise<{ reached: boolean; highest: number }> {
+  const until = performance.now() + ms
+  let highest = video.currentTime
+  for (;;) {
+    const error = mediaErrorOf(video)
+    if (error) throw error
+    highest = Math.max(highest, video.currentTime)
+    if (highest >= seconds) return { reached: true, highest }
+    if (performance.now() >= until) return { reached: false, highest }
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+}
+
+/** Resolves at the next event of the type on the target, or rejects with a sentence if none comes within `ms` milliseconds. */
+export function waitFor(target: EventTarget, type: string, ms: number): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      target.removeEventListener(type, onEvent)
+      reject(new Error(`No '${type}' event came within ${ms} ms.`))
+    }, ms)
+    const onEvent = (): void => {
+      clearTimeout(timer)
+      resolve()
+    }
+    target.addEventListener(type, onEvent, { once: true })
+  })
+}
+
+/** Whether `test` becomes true, polled every 10 ms, within `ms` milliseconds of the call. */
+export async function waitUntil(test: () => boolean, ms: number): Promise<boolean> {
+  const until = performance.now() + ms
+  while (!test()) {
+    if (performance.now() >= until) return false
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  return true
+}
+
+/** The pictures a video has shown since `watchFrames`, as `mediaTime`s (the presentation time of each, in seconds), in the order they were shown. */
+export interface FrameWatch {
+  shown: number[]
+  stop: () => void
+}
+
+/**
+ * Records the `mediaTime` of each picture that the video presents from now on
+ * (`requestVideoFrameCallback`, which fires for a picture shown after a seek on
+ * a paused video as well as for those of a video that plays), until `stop`.
+ */
+export function watchFrames(video: HTMLVideoElement): FrameWatch {
+  const watch: FrameWatch = {
+    shown: [],
+    stop: () => {
+      stopped = true
+    },
+  }
+  let stopped = false
+  const arm = (): void => {
+    video.requestVideoFrameCallback((_now, metadata) => {
+      if (stopped) return
+      watch.shown.push(metadata.mediaTime)
+      arm()
+    })
+  }
+  arm()
+  return watch
+}

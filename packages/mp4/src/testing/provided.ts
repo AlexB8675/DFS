@@ -11,6 +11,8 @@ export interface CorpusFile {
   name: string
   expect: 'plays' | { refused: Mp4Refusal }
   size: number
+  /** Whether `corpus:make` made it, as against one of the user's videos, which are read in place. */
+  synthetic: boolean
 }
 
 /** The Range server over the corpus: where it is, and the files of the manifest that are there. */
@@ -22,5 +24,7 @@ export interface CorpusInfo {
 declare module 'vitest' {
   export interface ProvidedContext {
     corpus: CorpusInfo
+    /** Whether every file expected to play is to be played (`DFS_CORPUS_ALL=1`), and not the sample of the user's. */
+    playAll: boolean
   }
 }

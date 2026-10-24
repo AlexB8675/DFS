@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { parseRange, startCorpusServer } from './serve.ts'
+import { parseRange, playsAll, startCorpusServer } from './serve.ts'
 import type { CorpusServer } from './serve.ts'
 
 // The Range server that the browser suites read the corpus from (DESIGN.md
@@ -42,6 +42,16 @@ describe('parseRange', () => {
   })
 })
 
+describe('playsAll', () => {
+  it('is asked for by DFS_CORPUS_ALL=1, and by nothing else', () => {
+    expect(playsAll({ DFS_CORPUS_ALL: '1' })).toBe(true)
+    expect(playsAll({})).toBe(false)
+    expect(playsAll({ DFS_CORPUS_ALL: '' })).toBe(false)
+    expect(playsAll({ DFS_CORPUS_ALL: '0' })).toBe(false)
+    expect(playsAll({ DFS_CORPUS_ALL: 'true' })).toBe(false)
+  })
+})
+
 describe('startCorpusServer', () => {
   const bytes = Uint8Array.from({ length: 1000 }, (_, at) => at % 251)
   let folder: string
@@ -61,8 +71,11 @@ describe('startCorpusServer', () => {
 
   const at = (id: number) => `${server.info.url}/file/${id}`
 
-  it('lists each file by id and base name, with its size and expectation, and no path', () => {
-    expect(server.info.files).toEqual([{ id: 0, name: 'clip.mp4', expect: 'plays', size: 1000 }])
+  it('lists each file by id and base name, with its size, expectation and whether it is a synthetic one, and no path', () => {
+    // A file outside the corpus's synthetic folder is one of the user's, however it is named.
+    expect(server.info.files).toEqual([
+      { id: 0, name: 'clip.mp4', expect: 'plays', size: 1000, synthetic: false },
+    ])
     expect(JSON.stringify(server.info)).not.toContain(folder.replaceAll('\\', '/'))
   })
 
@@ -134,7 +147,7 @@ describe('startCorpusServer', () => {
     ])
     try {
       expect(other.info.files).toEqual([
-        { id: 0, name: 'present.mp4', expect: 'plays', size: 1000 },
+        { id: 0, name: 'present.mp4', expect: 'plays', size: 1000, synthetic: false },
       ])
       expect(warn).toHaveBeenCalledTimes(1)
       expect(String(warn.mock.calls[0]?.[0])).toContain('2 of 3')
