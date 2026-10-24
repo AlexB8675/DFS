@@ -100,7 +100,7 @@ async function readTracks(file: CorpusFile, url: string): Promise<Tracks> {
     const found = locateMoov(head, file.size)
     if (!found) throw new Error('no moov was found, though the corpus expects the file to play')
     const moov = moovIn(await fetchRange(url, found.start, found.end - 1))
-    return chooseTracks(readMovie(moov))
+    return chooseTracks(readMovie(moov), file.size)
   })
 }
 

@@ -17,6 +17,10 @@ import type { TrackTiming } from './timing.ts'
 // frames are expanded (an edit list that can't be placed is a reason that costs
 // nothing to find), and placed once the frames are there, because where the media
 // edit starts depends on when the first frame is shown (see `trackTiming`).
+//
+// The size of the file is given, and each chosen track's frames are held to it
+// (`frameTable`): they can't number more than a track may have, nor add up to, or
+// end, past the end of the file.
 
 /** A track ready to play: its header, frames, timing, codec string and the entry its init segment carries. */
 export interface PlayTrack {
@@ -54,11 +58,13 @@ function firstPresented(table: FrameTable): number | undefined {
  * the time the first frame is shown: the media edit starts there if it begins
  * earlier, as FFmpeg has it (the writers meant the first frame at the edit's
  * start; 154 of the 192 pictures with an edit list in the corpus begin it before
- * their first frame, by up to 0.198 s).
+ * their first frame, by up to 0.198 s). The frames are held to the file they are
+ * in, `fileSize` bytes: a track whose frames don't lie inside it is `damaged`.
  */
 function playTrack(
   track: TrackHeader,
   movieTimescale: number,
+  fileSize: number,
   what: 'picture' | 'sound',
 ): PlayTrack {
   try {
@@ -74,7 +80,7 @@ function playTrack(
     const codec = codecString(only)
     const entry = initEntry(only)
     trackTiming(track, movieTimescale)
-    const table = frameTable(track)
+    const table = frameTable(track, fileSize)
     const timing = trackTiming(track, movieTimescale, firstPresented(table))
     const keyframes = keyframeIndexes(table)
     if (what === 'picture' && keyframes.length === 0) {
@@ -98,16 +104,26 @@ function playTrack(
  * that fails the rules refuses it too: a sound the browser can't play is a
  * reason to play elsewhere (D45), unless it has no frames, which makes it no
  * sound at all. The picture is checked first, so its reason is the one given
- * when both fail.
+ * when both fail. Each track's frames must lie inside the file, `fileSize`
+ * bytes (the caller has it, as it had for `locateMoov`): more frames than a track
+ * may have, a constant sample size that adds up to more than the file, or a chunk
+ * that ends past it, is `damaged`. A `fileSize` that isn't a count of bytes is a
+ * RangeError, the caller's mistake and not the file's, whatever the movie.
  */
-export function chooseTracks(movie: Movie): { video: PlayTrack; audio: PlayTrack | null } {
+export function chooseTracks(
+  movie: Movie,
+  fileSize: number,
+): { video: PlayTrack; audio: PlayTrack | null } {
+  if (!Number.isSafeInteger(fileSize) || fileSize < 0) {
+    throw new RangeError(`${fileSize} is not a size that a file has.`)
+  }
   const picture = movie.tracks.find((track) => track.kind === 'video')
   if (!picture) {
     throw new Mp4Error('no-picture', 'The file has no picture track, so there is nothing to play.')
   }
-  const video = playTrack(picture, movie.timescale, 'picture')
+  const video = playTrack(picture, movie.timescale, fileSize, 'picture')
   const sound = movie.tracks.find((track) => track.kind === 'audio')
-  const audio = sound ? playTrack(sound, movie.timescale, 'sound') : null
+  const audio = sound ? playTrack(sound, movie.timescale, fileSize, 'sound') : null
   // A sound with no frames is no sound: a SourceBuffer with nothing appended to it would stall the video at 0.
   return { video, audio: audio && audio.table.count > 0 ? audio : null }
 }

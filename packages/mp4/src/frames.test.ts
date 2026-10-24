@@ -18,6 +18,11 @@ import {
   u32,
 } from './testing/build.ts'
 
+/** A file of a mebibyte: it holds every frame that the small tables here place (the furthest ends at 67 791). */
+const FILE_SIZE = 2 ** 20
+/** The largest file there can be, for the tables that place frames past 4 GiB, up to the last offset a number holds exactly. */
+const HUGE_FILE = Number.MAX_SAFE_INTEGER
+
 /** What `run` throws, which must be an `Mp4Error`. */
 function refusal(run: () => unknown): Mp4Error {
   try {
@@ -79,7 +84,7 @@ describe("a track's frames (§10.4)", () => {
       30000,
     )
 
-    const frames = frameTable(track)
+    const frames = frameTable(track, FILE_SIZE)
 
     expect(frames.count).toBe(8)
     expect(frames.timescale).toBe(30000)
@@ -101,7 +106,7 @@ describe("a track's frames (§10.4)", () => {
   it('reads a constant sample size, and stz2 of 4, 8 and 16 bits', () => {
     const rest = [stts([[5, 1024]]), stsc([[1, 5]]), stco([1000])]
 
-    const constant = frameTable(trackWith([stsz({ size: 512, count: 5 }), ...rest]))
+    const constant = frameTable(trackWith([stsz({ size: 512, count: 5 }), ...rest]), FILE_SIZE)
     expect(constant.count).toBe(5)
     expect(ints(constant.sizes)).toEqual([512, 512, 512, 512, 512])
     expect(ints(constant.offsets)).toEqual([1000, 1512, 2024, 2536, 3048])
@@ -113,7 +118,7 @@ describe("a track's frames (§10.4)", () => {
       { bits: 16, sizes: [65535, 256, 0, 1000, 12], offsets: [1000, 66535, 66791, 66791, 67791] },
     ] as const
     for (const { bits, sizes, offsets } of cases) {
-      const frames = frameTable(trackWith([stz2(bits, sizes), ...rest]))
+      const frames = frameTable(trackWith([stz2(bits, sizes), ...rest]), FILE_SIZE)
       expect(frames.count, `${bits} bits`).toBe(5)
       expect(ints(frames.sizes), `${bits} bits`).toEqual(sizes)
       expect(ints(frames.offsets), `${bits} bits`).toEqual(offsets)
@@ -131,6 +136,7 @@ describe("a track's frames (§10.4)", () => {
         ]),
         ...rest,
       ]),
+      FILE_SIZE,
     )
     expect(ints(version0.cts)).toEqual([2002, 2002, 0, 0, 0])
 
@@ -144,12 +150,13 @@ describe("a track's frames (§10.4)", () => {
         ]),
         ...rest,
       ]),
+      FILE_SIZE,
     )
     expect(signed.cts).toBeInstanceOf(Int32Array)
     expect(ints(signed.cts)).toEqual([-2002, 4004, 4004, -1001, 0])
 
     // The ends of what 32 bits hold as a signed number: the largest of version 0 and both of version 1.
-    const high = frameTable(trackWith([ctts(0, [[5, 2 ** 31 - 1]]), ...rest]))
+    const high = frameTable(trackWith([ctts(0, [[5, 2 ** 31 - 1]]), ...rest]), FILE_SIZE)
     expect(ints(high.cts)).toEqual(new Array<number>(5).fill(2 ** 31 - 1))
     const ends = frameTable(
       trackWith([
@@ -159,6 +166,7 @@ describe("a track's frames (§10.4)", () => {
         ]),
         ...rest,
       ]),
+      FILE_SIZE,
     )
     expect(ints(ends.cts)).toEqual([-(2 ** 31), -(2 ** 31), 2 ** 31 - 1, 2 ** 31 - 1, 2 ** 31 - 1])
   })
@@ -177,25 +185,30 @@ describe("a track's frames (§10.4)", () => {
         ]),
         ...rest,
       ]),
+      FILE_SIZE,
     )
     expect(frames.cts).toBeInstanceOf(Int32Array)
     expect(ints(frames.cts)).toEqual([-1024, 2002, 2002, -(2 ** 31), -1])
   })
 
   it('treats every frame as a keyframe without stss', () => {
-    const frames = frameTable(trackWith(tablesOf({})))
+    const frames = frameTable(trackWith(tablesOf({})), FILE_SIZE)
     expect(ints(frames.sync)).toEqual([1, 1, 1, 1])
   })
 
   it('marks the frames that stss numbers, counting from 1, and no others', () => {
-    const frames = frameTable(trackWith(tablesOf({ stss: stss([1, 3]) })))
+    const frames = frameTable(trackWith(tablesOf({ stss: stss([1, 3]) })), FILE_SIZE)
     expect(ints(frames.sync)).toEqual([1, 0, 1, 0])
 
     // The last frame, in the order of the list as written: not necessarily ascending.
-    expect(ints(frameTable(trackWith(tablesOf({ stss: stss([4, 2]) }))).sync)).toEqual([0, 1, 0, 1])
+    expect(ints(frameTable(trackWith(tablesOf({ stss: stss([4, 2]) })), FILE_SIZE).sync)).toEqual([
+      0, 1, 0, 1,
+    ])
 
     // A list with nothing in it is not the same as no list: no frame is a keyframe.
-    expect(ints(frameTable(trackWith(tablesOf({ stss: stss([]) }))).sync)).toEqual([0, 0, 0, 0])
+    expect(ints(frameTable(trackWith(tablesOf({ stss: stss([]) })), FILE_SIZE).sync)).toEqual([
+      0, 0, 0, 0,
+    ])
   })
 
   it('reads co64 offsets past 4 GiB exactly', () => {
@@ -206,6 +219,7 @@ describe("a track's frames (§10.4)", () => {
         stsc([[1, 2]]),
         co64([2n ** 32n + 12345n, 7_140_713_588n - 1000n]),
       ]),
+      HUGE_FILE,
     )
     // Two samples in each chunk: the second one is its chunk's offset plus the first one's size.
     expect(frames.offsets[0]).toBe(2 ** 32 + 12345)
@@ -230,6 +244,7 @@ describe("a track's frames (§10.4)", () => {
           BigInt(Number.MAX_SAFE_INTEGER) - 300n,
         ]),
       ]),
+      HUGE_FILE,
     )
     expect(edge.offsets[1]).toBe(Number.MAX_SAFE_INTEGER - 300 - 300 + 100)
     expect(edge.offsets[2]).toBe(Number.MAX_SAFE_INTEGER - 300)
@@ -237,6 +252,7 @@ describe("a track's frames (§10.4)", () => {
     // A chunk of 32-bit offsets that reaches past 4 GiB inside the chunk doesn't wrap.
     const crossing = frameTable(
       trackWith([stts([[3, 1]]), stsz([100, 200, 300]), stsc([[1, 3]]), stco([4_294_967_000])]),
+      HUGE_FILE,
     )
     expect(ints(crossing.offsets)).toEqual([4_294_967_000, 4_294_967_100, 4_294_967_300])
   })
@@ -245,11 +261,12 @@ describe("a track's frames (§10.4)", () => {
     // 4 samples of 10, 20, 30 and 40 bytes in 2 chunks; the stco says other places, and fewer than 2^32.
     const frames = frameTable(
       trackWith([...tablesOf({ stco: stco([100, 200]) }), co64([2n ** 32n + 5n, 2n ** 33n])]),
+      HUGE_FILE,
     )
     expect(ints(frames.offsets)).toEqual([2 ** 32 + 5, 2 ** 32 + 15, 2 ** 33, 2 ** 33 + 30])
 
     // Whatever the stco says is not read: it can be one chunk, none, or not a table at all.
-    const bare = frameTable(trackWith([...tablesOf({ stco: stco([]) }), co64([7n, 9n])]))
+    const bare = frameTable(trackWith([...tablesOf({ stco: stco([]) }), co64([7n, 9n])]), FILE_SIZE)
     expect(ints(bare.offsets)).toEqual([7, 17, 9, 39])
   })
 
@@ -267,11 +284,11 @@ describe("a track's frames (§10.4)", () => {
     })
     const track = readMovie(movie({ tracks: [{ entries, tables }] })).tracks[0]
     if (!track) throw new Error('expected a track')
-    expect(ints(frameTable(track).offsets)).toEqual([100, 200])
+    expect(ints(frameTable(track, FILE_SIZE).offsets)).toEqual([100, 200])
   })
 
   it('reads the tables of a track with no samples as no frames', () => {
-    const frames = frameTable(trackWith([stts([]), stsz([]), stsc([]), stco([])]))
+    const frames = frameTable(trackWith([stts([]), stsz([]), stsc([]), stco([])]), FILE_SIZE)
     expect(frames.count).toBe(0)
     expect([
       frames.offsets.length,
@@ -284,7 +301,7 @@ describe("a track's frames (§10.4)", () => {
   it('keeps the track timescale, 0 included, without dividing by it', () => {
     // `readMovie` gives a track that counts in ticks of 0 a problem, so the 0 is put in by hand.
     const track = { ...trackWith(tablesOf({})), timescale: 0 }
-    expect(frameTable(track).timescale).toBe(0)
+    expect(frameTable(track, FILE_SIZE).timescale).toBe(0)
   })
 
   describe('refuses tables whose counts disagree', () => {
@@ -433,32 +450,35 @@ describe("a track's frames (§10.4)", () => {
       ],
     ]
     it.each(cases)('%s', (_name, changes, message) => {
-      const error = refusal(() => frameTable(trackWith(tablesOf(changes))))
+      const error = refusal(() => frameTable(trackWith(tablesOf(changes)), FILE_SIZE))
       expect(error.reason).toBe('damaged')
       expect(error.message).toMatch(message)
     })
 
     it('an stz2 that is not 4, 8 or 16 bits, or claims more sizes than it holds', () => {
       const odd = fullBox('stz2', 0, 0, [0, 0, 0, 12], u32(4), [1, 2, 3, 4, 5, 6])
-      const error = refusal(() => frameTable(trackWith(tablesOf({ stsz: odd }))))
+      const error = refusal(() => frameTable(trackWith(tablesOf({ stsz: odd })), FILE_SIZE))
       expect(error.reason).toBe('damaged')
       expect(error.message).toMatch(/'stz2'.*12 bits/)
 
       const long = refusal(() =>
-        frameTable(trackWith(tablesOf({ stsz: stz2(4, [1, 2, 3, 4], 99) }))),
+        frameTable(trackWith(tablesOf({ stsz: stz2(4, [1, 2, 3, 4], 99) })), FILE_SIZE),
       )
       expect(long.reason).toBe('damaged')
       expect(long.message).toMatch(/'stz2'.*99/)
     })
 
     it('a co64 offset, or a chunk reaching past what a number holds exactly', () => {
-      const wide = refusal(() => frameTable(trackWith(tablesOf({ stco: co64([100n, 2n ** 53n]) }))))
+      const wide = refusal(() =>
+        frameTable(trackWith(tablesOf({ stco: co64([100n, 2n ** 53n]) })), HUGE_FILE),
+      )
       expect(wide.reason).toBe('damaged')
 
       // The chunk starts below the limit; its samples carry it over.
       const over = refusal(() =>
         frameTable(
           trackWith(tablesOf({ stco: co64([100n, BigInt(Number.MAX_SAFE_INTEGER) - 50n]) })),
+          HUGE_FILE,
         ),
       )
       expect(over.reason).toBe('damaged')
@@ -475,6 +495,7 @@ describe("a track's frames (§10.4)", () => {
             stsc([[1, count]]),
             stco([100]),
           ]),
+          HUGE_FILE,
         ),
       )
       expect(error.reason).toBe('damaged')
@@ -484,9 +505,78 @@ describe("a track's frames (§10.4)", () => {
     it('a track that could not be read, with the reason it could not', () => {
       const track = readMovie(movie({ tracks: [{ stbl: new Uint8Array(0) }] })).tracks[0]
       if (!track?.problem) throw new Error('expected a track that could not be read')
-      const error = refusal(() => frameTable(track))
+      const error = refusal(() => frameTable(track, FILE_SIZE))
       expect(error.reason).toBe('damaged')
       expect(error.message).toContain(track.problem)
+    })
+  })
+
+  describe("bounds a track's frames by the file they are in", () => {
+    /** A constant sample size of `size` for `count` samples, in one chunk at offset `at`, the other tables agreeing. */
+    function constantTrack(count: number, size: number, at = 100): TrackHeader {
+      return trackWith([stts([[count, 1]]), stsz({ size, count }), stsc([[1, count]]), stco([at])])
+    }
+
+    it('refuses a constant size that the file is too small to hold, before any array is made', () => {
+      // 2^20 frames is under the cap, and every other table agrees: only the file's size can refuse it.
+      const track = constantTrack(2 ** 20, 1000)
+      for (const fileSize of [2 ** 20, 5_000_000]) {
+        const error = refusal(() => frameTable(track, fileSize))
+        expect(error.reason, `${fileSize}`).toBe('damaged')
+        expect(error.message, `${fileSize}`).toMatch(
+          new RegExp(`'stsz'.*1048576 samples.*1000 bytes.*file.*${fileSize} bytes`),
+        )
+      }
+      // The same table in a file that holds it: 2^20 frames of 1000 bytes, and the 100 before the chunk.
+      expect(frameTable(track, 100 + 1000 * 2 ** 20).count).toBe(2 ** 20)
+
+      // The count and the size alone, from the file's first byte: a file of exactly their product holds them, one byte less does not.
+      const bytes = 1000 * 2 ** 20
+      const whole = constantTrack(2 ** 20, 1000, 0)
+      expect(frameTable(whole, bytes).count).toBe(2 ** 20)
+      expect(refusal(() => frameTable(whole, bytes - 1)).message).toMatch(
+        /'stsz'.*file.*1048575999/,
+      )
+    })
+
+    it('holds a track to 2^22 frames, however large the file is', () => {
+      const count = 2 ** 22
+      const error = refusal(() => frameTable(constantTrack(count + 1, 1), 2 ** 32))
+      expect(error.reason).toBe('damaged')
+      expect(error.message).toMatch(/'stsz'.*4194305/)
+
+      // The cap itself is allowed: 4 194 304 frames, about 116 MiB.
+      const frames = frameTable(constantTrack(count, 1), 2 ** 32)
+      expect(frames.count).toBe(count)
+      expect(frames.offsets[count - 1]).toBe(100 + count - 1)
+    })
+
+    it('refuses a chunk that ends past the end of the file, and takes one that ends at it', () => {
+      // Chunk 2 holds the samples of 30 and 40 bytes at 200: it ends at 270, and chunk 1 at 130.
+      const track = trackWith(tablesOf({}))
+      const error = refusal(() => frameTable(track, 269))
+      expect(error.reason).toBe('damaged')
+      expect(error.message).toMatch(/[Cc]hunk 2.*'stco'.*270.*file.*269 bytes/)
+      expect(ints(frameTable(track, 270).offsets)).toEqual([100, 110, 200, 230])
+      expect(frameTable(track, 2 ** 20).count).toBe(4)
+
+      // Any chunk, whichever way the file lays them out: the first of these ends at 330, the second at 170.
+      const reversed = trackWith(tablesOf({ stco: stco([300, 100]) }))
+      const first = refusal(() => frameTable(reversed, 200))
+      expect(first.reason).toBe('damaged')
+      expect(first.message).toMatch(/[Cc]hunk 1.*330.*file.*200 bytes/)
+      expect(ints(frameTable(reversed, 330).offsets)).toEqual([300, 310, 100, 130])
+    })
+
+    it('refuses a file size that no file has, as a caller mistake', () => {
+      const track = trackWith(tablesOf({}))
+      for (const fileSize of [-1, 1.5, NaN, Infinity, 2 ** 53]) {
+        expect(() => frameTable(track, fileSize), `${fileSize}`).toThrow(RangeError)
+      }
+      // Even a track that could not be read: the caller's mistake comes before the file's.
+      const unreadable = readMovie(movie({ tracks: [{ stbl: new Uint8Array(0) }] })).tracks[0]
+      if (!unreadable?.problem) throw new Error('expected a track that could not be read')
+      expect(() => frameTable(unreadable, -1)).toThrow(RangeError)
     })
   })
 
@@ -500,8 +590,11 @@ describe("a track's frames (§10.4)", () => {
       60000,
     )
 
+    // A frame is under 9000 bytes and a chunk every 9000 after the first, so the file is as long as the last chunk's slot ends.
+    const fileSize = 48 + count * 9000
+
     const start = performance.now()
-    const frames = frameTable(track)
+    const frames = frameTable(track, fileSize)
     const elapsed = performance.now() - start
 
     expect(elapsed).toBeLessThan(300)

@@ -371,7 +371,7 @@ function compareStream(
 /** The reason a file is turned away, or null when it is taken. */
 function refusalOf(path: string, size: number): { reason: Mp4Refusal; message: string } | null {
   try {
-    chooseTracks(readIndex(path, size))
+    chooseTracks(readIndex(path, size), size)
     return null
   } catch (error) {
     if (error instanceof Mp4Error) return { reason: error.reason, message: error.message }
@@ -384,7 +384,7 @@ async function checkPlays(entry: ManifestEntry): Promise<void> {
   const refused = refusalOf(entry.path, size)
   expect(refused, `refused (${refused?.reason}): ${refused?.message}`).toBeNull()
   const movie = readIndex(entry.path, size)
-  const { video, audio } = chooseTracks(movie)
+  const { video, audio } = chooseTracks(movie, size)
 
   const windowed = size >= WHOLE_FILE_LIMIT
   const intervals = windowed ? windowsOf(movie.durationTicks / movie.timescale) : undefined
@@ -559,7 +559,8 @@ describe('the writer against ffprobe, on the synthetic files', () => {
   it.each(synthetic.map((entry, i) => [titles[i] ?? entry.path, entry] as const))(
     '%s',
     async (_title, entry) => {
-      const { video, audio } = chooseTracks(readIndex(entry.path, statSync(entry.path).size))
+      const size = statSync(entry.path).size
+      const { video, audio } = chooseTracks(readIndex(entry.path, size), size)
       const bytes = readFileSync(entry.path)
       const streams = await probeStreams(entry.path)
       const folder = mkdtempSync(resolve(tmpdir(), 'dfs-mp4-corpus-'))

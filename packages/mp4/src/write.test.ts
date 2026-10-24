@@ -24,6 +24,9 @@ import {
 } from './testing/build.ts'
 import { fragment, fragmentHead, initSegment } from './write.ts'
 
+/** A file of a mebibyte: it holds every frame that the tables here place (the furthest ends at 9 600). */
+const FILE_SIZE = 2 ** 20
+
 const PICTURE = visualEntry('avc1', {}, avcC())
 /** A sound as QuickTime writes it, which the init segment carries rewritten as an ISO one. */
 const QUICKTIME_SOUND = quickTimeAudioEntry(
@@ -103,6 +106,7 @@ function play(): { video: PlayTrack; audio: PlayTrack } {
         ],
       }),
     ),
+    FILE_SIZE,
   )
   if (!audio) throw new Error('expected a sound')
   return { video, audio }
@@ -243,7 +247,7 @@ describe('the init segment (§10.4)', () => {
       expect(nth(only.entries, 0).bytes).toEqual(track.entry)
       // The tables are there, are well formed and describe no frame.
       expect(Object.keys(only.tables).sort()).toEqual(['stco', 'stsc', 'stsz', 'stts'])
-      expect(frameTable(only).count).toBe(0)
+      expect(frameTable(only, FILE_SIZE).count).toBe(0)
     }
   })
 

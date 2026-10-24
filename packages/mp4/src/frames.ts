@@ -13,6 +13,10 @@ import type { TableType, TrackHeader } from './movie.ts'
 // then is each array filled, in one pass over its table, with no object for a
 // frame. What each entry says is checked as it is read: each number of `stss`
 // must be a sample the track has, and each description of `stsc` one of its own.
+// A track is also held to the file it is in, whose size the caller gives: it has
+// at most `MAX_FRAMES` frames, a constant sample size can't add up to more bytes
+// than the file has (checked before any array is made), and each chunk must end
+// inside the file.
 // Offsets and decode times are doubles (exact to 2^53) and never go through
 // 32-bit arithmetic: a file past 4 GiB has chunks that don't fit in it.
 
@@ -29,13 +33,18 @@ export interface FrameTable {
 }
 
 /**
- * The most frames a track may have: 2^24, which is 4.6 hours of 1000 frames a
- * second. A real track is far below it (two hours at 60 frames a second is
- * 432 000), but a constant sample size has no entries to hold a count to, so an
- * `stsz` can claim 4 billion frames in 20 bytes, with the other tables agreeing
- * in 60 more: this is what stands between that and arrays of over 100 GiB.
+ * The most frames a track may have: 2^22, or 4 194 304. That is 19.4 hours at 60
+ * frames a second, 9.7 hours at 120, and 24.8 hours of 48 kHz AAC, where a real
+ * track is far below it (two hours at 60 frames a second is 432 000). It bounds
+ * the arrays that a track is expanded into, 29 bytes a frame, to about 116 MiB a
+ * track. A constant sample size has no entries to hold a count to, so an `stsz`
+ * can claim 4 billion frames in 20 bytes, with the other tables agreeing in 60
+ * more: this is what stands between that and arrays of over 100 GiB. The size of
+ * the file is the other bound, under the cap: a table of a million frames can
+ * still say more bytes than the file holds (`openSizes`, and the end of each
+ * chunk in `frameTable`).
  */
-const MAX_FRAMES = 2 ** 24
+const MAX_FRAMES = 2 ** 22
 
 function damaged(message: string): Mp4Error {
   return new Mp4Error('damaged', message)
@@ -91,7 +100,13 @@ interface Sizes {
   bits: 4 | 8 | 16 | 32
 }
 
-function openSizes(track: TrackHeader): Sizes {
+/**
+ * Where the sizes are and how many samples there are, refused when the count is
+ * more than a track may have, more than the box has room for, or, for a constant
+ * size, more bytes than a file of `fileSize` bytes can hold: all of it before
+ * any array is made.
+ */
+function openSizes(track: TrackHeader, fileSize: number): Sizes {
   const stsz = open(track, 'stsz', 0)
   let sizes: Sizes
   if (stsz) {
@@ -119,6 +134,11 @@ function openSizes(track: TrackHeader): Sizes {
         `The '${sizes.box}' box counts ${sizes.count} samples, but holds room for ${room}.`,
       )
     }
+  } else if (sizes.count * sizes.constant > fileSize) {
+    // A constant size lists nothing to hold the count to: the file does. The product is at most 2^54, and a double that rounds is still past any size a file has.
+    throw damaged(
+      `The '${sizes.box}' box counts ${sizes.count} samples of ${sizes.constant} bytes each, which the file's ${fileSize} bytes can't hold.`,
+    )
   }
   return sizes
 }
@@ -295,12 +315,23 @@ function fillSync(keyframes: Keyframes | null, count: number): Uint8Array {
   return out
 }
 
-/** Expands a track's tables; refuses inconsistent ones (counts that disagree, a chunk past the samples) as Mp4Error('damaged'). */
-export function frameTable(track: TrackHeader): FrameTable {
+/**
+ * Expands a track's tables; refuses inconsistent ones (counts that disagree, a
+ * chunk past the samples), a track of more than `MAX_FRAMES` frames, and frames
+ * that don't lie inside a file of `fileSize` bytes (a constant sample size that
+ * adds up to more, checked before any array is made, or a chunk that ends past
+ * it) as Mp4Error('damaged'). A frame that ends exactly at the end of the file
+ * is inside it. A `fileSize` that isn't a count of bytes is a RangeError, the
+ * caller's mistake and not the file's.
+ */
+export function frameTable(track: TrackHeader, fileSize: number): FrameTable {
+  if (!Number.isSafeInteger(fileSize) || fileSize < 0) {
+    throw new RangeError(`${fileSize} is not a size that a file has.`)
+  }
   if (track.problem !== null) throw damaged(`The track can't be read: ${track.problem}`)
 
   // First, what the tables say, and whether they say the same: nothing is made until they do.
-  const sizes = openSizes(track)
+  const sizes = openSizes(track, fileSize)
   const { count } = sizes
   const durationRuns = readRuns(track, 'stts')
   if (!durationRuns) throw damaged(`The track has no 'stts' box.`)
@@ -372,6 +403,12 @@ export function frameTable(track: TrackHeader): FrameTable {
     if (offset > Number.MAX_SAFE_INTEGER) {
       throw damaged(
         `Chunk ${chunk} of '${chunks.box}' reaches an offset past what a number holds exactly.`,
+      )
+    }
+    // The offsets only grow within a chunk, so its end bounds every frame in it: a frame that ends past the file's end puts it there.
+    if (offset > fileSize) {
+      throw damaged(
+        `Chunk ${chunk} of '${chunks.box}' ends at offset ${offset}, past the end of the file, which is ${fileSize} bytes long.`,
       )
     }
   }

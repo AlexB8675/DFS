@@ -15,6 +15,9 @@ import {
 import { ctts, movie, stco, stsc, stss, stsz, stts } from './testing/build.ts'
 import type { EditSpec, Run } from './testing/build.ts'
 
+/** A file of a mebibyte: it holds every frame that the tables here place (the furthest ends at 2 700). */
+const FILE_SIZE = 2 ** 20
+
 /** What `run` throws, which must be an `Mp4Error`. */
 function refusal(run: () => unknown): Mp4Error {
   try {
@@ -53,7 +56,7 @@ function built(spec: {
   const track = read.tracks[0]
   if (!track) throw new Error('expected a track')
   expect(track.problem).toBeNull()
-  return { track, table: frameTable(track), movieTimescale: read.timescale }
+  return { track, table: frameTable(track, FILE_SIZE), movieTimescale: read.timescale }
 }
 
 /** Runs of equal values, as `stts` and `ctts` hold them. */

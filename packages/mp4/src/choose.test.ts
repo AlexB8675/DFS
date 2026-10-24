@@ -11,6 +11,7 @@ import {
   avcC,
   box,
   ctts,
+  dOps,
   esds,
   frma,
   hdlr,
@@ -42,6 +43,9 @@ function refusal(reason: Mp4Refusal, run: () => unknown): Mp4Error {
   }
   throw new Error(`expected an Mp4Error (${reason})`)
 }
+
+/** A file of a mebibyte: it holds every frame that the tables here place (the furthest ends at 270). */
+const FILE_SIZE = 2 ** 20
 
 const PICTURE = visualEntry('avc1', {}, avcC())
 const SOUND = audioEntry('mp4a', {}, esds())
@@ -127,10 +131,10 @@ describe('the tracks a video plays (§10.4, D45)', () => {
     ])
     for (const track of unchosen) {
       expect(track.problem).toBeNull()
-      refusal('damaged', () => frameTable(track))
+      refusal('damaged', () => frameTable(track, FILE_SIZE))
     }
 
-    const { video, audio } = chooseTracks(parsed)
+    const { video, audio } = chooseTracks(parsed, FILE_SIZE)
     expect(video.header.id).toBe(2)
     expect(audio?.header.id).toBe(3)
     expect(video.table.count).toBe(4)
@@ -165,10 +169,10 @@ describe('the tracks a video plays (§10.4, D45)', () => {
       ],
       1000,
     )
-    const { video, audio } = chooseTracks(parsed)
+    const { video, audio } = chooseTracks(parsed, FILE_SIZE)
 
     expect(video.header).toBe(trackOf(parsed, 0))
-    expect(video.table).toEqual(frameTable(trackOf(parsed, 0)))
+    expect(video.table).toEqual(frameTable(trackOf(parsed, 0), FILE_SIZE))
     expect(video.codec).toBe('avc1.64001f')
     expect(video.entry).toEqual(PICTURE)
     expect(Array.from(video.keyframes)).toEqual([0, 2])
@@ -177,7 +181,7 @@ describe('the tracks a video plays (§10.4, D45)', () => {
 
     if (!audio) throw new Error('expected a sound')
     expect(audio.header).toBe(trackOf(parsed, 1))
-    expect(audio.table).toEqual(frameTable(trackOf(parsed, 1)))
+    expect(audio.table).toEqual(frameTable(trackOf(parsed, 1), FILE_SIZE))
     expect(audio.codec).toBe('mp4a.40.2')
     const original = trackOf(parsed, 1).entries[0]
     if (!original) throw new Error('expected an entry')
@@ -191,7 +195,7 @@ describe('the tracks a video plays (§10.4, D45)', () => {
   })
 
   it('has no sound for a file that has none', () => {
-    const { video, audio } = chooseTracks(read([picture(), { handler: 'tmcd' }]))
+    const { video, audio } = chooseTracks(read([picture(), { handler: 'tmcd' }]), FILE_SIZE)
     expect(video.codec).toBe('avc1.64001f')
     expect(audio).toBeNull()
   })
@@ -203,7 +207,7 @@ describe('the tracks a video plays (§10.4, D45)', () => {
       picture({ id: 21 }),
       sound({ id: 11 }),
     ])
-    const { video, audio } = chooseTracks(parsed)
+    const { video, audio } = chooseTracks(parsed, FILE_SIZE)
     expect(video.header.id).toBe(20)
     expect(audio?.header.id).toBe(10)
   })
@@ -219,7 +223,7 @@ describe('the tracks a video plays (§10.4, D45)', () => {
       { id: 6, handler: 'tmcd', stbl: box('stbl', stsd([sampleEntry('tmcd')], 3)) },
     ])
     expect(parsed.tracks.slice(2).every((track) => track.problem !== null)).toBe(true)
-    const { video, audio } = chooseTracks(parsed)
+    const { video, audio } = chooseTracks(parsed, FILE_SIZE)
     expect(video.header.id).toBe(1)
     expect(audio?.header.id).toBe(2)
   })
@@ -232,13 +236,14 @@ describe('the tracks a video plays (§10.4, D45)', () => {
       sound({ id: 2, tables: emptyTables }),
       sound({ id: 3 }),
     ])
-    const { video, audio } = chooseTracks(parsed)
+    const { video, audio } = chooseTracks(parsed, FILE_SIZE)
     expect(video.header.id).toBe(1)
     expect(audio).toBeNull()
     // The rules come first: an empty sound that the player couldn't take is a reason all the same.
     refusal('unsupported-codec', () =>
       chooseTracks(
         read([picture(), sound({ entries: [audioEntry('ac-3')], tables: emptyTables })]),
+        FILE_SIZE,
       ),
     )
   })
@@ -261,6 +266,7 @@ describe('the tracks a video plays (§10.4, D45)', () => {
           edits: { version: 0, edits: [{ duration: 133, mediaTime: 3204 }] },
         }),
       ]),
+      FILE_SIZE,
     )
     expect(early.video.timing.offsetSeconds).toBeCloseTo(-21020 / 90000, 12)
     expect(early.video.timing.endSeconds).toBeCloseTo(0.133, 12)
@@ -279,6 +285,7 @@ describe('the tracks a video plays (§10.4, D45)', () => {
           },
         }),
       ]),
+      FILE_SIZE,
     )
     expect(paused.video.timing.offsetSeconds).toBeCloseTo(0.5 - 21020 / 90000, 12)
     expect(paused.video.timing.endSeconds).toBeCloseTo(0.633, 12)
@@ -293,6 +300,7 @@ describe('the tracks a video plays (§10.4, D45)', () => {
         }),
         sound({ edits: { version: 0, edits: [{ duration: 133, mediaTime: 1024 }] } }),
       ]),
+      FILE_SIZE,
     )
     expect(later.video.timing.offsetSeconds).toBeCloseTo(-30000 / 90000, 12)
     expect(later.audio?.timing.offsetSeconds).toBeCloseTo(-1024 / 44100, 12)
@@ -383,7 +391,7 @@ describe('the tracks a video plays (§10.4, D45)', () => {
       },
     ]
     for (const { what, tracks, reason, says } of cases) {
-      const error = refusal(reason, () => chooseTracks(read(tracks)))
+      const error = refusal(reason, () => chooseTracks(read(tracks), FILE_SIZE))
       if (says) expect(error.message, what).toContain(says)
     }
   })
@@ -391,12 +399,12 @@ describe('the tracks a video plays (§10.4, D45)', () => {
   it('names the track that is refused', () => {
     expect(
       refusal('unsupported-codec', () =>
-        chooseTracks(read([picture(), sound({ entries: [audioEntry('ac-3')] })])),
+        chooseTracks(read([picture(), sound({ entries: [audioEntry('ac-3')] })]), FILE_SIZE),
       ).message,
     ).toMatch(/^The sound track can't be played: /)
     expect(
       refusal('several-descriptions', () =>
-        chooseTracks(read([picture({ entries: [PICTURE, PICTURE] })])),
+        chooseTracks(read([picture({ entries: [PICTURE, PICTURE] })]), FILE_SIZE),
       ).message,
     ).toMatch(/^The picture track can't be played: /)
   })
@@ -405,7 +413,7 @@ describe('the tracks a video plays (§10.4, D45)', () => {
     const parsed = read([broken('vide', { id: 1 }), picture({ id: 2 })])
     expect(trackOf(parsed, 0).kind).toBe('video')
     expect(trackOf(parsed, 0).problem).not.toBeNull()
-    refusal('damaged', () => chooseTracks(parsed))
+    refusal('damaged', () => chooseTracks(parsed, FILE_SIZE))
   })
 
   it("refuses a file whose first picture is broken before its handler's place in the file, with that track's reason", () => {
@@ -432,7 +440,7 @@ describe('the tracks a video plays (§10.4, D45)', () => {
       expect(trackOf(parsed, 0).kind, what).toBe('video')
       expect(trackOf(parsed, 0).problem, what).not.toBeNull()
       expect(trackOf(parsed, 1).problem, what).toBeNull()
-      const error = refusal('damaged', () => chooseTracks(parsed))
+      const error = refusal('damaged', () => chooseTracks(parsed, FILE_SIZE))
       expect(error.message, what).toMatch(/^The picture track can't be played: /)
       expect(error.message, what).toMatch(reason)
     }
@@ -443,13 +451,14 @@ describe('the tracks a video plays (§10.4, D45)', () => {
       box('mdia', mdhd({ timescale: 30000 }), box('minf', box('stbl', stsd([PICTURE])))),
     )
     const parsed = readMovie(movie({ tracks: [nameless, trak(picture({ id: 2 }))] }))
-    expect(chooseTracks(parsed).video.header.id).toBe(2)
+    expect(chooseTracks(parsed, FILE_SIZE).video.header.id).toBe(2)
   })
 
   it('refuses a file whose first sound is refused, and does not try the next', () => {
     refusal('unsupported-codec', () =>
       chooseTracks(
         read([picture(), sound({ id: 2, entries: [audioEntry('ac-3')] }), sound({ id: 3 })]),
+        FILE_SIZE,
       ),
     )
   })
@@ -458,6 +467,7 @@ describe('the tracks a video plays (§10.4, D45)', () => {
     const error = refusal('unsupported-codec', () =>
       chooseTracks(
         read([picture({ entries: [visualEntry('vp09')] }), sound({ entries: [SOUND, SOUND] })]),
+        FILE_SIZE,
       ),
     )
     expect(error.message).toContain('vp09')
@@ -467,15 +477,17 @@ describe('the tracks a video plays (§10.4, D45)', () => {
     // Tables that frameTable refuses as damaged, behind a rule that is cheaper to check: the cheaper one is the reason.
     const tables = wrongTables()
     refusal('several-descriptions', () =>
-      chooseTracks(read([picture({ entries: [PICTURE, PICTURE], tables })])),
+      chooseTracks(read([picture({ entries: [PICTURE, PICTURE], tables })]), FILE_SIZE),
     )
     refusal('unsupported-codec', () =>
-      chooseTracks(read([picture({ entries: [visualEntry('vp09')], tables })])),
+      chooseTracks(read([picture({ entries: [visualEntry('vp09')], tables })]), FILE_SIZE),
     )
     refusal('unsupported-codec', () =>
-      chooseTracks(read([picture(), sound({ entries: [audioEntry('sowt')], tables })])),
+      chooseTracks(read([picture(), sound({ entries: [audioEntry('sowt')], tables })]), FILE_SIZE),
     )
-    refusal('edit-list', () => chooseTracks(read([picture({ edits: TWO_MEDIA_EDITS, tables })])))
+    refusal('edit-list', () =>
+      chooseTracks(read([picture({ edits: TWO_MEDIA_EDITS, tables })]), FILE_SIZE),
+    )
   })
 
   it("refuses a track for its problem before it counts the track's descriptions", () => {
@@ -483,7 +495,7 @@ describe('the tracks a video plays (§10.4, D45)', () => {
     const parsed = read([picture({ entries: [PICTURE, PICTURE] })])
     const track = { ...trackOf(parsed, 0), problem: 'A box is cut short.' }
     expect(track.entries).toHaveLength(2)
-    const error = refusal('damaged', () => chooseTracks({ ...parsed, tracks: [track] }))
+    const error = refusal('damaged', () => chooseTracks({ ...parsed, tracks: [track] }, FILE_SIZE))
     expect(error.message).toContain('A box is cut short.')
   })
 
@@ -494,6 +506,7 @@ describe('the tracks a video plays (§10.4, D45)', () => {
         [picture({ edits: { version: 0, edits: [{ duration: 500, mediaTime: 0 }] } }), sound()],
         0,
       ),
+      FILE_SIZE,
     )
     expect(plain.video.timing).toEqual({ offsetSeconds: 0, endSeconds: null })
     // An empty edit is a number of movie ticks, which a timescale of 0 can't turn into seconds.
@@ -513,7 +526,60 @@ describe('the tracks a video plays (§10.4, D45)', () => {
           ],
           0,
         ),
+        FILE_SIZE,
       ),
     )
+  })
+
+  describe("bounds the tracks' frames by the file (§10.4)", () => {
+    it('refuses tables that count 16.7 million frames a track in a file of 2000 bytes, with the track named', () => {
+      // About 100 bytes of tables, and each track would be 2^24 frames of 29 bytes of arrays, a gigabyte between them.
+      const count = 2 ** 24
+      const tables = (): Uint8Array[] => [
+        stts([[count, 1]]),
+        stsz({ size: 1, count }),
+        stsc([[1, count]]),
+        stco([100]),
+      ]
+      const parsed = read([
+        picture({ tables: tables() }),
+        sound({
+          timescale: 48000,
+          entries: [audioEntry('Opus', { sampleRate: 48000 }, dOps())],
+          tables: tables(),
+        }),
+      ])
+      const error = refusal('damaged', () => chooseTracks(parsed, 2000))
+      expect(error.message).toMatch(/^The picture track can't be played: /)
+      expect(error.message).toMatch(/'stsz'.*16777216/)
+    })
+
+    it("refuses a track whose frames end past the file's end, and takes a file that ends with them", () => {
+      // The tables of `goodTables` end at 270: chunk 2 holds 30 and 40 bytes at 200.
+      const parsed = read([picture(), sound()])
+      expect(chooseTracks(parsed, 270).video.table.count).toBe(4)
+      const error = refusal('damaged', () => chooseTracks(parsed, 269))
+      expect(error.message).toMatch(/^The picture track can't be played: .*269 bytes/)
+
+      // The sound is held to the same size as the picture is.
+      const late = read([
+        picture(),
+        sound({
+          tables: [stts([[4, 1000]]), stsz([10, 20, 30, 40]), stsc([[1, 2]]), stco([100, 9000])],
+        }),
+      ])
+      const sounds = refusal('damaged', () => chooseTracks(late, 270))
+      expect(sounds.message).toMatch(/^The sound track can't be played: .*270 bytes/)
+      expect(chooseTracks(late, 9070).audio?.table.count).toBe(4)
+    })
+
+    it('refuses a size that no file has, as a caller mistake, before it looks at the tracks', () => {
+      const parsed = read([picture(), sound()])
+      for (const fileSize of [-1, 1.5, NaN]) {
+        expect(() => chooseTracks(parsed, fileSize), `${fileSize}`).toThrow(RangeError)
+        // A file with no picture is refused for it, but not before the caller's mistake is.
+        expect(() => chooseTracks(read([]), fileSize), `${fileSize}`).toThrow(RangeError)
+      }
+    })
   })
 })
