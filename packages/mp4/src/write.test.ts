@@ -91,7 +91,8 @@ function play(): { video: PlayTrack; audio: PlayTrack } {
             height: 1080,
             matrix: ROTATED_90,
             // An edit list that the init segment must leave out: the player's SourceBuffer takes it as an offset.
-            edits: { version: 0, edits: [{ duration: 500, mediaTime: 3000 }] },
+            // (It starts at 0, where the picture's first frame is shown: an edit that starts later is refused.)
+            edits: { version: 0, edits: [{ duration: 500, mediaTime: 0 }] },
             entries: [PICTURE],
             tables: pictureTables(),
           },

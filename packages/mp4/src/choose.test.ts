@@ -109,6 +109,18 @@ const TWO_MEDIA_EDITS: TrackSpec['edits'] = {
   ],
 }
 
+/** Four frames of 3000 at 90000 a second, each shown `shown` after it is decoded: the first is shown at `shown`. */
+function shownTables(shown: number): Uint8Array[] {
+  return [
+    stts([[4, 3000]]),
+    ctts(0, [[4, shown]]),
+    stss([1, 3]),
+    stsz([10, 20, 30, 40]),
+    stsc([[1, 2]]),
+    stco([100, 200]),
+  ]
+}
+
 describe('the tracks a video plays (§10.4, D45)', () => {
   it('chooses the first picture and the first sound, leaving the others unexpanded', () => {
     // The tracks that are not chosen read cleanly (no problem) but could not be expanded, so a play that expanded one would be refused.
@@ -152,6 +164,8 @@ describe('the tracks a video plays (§10.4, D45)', () => {
       [
         picture({
           id: 1,
+          // The frames are shown a second (30000 ticks) after they are decoded, so the edit starts at the first of them.
+          tables: shownTables(30000),
           edits: { version: 0, edits: [{ duration: 500, mediaTime: 30000 }] },
         }),
         sound({
@@ -249,20 +263,12 @@ describe('the tracks a video plays (§10.4, D45)', () => {
   })
 
   it("puts a picture's first frame at its edit's start when the edit begins before it, as FFmpeg does", () => {
-    // Four frames of 3000 at 90000 a second, each shown 21020 after it is decoded; the first is shown at 21020 and the edit starts at 3204.
-    const tables = (shown: number): Uint8Array[] => [
-      stts([[4, 3000]]),
-      ctts(0, [[4, shown]]),
-      stss([1, 3]),
-      stsz([10, 20, 30, 40]),
-      stsc([[1, 2]]),
-      stco([100, 200]),
-    ]
+    // The first frame is shown at 21020 and the edit starts at 3204.
     const early = chooseTracks(
       read([
         picture({
           timescale: 90000,
-          tables: tables(21020),
+          tables: shownTables(21020),
           edits: { version: 0, edits: [{ duration: 133, mediaTime: 3204 }] },
         }),
       ]),
@@ -275,7 +281,7 @@ describe('the tracks a video plays (§10.4, D45)', () => {
       read([
         picture({
           timescale: 90000,
-          tables: tables(21020),
+          tables: shownTables(21020),
           edits: {
             version: 0,
             edits: [
@@ -290,20 +296,77 @@ describe('the tracks a video plays (§10.4, D45)', () => {
     expect(paused.video.timing.offsetSeconds).toBeCloseTo(0.5 - 21020 / 90000, 12)
     expect(paused.video.timing.endSeconds).toBeCloseTo(0.633, 12)
 
-    // An edit that starts at the first frame's time, or after it, is where it says; so is a sound's, whose first frame comes before it.
+    // An edit that starts exactly at the first frame's time is where it says. A sound's edit may start after its first frame (an encoder's priming comes first), and is where it says too: that is accepted for a sound and not for a picture (below).
     const later = chooseTracks(
       read([
         picture({
           timescale: 90000,
-          tables: tables(21020),
-          edits: { version: 0, edits: [{ duration: 133, mediaTime: 30000 }] },
+          tables: shownTables(21020),
+          edits: { version: 0, edits: [{ duration: 133, mediaTime: 21020 }] },
         }),
         sound({ edits: { version: 0, edits: [{ duration: 133, mediaTime: 1024 }] } }),
       ]),
       FILE_SIZE,
     )
-    expect(later.video.timing.offsetSeconds).toBeCloseTo(-30000 / 90000, 12)
+    expect(later.video.timing.offsetSeconds).toBeCloseTo(-21020 / 90000, 12)
     expect(later.audio?.timing.offsetSeconds).toBeCloseTo(-1024 / 44100, 12)
+  })
+
+  it('refuses a picture whose edit starts after its first frame is shown, as a stream-copy cut leaves it', () => {
+    // The first frame is shown at 21020. An edit that starts later hides it, and Media Source would drop its whole GOP.
+    const cut = (edits: { duration: number; mediaTime: number }[]): Movie =>
+      read([
+        picture({ timescale: 90000, tables: shownTables(21020), edits: { version: 0, edits } }),
+      ])
+    const starts = /^The picture track can't be played: The track's edit list starts /
+
+    // One tick late is as fatal as a third of a second.
+    const oneTick = refusal('edit-list', () =>
+      chooseTracks(cut([{ duration: 133, mediaTime: 21021 }]), FILE_SIZE),
+    )
+    expect(oneTick.message).toMatch(starts)
+    const far = refusal('edit-list', () =>
+      chooseTracks(cut([{ duration: 133, mediaTime: 30000 }]), FILE_SIZE),
+    )
+    expect(far.message).toMatch(starts)
+    // (30000 - 21020) / 90000 s, to the millisecond.
+    expect(far.message).toContain('starts 0.1 s after its first frame is shown')
+    // A leading empty edit changes where the picture is shown, not where its edit starts in the media.
+    const paused = refusal('edit-list', () =>
+      chooseTracks(
+        cut([
+          { duration: 500, mediaTime: -1 },
+          { duration: 133, mediaTime: 30000 },
+        ]),
+        FILE_SIZE,
+      ),
+    )
+    expect(paused.message).toMatch(starts)
+
+    // An edit that starts at the first frame is taken, as it is after the empty edit.
+    expect(
+      chooseTracks(cut([{ duration: 133, mediaTime: 21020 }]), FILE_SIZE).video.timing
+        .offsetSeconds,
+    ).toBeCloseTo(-21020 / 90000, 12)
+    expect(
+      chooseTracks(
+        cut([
+          { duration: 500, mediaTime: -1 },
+          { duration: 133, mediaTime: 21020 },
+        ]),
+        FILE_SIZE,
+      ).video.timing.offsetSeconds,
+    ).toBeCloseTo(0.5 - 21020 / 90000, 12)
+
+    // A sound alone is not held to it: its edit starts 1024 ticks in, after its first frame, as an encoder's priming leaves it.
+    const primed = chooseTracks(
+      read([
+        picture(),
+        sound({ edits: { version: 0, edits: [{ duration: 133, mediaTime: 1024 }] } }),
+      ]),
+      FILE_SIZE,
+    )
+    expect(primed.audio?.timing.offsetSeconds).toBeCloseTo(-1024 / 44100, 12)
   })
 
   it('refuses a file with no picture, a chosen track with two entries, an unaccepted edit list or an unknown codec, each with its reason', () => {

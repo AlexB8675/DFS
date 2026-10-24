@@ -49,6 +49,29 @@ function firstPresented(table: FrameTable): number | undefined {
 }
 
 /**
+ * Refuses a picture whose media edit starts after its first frame is shown (in
+ * the track's ticks, the edit's `mediaTime` against the least `dts + cts`), as
+ * a cut made without re-encoding leaves it (`ffmpeg -ss … -c copy`, and so
+ * LosslessCut): the frames from the keyframe before the cut are kept, behind
+ * an edit that starts at the cut. The frames before it would be shown before 0,
+ * where Media Source drops them, and every frame after them up to the next
+ * keyframe with them (it needs a random access point again), so the picture
+ * would never start. The comparison is exact: a frame one tick early is
+ * dropped as a frame a second early is. `trackTiming` has accepted the list,
+ * so the media edit is its last edit; no edit list, or no frame, is nothing to
+ * check. Playing such a cut, from a later start, is the player's to decide (step 5).
+ */
+function refuseCut(track: TrackHeader, first: number | undefined): void {
+  const media = track.edits?.at(-1)
+  if (!media || first === undefined || media.mediaTime <= first) return
+  const seconds = Number(((media.mediaTime - first) / track.timescale).toFixed(3))
+  throw new Mp4Error(
+    'edit-list',
+    `The track's edit list starts ${seconds} s after its first frame is shown, as a cut made without re-encoding leaves it, and the player's buffer would drop the frames before the cut and every frame after them up to the next keyframe.`,
+  )
+}
+
+/**
  * One chosen track, checked from the cheapest rule to the dearest, and the first
  * that fails is the reason: its `problem`; one sample description; a codec
  * string (and the entry that carries it) and an edit list that can be placed,
@@ -58,7 +81,9 @@ function firstPresented(table: FrameTable): number | undefined {
  * the time the first frame is shown: the media edit starts there if it begins
  * earlier, as FFmpeg has it (the writers meant the first frame at the edit's
  * start; 154 of the 192 pictures with an edit list in the corpus begin it before
- * their first frame, by up to 0.198 s). The frames are held to the file they are
+ * their first frame, by up to 0.198 s). A picture whose edit begins after its
+ * first frame is refused (`refuseCut`): a cut made without re-encoding would
+ * never start in the player's buffer. The frames are held to the file they are
  * in, `fileSize` bytes: a track whose frames don't lie inside it is `damaged`.
  */
 function playTrack(
@@ -81,7 +106,9 @@ function playTrack(
     const entry = initEntry(only)
     trackTiming(track, movieTimescale)
     const table = frameTable(track, fileSize)
-    const timing = trackTiming(track, movieTimescale, firstPresented(table))
+    const first = firstPresented(table)
+    const timing = trackTiming(track, movieTimescale, first)
+    if (what === 'picture') refuseCut(track, first)
     const keyframes = keyframeIndexes(table)
     if (what === 'picture' && keyframes.length === 0) {
       throw new Mp4Error('damaged', 'The track has no keyframe to decode from.')

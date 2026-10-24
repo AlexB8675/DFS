@@ -80,8 +80,11 @@ function placeable(edits: readonly Edit[]): { empty: Edit | null; media: Edit } 
  * pictures with an edit list, and in 154 of them the edit starts before the
  * first frame, by 0.007 to 0.198 s. An edit that starts at the first frame or
  * later (a sound's priming comes first; a trim cuts frames) is where it says;
- * without `firstPresentedTicks` the start is the edit's own. `endSeconds` does
- * not move: the footage is still cut at the edit's end.
+ * for a sound that is how it is played, and `chooseTracks` refuses a picture
+ * whose edit starts after its first frame, which a stream-copy cut leaves and
+ * which the player's buffer would drop. Without `firstPresentedTicks` the
+ * start is the edit's own. `endSeconds` does not move: the footage is still cut
+ * at the edit's end.
  *
  * Accepts no edit list, or an optional leading empty edit and then one media
  * edit at rate 1 (the only shapes the videos in use have, as surveyed), and

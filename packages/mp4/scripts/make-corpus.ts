@@ -21,6 +21,7 @@ import {
   statSync,
 } from 'node:fs'
 import { resolve } from 'node:path'
+import { frameTable } from '../src/frames.ts'
 import {
   mergeEntries,
   readIndex,
@@ -91,6 +92,43 @@ const SPECS: Spec[] = [
     ],
     expect: 'plays',
     codecs: { video: 'avc1.64', audio: 'mp4a.40.2' },
+  },
+  {
+    // A stream-copy cut, as `ffmpeg -ss <t> -c copy` (and so LosslessCut) leaves it: the file above from 2.3 s, in the middle of
+    // a group of pictures (keyframes every 2 s), by input seeking. The frames from the keyframe before the cut are kept,
+    // behind a media edit that starts at the cut, so the picture's first frame is shown before its edit starts. Media Source
+    // drops every frame shown before 0 and the rest of that group with them, so it would never start: the reader must refuse it.
+    name: 'h264-aac-cut.mp4',
+    layout: 'ftyp free mdat moov',
+    streams: ['h264', 'aac'],
+    args: [
+      '-ss',
+      '2.3',
+      '-i',
+      resolve(syntheticDir, 'h264-aac-faststart.mp4'),
+      '-c',
+      'copy',
+      '-f',
+      'mp4',
+    ],
+    expect: { refused: 'edit-list' },
+    verify: (path) => {
+      const size = statSync(path).size
+      const picture = readIndex(path, size).tracks.find((track) => track.kind === 'video')
+      if (!picture) throw new Error('The cut has no picture track.')
+      const edit = picture.edits?.at(-1)
+      if (!edit) throw new Error(`The picture has no edit list: ${JSON.stringify(picture.edits)}`)
+      const table = frameTable(picture, size)
+      let first = Infinity
+      for (let i = 0; i < table.count; i += 1) {
+        first = Math.min(first, (table.dts[i] ?? 0) + (table.cts[i] ?? 0))
+      }
+      if (!(edit.mediaTime > first)) {
+        throw new Error(
+          `The picture's media edit starts at ${edit.mediaTime}, not after its first frame, shown at ${first} (in ticks of 1/${picture.timescale} s): it is no cut.`,
+        )
+      }
+    },
   },
   {
     // ftyp, free, mdat, moov: the index after the samples, as a phone leaves a recording it has just stopped.
