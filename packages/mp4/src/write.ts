@@ -1,5 +1,5 @@
-import type { PlayTrack } from './choose.ts'
 import type { FrameTable } from './frames.ts'
+import type { TrackHeader } from './movie.ts'
 
 // What Media Source takes, written from the index and the bytes (DESIGN.md
 // §10.4, D45): an init segment for each track, and fragments of a run of its
@@ -8,7 +8,35 @@ import type { FrameTable } from './frames.ts'
 // frames' raw decode times and their signed composition offsets, and the init
 // segment carries no edit list. Everything here is a pure function of its
 // arguments: no state is kept between calls, and the only bytes of a file that
-// a fragment holds are those the caller hands over for the frames it asks about.
+// a fragment holds are those the caller hands over for the frames it asks about
+// (and the prefix, if the track has one, which no file holds). What the writer
+// takes is what it reads and no more: an MP4's `PlayTrack` has all of it, and
+// so can a track of another container, built by a reader of its own.
+
+/** What the init segment says of a track: its ID and kind, timescale, language, and a picture's size and matrix. */
+export type InitHeader = Pick<
+  TrackHeader,
+  'id' | 'kind' | 'timescale' | 'language' | 'width' | 'height' | 'matrix'
+>
+
+/** What an init segment is written from: the header above, and the sample entry that goes in its `stsd`. A `PlayTrack` is one. */
+export interface InitTrack {
+  header: InitHeader
+  entry: Uint8Array
+}
+
+/**
+ * What a fragment is written from: the track's ID, and a table of the frames to
+ * take from (a `sliceTable` of a larger one will do). Header stripping, which
+ * Matroska allows (`ContentCompAlgo` 3), takes the same leading bytes from every
+ * frame of a track: `prefix` is what the fragment puts back before each frame,
+ * and what the file never held. A `PlayTrack` is one, with no prefix.
+ */
+export interface FragmentTrack {
+  header: { id: number }
+  table: FrameTable
+  prefix?: Uint8Array
+}
 
 /** The size of a box's header: its size in 32 bits, then its type. */
 const BOX_HEADER = 8
@@ -33,6 +61,9 @@ const DEPENDENT_FRAME = 0x01010000
 
 /** The size a box can say in its 32 bits: header and payload together, which `mdat` is the one box to outgrow. */
 const MAX_BOX = 0xffffffff
+
+/** The size a `trun` can say for a frame, in 32 bits: the frame's bytes and the prefix put back before them together. */
+const MAX_FRAME = 0xffffffff
 
 function u16(value: number): Uint8Array {
   const out = new Uint8Array(2)
@@ -125,7 +156,7 @@ function movieHeader(nextTrackId: number): Uint8Array {
 }
 
 /** `tkhd`: the track's ID, no length, the matrix and the size in pixels of the source's, in 16.16. */
-function trackHeader(track: PlayTrack, picture: boolean): Uint8Array {
+function trackHeader(track: InitTrack, picture: boolean): Uint8Array {
   const { id, matrix, width, height } = track.header
   return fullBox(
     'tkhd',
@@ -148,7 +179,7 @@ function trackHeader(track: PlayTrack, picture: boolean): Uint8Array {
 }
 
 /** `mdhd`: the media's timescale and language, with no length. */
-function mediaHeader(track: PlayTrack): Uint8Array {
+function mediaHeader(track: InitTrack): Uint8Array {
   return fullBox(
     'mdhd',
     0,
@@ -189,7 +220,7 @@ function entryOfInit(entry: Uint8Array): Uint8Array {
 }
 
 /** `minf`: the media header of a picture (flag 1, as ISO asks) or a sound, a data reference to this same stream, and the sample tables: the one description and no frame. */
-function mediaInformation(track: PlayTrack, picture: boolean): Uint8Array {
+function mediaInformation(track: InitTrack, picture: boolean): Uint8Array {
   return box(
     'minf',
     picture ? fullBox('vmhd', 0, 1, zeros(8)) : fullBox('smhd', 0, 0, zeros(4)),
@@ -212,9 +243,11 @@ function mediaInformation(track: PlayTrack, picture: boolean): Uint8Array {
  * and whose other tables are empty) and `mvex`/`trex`. There is no edit list:
  * the player gives the SourceBuffer the track's `timing.offsetSeconds` instead.
  * Times are not given, for the fragments carry them. A picture is a track
- * whose kind is `video`; any other is written as a sound.
+ * whose kind is `video`; any other is written as a sound. It takes any track
+ * that has a header of the fields `InitHeader` names and an entry, which a
+ * `PlayTrack` has; the rest of a `PlayTrack` is not read.
  */
-export function initSegment(track: PlayTrack): Uint8Array {
+export function initSegment(track: InitTrack): Uint8Array {
   const picture = track.header.kind === 'video'
   const { id } = track.header
   return concat([
@@ -237,13 +270,23 @@ export function initSegment(track: PlayTrack): Uint8Array {
   ])
 }
 
-/** `trun` of frames [from, to): the data offset, then each frame's duration, size, flags and composition offset (signed). */
-function trackRun(table: FrameTable, from: number, to: number, dataOffset: number): Uint8Array {
+/**
+ * `trun` of frames [from, to): the data offset, then each frame's duration, size,
+ * flags and composition offset (signed). A frame's size counts the prefix that is
+ * put back before it (`prefixLength` bytes, none for an MP4) and the bytes it has in the file.
+ */
+function trackRun(
+  table: FrameTable,
+  from: number,
+  to: number,
+  dataOffset: number,
+  prefixLength: number,
+): Uint8Array {
   const frames = new Uint8Array((to - from) * RUN_FRAME)
   const view = new DataView(frames.buffer)
   for (let i = from, at = 0; i < to; i += 1, at += RUN_FRAME) {
     view.setUint32(at, table.durations[i] ?? 0)
-    view.setUint32(at + 4, table.sizes[i] ?? 0)
+    view.setUint32(at + 4, prefixLength + (table.sizes[i] ?? 0))
     view.setUint32(at + 8, table.sync[i] === 1 ? KEYFRAME : DEPENDENT_FRAME)
     view.setInt32(at + 12, table.cts[i] ?? 0)
   }
@@ -280,20 +323,31 @@ function checkFragment(table: FrameTable, from: number, to: number, sequence: nu
 
 /**
  * Everything of a fragment but the bytes of its frames: the `moof`, then the
- * header of the `mdat` that follows it, and how many bytes that `mdat` holds.
- * Exported for the tests, and not by the package: a payload past 4 GiB is
- * tested through it, for a fragment itself would have to hold it.
+ * header of the `mdat` that follows it, and how many bytes that `mdat` holds,
+ * which counts the track's prefix once for each frame. Exported for the tests,
+ * and not by the package: a payload past 4 GiB is tested through it, for a
+ * fragment itself would have to hold it. A frame and its prefix that a size of
+ * 32 bits can't hold are a RangeError, as a range that isn't one is.
  */
 export function fragmentHead(
-  track: PlayTrack,
+  track: FragmentTrack,
   from: number,
   to: number,
   sequence: number,
 ): { head: Uint8Array; payload: number } {
   const { table } = track
   checkFragment(table, from, to, sequence)
+  const prefixLength = track.prefix?.length ?? 0
   let payload = 0
-  for (let i = from; i < to; i += 1) payload += table.sizes[i] ?? 0
+  for (let i = from; i < to; i += 1) {
+    const size = prefixLength + (table.sizes[i] ?? 0)
+    if (size > MAX_FRAME) {
+      throw new RangeError(
+        `Frame ${i} is ${table.sizes[i]} bytes and its prefix ${prefixLength}, more than the ${MAX_FRAME} bytes that a size in a fragment holds.`,
+      )
+    }
+    payload += size
+  }
   const data = dataHeader(payload)
 
   const mfhd = fullBox('mfhd', 0, 0, u32(sequence))
@@ -306,7 +360,7 @@ export function fragmentHead(
   const moof = box(
     'moof',
     mfhd,
-    box('traf', tfhd, tfdt, trackRun(table, from, to, moofSize + data.length)),
+    box('traf', tfhd, tfdt, trackRun(table, from, to, moofSize + data.length, prefixLength)),
   )
   return { head: concat([moof, data]), payload }
 }
@@ -320,21 +374,30 @@ export function fragmentHead(
  * is asked once for each frame, in order, and answers from the span of the file
  * the caller holds; an answer of another length than the size asked for is the
  * caller's mistake, as is a range that isn't one or a sequence number outside
- * 1 to 2^32 - 1 (all `RangeError`).
+ * 1 to 2^32 - 1 (all `RangeError`). The track is a `FragmentTrack`, which a
+ * `PlayTrack` is. When it has a prefix (header stripping took the same leading
+ * bytes from each frame), the `mdat` holds the prefix and then the frame's bytes
+ * for each frame, and each frame's size in the `trun` counts both: `bytesAt` is
+ * asked for the frame as the file has it, and never for the prefix, which the
+ * file doesn't hold. A prefix of no bytes is no prefix.
  */
 export function fragment(
-  track: PlayTrack,
+  track: FragmentTrack,
   from: number,
   to: number,
   sequence: number,
   bytesAt: (offset: number, size: number) => Uint8Array,
 ): Uint8Array {
-  const { table } = track
+  const { table, prefix } = track
   const { head, payload } = fragmentHead(track, from, to, sequence)
   const out = new Uint8Array(head.length + payload)
   out.set(head)
   let at = head.length
   for (let i = from; i < to; i += 1) {
+    if (prefix) {
+      out.set(prefix, at)
+      at += prefix.length
+    }
     const offset = table.offsets[i] ?? 0
     const size = table.sizes[i] ?? 0
     const bytes = bytesAt(offset, size)

@@ -8,3 +8,4 @@ export * from './movie.ts'
 export * from './timing.ts'
 // Named, unlike the others: `write.ts` also exports `fragmentHead`, which only its tests use.
 export { fragment, initSegment } from './write.ts'
+export type { FragmentTrack, InitHeader, InitTrack } from './write.ts'

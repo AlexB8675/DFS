@@ -4,7 +4,8 @@ import type { Box } from './boxes.ts'
 import { chooseTracks } from './choose.ts'
 import type { PlayTrack } from './choose.ts'
 import { Mp4Error } from './errors.ts'
-import { frameTable } from './frames.ts'
+import { frameTable, sliceTable } from './frames.ts'
+import type { FrameTable } from './frames.ts'
 import { readMovie } from './movie.ts'
 import {
   avcC,
@@ -23,6 +24,7 @@ import {
   wave,
 } from './testing/build.ts'
 import { fragment, fragmentHead, initSegment } from './write.ts'
+import type { FragmentTrack, InitTrack } from './write.ts'
 
 /** A file of a mebibyte: it holds every frame that the tables here place (the furthest ends at 9 600). */
 const FILE_SIZE = 2 ** 20
@@ -820,5 +822,137 @@ describe('the size of the mdat (§10.4)', () => {
     expect(huge).toMatchObject({ payload: 3 * (2 ** 32 - 1), headerSize: 16, wide: true })
     expect(huge.size).toBe(3 * (2 ** 32 - 1) + 16)
     expect(huge.dataOffset).toBe(huge.moofEnd + 16)
+  })
+})
+
+describe('a track of the right shape (§10.4)', () => {
+  /** A table of frames of these sizes at these file offsets, each a keyframe lasting 1000 ticks: nothing an MP4 had to give. */
+  function tableOf(sizes: number[], offsets: number[]): FrameTable {
+    const count = sizes.length
+    return {
+      count,
+      timescale: 1000,
+      offsets: Float64Array.from(offsets),
+      sizes: Uint32Array.from(sizes),
+      dts: Float64Array.from(sizes, (_, i) => 1000 * i),
+      durations: new Uint32Array(count).fill(1000),
+      cts: new Int32Array(count),
+      sync: new Uint8Array(count).fill(1),
+    }
+  }
+
+  /** The bytes a frame is made of in these tests: its size times the letter of its place in the range. */
+  function lettered(_offset: number, size: number, call: number): Uint8Array {
+    return new Uint8Array(size).fill(call === 0 ? 0xaa : 0xbb)
+  }
+
+  it('writes the init segment of a header and an entry alone, the same as it does of the whole track', () => {
+    const { video, audio } = play()
+    for (const track of [video, audio]) {
+      const { id, kind, timescale, language, width, height, matrix } = track.header
+      const alone: InitTrack = {
+        header: { id, kind, timescale, language, width, height, matrix },
+        entry: track.entry,
+      }
+      expect(initSegment(alone)).toEqual(initSegment(track))
+    }
+  })
+
+  it("writes the fragment of a slice of the table as it writes the range's", () => {
+    const { video, audio } = play()
+    for (const track of [video, audio]) {
+      const whole = recorder()
+      const sliced = recorder()
+      const slice: FragmentTrack = {
+        header: track.header,
+        table: sliceTable(track.table, 2, 5),
+      }
+      const expected = fragment(track, 2, 5, 7, whole.bytesAt)
+      expect(fragment(slice, 0, 3, 7, sliced.bytesAt)).toEqual(expected)
+      expect(sliced.calls).toEqual(whole.calls)
+    }
+    // And a range within a slice is the same range of the table, shifted by where the slice starts.
+    const inner = recorder()
+    const slice = { header: video.header, table: sliceTable(video.table, 1, 6) }
+    expect(fragment(slice, 1, 3, 2, inner.bytesAt)).toEqual(
+      fragment(video, 2, 4, 2, recorder().bytesAt),
+    )
+  })
+
+  it("puts a prefix before each frame, and counts it in the frame's size", () => {
+    const prefix = Uint8Array.of(0x0b, 0x77)
+    const track: FragmentTrack = {
+      header: { id: 4 },
+      table: tableOf([3, 2], [100, 200]),
+      prefix,
+    }
+    const { bytesAt, calls } = recorder(lettered)
+    const bytes = fragment(track, 0, 2, 1, bytesAt)
+    const read = readFragment(bytes)
+
+    expect(read.top).toEqual(['moof', 'mdat'])
+    expect(read.tfhd.id).toBe(4)
+    expect(read.trun.frames.map((frame) => frame.size)).toEqual([5, 4])
+    expect(read.trun.dataOffset).toBe(read.mdat.body)
+    expect(read.mdat.end).toBe(bytes.length)
+    expect(Array.from(bytes.subarray(read.mdat.body))).toEqual([
+      ...[0x0b, 0x77, 0xaa, 0xaa, 0xaa],
+      ...[0x0b, 0x77, 0xbb, 0xbb],
+    ])
+    // The file never held the prefix: the frames are asked for by their own size, and nothing else is.
+    expect(calls).toEqual([
+      [100, 3],
+      [200, 2],
+    ])
+    // The prefix is copied, and left as it was.
+    expect(Array.from(prefix)).toEqual([0x0b, 0x77])
+  })
+
+  it('writes a fragment with a prefix of no bytes as it writes one with none', () => {
+    const { video } = play()
+    const none = fragment(video, 0, 3, 7, recorder().bytesAt)
+    const empty = fragment({ ...video, prefix: new Uint8Array(0) }, 0, 3, 7, recorder().bytesAt)
+    expect(empty).toEqual(none)
+  })
+
+  it('writes the same fragment of a PlayTrack as it always has, which has no prefix', () => {
+    const { video } = play()
+    expect('prefix' in video).toBe(false)
+    const read = readFragment(fragment(video, 0, 2, 1, recorder().bytesAt))
+    expect(read.trun.frames.map((frame) => frame.size)).toEqual([10, 20])
+  })
+
+  it('counts a prefix in a payload past 4 GiB', () => {
+    const frames = 2 ** 20
+    const track: FragmentTrack = {
+      header: { id: 1 },
+      table: tableOf(new Array<number>(frames).fill(4096), new Array<number>(frames).fill(0)),
+      prefix: new Uint8Array(4),
+    }
+    const { head, payload } = fragmentHead(track, 0, frames, 1)
+    // 2^20 frames of 4 096 bytes are 2^32 on their own: the 4 bytes before each are what makes the payload 4 100 a frame.
+    expect(payload).toBe(frames * 4100)
+    expect(payload).toBeGreaterThan(2 ** 32)
+    const moof = firstBox(head, 0, head.length)
+    if (!moof) throw new Error('expected a moof')
+    const header = new Reader(head, moof.end, head.length)
+    expect(header.u32()).toBe(1) // the size of the 64-bit kind
+    expect(header.fourcc()).toBe('mdat')
+    expect(header.u64()).toBe(16 + frames * 4100)
+    const run = readMoof(head, moof).trun
+    expect(run.dataOffset).toBe(head.length)
+    expect(run.frames[0]?.size).toBe(4100)
+    expect(run.frames[frames - 1]?.size).toBe(4100)
+  })
+
+  it("refuses a frame and its prefix that a size of 32 bits can't hold", () => {
+    const track: FragmentTrack = {
+      header: { id: 1 },
+      table: tableOf([0xffffffff], [0]),
+      prefix: Uint8Array.of(1),
+    }
+    expect(() => fragmentHead(track, 0, 1, 1)).toThrow(RangeError)
+    // Without the prefix the frame is the largest there can be, and is written.
+    expect(() => fragmentHead({ ...track, prefix: undefined }, 0, 1, 1)).not.toThrow()
   })
 })

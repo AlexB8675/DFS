@@ -415,3 +415,36 @@ export function frameTable(track: TrackHeader, fileSize: number): FrameTable {
 
   return { count, timescale: track.timescale, offsets, sizes: sizeArray, dts, durations, cts, sync }
 }
+
+/**
+ * The frames [from, to) of a table, as a table of their own: views onto the
+ * table's arrays (`subarray`, so nothing is copied and a slice is as cheap as the
+ * range it takes), with the same timescale. A reader that builds a table span by
+ * span for the writer gets the frames of a span this way. The range may be empty,
+ * and a slice is a table: `from` and `to` count frames of this table, and the
+ * frames of the slice count from 0. A range outside the table, or one whose ends
+ * are not whole numbers, is a RangeError: the caller's mistake, and not the file's.
+ */
+export function sliceTable(table: FrameTable, from: number, to: number): FrameTable {
+  if (
+    !Number.isInteger(from) ||
+    !Number.isInteger(to) ||
+    from < 0 ||
+    from > to ||
+    to > table.count
+  ) {
+    throw new RangeError(
+      `Frames ${from} to ${to} are not a range of frames within the ${table.count} frames of the table.`,
+    )
+  }
+  return {
+    count: to - from,
+    timescale: table.timescale,
+    offsets: table.offsets.subarray(from, to),
+    sizes: table.sizes.subarray(from, to),
+    dts: table.dts.subarray(from, to),
+    durations: table.durations.subarray(from, to),
+    cts: table.cts.subarray(from, to),
+    sync: table.sync.subarray(from, to),
+  }
+}

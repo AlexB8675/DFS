@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Mp4Error } from './errors.ts'
-import { frameTable } from './frames.ts'
+import { frameTable, sliceTable } from './frames.ts'
+import type { FrameTable } from './frames.ts'
 import { readMovie } from './movie.ts'
 import type { TrackHeader } from './movie.ts'
 import {
@@ -615,5 +616,89 @@ describe("a track's frames (§10.4)", () => {
     expect(frames.offsets[count - 1]).toBe(48 + (count - 1) * 9000)
     expect(frames.sizes[count - 1]).toBe(1000 + ((count - 1) % 7919))
     expect(frames.sync[count - 1]).toBe(1)
+  })
+})
+
+describe('a slice of a table (§10.4)', () => {
+  /** 6 frames whose every number says which frame it is: 100 + i for its offset, 10 + i for its size, and so on. */
+  function sixFrames(): FrameTable {
+    return {
+      count: 6,
+      timescale: 24000,
+      offsets: Float64Array.from({ length: 6 }, (_, i) => 100 + i),
+      sizes: Uint32Array.from({ length: 6 }, (_, i) => 10 + i),
+      dts: Float64Array.from({ length: 6 }, (_, i) => 1000 * i),
+      durations: Uint32Array.from({ length: 6 }, (_, i) => 1000 + i),
+      cts: Int32Array.from({ length: 6 }, (_, i) => -i),
+      sync: Uint8Array.from({ length: 6 }, (_, i) => (i % 3 === 0 ? 1 : 0)),
+    }
+  }
+
+  it('is the frames of the range, with the count of the range and the timescale of the table', () => {
+    const table = sixFrames()
+    const slice = sliceTable(table, 2, 5)
+    expect(slice.count).toBe(3)
+    expect(slice.timescale).toBe(24000)
+    expect(ints(slice.offsets)).toEqual([102, 103, 104])
+    expect(ints(slice.sizes)).toEqual([12, 13, 14])
+    expect(ints(slice.dts)).toEqual([2000, 3000, 4000])
+    expect(ints(slice.durations)).toEqual([1002, 1003, 1004])
+    expect(ints(slice.cts)).toEqual([-2, -3, -4])
+    expect(ints(slice.sync)).toEqual([0, 1, 0])
+    // The same kinds of array as the table's, so a slice is a table.
+    expect(slice.offsets).toBeInstanceOf(Float64Array)
+    expect(slice.sizes).toBeInstanceOf(Uint32Array)
+    expect(slice.dts).toBeInstanceOf(Float64Array)
+    expect(slice.durations).toBeInstanceOf(Uint32Array)
+    expect(slice.cts).toBeInstanceOf(Int32Array)
+    expect(slice.sync).toBeInstanceOf(Uint8Array)
+  })
+
+  it('holds views onto the table, not copies of it, and leaves the table as it was', () => {
+    const table = sixFrames()
+    const slice = sliceTable(table, 2, 5)
+    expect(slice.offsets.buffer).toBe(table.offsets.buffer)
+    expect(slice.sizes.buffer).toBe(table.sizes.buffer)
+    expect(slice.dts.buffer).toBe(table.dts.buffer)
+    expect(slice.durations.buffer).toBe(table.durations.buffer)
+    expect(slice.cts.buffer).toBe(table.cts.buffer)
+    expect(slice.sync.buffer).toBe(table.sync.buffer)
+    expect(slice.sizes.byteOffset).toBe(2 * 4)
+    expect(slice.offsets.byteOffset).toBe(2 * 8)
+    expect(table).toEqual(sixFrames())
+  })
+
+  it('takes the whole table, a single frame and none at all', () => {
+    const table = sixFrames()
+    expect(sliceTable(table, 0, 6)).toEqual(table)
+    const one = sliceTable(table, 5, 6)
+    expect([one.count, ints(one.sizes), ints(one.dts)]).toEqual([1, [15], [5000]])
+    // An empty range is allowed, at either end or between: a span with no frame is a table of none.
+    for (const at of [0, 3, 6]) {
+      const none = sliceTable(table, at, at)
+      expect(none.count).toBe(0)
+      expect(none.timescale).toBe(24000)
+      expect([none.offsets.length, none.sizes.length, none.dts.length]).toEqual([0, 0, 0])
+      expect([none.durations.length, none.cts.length, none.sync.length]).toEqual([0, 0, 0])
+    }
+  })
+
+  it('refuses a range that is not within the table, as a RangeError', () => {
+    const table = sixFrames()
+    const ranges: [number, number][] = [
+      [3, 2],
+      [0, 7],
+      [7, 7],
+      [-1, 2],
+      [0.5, 2],
+      [1, 2.5],
+      [Number.NaN, 2],
+      [0, Number.NaN],
+      [0, Infinity],
+      [-Infinity, 2],
+    ]
+    for (const [from, to] of ranges) {
+      expect(() => sliceTable(table, from, to), `${from} to ${to}`).toThrow(RangeError)
+    }
   })
 })
