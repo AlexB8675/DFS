@@ -6,6 +6,11 @@
 // will play it: a SourceBuffer for each track, its `timestampOffset` and
 // `appendWindowEnd` from the track's timing, an init segment, then fragments of
 // up to a second. Every failure names the file, the track and the check.
+//
+// A track is first asked of the browser by each name it has (`codecNames`), and the
+// browser's answer is held to the table of what each browser plays (support.ts): one
+// that disagrees with the table, or a codec the table lacks, fails the test, and
+// only a codec that the browser and the table agree it doesn't take is skipped.
 
 import { afterAll, describe, inject, it } from 'vitest'
 import type { TestContext } from 'vitest'
@@ -36,6 +41,8 @@ import {
   waitUntil,
   watchFrames,
 } from './media.ts'
+import { supportVerdict } from './support.ts'
+import type { Engine } from './support.ts'
 
 /** How much of a file's start is read to find its index: the same 1 MiB that the player will fetch. */
 const HEAD_BYTES = 1024 * 1024
@@ -59,6 +66,16 @@ const BROWSER =
     : server.browser === 'firefox'
       ? 'Firefox'
       : server.browser
+
+/** The engine of the running browser, which the table of what browsers play (support.ts) is by. */
+function engineOf(browser: string): Engine {
+  if (browser === 'chromium' || browser === 'firefox') return browser
+  throw new Error(
+    `support.ts has a table for Chrome and Firefox only, and this browser is ${browser}.`,
+  )
+}
+
+const ENGINE = engineOf(server.browser)
 
 type Kind = 'picture' | 'sound'
 type Part = Kind | 'file'
@@ -104,18 +121,42 @@ async function readTracks(file: CorpusFile, url: string): Promise<Tracks> {
   })
 }
 
-function mimeType(kind: 'video' | 'audio', track: PlayTrack): string {
-  return `${kind}/mp4; codecs="${track.codec}"`
+/** The MIME type of the first of the track's names that this browser's Media Source takes, or null where it takes none. */
+function mimeTypeFor(kind: 'video' | 'audio', track: PlayTrack): string | null {
+  for (const name of track.codecNames) {
+    const type = `${kind}/mp4; codecs="${name}"`
+    if (MediaSource.isTypeSupported(type)) return type
+  }
+  return null
 }
 
-/** Skips the test for a browser that says it can't take one of the file's tracks. */
-function skipUnsupported(ctx: TestContext, tracks: Tracks): void {
-  if (!MediaSource.isTypeSupported(mimeType('video', tracks.video))) {
-    ctx.skip(`${BROWSER} can't play ${tracks.video.codec}`)
+/** The MIME type for a track the browser took (see `checkSupport`), for a SourceBuffer to be made with. */
+function acceptedType(kind: 'video' | 'audio', track: PlayTrack): string {
+  const type = mimeTypeFor(kind, track)
+  if (type === null) {
+    throw new Error(`${BROWSER}'s Media Source took none of ${track.codecNames.join(', ')}`)
   }
-  if (tracks.audio && !MediaSource.isTypeSupported(mimeType('audio', tracks.audio))) {
-    ctx.skip(`${BROWSER} can't play ${tracks.audio.codec}`)
+  return type
+}
+
+/**
+ * Holds the browser's answer for each of the file's tracks to the table of what it
+ * plays (support.ts, `supportVerdict`) before the file plays. Every track is
+ * judged before any is skipped, so that a wrong name of the sound is found though
+ * the picture is one the browser doesn't take. A disagreement with the table, or a
+ * family it lacks, fails the test; a codec that the browser and the table agree it
+ * doesn't take skips it, saying so.
+ */
+function checkSupport(ctx: TestContext, file: CorpusFile, tracks: Tracks): void {
+  const judged: [Kind, 'video' | 'audio', PlayTrack][] = [['picture', 'video', tracks.video]]
+  if (tracks.audio) judged.push(['sound', 'audio', tracks.audio])
+  let skip: string | undefined
+  for (const [part, kind, track] of judged) {
+    const verdict = supportVerdict(track, ENGINE, BROWSER, mimeTypeFor(kind, track) !== null)
+    if (verdict.outcome === 'fail') fail(file.name, part, 'the codec table', verdict.reason)
+    if (verdict.outcome === 'skip') skip ??= verdict.reason
   }
+  if (skip !== undefined) ctx.skip(skip)
 }
 
 /** A video element on a media source, with a SourceBuffer for each track and its init segment appended, as the player sets one up. */
@@ -150,10 +191,10 @@ async function openPlayer(file: CorpusFile, tracks: Tracks): Promise<Player> {
 
     // Both buffers are added before either has its init segment: the video reaches its metadata once every buffer has one.
     const picture = await guarded(file.name, 'picture', 'adding its SourceBuffer', () =>
-      mediaSource.addSourceBuffer(mimeType('video', tracks.video)),
+      mediaSource.addSourceBuffer(acceptedType('video', tracks.video)),
     )
     const sound = await guarded(file.name, 'sound', 'adding its SourceBuffer', () =>
-      tracks.audio ? mediaSource.addSourceBuffer(mimeType('audio', tracks.audio)) : null,
+      tracks.audio ? mediaSource.addSourceBuffer(acceptedType('audio', tracks.audio)) : null,
     )
     const buffers: [SourceBuffer, PlayTrack, Kind][] = [[picture, tracks.video, 'picture']]
     if (sound && tracks.audio) buffers.push([sound, tracks.audio, 'sound'])
@@ -434,7 +475,7 @@ describe.each(files)('$name', (file) => {
     { timeout: TEST_TIMEOUT_MS },
     async (ctx) => {
       const tracks = await tracksOf()
-      skipUnsupported(ctx, tracks)
+      checkSupport(ctx, file, tracks)
       const { video: picture, audio: sound } = tracks
       return withPlayer(ctx, file, tracks, async (player) => {
         const stretch = startStretch(tracks)
@@ -521,7 +562,7 @@ describe.each(files)('$name', (file) => {
     { timeout: TEST_TIMEOUT_MS },
     async (ctx) => {
       const tracks = await tracksOf()
-      skipUnsupported(ctx, tracks)
+      checkSupport(ctx, file, tracks)
       const { video: picture, audio: sound } = tracks
       return withPlayer(ctx, file, tracks, async (player) => {
         // The target is the middle of the picture (see seekTarget); the picture is decoded from the keyframe
@@ -617,7 +658,7 @@ describe.each(files)('$name', (file) => {
   if (file.synthetic && file.name.endsWith('/portrait-h264.mp4')) {
     it('a portrait video plays upright', { timeout: TEST_TIMEOUT_MS }, async (ctx) => {
       const tracks = await tracksOf()
-      skipUnsupported(ctx, tracks)
+      checkSupport(ctx, file, tracks)
       return withPlayer(ctx, file, tracks, async (player) => {
         const { video } = player
         const loaded = await waitUntil(

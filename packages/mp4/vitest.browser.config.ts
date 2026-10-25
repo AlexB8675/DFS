@@ -27,8 +27,10 @@ if (wanted.length === 0 || unknown.length > 0) {
 
 // Unset, the installed Chrome; `msedge` and the like name another installed browser; an empty value
 // or `none` names none, and leaves the channel out for Playwright's own Chromium (`playwright install
-// chromium`), for a machine without any. That Chromium is built without H.264, AAC and HEVC, so most
-// of the corpus is skipped there, each file saying it can't play its codec.
+// chromium`), for a machine without any. That Chromium is built without H.264, AAC and HEVC, which
+// src/browser/support.ts says Chrome plays, so most of the corpus fails there, each file saying that
+// its Media Source doesn't take a codec the table says it does (another channel, such as Edge,
+// differs from the table in the same way for IAMF, and the table is of Chrome and Firefox).
 const channelValue = process.env.DFS_CHROME_CHANNEL?.trim()
 const chromeChannel =
   channelValue === undefined
