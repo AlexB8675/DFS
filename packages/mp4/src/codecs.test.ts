@@ -617,10 +617,13 @@ describe('codecNames', () => {
           audioEntry('mp4a', {}, esds({ objectType, ...(config === undefined ? {} : { config }) })),
         ),
       )
-    // MPEG-2 AAC, with its AudioSpecificConfig.
-    expect(named(0x66)).toEqual(['mp4a.66'])
-    expect(named(0x67)).toEqual(['mp4a.67'])
-    expect(named(0x68)).toEqual(['mp4a.68'])
+    // MPEG-2 AAC, with its AudioSpecificConfig: named as MPEG-4 audio by the audio object type that holds, then by its own.
+    expect(named(0x66, audioSpecificConfig(1))).toEqual(['mp4a.40.1', 'mp4a.66'])
+    expect(named(0x67)).toEqual(['mp4a.40.2', 'mp4a.67'])
+    expect(named(0x68, audioSpecificConfig(3))).toEqual(['mp4a.40.3', 'mp4a.68'])
+    // The audio object type is the AudioSpecificConfig's, whatever the profile the object type says (and an escaped one is read).
+    expect(named(0x67, audioSpecificConfig(5))).toEqual(['mp4a.40.5', 'mp4a.67'])
+    expect(named(0x67, audioSpecificConfig(42))).toEqual(['mp4a.40.42', 'mp4a.67'])
     // MPEG audio layer 3 has no DecoderSpecificInfo, and browsers know it by three names.
     expect(named(0x6b, null)).toEqual(['mp4a.6B', 'mp3', 'mp4a.40.34'])
     expect(named(0x69, null)).toEqual(['mp4a.69', 'mp3', 'mp4a.40.34'])
@@ -1379,6 +1382,108 @@ describe('initEntry', () => {
       const out = initEntry(given)
       expect(out, given.type).toBe(given.bytes)
       expect(out, given.type).toEqual(bytes)
+    }
+  })
+
+  it.each([
+    ['0x66', 0x66, 1],
+    ['0x67', 0x67, 2],
+    ['0x68', 0x68, 3],
+  ])(
+    'writes an ISO version 0 entry of MPEG-2 AAC (object type %s) with the one byte that says MPEG-4 audio changed, and leaves the given bytes as they were',
+    (_name, oti, aot) => {
+      const config = audioSpecificConfig(aot)
+      const bytes = audioEntry(
+        'mp4a',
+        { channels: 2, sampleRate: 48000 },
+        esds({ objectType: oti, config }),
+        chan,
+      )
+      const kept = bytes.slice()
+      const given = entryOf(bytes, 0)
+      const out = initEntry(given)
+      // The same entry, as it would be with the object type of MPEG-4 audio, box for box.
+      expect(out).toEqual(
+        audioEntry(
+          'mp4a',
+          { channels: 2, sampleRate: 48000 },
+          esds({ objectType: 0x40, config }),
+          chan,
+        ),
+      )
+      // Exactly one byte differs from the given entry, and the given entry is untouched.
+      expect(out.length).toBe(bytes.length)
+      expect(Array.from(out).filter((byte, at) => byte !== bytes[at])).toHaveLength(1)
+      expect(out).not.toBe(given.bytes)
+      expect(out.buffer).not.toBe(given.bytes.buffer)
+      expect(given.bytes).toEqual(kept)
+      expect(bytes).toEqual(kept)
+      // What is written names MPEG-4 audio, and has nothing left to rewrite.
+      const written = entryOf(out)
+      expect(codecNames(written)).toEqual([`mp4a.40.${aot}`])
+      expect(initEntry(written)).toBe(written.bytes)
+    },
+  )
+
+  it('writes QuickTime and ISO version 1 entries of MPEG-2 AAC as ISO version 0 with the esds of MPEG-4 audio', () => {
+    const config = audioSpecificConfig(2)
+    const mpeg2 = esds({ objectType: 0x67, config })
+    const mpeg4 = esds({ objectType: 0x40, config })
+    const quickTime = quickTimeAudioEntry(
+      'mp4a',
+      { version: 1, channels: 2, sampleRate: 44100 },
+      wave(frma('mp4a'), mpeg2, [0, 0, 0, 0]),
+      chan,
+    )
+    const out = initEntry(entryOf(quickTime))
+    expect(audioFields(out)).toMatchObject({
+      type: 'mp4a',
+      version: 0,
+      channels: 2,
+      sampleRate: 44100,
+    })
+    expect(childrenOf(out).bytes).toEqual([mpeg4, chan])
+    expect(codecNames(entryOf(out))).toEqual(['mp4a.40.2'])
+    // ISO's own version 1, in an stsd of version 1, with its rate in the srat.
+    const iso = audioEntry(
+      'mp4a',
+      { version: 1, channels: 2, sampleRate: 48000 },
+      srat(96000),
+      mpeg2,
+    )
+    const fromIso = initEntry(entryOf(iso, 1))
+    expect(audioFields(fromIso)).toMatchObject({ type: 'mp4a', version: 0, sampleRate: 48000 })
+    expect(childrenOf(fromIso).bytes).toEqual([mpeg4])
+    // An entry of version 0 in an stsd of version 1 is written afresh, with the byte changed too.
+    const plain = audioEntry('mp4a', { channels: 2, sampleRate: 48000 }, mpeg2)
+    expect(childrenOf(initEntry(entryOf(plain, 1))).bytes).toEqual([mpeg4])
+  })
+
+  it('writes the esds of MPEG-2 AAC with every byte but the object type as it was, wide descriptors and a URL included', () => {
+    const config = audioSpecificConfig(2)
+    const spec = { wide: true, url: 'a.mp4', clock: 7, dependsOn: 3, config }
+    const bytes = audioEntry('mp4a', {}, esds({ ...spec, objectType: 0x67 }))
+    const out = initEntry(entryOf(bytes))
+    expect(out).toEqual(audioEntry('mp4a', {}, esds({ ...spec, objectType: 0x40 })))
+  })
+
+  it('carries every other sound as it is, MPEG audio layer 3 and the other object types of an mp4a included', () => {
+    for (const [objectType, config] of [
+      [0x40, undefined],
+      [0x69, null],
+      [0x6b, null],
+      [0xa5, null],
+      [0xa6, null],
+      [0xdd, null],
+      [0x05, null],
+    ] as const) {
+      const bytes = audioEntry(
+        'mp4a',
+        {},
+        esds({ objectType, ...(config === undefined ? {} : { config }) }),
+      )
+      const given = entryOf(bytes)
+      expect(initEntry(given), `object type ${objectType}`).toBe(given.bytes)
     }
   })
 

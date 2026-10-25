@@ -106,10 +106,65 @@ function firstDifference(a: Uint8Array, b: Uint8Array): number {
   return at === -1 ? 0 : at
 }
 
+/** The objectTypeIndication of MPEG-4 audio, which MPEG-2 AAC (0x66 to 0x68) is written with. */
+const MPEG4_AUDIO = 0x40
+
+/**
+ * Where the objectTypeIndication byte of an `esds` box (whole, header included)
+ * is: the first byte of the DecoderConfigDescriptor (tag 4) that follows the
+ * ES_Descriptor's ID, flags and the fields the flags say it has, after the box's
+ * header and its version and flags. Written out here, and not taken from the
+ * module. Null where the descriptors are not as that, or are cut short.
+ */
+function objectTypeAt(esds: Uint8Array): number | null {
+  /** The tag of the descriptor at `at`, where its body begins, and its length (up to four bytes of 7 bits). */
+  const header = (at: number): { tag: number; body: number; length: number } | null => {
+    const tag = esds[at]
+    if (tag === undefined) return null
+    let length = 0
+    for (let index = 1; index <= 4; index += 1) {
+      const next = esds[at + index]
+      if (next === undefined) return null
+      length = length * 128 + (next & 0x7f)
+      if ((next & 0x80) === 0) return { tag, body: at + index + 1, length }
+    }
+    return null
+  }
+  const stream = header(12)
+  if (stream?.tag !== 0x03) return null
+  // The ES_ID, the flags, then the stream it depends on, a URL after its length, and the stream that clocks it.
+  const flags = esds[stream.body + 2]
+  if (flags === undefined) return null
+  let at = stream.body + 3
+  if (flags & 0x80) at += 2
+  if (flags & 0x40) at += 1 + (esds[at] ?? 0)
+  if (flags & 0x20) at += 2
+  const decoder = header(at)
+  if (decoder?.tag !== 0x04 || decoder.body >= esds.length) return null
+  return decoder.body
+}
+
+/**
+ * Whether a written box differs from the source's only as a writer is allowed
+ * to: an `esds` whose objectTypeIndication was 0x66, 0x67 or 0x68 (MPEG-2 AAC)
+ * and is 0x40 (MPEG-4 audio) now, with every other byte the same. Chrome's
+ * Media Source takes an `mp4a` only with that type, and `initEntry` writes it.
+ */
+function onlyMpeg2AacBecameMpeg4(type: string, actual: Uint8Array, expected: Uint8Array): boolean {
+  if (type !== 'esds' || actual.length !== expected.length) return false
+  const at = objectTypeAt(expected)
+  if (at === null) return false
+  const was = expected[at] ?? 0
+  if (was < 0x66 || was > 0x68 || actual[at] !== MPEG4_AUDIO) return false
+  return actual.every((byte, index) => index === at || byte === expected[index])
+}
+
 /**
  * What is wrong with the entry a writer wrote, as sentences, against the entry
  * it was made from: each codec configuration box that the source holds must be
- * in the written entry, byte for byte. QuickTime's `.mp3` holds none, and is
+ * in the written entry, byte for byte; the one allowance is the object type of
+ * MPEG-2 AAC's `esds`, written as MPEG-4 audio's (`onlyMpeg2AacBecameMpeg4`).
+ * QuickTime's `.mp3` holds none, and is
  * written with the `esds` that is made for it (`MP3_ESDS`). A source that holds
  * no configuration box this knows is a problem too: nothing would be proved. An
  * entry that can't be read is a problem, never an exception.
@@ -150,7 +205,10 @@ export function configProblems(
       problems.push(
         `the '${type}' box of the written init entry has ${actual.length} bytes, and the source's ${expected.length}`,
       )
-    } else if (actual.some((byte, index) => byte !== expected[index])) {
+    } else if (
+      actual.some((byte, index) => byte !== expected[index]) &&
+      !onlyMpeg2AacBecameMpeg4(type, actual, expected)
+    ) {
       problems.push(
         `the '${type}' box of the written init entry differs from the source's, first at its byte ${firstDifference(actual, expected)}`,
       )

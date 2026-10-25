@@ -46,6 +46,13 @@ const MPEG1_AUDIO = 0x6b
 const AC3 = 0xa5
 const EAC3 = 0xa6
 
+/** Whether an `esds` object type is MPEG-2 AAC's, in any of its profiles. */
+function isMpeg2Aac(objectType: number): boolean {
+  return (
+    objectType === MPEG2_AAC_MAIN || objectType === MPEG2_AAC_LC || objectType === MPEG2_AAC_SSR
+  )
+}
+
 /** The names of a codec: never none, the RFC 6381 one first. */
 type Names = [string, ...string[]]
 
@@ -274,9 +281,11 @@ function findDescriptor(
   return null
 }
 
-/** What `esds` says of the stream: the type of its object, and the AudioSpecificConfig when it has one. */
+/** What `esds` says of the stream: the type of its object and where that byte is, and the AudioSpecificConfig when it has one. */
 interface StreamConfig {
   objectType: number
+  /** The index of the objectTypeIndication byte in the bytes the `esds` was read from. */
+  objectTypeAt: number
   config: Descriptor | null
 }
 
@@ -287,9 +296,14 @@ interface StreamConfig {
  */
 function decoderConfig(bytes: Uint8Array, decoder: Descriptor): StreamConfig {
   const fields = new Reader(bytes, decoder.from, decoder.to)
+  const objectTypeAt = fields.position
   const objectType = fields.u8()
   fields.skip(12) // the stream's type, the size of its buffer, its highest and its average bit rate
-  return { objectType, config: findDescriptor(bytes, fields.position, decoder.to, 0x05) }
+  return {
+    objectType,
+    objectTypeAt,
+    config: findDescriptor(bytes, fields.position, decoder.to, 0x05),
+  }
 }
 
 /**
@@ -413,6 +427,12 @@ function configured(entry: SampleEntry, type: string, names: Names): Names {
   return names
 }
 
+/** Where the objectTypeIndication byte of an `esds` is, in the bytes that hold it, when it says MPEG-2 AAC; null for any other object type. */
+function mpeg2AacTypeAt(bytes: Uint8Array, esds: Box): number | null {
+  const { objectType, objectTypeAt } = readStream(bytes, esds)
+  return isMpeg2Aac(objectType) ? objectTypeAt : null
+}
+
 /** The audio object type of the DecoderSpecificInfo of an `esds`, which is `damaged` when there is none or it is cut short. */
 function specificInfoType(entry: SampleEntry, esds: Box, config: Descriptor | null): number {
   if (!config) throw damaged(`The 'esds' box at offset ${esds.start} has no DecoderSpecificInfo.`)
@@ -423,7 +443,10 @@ function specificInfoType(entry: SampleEntry, esds: Box, config: Descriptor | nu
  * The names of an `mp4a` entry, from the object type of its `esds` (ISO/IEC
  * 14496-1, and the registry of MP4RA): `mp4a.40.N` for MPEG-4 audio, N being
  * its audio object type; `mp4a.66`, `.67` and `.68` for MPEG-2 AAC, which have
- * a DecoderSpecificInfo too; `mp4a.6B` (MPEG-1 audio) and `mp4a.69` (MPEG-2
+ * a DecoderSpecificInfo too and are named `mp4a.40.N` first, N being the audio
+ * object type of that (the stream is AAC all the same, and `initEntry` writes it
+ * with MPEG-4 audio's object type, which is all that Chrome's Media Source
+ * takes in MP4), then by their own; `mp4a.6B` (MPEG-1 audio) and `mp4a.69` (MPEG-2
  * audio), whose layer 3 is MP3, which browsers also know as `mp3` and as
  * `mp4a.40.34`; the object types of AC-3 and E-AC-3 (`mp4a.A5`, `mp4a.A6`),
  * which are `ac-3` and `ec-3` as well. Any other is named as it is, in two
@@ -441,8 +464,7 @@ function mp4aNames(entry: SampleEntry): Names {
     case MPEG2_AAC_MAIN:
     case MPEG2_AAC_LC:
     case MPEG2_AAC_SSR:
-      specificInfoType(entry, esds, config)
-      return [name]
+      return [`mp4a.40.${specificInfoType(entry, esds, config)}`, name]
     case MPEG2_AUDIO:
     case MPEG1_AUDIO:
       return [name, 'mp3', 'mp4a.40.34']
@@ -764,7 +786,12 @@ function isoRate(entry: SampleEntry, hertz: number): number {
  * The entry that goes in an init segment (`stsd`) for a track's description.
  * It is the entry's own bytes, as the view `readMovie` gave, for a picture and
  * for an ISO version 0 sound entry (in an `stsd` of version 0) whose
- * configuration box is directly inside it. Any other sound entry, which Chrome's
+ * configuration box is directly inside it. MPEG-2 AAC is the exception: Chrome's
+ * Media Source takes the name `mp4a.67` and then refuses an `esds` that says
+ * MPEG-2 AAC, so the entry is carried with that one byte, the objectTypeIndication,
+ * set to MPEG-4 audio's 0x40 (the stream is the same AAC, as its
+ * AudioSpecificConfig shows, and is named `mp4a.40.N` first); the bytes given
+ * are never changed, the entry written is a copy. Any other sound entry, which Chrome's
  * and Firefox's Media Source don't take (QuickTime's version 1 or 2, ISO's
  * version 1, one with its configuration inside a `wave` box, or QuickTime's
  * `.mp3`), is written as an ISO version 0 one: the same type (`.mp3` becomes
@@ -784,7 +811,14 @@ export function initEntry(entry: SampleEntry): Uint8Array {
   const audio = readAudioEntry(entry)
   // QuickTime's MP3 has no configuration box to find; the one it is given is made.
   const found = entry.type === '.mp3' ? null : findAudioBox(entry, audio.inside, configType)
-  if (audio.version === 0 && entry.stsdVersion === 0 && found?.direct) return entry.bytes
+  // Where the object type of an `esds` that says MPEG-2 AAC is, to be written as MPEG-4 audio's.
+  const mpeg2At = found && entry.type === 'mp4a' ? mpeg2AacTypeAt(entry.bytes, found.box) : null
+  if (audio.version === 0 && entry.stsdVersion === 0 && found?.direct) {
+    if (mpeg2At === null) return entry.bytes
+    const copy = entry.bytes.slice()
+    copy[mpeg2At] = MPEG4_AUDIO
+    return copy
+  }
 
   const rate = isoRate(entry, audio.sampleRate)
   if (audio.channels === 0 || audio.channels > 0xffff) {
@@ -794,7 +828,11 @@ export function initEntry(entry: SampleEntry): Uint8Array {
   const others = childBoxes(entry.bytes, audio.inside.body, audio.inside.end)
     .filter((other) => other.type !== 'wave' && other.type !== 'srat' && other.type !== configType)
     .map((other) => entry.bytes.subarray(other.start, other.end))
-  const config = found ? entry.bytes.subarray(found.box.start, found.box.end) : mp3Esds()
+  let config = found ? entry.bytes.subarray(found.box.start, found.box.end) : mp3Esds()
+  if (found && mpeg2At !== null) {
+    config = config.slice()
+    config[mpeg2At - found.box.start] = MPEG4_AUDIO
+  }
   const type = entry.type === '.mp3' ? 'mp4a' : entry.type
   return isoSound(type, audio.channels, rate, [config, ...others])
 }

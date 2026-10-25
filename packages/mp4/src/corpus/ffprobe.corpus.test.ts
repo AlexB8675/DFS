@@ -348,13 +348,6 @@ function codecPrefix(stream: ProbeStream): string | null {
   }
 }
 
-/** The MPEG-4 audio names that FFmpeg gives MPEG-2 AAC, by its profile: the object types 0x66 to 0x68 are the audio object types 1 to 3 (it calls them AAC Main, LC and SSR). */
-const MPEG4_NAME_OF_MPEG2_AAC: Record<string, string> = {
-  'mp4a.66': 'mp4a.40.1',
-  'mp4a.67': 'mp4a.40.2',
-  'mp4a.68': 'mp4a.40.3',
-}
-
 /** IAMF's name for a codec inside it (`iamf.000.000.Opus`), as the codec's own RFC 6381 string, which is what FFmpeg names the stream by. */
 const IAMF_INNER: Record<string, string> = { Opus: 'opus', fLaC: 'flac' }
 
@@ -365,8 +358,8 @@ const NO_TAG = '[0][0][0][0]'
  * The names of a track that ffprobe's reading is compared with. `first` is the
  * track's own codec string, which the profile's prefix is matched against;
  * `all` is every name the track has, which ffprobe's `mime_codec_string` may be
- * any of (VP9's short form, MP3's `mp4a.40.34`). Both also have, for MPEG-2
- * AAC, the MPEG-4 name FFmpeg gives it. An IAMF sound is named by the codec
+ * any of (VP9's short form, MP3's `mp4a.40.34`, MPEG-2 AAC's `mp4a.40.N`, which
+ * is its first name). An IAMF sound is named by the codec
  * inside it: that is what FFmpeg reads as the stream's codec. No name at all
  * when its string is not `iamf.PPP.AAA.<codec>`.
  */
@@ -376,8 +369,7 @@ function namesToCompare(track: PlayTrack, iamf: boolean): { first: string[]; all
     const names = inner === undefined ? [] : [IAMF_INNER[inner] ?? inner]
     return { first: names, all: names }
   }
-  const alsoMpeg4 = (name: string): string[] => [name, MPEG4_NAME_OF_MPEG2_AAC[name] ?? []].flat()
-  return { first: alsoMpeg4(track.codec), all: track.codecNames.flatMap(alsoMpeg4) }
+  return { first: [track.codec], all: [...track.codecNames] }
 }
 
 /** The track against ffprobe's reading of its stream (edit lists applied): its codec, rotation, time base and where it starts. */

@@ -33,7 +33,12 @@ const ROWS: {
   { family: 'opus', names: ['opus', 'Opus'], chromium: true, firefox: true },
   { family: 'flac', names: ['flac', 'fLaC'], chromium: true, firefox: true },
   { family: 'mp4a.40', names: ['mp4a.40.2'], chromium: true, firefox: true },
-  { family: 'mp4a.67', names: ['mp4a.67'], chromium: true, firefox: true },
+  {
+    family: 'mp4a.40',
+    names: ['mp4a.40.2', 'mp4a.67'],
+    chromium: true,
+    firefox: true,
+  },
   {
     family: 'iamf',
     names: ['iamf.000.000.Opus'],
@@ -67,16 +72,17 @@ describe('familyOf', () => {
     expect(familyOf(track('flak'))).toBe('flak')
   })
 
-  it('keeps the object type of an MPEG-4 audio name and of MPEG-2 AAC and MP3', () => {
+  it('keeps the object type of an MPEG-4 audio name and of MP3, and reads MPEG-2 AAC by its MPEG-4 name', () => {
     for (const aot of ['2', '5', '29', '42']) {
       expect(familyOf(track(`mp4a.40.${aot}`))).toBe('mp4a.40')
     }
-    expect(familyOf(track('mp4a.67'))).toBe('mp4a.67')
+    // MPEG-2 AAC is named `mp4a.40.N` first, and `mp4a.67` after it.
+    expect(familyOf(track('mp4a.40.2', 'mp4a.67'))).toBe('mp4a.40')
     expect(familyOf(track('mp4a.6B', 'mp3', 'mp4a.40.34'))).toBe('mp4a.6B')
   })
 
   it("leaves the object type off any other 'mp4a' name, which no table row is named for", () => {
-    for (const name of ['mp4a.66', 'mp4a.68', 'mp4a.69', 'mp4a.A5', 'mp4a.DD']) {
+    for (const name of ['mp4a.66', 'mp4a.67', 'mp4a.68', 'mp4a.69', 'mp4a.A5', 'mp4a.DD']) {
       expect(familyOf(track(name))).toBe('mp4a')
     }
   })
@@ -107,6 +113,7 @@ describe('expectedSupport', () => {
     ['avc2.64001f', 'chromium'],
     ['mp4a.A5', 'chromium'],
     ['mp4a.66', 'firefox'],
+    ['mp4a.67', 'chromium'],
   ])('has no answer for %s on %s: its family is not in the table', (name, engine) => {
     expect(expectedSupport(track(name), engine)).toBeUndefined()
   })

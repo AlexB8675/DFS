@@ -19,7 +19,8 @@ type Takes = Record<Engine, boolean>
  * by each name a codec has. A family is the part of a track's first codec name
  * before its first dot, except that the `mp4a` object types that browsers answer
  * differently are families of their own: `mp4a.40` (MPEG-4 audio, whatever its
- * audio object type), `mp4a.67` (MPEG-2 AAC LC) and `mp4a.6B` (MP3, which
+ * audio object type, and MPEG-2 AAC, which is named `mp4a.40.N` first and written
+ * as MPEG-4 audio, as Chrome takes nothing else) and `mp4a.6B` (MP3, which
  * Firefox takes as `mp3` and Chrome doesn't take in MP4). AC-3, E-AC-3 and ALAC
  * are taken by neither of them: Safari plays them. A family that isn't here is a
  * codec the suite has never seen a browser answer for, and the suite fails on it
@@ -35,7 +36,6 @@ export const SUPPORT: Readonly<Record<string, Takes>> = {
   opus: { chromium: true, firefox: true },
   flac: { chromium: true, firefox: true },
   'mp4a.40': { chromium: true, firefox: true },
-  'mp4a.67': { chromium: true, firefox: true },
   iamf: { chromium: true, firefox: false },
   'mp4a.6B': { chromium: false, firefox: true },
   'ac-3': { chromium: false, firefox: false },
@@ -44,11 +44,11 @@ export const SUPPORT: Readonly<Record<string, Takes>> = {
 }
 
 /** The `mp4a` families that are more than `mp4a`: the first name of a track begins with one, or is one. */
-const MP4A_FAMILIES = ['mp4a.40', 'mp4a.67', 'mp4a.6B']
+const MP4A_FAMILIES = ['mp4a.40', 'mp4a.6B']
 
 /**
  * The family of a track: its first name up to the first dot (`avc1`, `iamf`,
- * `flac`), or `mp4a.40`, `mp4a.67` or `mp4a.6B` for those; any other `mp4a`
+ * `flac`), or `mp4a.40` or `mp4a.6B` for those; any other `mp4a`
  * name is `mp4a`, which the table doesn't have. Only the first name is read, the
  * RFC 6381 one: the names after it are other ways to ask for the same codec.
  */

@@ -571,12 +571,14 @@ const SPECS: Spec[] = [
   {
     // MPEG-2 AAC (low complexity, `mp4a.67`): the AAC file above, stream-copied, with one byte of its `esds` changed in place, the
     // objectTypeIndication, from MPEG-4 audio's 0x40 to MPEG-2 AAC LC's 0x67, which ffmpeg has no option to write. The size is the same.
+    // It is named `mp4a.40.2` first (the audio object type of its AudioSpecificConfig, which is also ffprobe's name for it) and then `mp4a.67`,
+    // and written with the object type 0x40 again, as Chrome's Media Source takes nothing else.
     name: 'h264-mpeg2aac.mp4',
     layout: 'ftyp free mdat moov',
     streams: ['h264', 'aac'],
     args: ['-i', resolve(syntheticDir, 'h264-aac-faststart.mp4'), '-c', 'copy', '-f', 'mp4'],
     expect: 'plays',
-    codecs: { video: 'avc1.64', audio: 'mp4a.67' },
+    codecs: { video: 'avc1.64', audio: 'mp4a.40.2' },
     patch: (path) => {
       const { at, value } = objectTypeOf(path)
       if (value !== OTI_MPEG4_AUDIO) {
