@@ -7,7 +7,8 @@ import type { SampleEntry } from './movie.ts'
 // the sample entry an init segment carries (DESIGN.md §10.4, D45). The first
 // name is RFC 6381's, which `MediaSource.isTypeSupported` and `addSourceBuffer`
 // take: `avc1.64001f`, `hvc1.2.4.L153.B0`, `av01.0.05M.08`,
-// `vp09.00.20.08.01.02.02.02.00`, `dvh1.08.06`, `mp4a.40.2`, `opus`, `flac`.
+// `vp09.00.20.08.01.02.02.02.00`, `dvh1.08.06`, `mp4a.40.2`, `opus`, `flac`,
+// `iamf.000.000.Opus`.
 // Some codecs have others that a browser may know them by (`Opus` for `opus`,
 // `mp3` and `mp4a.40.34` for MPEG audio layer 3), after it, so that the player
 // can ask the browser about each in turn. They are read from the codec's own
@@ -280,6 +281,18 @@ interface StreamConfig {
 }
 
 /**
+ * What a DecoderConfigDescriptor says (ISO/IEC 14496-1): the type of its
+ * object, then the stream's type, its buffer and its bit rates, which are not
+ * read, then the descriptors it holds, the DecoderSpecificInfo among them.
+ */
+function decoderConfig(bytes: Uint8Array, decoder: Descriptor): StreamConfig {
+  const fields = new Reader(bytes, decoder.from, decoder.to)
+  const objectType = fields.u8()
+  fields.skip(12) // the stream's type, the size of its buffer, its highest and its average bit rate
+  return { objectType, config: findDescriptor(bytes, fields.position, decoder.to, 0x05) }
+}
+
+/**
  * The DecoderConfigDescriptor of an `esds` (ISO/IEC 14496-1): inside the
  * ES_Descriptor, after its ID and flags and the fields that the flags say are
  * there (the stream it depends on, a URL, the stream that clocks it).
@@ -298,10 +311,7 @@ function readStream(bytes: Uint8Array, esds: Box): StreamConfig {
   const decoder = findDescriptor(bytes, header.position, stream.to, 0x04)
   if (!decoder)
     throw damaged(`The 'esds' box at offset ${esds.start} has no DecoderConfigDescriptor.`)
-  const fields = new Reader(bytes, decoder.from, decoder.to)
-  const objectType = fields.u8()
-  fields.skip(12) // the stream's type, the size of its buffer, its highest and its average bit rate
-  return { objectType, config: findDescriptor(bytes, fields.position, decoder.to, 0x05) }
+  return decoderConfig(bytes, decoder)
 }
 
 /** The audio object type that begins an AudioSpecificConfig: 5 bits, where 31 says that it is 32 plus the next 6. */
@@ -445,6 +455,145 @@ function mp4aNames(entry: SampleEntry): Names {
   }
 }
 
+/** The most bytes that a leb128 number has (IAMF v1.0 §3.2). */
+const LEB128_BYTES = 8
+
+/** `obu_type` of the Codec Config and of the IA Sequence Header (IAMF v1.0 §3.2). */
+const OBU_CODEC_CONFIG = 0
+const OBU_SEQUENCE_HEADER = 31
+
+/**
+ * A leb128 number (IAMF v1.0 §3.2): 7 bits in each byte, the low group first,
+ * the top bit of a byte saying that another follows. One that is cut short, has
+ * more than 8 bytes or is beyond `Number.MAX_SAFE_INTEGER` is damaged.
+ */
+function leb128(reader: Reader): number {
+  const at = reader.position
+  let value = 0
+  for (let index = 0; index < LEB128_BYTES; index += 1) {
+    const byte = reader.u8()
+    value += (byte & 0x7f) * 128 ** index
+    if ((byte & 0x80) === 0) {
+      // A sum that a number can't hold exactly rounds to more than the largest it can, so this catches it too.
+      if (value > Number.MAX_SAFE_INTEGER) {
+        throw damaged(
+          `The leb128 number at offset ${at} is outside the range a number can hold exactly.`,
+        )
+      }
+      return value
+    }
+  }
+  throw damaged(`The leb128 number at offset ${at} is longer than ${LEB128_BYTES} bytes.`)
+}
+
+/** The profiles in an IA Sequence Header, as `PPP.AAA`: its code, `iamf`, then the primary and the additional profile, each in decimal with three digits. */
+function sequenceProfiles(config: Box, obu: Reader): string {
+  const code = obu.fourcc()
+  if (code !== 'iamf') {
+    throw damaged(
+      `The Sequence Header of the 'iacb' box at offset ${config.start} has the code '${code}', and IAMF's is 'iamf'.`,
+    )
+  }
+  const primary = String(obu.u8()).padStart(3, '0')
+  const additional = String(obu.u8()).padStart(3, '0')
+  return `${primary}.${additional}`
+}
+
+/**
+ * The codec of a Codec Config OBU, as IAMF's codec string writes it. The OBU
+ * holds the config's ID (leb128), the codec (4 bytes), the samples in a frame
+ * (leb128) and the roll distance (16 bits), then the decoder config. `Opus`,
+ * `fLaC` and `ipcm` are named by the codec alone; `mp4a` is `mp4a.40.N`, N
+ * being the audio object type in the AudioSpecificConfig of its
+ * DecoderConfigDescriptor, which is laid out as an `esds` has it and is looked
+ * for inside this OBU only (IAMF fixes its object type at 0x40, which is not
+ * asked). Any other codec is one that IAMF doesn't have, and no browser takes.
+ */
+function codecConfigName(entry: SampleEntry, config: Box, obu: Reader, end: number): string {
+  leb128(obu) // codec_config_id
+  const codec = obu.fourcc()
+  leb128(obu) // num_samples_per_frame
+  obu.i16() // audio_roll_distance
+  switch (codec) {
+    case 'Opus':
+    case 'fLaC':
+    case 'ipcm':
+      return codec
+    case 'mp4a': {
+      const decoder = findDescriptor(entry.bytes, obu.position, end, 0x04)
+      const named = `The Codec Config of the 'iacb' box at offset ${config.start}`
+      if (!decoder) throw damaged(`${named} has no DecoderConfigDescriptor.`)
+      const { config: specific } = decoderConfig(entry.bytes, decoder)
+      if (!specific) throw damaged(`${named} has no DecoderSpecificInfo.`)
+      return `mp4a.40.${audioObjectType(entry.bytes, specific)}`
+    }
+    default:
+      throw unsupported(
+        `The IAMF codec '${codec}' of the '${entry.type}' sample description is not a codec that any browser's Media Source takes in MP4.`,
+      )
+  }
+}
+
+/**
+ * `iamf.000.000.Opus`, from the `iacb` box of an `iamf` entry (IAMF v1.0 §3.2
+ * and §6.2.4): its configurationVersion, which is 1, the size of its OBUs
+ * (leb128), then the OBUs. An OBU is a byte (its type in the top 5 bits, then
+ * the flags of a redundant copy, of trimming and of an extension), its size
+ * (leb128), which counts all that follows, two numbers if it is trimmed, a size
+ * and that many bytes if it has an extension, and then its payload. The primary
+ * and additional profiles are in the first Sequence Header (type 31) and the
+ * codec in the first Codec Config (type 0). The OBUs are read until both are
+ * found, in whatever order (IAMF puts the Sequence Header first, but nothing is
+ * lost by not asking); one of any other type is passed by its size, and what
+ * comes after the two is not read. A version other than 1, a size that runs
+ * past what holds it and the lack of either OBU are damaged.
+ */
+function iamfNames(entry: SampleEntry): Names {
+  const { inside } = readAudioEntry(entry)
+  const { box: config } = findAudioBox(entry, inside, 'iacb')
+  const named = `The 'iacb' box at offset ${config.start}`
+  const outer = new Reader(entry.bytes, config.body, config.end)
+  const version = outer.u8()
+  if (version !== 1) throw damaged(`${named} is version ${version}, and only 1 is read.`)
+  const size = leb128(outer)
+  if (size > outer.remaining) {
+    throw damaged(
+      `${named} says that its OBUs take ${size} bytes, and ${outer.remaining} are in it.`,
+    )
+  }
+  const list = new Reader(entry.bytes, outer.position, outer.position + size)
+  let profiles: string | null = null
+  let codec: string | null = null
+  while (list.remaining > 0 && (profiles === null || codec === null)) {
+    const header = list.u8()
+    const type = header >> 3
+    const length = leb128(list)
+    if (length > list.remaining) {
+      throw damaged(
+        `An OBU of the 'iacb' box at offset ${config.start} claims ${length} bytes, but ${list.remaining} are left in its OBUs.`,
+      )
+    }
+    const from = list.position
+    list.skip(length)
+    const wanted =
+      (type === OBU_SEQUENCE_HEADER && profiles === null) ||
+      (type === OBU_CODEC_CONFIG && codec === null)
+    if (!wanted) continue
+    // What the flags add is inside the OBU's size, and the payload comes after it; nothing here reads past the OBU.
+    const obu = new Reader(entry.bytes, from, from + length)
+    if (header & 2) {
+      leb128(obu) // the samples to trim at the end
+      leb128(obu) // and at the start
+    }
+    if (header & 1) obu.skip(leb128(obu)) // the extension header, after its size
+    if (type === OBU_SEQUENCE_HEADER) profiles = sequenceProfiles(config, obu)
+    else codec = codecConfigName(entry, config, obu, from + length)
+  }
+  if (profiles === null) throw damaged(`${named} holds no Sequence Header.`)
+  if (codec === null) throw damaged(`${named} holds no Codec Config.`)
+  return [`iamf.${profiles}.${codec}`]
+}
+
 /**
  * The names that Media Source is asked about for an entry, read from its
  * configuration, the RFC 6381 one first, and never none. A codec that browsers
@@ -453,10 +602,11 @@ function mp4aNames(entry: SampleEntry): Names {
  * `mp4a.40.34`. These are named, for the player to ask the browser about:
  * `avc1` to `avc4`, `hvc1` and `hev1`, `av01`, VP9 and VP8 (`vp09`, `vp08`),
  * Dolby Vision (`dvh1`, `dvhe`, `dav1`, `dvav`, `dva1`), every `mp4a` by the
- * object type of its `esds`, QuickTime's `.mp3`, `Opus`, `fLaC`, `ac-3`, `ec-3`
- * and `alac`. One whose configuration box is missing, cut short or lies about
- * its sizes is `damaged`. Every other type is refused as `unsupported-codec`,
- * because no browser's Media Source takes it in MP4:
+ * object type of its `esds`, QuickTime's `.mp3`, `Opus`, `fLaC`, `ac-3`, `ec-3`,
+ * `alac` and IAMF (`iamf`, named `iamf.000.000.Opus` by the profiles and the
+ * codec in the OBUs of its `iacb`). One whose configuration box is missing,
+ * cut short or lies about its sizes is `damaged`. Every other type is refused
+ * as `unsupported-codec`, because no browser's Media Source takes it in MP4:
  * - PCM: `ipcm` `fpcm` `sowt` `twos` `lpcm` `in24` `in32` `fl32` `fl64` `raw ` `NONE`;
  * - MPEG-4 Visual (`mp4v`), VVC (`vvc1` `vvi1`), Motion JPEG (`jpeg` `mjpa` `mjpb`) and ProRes (`apco` `apcs` `apcn` `apch` `ap4h` `ap4x`);
  * - DTS (`dtsc` `dtse` `dtsh` `dtsl` `dtsx`), AC-4 (`ac-4`), MPEG-H (`mha1` `mha2` `mhm1` `mhm2`), `ulaw` and `alaw`;
@@ -499,6 +649,8 @@ export function codecNames(entry: SampleEntry): Names {
       return configured(entry, 'dec3', ['ec-3'])
     case 'alac':
       return configured(entry, 'alac', ['alac'])
+    case 'iamf':
+      return iamfNames(entry)
     default:
       throw unsupported(
         `The sample description '${entry.type}' is not a codec that any browser's Media Source takes in MP4.`,

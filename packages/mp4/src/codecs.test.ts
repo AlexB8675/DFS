@@ -15,6 +15,7 @@ import {
   concat,
   dac3,
   dec3,
+  descriptor,
   dfLa,
   dolbyVisionConfig,
   dOps,
@@ -23,14 +24,17 @@ import {
   frma,
   fullBox,
   hvcC,
+  i16,
   movie,
   quickTimeAudioEntry,
   srat,
+  u16,
   u32,
   visualEntry,
   vpcC,
   wave,
 } from './testing/build.ts'
+import type { Part } from './testing/build.ts'
 
 /**
  * The entry as `readMovie` gives it: a view onto bytes that don't start at 0,
@@ -763,6 +767,455 @@ describe('codecNames', () => {
         const error = refusal('unsupported-codec', run)
         expect(error.message).toContain(`'${entry.type}'`)
         expect(error.message).toContain("any browser's Media Source")
+      }
+    }
+  })
+})
+
+// IAMF's `iacb` box (IAMF v1.0 §3.2 and §6.2.4), as an FFmpeg-made file holds
+// it and as the standard lays it out, byte by byte.
+
+/** Bytes written as hex digits, in groups. */
+function hexBytes(groups: readonly string[]): Uint8Array {
+  return Uint8Array.from(groups.join(' ').split(' '), (digits) => Number.parseInt(digits, 16))
+}
+
+/**
+ * The `iacb` box of an Opus IAMF file that FFmpeg made from a generated tone (a
+ * mono channel-based audio element, and a mix of it for stereo): the box as the
+ * file holds it, cut out of the sample entry. The file is not kept. It was made
+ * in a scratch folder outside the repo with this command, the one the controller
+ * checked on 2026-10-25:
+ * `ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000:duration=1 -c:a libopus -stream_group "type=iamf_audio_element:id=1:st=0:audio_element_type=channel,layer=ch_layout=mono" -stream_group "type=iamf_mix_presentation:id=2:stg=0:annotations=en-us=default,submix=parameter_id=100:parameter_rate=48000|element=stg=0:parameter_id=101:parameter_rate=48000:annotations=en-us=main|layout=sound_system=stereo" -f mp4 iamf.mp4`
+ */
+const IACB_OPUS = hexBytes([
+  '00 00 00 65 69 61 63 62 01 5b', // the box of 101 bytes, 'iacb', configurationVersion 1, configOBUs_size 91
+  'f8 06 69 61 6d 66 00 00', // the Sequence Header (type 31, 6 bytes): 'iamf', primary profile 0, additional profile 0
+  '00 14 00 4f 70 75 73 c0 07 ff fc 01 02 01 38 00 00 bb 80 00 00 00', // the Codec Config (type 0, 20 bytes): ID 0, 'Opus', 960 samples a frame, roll distance -4, then Opus's decoder config
+  '08 0a 01 00 00 01 00 00 20 00 01 00', // an Audio Element (type 1, 10 bytes)
+  '10 2f 02 01 65 6e 2d 75 73 00 64 65 66 61 75 6c 74 00 01 01 01 6d 61 69 6e 00 00 00 65 80 f7 02 80 00 00 64 80 f7 02 80 00 00 01 80 00 00 00 00 00', // a Mix Presentation (type 2, 47 bytes)
+])
+
+/** A number as IAMF's leb128 writes it: 7 bits at a time, the low group first, the top bit of every byte but the last saying that another follows. `length` pads it with groups of zero up to that many bytes, as a writer may. */
+function leb128(value: number | bigint, length = 1): number[] {
+  const groups: number[] = []
+  let rest = BigInt(value)
+  do {
+    groups.push(Number(rest & 0x7fn))
+    rest >>= 7n
+  } while (rest > 0n)
+  while (groups.length < length) groups.push(0)
+  return groups.map((group, index) => (index < groups.length - 1 ? group | 0x80 : group))
+}
+
+interface ObuSpec {
+  /** The samples to trim at the end and at the start, which put two numbers after the size. */
+  trim?: readonly [number, number]
+  /** The bytes of an extension header, which put their number and themselves after the size and the trimming. */
+  extension?: Part
+  /** The redundant copy flag. */
+  redundant?: boolean
+  /** The size stated, in place of the size there is: for an OBU that lies. */
+  size?: number | bigint
+  /** The bytes of the size, padded with zero groups up to this many. */
+  sizeLength?: number
+}
+
+/** An OBU: its type and flags in a byte, its size, the fields that the flags add, then the payload. The size counts everything after it. */
+function obu(
+  type: number,
+  payload: Part,
+  { trim, extension, redundant = false, size, sizeLength }: ObuSpec = {},
+): number[] {
+  const body = [
+    ...(trim ? [...leb128(trim[0]), ...leb128(trim[1])] : []),
+    ...(extension ? [...leb128(extension.length), ...extension] : []),
+    ...payload,
+  ]
+  const flags = (redundant ? 4 : 0) | (trim ? 2 : 0) | (extension ? 1 : 0)
+  return [(type << 3) | flags, ...leb128(size ?? body.length, sizeLength), ...body]
+}
+
+/** The IA Sequence Header: its code, `iamf`, then the primary and the additional profile. */
+function sequenceHeader(primary = 0, additional = 0, spec?: ObuSpec): number[] {
+  return obu(31, [...fourcc('iamf'), primary, additional], spec)
+}
+
+/** A Codec Config: its ID, the codec's, the samples in a frame, the roll distance, then the decoder config as given. */
+function codecConfig(
+  codec: string,
+  decoder: Part,
+  { samples = 960, roll = 0 }: { samples?: number; roll?: number } = {},
+  spec?: ObuSpec,
+): number[] {
+  return obu(
+    0,
+    [...leb128(0), ...fourcc(codec), ...leb128(samples), ...i16(roll), ...decoder],
+    spec,
+  )
+}
+
+/** Opus's decoder config in IAMF: the version, the channels, the pre-skip, the input rate, the gain and the channel mapping family. */
+const OPUS_CONFIG = [1, 2, ...u16(312), ...u32(48000), ...i16(0), 0]
+
+/** The decoder config of AAC, which is a DecoderConfigDescriptor as an `esds` holds it, and the AudioSpecificConfig of an object type in its DecoderSpecificInfo. */
+function aacConfig(objectType = 2, wide = false): number[] {
+  return descriptor(
+    0x04,
+    [
+      0x40, // MPEG-4 audio
+      0x15, // an audio stream, and not an upstream
+      ...[0, 0, 0], // the size of the buffer
+      ...u32(0), // the highest bit rate
+      ...u32(0), // the average bit rate
+      ...descriptor(0x05, audioSpecificConfig(objectType), wide),
+    ],
+    wide,
+  )
+}
+
+/** OBUs that are not read, with bytes that would be a Codec Config and a Sequence Header if they were: an Audio Element, a Mix Presentation, a Temporal Delimiter and one of a reserved type. */
+const ELEMENT = obu(1, [0, ...fourcc('fLaC'), 1, 2, 3])
+const MIX = obu(2, [31, 6, ...fourcc('iamf'), 9, 9])
+const DELIMITER = obu(4, [])
+const RESERVED = obu(26, [1, 2, 3])
+
+/** An `iacb`: the version, the size of its OBUs, the OBUs. */
+function iacb(...obus: number[][]): Uint8Array {
+  const list = obus.flat()
+  return box('iacb', [1], leb128(list.length), list)
+}
+
+describe('the codec string of IAMF (§10.4)', () => {
+  /** An `iamf` entry as FFmpeg writes it, with no channels and no rate: IAMF says its own in its OBUs. */
+  function iamfEntry(...children: Part[]): SampleEntry {
+    return entryOf(audioEntry('iamf', { channels: 0, sampleRate: 0 }, ...children))
+  }
+
+  /** The error that each of `codecNames`, `codecString` and `initEntry` gives for an entry, which must all be of this reason. */
+  function refusedByAll(reason: Mp4Refusal, entry: SampleEntry): Mp4Error[] {
+    return [() => codecNames(entry), () => codecString(entry), () => initEntry(entry)].map((run) =>
+      refusal(reason, run),
+    )
+  }
+
+  const opusConfig = codecConfig('Opus', OPUS_CONFIG, { samples: 960, roll: -4 })
+
+  it('names IAMF from its sequence header and codec config', () => {
+    // FFmpeg's file: the profiles it writes are 0 and 0, and the codec is Opus.
+    const real = iamfEntry(IACB_OPUS)
+    expect(codecNames(real)).toEqual(['iamf.000.000.Opus'])
+    expect(codecString(real)).toBe('iamf.000.000.Opus')
+    // The builders write the same bytes as that file holds.
+    const rest = Array.from(IACB_OPUS.subarray(40)) // the Audio Element and the Mix Presentation
+    expect(iacb(sequenceHeader(), opusConfig, rest)).toEqual(IACB_OPUS)
+    // An mp4a codec config says its audio object type in the AudioSpecificConfig inside its DecoderConfigDescriptor.
+    const aac = codecConfig('mp4a', aacConfig(2), { samples: 1024, roll: -1 })
+    const entry = iamfEntry(iacb(sequenceHeader(), aac, rest))
+    expect(codecNames(entry)).toEqual(['iamf.000.000.mp4a.40.2'])
+    expect(codecString(entry)).toBe('iamf.000.000.mp4a.40.2')
+  })
+
+  it('writes the profiles with three digits, and names the codec from its codec id', () => {
+    const named = (primary: number, additional: number, config: number[]) =>
+      codecNames(iamfEntry(iacb(sequenceHeader(primary, additional), config)))
+    expect(named(1, 2, opusConfig)).toEqual(['iamf.001.002.Opus'])
+    expect(named(12, 100, opusConfig)).toEqual(['iamf.012.100.Opus'])
+    expect(named(255, 255, opusConfig)).toEqual(['iamf.255.255.Opus'])
+    // FLAC and LPCM are named by their codec id alone: their decoder config is not read.
+    expect(
+      named(0, 0, codecConfig('fLaC', [0x80, 0, 0, 34, ...new Array<number>(34).fill(0)])),
+    ).toEqual(['iamf.000.000.fLaC'])
+    const lpcm = codecConfig('ipcm', [1, 16, ...u32(48000)], { samples: 1024 })
+    expect(named(0, 0, lpcm)).toEqual(['iamf.000.000.ipcm'])
+    // AAC by the audio object type it says, escaped above 30 as in an esds, and with the lengths of 4 bytes that some writers use.
+    for (const [objectType, wide] of [
+      [2, false],
+      [2, true],
+      [5, false],
+      [29, true],
+      [42, false],
+    ] as const) {
+      const aac = codecConfig('mp4a', aacConfig(objectType, wide), { roll: -1 })
+      expect(named(0, 0, aac), `AOT ${objectType}${wide ? ', wide' : ''}`).toEqual([
+        `iamf.000.000.mp4a.40.${objectType}`,
+      ])
+    }
+  })
+
+  it('reads the two OBUs in any order, and skips the others by their size', () => {
+    const name = 'iamf.000.000.Opus'
+    const sequence = sequenceHeader()
+    // The standard puts the Sequence Header first, and a Codec Config before it is read as well.
+    expect(codecNames(iamfEntry(iacb(opusConfig, sequence)))).toEqual([name])
+    // What lies between them, or before them, is skipped by its size, whatever its bytes look like.
+    const between = iacb(ELEMENT, DELIMITER, sequence, MIX, RESERVED, opusConfig, ELEMENT)
+    expect(codecNames(iamfEntry(between))).toEqual([name])
+    // The first of each is the one that counts.
+    const twice = iacb(
+      sequenceHeader(1, 0),
+      codecConfig('fLaC', [0x80, 0, 0, 0]),
+      sequenceHeader(2, 0),
+      opusConfig,
+    )
+    expect(codecNames(iamfEntry(twice))).toEqual(['iamf.001.000.fLaC'])
+    // Also when the other OBU comes only after the second of one kind.
+    const flac = codecConfig('fLaC', [0x80, 0, 0, 0])
+    const laterSequence = iacb(flac, opusConfig, sequenceHeader(1, 0))
+    expect(codecNames(iamfEntry(laterSequence))).toEqual(['iamf.001.000.fLaC'])
+    const laterConfig = iacb(sequenceHeader(1, 0), sequenceHeader(2, 0), opusConfig)
+    expect(codecNames(iamfEntry(laterConfig))).toEqual(['iamf.001.000.Opus'])
+    // An OBU may state more size than it needs, which is ignored; it may be a redundant copy, hold the fields of a trimming and of an extension (inside its size), and write its size in more bytes than it takes.
+    const padded = iacb(
+      sequenceHeader(0, 0, { trim: [3, 400], extension: [9, 9, 9], redundant: true }),
+      codecConfig('Opus', OPUS_CONFIG, { samples: 960, roll: -4 }, { extension: [0x80, 0x80, 1] }),
+    )
+    expect(codecNames(iamfEntry(padded))).toEqual([name])
+    const longer = iacb(
+      obu(31, [...fourcc('iamf'), 0, 0, 7, 7, 7], { sizeLength: 4 }),
+      codecConfig('Opus', [...OPUS_CONFIG, 7, 7, 7], {}, { sizeLength: 8 }),
+    )
+    expect(codecNames(iamfEntry(longer))).toEqual([name])
+    // What follows the OBUs in the box is not read.
+    const list = [...sequence, ...opusConfig]
+    const trailing = box('iacb', [1], leb128(list.length), list, [1, 2, 3])
+    expect(codecNames(iamfEntry(trailing))).toEqual([name])
+  })
+
+  it('reads a leb128 of up to 8 bytes, and refuses a longer one or one beyond what a number holds', () => {
+    const name = ['iamf.000.000.Opus']
+    // An 8-byte leb128 for the size of the list and for each field that is one, with its groups of zero.
+    const body = [
+      ...obu(31, [...fourcc('iamf'), 0, 0], { sizeLength: 8 }),
+      ...obu(
+        0,
+        [...leb128(0, 8), ...fourcc('Opus'), ...leb128(960, 8), ...i16(-4), ...OPUS_CONFIG],
+        { sizeLength: 8 },
+      ),
+    ]
+    expect(codecNames(iamfEntry(box('iacb', [1], leb128(body.length, 8), body)))).toEqual(name)
+    // The largest number is exact, and the next is not.
+    const id = (value: number | bigint, length = 1) =>
+      iamfEntry(
+        iacb(
+          sequenceHeader(),
+          obu(0, [
+            ...leb128(value, length),
+            ...fourcc('Opus'),
+            ...leb128(960),
+            ...i16(-4),
+            ...OPUS_CONFIG,
+          ]),
+        ),
+      )
+    expect(codecNames(id(Number.MAX_SAFE_INTEGER))).toEqual(name)
+    refusedByAll('damaged', id(BigInt(Number.MAX_SAFE_INTEGER) + 1n))
+    refusedByAll('damaged', id(2n ** 56n - 1n))
+    // 9 bytes are too many, whatever they say.
+    refusedByAll('damaged', id(5, 9))
+    refusedByAll('damaged', id(0, 9))
+    // The same in each place that a leb128 is: the size of the list, of an OBU, of a trimming or an extension, the samples in a frame.
+    const nine = leb128(1, 9)
+    const huge = leb128(Number.MAX_SAFE_INTEGER)
+    const beyond = leb128(2n ** 53n)
+    const iamf = fourcc('iamf')
+    const cases: Uint8Array[] = [
+      box('iacb', [1], nine, sequenceHeader(), opusConfig),
+      box('iacb', [1], huge, sequenceHeader(), opusConfig),
+      iacb(obu(31, [...fourcc('iamf'), 0, 0], { size: Number.MAX_SAFE_INTEGER }), opusConfig),
+      iacb(sequenceHeader(), obu(0, [0], { size: 2n ** 56n - 1n })),
+      iacb([31 << 3, ...nine], opusConfig),
+      // A trimming, with a number of 9 bytes and then one beyond what a number holds; an extension, the size of which is huge and then 9 bytes.
+      iacb([(31 << 3) | 2, 16, ...nine, 1, ...iamf, 0, 0], opusConfig),
+      iacb([(31 << 3) | 2, 15, ...beyond, 1, ...iamf, 0, 0], opusConfig),
+      iacb([(31 << 3) | 1, 14, ...huge, ...iamf, 0, 0], opusConfig),
+      iacb([(31 << 3) | 1, 15, ...nine, ...iamf, 0, 0], opusConfig),
+      iacb(
+        sequenceHeader(),
+        obu(0, [0, ...fourcc('Opus'), ...leb128(2n ** 53n), ...i16(-4), ...OPUS_CONFIG]),
+      ),
+      iacb(sequenceHeader(), obu(0, [0, ...fourcc('Opus'), ...nine, ...i16(-4), ...OPUS_CONFIG])),
+    ]
+    for (const [index, bytes] of cases.entries()) {
+      for (const error of refusedByAll('damaged', iamfEntry(bytes))) {
+        expect(error.message, `case ${index}`).not.toBe('')
+      }
+    }
+  })
+
+  it('refuses an IAMF entry whose iacb is missing, of another version or cut short, as damaged', () => {
+    const sequence = sequenceHeader()
+    // No iacb, with or without other boxes in the entry.
+    for (const bytes of [
+      audioEntry('iamf', { channels: 0, sampleRate: 0 }),
+      audioEntry(
+        'iamf',
+        { channels: 0, sampleRate: 0 },
+        box('btrt', new Array<number>(12).fill(0)),
+      ),
+      audioEntry('iamf', { channels: 2, sampleRate: 48000 }, dOps()),
+    ]) {
+      for (const error of refusedByAll('damaged', entryOf(bytes))) {
+        expect(error.message).toContain("'iamf'")
+        expect(error.message).toContain("'iacb'")
+      }
+    }
+    // Another version than 1, which is the only one there is.
+    const list = [...sequence, ...opusConfig]
+    for (const version of [0, 2, 255]) {
+      const entry = iamfEntry(box('iacb', [version], leb128(list.length), list))
+      for (const error of refusedByAll('damaged', entry)) {
+        expect(error.message).toContain("'iacb'")
+        expect(error.message).toContain(`version ${version}`)
+      }
+    }
+    // Cut short before its version, before its size or in the middle of it.
+    for (const bytes of [box('iacb'), box('iacb', [1]), box('iacb', [1, 0x80])]) {
+      for (const error of refusedByAll('damaged', iamfEntry(bytes))) {
+        expect(error.message).not.toBe('')
+      }
+    }
+    // Stating a size that is past the box, or an OBU size that is past the list.
+    const past: Uint8Array[] = [
+      box('iacb', [1, ...leb128(list.length + 1), ...list]),
+      box('iacb', [1, ...leb128(list.length), ...list.slice(0, -1)]),
+      iacb(sequence, obu(0, [0, ...fourcc('Opus')], { size: 40 })),
+    ]
+    for (const [index, bytes] of past.entries()) {
+      for (const error of refusedByAll('damaged', iamfEntry(bytes))) {
+        expect(error.message, `past ${index}`).toContain("'iacb'")
+      }
+    }
+    // No Sequence Header, no Codec Config, or neither.
+    const missing: [Uint8Array, string][] = [
+      [iacb(opusConfig), 'Sequence Header'],
+      [iacb(sequence), 'Codec Config'],
+      [iacb(ELEMENT, MIX, DELIMITER, RESERVED), 'Sequence Header'],
+      [iacb(), 'Sequence Header'],
+      // A second of one kind does not stand in for the other.
+      [iacb(sequence, sequenceHeader(1, 1)), 'Codec Config'],
+      [iacb(opusConfig, codecConfig('fLaC', [0x80, 0, 0, 0])), 'Sequence Header'],
+    ]
+    for (const [bytes, what] of missing) {
+      for (const error of refusedByAll('damaged', iamfEntry(bytes))) {
+        expect(error.message).toContain("'iacb'")
+        expect(error.message).toContain(what)
+      }
+    }
+  })
+
+  it('refuses a sequence header that is not IAMF, and a codec config that is cut short, as damaged', () => {
+    const badCode = obu(31, [...fourcc('av1C'), 0, 0])
+    const cases: number[][][] = [
+      [badCode, opusConfig],
+      // A Sequence Header that stops before its profiles.
+      [obu(31, [...fourcc('iamf'), 0]), opusConfig],
+      [obu(31, fourcc('iamf')), opusConfig],
+      [obu(31, []), opusConfig],
+      // A Codec Config that stops before each of its fields: its ID, its codec, its samples, its roll distance.
+      ...[[], [0], [0, 0x4f, 0x70], [0, ...fourcc('Opus')], [0, ...fourcc('Opus'), 0x80]].map(
+        (payload) => [sequenceHeader(), obu(0, payload)],
+      ),
+      [sequenceHeader(), obu(0, [0, ...fourcc('Opus'), ...leb128(960), 0xff])],
+    ]
+    for (const [index, obus] of cases.entries()) {
+      for (const error of refusedByAll('damaged', iamfEntry(iacb(...obus)))) {
+        expect(error.message, `case ${index}`).not.toBe('')
+      }
+    }
+  })
+
+  it("refuses an mp4a codec config without its DecoderConfigDescriptor's AudioSpecificConfig, as damaged", () => {
+    // Bytes follow the Codec Config that a descriptor which runs on would read: valid DecoderConfigDescriptors, in an Audio Element.
+    const aac = (decoder: Part) =>
+      iamfEntry(
+        iacb(
+          sequenceHeader(),
+          codecConfig('mp4a', decoder),
+          obu(1, [...aacConfig(2), ...aacConfig(2), ...aacConfig(2)]),
+        ),
+      )
+    const fields = [0x40, 0x15, 0, 0, 0, ...u32(0), ...u32(0)]
+    const cases: [string, Part][] = [
+      ['no decoder config', []],
+      ['no DecoderConfigDescriptor', descriptor(0x05, audioSpecificConfig(2))],
+      ['no DecoderSpecificInfo', descriptor(0x04, fields)],
+      ['an empty DecoderSpecificInfo', descriptor(0x04, [...fields, ...descriptor(0x05, [])])],
+      ['a DecoderSpecificInfo cut short', descriptor(0x04, [...fields, 0x05, 4, 0x12])],
+      ['a DecoderConfigDescriptor of too few bytes', descriptor(0x04, [0x40, 0x15, 0, 0])],
+      ['a length of 5 bytes', [0x04, 0x80, 0x80, 0x80, 0x80, 0x01, ...fields]],
+      ['an unfinished length', [0x04, 0x80]],
+      ['a tag alone', [0x04]],
+      // A descriptor whose length runs on into the OBUs that follow is not read there.
+      ['a length past the OBU', [0x04, 100, 0x40]],
+    ]
+    for (const [what, decoder] of cases) {
+      for (const error of refusedByAll('damaged', aac(decoder))) {
+        expect(error.message, what).not.toBe('')
+      }
+    }
+    // The same entry with a whole decoder config is named.
+    expect(codecNames(aac(aacConfig(2)))).toEqual(['iamf.000.000.mp4a.40.2'])
+  })
+
+  it('refuses a codec that IAMF does not name, as unsupported-codec', () => {
+    for (const codec of ['xxxx', 'opus', 'flac', 'ac-3', 'mp3 ']) {
+      const entry = iamfEntry(iacb(sequenceHeader(), codecConfig(codec, [1, 2, 3])))
+      for (const error of refusedByAll('unsupported-codec', entry)) {
+        expect(error.message).toContain(`'${codec}'`)
+        expect(error.message).toContain("any browser's Media Source")
+      }
+    }
+  })
+
+  it('carries an IAMF entry as it is, however many channels and what rate it says', () => {
+    // FFmpeg writes 0 channels and a rate of 0: they are in the OBUs, so the entry is not refused for them.
+    const real = iamfEntry(IACB_OPUS)
+    expect(initEntry(real)).toBe(real.bytes)
+    expect(audioFields(real.bytes)).toMatchObject({ type: 'iamf', channels: 0, sampleRate: 0 })
+    const stereo = entryOf(audioEntry('iamf', { channels: 2, sampleRate: 48000 }, IACB_OPUS))
+    expect(initEntry(stereo)).toBe(stereo.bytes)
+  })
+
+  it('rewrites an IAMF entry whose iacb is inside a wave box as ISO version 0, as for the other sound codecs', () => {
+    const entry = quickTimeAudioEntry(
+      'iamf',
+      { version: 1, channels: 2, sampleRate: 48000 },
+      wave(frma('iamf'), IACB_OPUS, [0, 0, 0, 0]),
+    )
+    expect(codecNames(entryOf(entry))).toEqual(['iamf.000.000.Opus'])
+    const out = initEntry(entryOf(entry))
+    expect(audioFields(out)).toMatchObject({
+      type: 'iamf',
+      version: 0,
+      channels: 2,
+      sampleRate: 48000,
+    })
+    expect(audioFields(out).children.map((one) => one.bytes)).toEqual([IACB_OPUS])
+    const written = entryOf(out)
+    expect(codecNames(written)).toEqual(['iamf.000.000.Opus'])
+    expect(initEntry(written)).toBe(written.bytes)
+  })
+
+  it('is damaged or names the same for every prefix of an iacb, whatever size it states', () => {
+    const name = ['iamf.000.000.Opus']
+    const body = IACB_OPUS.subarray(8) // after the box's size and type: the version, the size of the OBUs, the OBUs
+    // As it was cut, so that the size it states is past its end.
+    for (let length = 0; length < body.length; length += 1) {
+      refusedByAll('damaged', iamfEntry(box('iacb', body.subarray(0, length))))
+    }
+    const whole = iamfEntry(box('iacb', body))
+    expect(codecNames(whole)).toEqual(name)
+    expect(initEntry(whole)).toBe(whole.bytes)
+    // As it was cut with the size of what is left, which only a cut inside the two OBUs that are read can make wrong: the Sequence Header and the Codec Config, of 8 and 22 bytes. A cut after them leaves what is not read.
+    const list = body.subarray(2)
+    for (let length = 0; length <= list.length; length += 1) {
+      const entry = iamfEntry(iacb(Array.from(list.subarray(0, length))))
+      if (length < 8 + 22) {
+        refusedByAll('damaged', entry)
+      } else {
+        expect(codecNames(entry), `${length} bytes of the OBUs`).toEqual(name)
+        expect(initEntry(entry), `${length} bytes of the OBUs`).toBe(entry.bytes)
       }
     }
   })
