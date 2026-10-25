@@ -359,7 +359,7 @@ const NO_TAG = '[0][0][0][0]'
  * track's own codec string, which the profile's prefix is matched against;
  * `all` is every name the track has, which ffprobe's `mime_codec_string` may be
  * any of (VP9's short form, MP3's `mp4a.40.34`, MPEG-2 AAC's `mp4a.40.N`, which
- * is its first name). An IAMF sound is named by the codec
+ * is its only name). An IAMF sound is named by the codec
  * inside it: that is what FFmpeg reads as the stream's codec. No name at all
  * when its string is not `iamf.PPP.AAA.<codec>`.
  */

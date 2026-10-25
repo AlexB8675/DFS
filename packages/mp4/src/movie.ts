@@ -155,8 +155,8 @@ function readTrackHeader(
   reader.skip(4) // reserved
   reader.skip(wide ? 8 : 4) // duration, which the media's own is read for
   reader.skip(16) // reserved, layer, alternate group, volume, reserved
-  // A copy: it is 36 bytes, and it is the one view that needn't keep the moov alive.
-  const matrix = reader.bytes(36).slice()
+  // A copy: it is 36 bytes, and it is the one view that needn't keep the moov alive. Made with `new Uint8Array`, as the `slice` of a Node Buffer is a view.
+  const matrix = new Uint8Array(reader.bytes(36))
   // Width and height are 16.16 fixed point: the integer part is the pixels.
   const width = reader.u32() >>> 16
   const height = reader.u32() >>> 16

@@ -442,16 +442,20 @@ function specificInfoType(entry: SampleEntry, esds: Box, config: Descriptor | nu
 /**
  * The names of an `mp4a` entry, from the object type of its `esds` (ISO/IEC
  * 14496-1, and the registry of MP4RA): `mp4a.40.N` for MPEG-4 audio, N being
- * its audio object type; `mp4a.66`, `.67` and `.68` for MPEG-2 AAC, which have
- * a DecoderSpecificInfo too and are named `mp4a.40.N` first, N being the audio
- * object type of that (the stream is AAC all the same, and `initEntry` writes it
- * with MPEG-4 audio's object type, which is all that Chrome's Media Source
- * takes in MP4), then by their own; `mp4a.6B` (MPEG-1 audio) and `mp4a.69` (MPEG-2
- * audio), whose layer 3 is MP3, which browsers also know as `mp3` and as
- * `mp4a.40.34`; the object types of AC-3 and E-AC-3 (`mp4a.A5`, `mp4a.A6`),
- * which are `ac-3` and `ec-3` as well. Any other is named as it is, in two
- * uppercase hex digits, for the browser to answer: that includes Vorbis (0xDD),
- * which is carried in an `mp4a`, and which no browser takes.
+ * its audio object type; MPEG-2 AAC (`mp4a.66`, `.67` and `.68`), which has a
+ * DecoderSpecificInfo too, is named `mp4a.40.N` as well, N being the audio
+ * object type of that, and by no other name: the stream is AAC all the same,
+ * and `initEntry` writes the `esds` with MPEG-4 audio's object type, which is
+ * all that Chrome's Media Source takes in MP4, so that a name with the object
+ * type of MPEG-2 would describe an `esds` that the init segment doesn't carry;
+ * `mp4a.6B` (MPEG-1 audio) and `mp4a.69` (MPEG-2 audio), which browsers also
+ * know as `mp3` and as `mp4a.40.34`. Those two alternates presume layer 3, MP3,
+ * which these object types don't state: their `esds` has no DecoderSpecificInfo,
+ * so a stream of layer 2 is offered as `mp3` too. The object types of AC-3 and
+ * E-AC-3 (`mp4a.A5`, `mp4a.A6`) are `ac-3` and `ec-3` as well. Any other is
+ * named as it is, in two uppercase hex digits, for the browser to answer: that
+ * includes Vorbis (0xDD), which is carried in an `mp4a`, and which no browser
+ * takes.
  */
 function mp4aNames(entry: SampleEntry): Names {
   const { inside } = readAudioEntry(entry)
@@ -464,7 +468,8 @@ function mp4aNames(entry: SampleEntry): Names {
     case MPEG2_AAC_MAIN:
     case MPEG2_AAC_LC:
     case MPEG2_AAC_SSR:
-      return [`mp4a.40.${specificInfoType(entry, esds, config)}`, name]
+      // Named as MPEG-4 audio and no more: the init entry says so (see `initEntry`).
+      return [`mp4a.40.${specificInfoType(entry, esds, config)}`]
     case MPEG2_AUDIO:
     case MPEG1_AUDIO:
       return [name, 'mp3', 'mp4a.40.34']
@@ -620,15 +625,16 @@ function iamfNames(entry: SampleEntry): Names {
  * The names that Media Source is asked about for an entry, read from its
  * configuration, the RFC 6381 one first, and never none. A codec that browsers
  * know by others has them after it, in the order to try: `opus` and `Opus`,
- * `flac` and `fLaC`, and for MPEG audio layer 3 `mp4a.6B`, `mp3` and
- * `mp4a.40.34`. These are named, for the player to ask the browser about:
- * `avc1` to `avc4`, `hvc1` and `hev1`, `av01`, VP9 and VP8 (`vp09`, `vp08`),
- * Dolby Vision (`dvh1`, `dvhe`, `dav1`, `dvav`, `dva1`), every `mp4a` by the
- * object type of its `esds`, QuickTime's `.mp3`, `Opus`, `fLaC`, `ac-3`, `ec-3`,
- * `alac` and IAMF (`iamf`, named `iamf.000.000.Opus` by the profiles and the
- * codec in the OBUs of its `iacb`). One whose configuration box is missing,
- * cut short or lies about its sizes is `damaged`. Every other type is refused
- * as `unsupported-codec`, because no browser's Media Source takes it in MP4:
+ * `flac` and `fLaC`, and for MPEG-1 and MPEG-2 audio `mp4a.6B`, `mp3` and
+ * `mp4a.40.34` (the last two presume layer 3: see `mp4aNames`). These are named,
+ * for the player to ask the browser about: `avc1` to `avc4`, `hvc1` and `hev1`,
+ * `av01`, VP9 and VP8 (`vp09`, `vp08`), Dolby Vision (`dvh1`, `dvhe`, `dav1`,
+ * `dvav`, `dva1`), every `mp4a` by the object type of its `esds`, QuickTime's
+ * `.mp3`, `Opus`, `fLaC`, `ac-3`, `ec-3`, `alac` and IAMF (`iamf`, named
+ * `iamf.000.000.Opus` by the profiles and the codec in the OBUs of its `iacb`).
+ * One whose configuration box is missing, cut short or lies about its sizes is
+ * `damaged`. Every other type is refused as `unsupported-codec`, because no
+ * browser's Media Source takes it in MP4:
  * - PCM: `ipcm` `fpcm` `sowt` `twos` `lpcm` `in24` `in32` `fl32` `fl64` `raw ` `NONE`;
  * - MPEG-4 Visual (`mp4v`), VVC (`vvc1` `vvi1`), Motion JPEG (`jpeg` `mjpa` `mjpb`) and ProRes (`apco` `apcs` `apcn` `apch` `ap4h` `ap4x`);
  * - DTS (`dtsc` `dtse` `dtsh` `dtsl` `dtsx`), AC-4 (`ac-4`), MPEG-H (`mha1` `mha2` `mhm1` `mhm2`), `ulaw` and `alaw`;
@@ -790,7 +796,7 @@ function isoRate(entry: SampleEntry, hertz: number): number {
  * Media Source takes the name `mp4a.67` and then refuses an `esds` that says
  * MPEG-2 AAC, so the entry is carried with that one byte, the objectTypeIndication,
  * set to MPEG-4 audio's 0x40 (the stream is the same AAC, as its
- * AudioSpecificConfig shows, and is named `mp4a.40.N` first); the bytes given
+ * AudioSpecificConfig shows, and is named `mp4a.40.N` and no other); the bytes given
  * are never changed, the entry written is a copy. Any other sound entry, which Chrome's
  * and Firefox's Media Source don't take (QuickTime's version 1 or 2, ISO's
  * version 1, one with its configuration inside a `wave` box, or QuickTime's
@@ -815,7 +821,8 @@ export function initEntry(entry: SampleEntry): Uint8Array {
   const mpeg2At = found && entry.type === 'mp4a' ? mpeg2AacTypeAt(entry.bytes, found.box) : null
   if (audio.version === 0 && entry.stsdVersion === 0 && found?.direct) {
     if (mpeg2At === null) return entry.bytes
-    const copy = entry.bytes.slice()
+    // A copy made with `new Uint8Array`: the `slice` of a Node Buffer is a view of its bytes, and the byte written would change the caller's.
+    const copy = new Uint8Array(entry.bytes)
     copy[mpeg2At] = MPEG4_AUDIO
     return copy
   }
@@ -830,7 +837,8 @@ export function initEntry(entry: SampleEntry): Uint8Array {
     .map((other) => entry.bytes.subarray(other.start, other.end))
   let config = found ? entry.bytes.subarray(found.box.start, found.box.end) : mp3Esds()
   if (found && mpeg2At !== null) {
-    config = config.slice()
+    // Copied for the same reason as above, whatever kind of bytes `entry.bytes` is.
+    config = new Uint8Array(config)
     config[mpeg2At - found.box.start] = MPEG4_AUDIO
   }
   const type = entry.type === '.mp3' ? 'mp4a' : entry.type

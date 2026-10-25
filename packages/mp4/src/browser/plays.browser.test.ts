@@ -9,8 +9,9 @@
 //
 // A track is first asked of the browser by each name it has (`codecNames`), and the
 // browser's answer is held to the table of what each browser plays (support.ts): one
-// that disagrees with the table, or a codec the table lacks, fails the test, and
-// only a codec that the browser and the table agree it doesn't take is skipped.
+// that disagrees with the table, a codec the table lacks, or a name other than the
+// first one taken where the table says it plays, fails the test, and only a codec that
+// the browser and the table agree it doesn't take is skipped.
 
 import { afterAll, describe, inject, it } from 'vitest'
 import type { TestContext } from 'vitest'
@@ -121,22 +122,25 @@ async function readTracks(file: CorpusFile, url: string): Promise<Tracks> {
   })
 }
 
-/** The MIME type of the first of the track's names that this browser's Media Source takes, or null where it takes none. */
-function mimeTypeFor(kind: 'video' | 'audio', track: PlayTrack): string | null {
-  for (const name of track.codecNames) {
-    const type = `${kind}/mp4; codecs="${name}"`
-    if (MediaSource.isTypeSupported(type)) return type
-  }
-  return null
+/** The MIME type that asks this browser's Media Source about one codec name of a track. */
+function mimeTypeOf(kind: 'video' | 'audio', name: string): string {
+  return `${kind}/mp4; codecs="${name}"`
+}
+
+/** The first of the track's names that this browser's Media Source takes, or null where it takes none. */
+function acceptedName(kind: 'video' | 'audio', track: PlayTrack): string | null {
+  return (
+    track.codecNames.find((name) => MediaSource.isTypeSupported(mimeTypeOf(kind, name))) ?? null
+  )
 }
 
 /** The MIME type for a track the browser took (see `checkSupport`), for a SourceBuffer to be made with. */
 function acceptedType(kind: 'video' | 'audio', track: PlayTrack): string {
-  const type = mimeTypeFor(kind, track)
-  if (type === null) {
+  const name = acceptedName(kind, track)
+  if (name === null) {
     throw new Error(`${BROWSER}'s Media Source took none of ${track.codecNames.join(', ')}`)
   }
-  return type
+  return mimeTypeOf(kind, name)
 }
 
 /**
@@ -144,15 +148,17 @@ function acceptedType(kind: 'video' | 'audio', track: PlayTrack): string {
  * plays (support.ts, `supportVerdict`) before the file plays. Every track is
  * judged before any is skipped, so that a wrong name of the sound is found though
  * the picture is one the browser doesn't take. A disagreement with the table, or a
- * family it lacks, fails the test; a codec that the browser and the table agree it
- * doesn't take skips it, saying so.
+ * family it lacks, fails the test; so does a browser that takes the track only by
+ * a later name than the first, the RFC 6381 one, except for Firefox's `mp3`: Firefox
+ * refuses `mp4a.6B` for MP3 in MP4 and takes it as `mp3`. A codec that the browser
+ * and the table agree it doesn't take skips the test, saying so.
  */
 function checkSupport(ctx: TestContext, file: CorpusFile, tracks: Tracks): void {
   const judged: [Kind, 'video' | 'audio', PlayTrack][] = [['picture', 'video', tracks.video]]
   if (tracks.audio) judged.push(['sound', 'audio', tracks.audio])
   let skip: string | undefined
   for (const [part, kind, track] of judged) {
-    const verdict = supportVerdict(track, ENGINE, BROWSER, mimeTypeFor(kind, track) !== null)
+    const verdict = supportVerdict(track, ENGINE, BROWSER, acceptedName(kind, track))
     if (verdict.outcome === 'fail') fail(file.name, part, 'the codec table', verdict.reason)
     if (verdict.outcome === 'skip') skip ??= verdict.reason
   }

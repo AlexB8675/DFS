@@ -344,7 +344,7 @@ describe('the codec string of a sound (§10.4)', () => {
     const v2 = quickTimeAudioEntry(
       'mp4a',
       { version: 2, channels: 6, sampleRate: 48000 },
-      wave(frma('mp4a'), inner, [0, 0, 0, 0]),
+      wave(frma('mp4a'), inner),
     )
     expect(codecString(entryOf(v2))).toBe('mp4a.40.2')
     const fromV2 = audioFields(initEntry(entryOf(v2)))
@@ -617,13 +617,14 @@ describe('codecNames', () => {
           audioEntry('mp4a', {}, esds({ objectType, ...(config === undefined ? {} : { config }) })),
         ),
       )
-    // MPEG-2 AAC, with its AudioSpecificConfig: named as MPEG-4 audio by the audio object type that holds, then by its own.
-    expect(named(0x66, audioSpecificConfig(1))).toEqual(['mp4a.40.1', 'mp4a.66'])
-    expect(named(0x67)).toEqual(['mp4a.40.2', 'mp4a.67'])
-    expect(named(0x68, audioSpecificConfig(3))).toEqual(['mp4a.40.3', 'mp4a.68'])
+    // MPEG-2 AAC, with its AudioSpecificConfig: named as MPEG-4 audio by the audio object type that holds, and by no other name, as
+    // the init entry is written with MPEG-4 audio's object type, so that `mp4a.66` to `mp4a.68` would describe an `esds` it doesn't carry.
+    expect(named(0x66, audioSpecificConfig(1))).toEqual(['mp4a.40.1'])
+    expect(named(0x67)).toEqual(['mp4a.40.2'])
+    expect(named(0x68, audioSpecificConfig(3))).toEqual(['mp4a.40.3'])
     // The audio object type is the AudioSpecificConfig's, whatever the profile the object type says (and an escaped one is read).
-    expect(named(0x67, audioSpecificConfig(5))).toEqual(['mp4a.40.5', 'mp4a.67'])
-    expect(named(0x67, audioSpecificConfig(42))).toEqual(['mp4a.40.42', 'mp4a.67'])
+    expect(named(0x67, audioSpecificConfig(5))).toEqual(['mp4a.40.5'])
+    expect(named(0x67, audioSpecificConfig(42))).toEqual(['mp4a.40.42'])
     // MPEG audio layer 3 has no DecoderSpecificInfo, and browsers know it by three names.
     expect(named(0x6b, null)).toEqual(['mp4a.6B', 'mp3', 'mp4a.40.34'])
     expect(named(0x69, null)).toEqual(['mp4a.69', 'mp3', 'mp4a.40.34'])
@@ -648,11 +649,7 @@ describe('codecNames', () => {
     const ac3 = audioEntry('ac-3', {}, dac3())
     expect(codecNames(entryOf(ac3))).toEqual(['ac-3'])
     // QuickTime's version 1 entry keeps the config inside its wave box.
-    const wrapped = quickTimeAudioEntry(
-      'ac-3',
-      { version: 1 },
-      wave(frma('ac-3'), dac3(), [0, 0, 0, 0]),
-    )
+    const wrapped = quickTimeAudioEntry('ac-3', { version: 1 }, wave(frma('ac-3'), dac3()))
     expect(codecNames(entryOf(wrapped))).toEqual(['ac-3'])
     expect(codecNames(entryOf(audioEntry('ec-3', {}, dec3())))).toEqual(['ec-3'])
     expect(codecNames(entryOf(audioEntry('alac', {}, alacConfig())))).toEqual(['alac'])
@@ -1184,7 +1181,7 @@ describe('the codec string of IAMF (§10.4)', () => {
     const entry = quickTimeAudioEntry(
       'iamf',
       { version: 1, channels: 2, sampleRate: 48000 },
-      wave(frma('iamf'), IACB_OPUS, [0, 0, 0, 0]),
+      wave(frma('iamf'), IACB_OPUS),
     )
     expect(codecNames(entryOf(entry))).toEqual(['iamf.000.000.Opus'])
     const out = initEntry(entryOf(entry))
@@ -1245,7 +1242,7 @@ describe('initEntry', () => {
     const entry = quickTimeAudioEntry(
       'ac-3',
       { version: 1, channels: 6, sampleRate: 48000 },
-      wave(frma('ac-3'), config, [0, 0, 0, 0]),
+      wave(frma('ac-3'), config),
       chan,
     )
     const out = initEntry(entryOf(entry))
@@ -1266,12 +1263,70 @@ describe('initEntry', () => {
     expect(initEntry(written)).toBe(written.bytes)
   })
 
+  describe('the end of the list of boxes in a QuickTime wave', () => {
+    const config = alacConfig()
+    const enda = box('enda', u16(1))
+    const fields = { version: 1, channels: 2, sampleRate: 44100 } as const
+
+    // These use `box('wave', ...)`, which ends the list as the test wants, and not the builder's `wave`, which always ends it with
+    // the 8-byte terminator atom. QuickTime ends some lists with just 4 zero bytes (ISO/IEC 14496-12 has no such thing).
+    it.each<[string, Uint8Array, number[]]>([
+      [
+        'an enda between the frma and the config, and the terminator atom',
+        wave(frma('alac'), enda, config),
+        [],
+      ],
+      [
+        'an enda between the frma and the config, and exactly 4 zero bytes',
+        box('wave', frma('alac'), enda, config, [0, 0, 0, 0]),
+        [],
+      ],
+      [
+        'exactly 4 zero bytes at the end of the wave and at the end of the entry',
+        box('wave', frma('alac'), enda, config, [0, 0, 0, 0]),
+        [0, 0, 0, 0],
+      ],
+    ])('finds the config and writes the entry without them, with %s', (_name, wrapped, tail) => {
+      const entry = quickTimeAudioEntry('alac', fields, wrapped, chan, tail)
+      expect(codecNames(entryOf(entry))).toEqual(['alac'])
+      const out = initEntry(entryOf(entry))
+      expect(audioFields(out)).toMatchObject({
+        type: 'alac',
+        version: 0,
+        channels: 2,
+        sampleSize: 16,
+        sampleRate: 44100,
+      })
+      // The wave goes with its enda and its end, and the entry's other box stays.
+      expect(childrenOf(out).bytes).toEqual([config, chan])
+    })
+
+    it('reads exactly 4 zero bytes at the end of the wave as its end, and any other tail that is too short for a box as damaged', () => {
+      // With no config in the wave, its list is read to the end: 4 zero bytes end it, and the entry just has no 'alac' box.
+      const without = (tail: number[]) =>
+        quickTimeAudioEntry('alac', fields, box('wave', frma('alac'), enda, tail))
+      expect(
+        refusal('damaged', () => codecNames(entryOf(without([0, 0, 0, 0])))).message,
+      ).toContain("has no 'alac' box")
+      for (const tail of [
+        [0, 0, 0],
+        [0, 0, 0, 1],
+        [0, 0, 0, 0, 0],
+      ]) {
+        expect(
+          refusal('damaged', () => codecNames(entryOf(without(tail)))).message,
+          `a tail of ${tail.join(' ')}`,
+        ).toContain('cut short')
+      }
+    })
+  })
+
   it('rewrites QuickTime ALAC at 96 kHz (version 2) with a rate field of 48000', () => {
     const config = alacConfig()
     const entry = quickTimeAudioEntry(
       'alac',
       { version: 2, channels: 2, sampleRate: 96000 },
-      wave(frma('alac'), config, [0, 0, 0, 0]),
+      wave(frma('alac'), config),
     )
     expect(codecNames(entryOf(entry))).toEqual(['alac'])
     const out = initEntry(entryOf(entry))
@@ -1432,7 +1487,7 @@ describe('initEntry', () => {
     const quickTime = quickTimeAudioEntry(
       'mp4a',
       { version: 1, channels: 2, sampleRate: 44100 },
-      wave(frma('mp4a'), mpeg2, [0, 0, 0, 0]),
+      wave(frma('mp4a'), mpeg2),
       chan,
     )
     const out = initEntry(entryOf(quickTime))
@@ -1465,6 +1520,61 @@ describe('initEntry', () => {
     const bytes = audioEntry('mp4a', {}, esds({ ...spec, objectType: 0x67 }))
     const out = initEntry(entryOf(bytes))
     expect(out).toEqual(audioEntry('mp4a', {}, esds({ ...spec, objectType: 0x40 })))
+  })
+
+  it('never changes a Node Buffer it is given, nor returns a view of it, when it writes MPEG-2 AAC as MPEG-4 audio', () => {
+    // A Buffer's `slice` is a view and not a copy, so a copy made with it would write the object type into the caller's bytes.
+    const config = audioSpecificConfig(2)
+    const mpeg2 = esds({ objectType: 0x67, config })
+    const mpeg4 = esds({ objectType: 0x40, config })
+    const direct = audioEntry('mp4a', { channels: 2, sampleRate: 48000 }, mpeg2, chan)
+    const wrapped = quickTimeAudioEntry(
+      'mp4a',
+      { version: 1, channels: 2, sampleRate: 44100 },
+      wave(frma('mp4a'), mpeg2),
+      chan,
+    )
+    const cases: [string, Uint8Array, Uint8Array[]][] = [
+      ['an ISO version 0 entry, the esds direct', direct, [mpeg4, chan]],
+      ['a QuickTime version 1 entry, the esds in a wave', wrapped, [mpeg4, chan]],
+    ]
+    for (const [where, bytes, written] of cases) {
+      // The entry as `entryOf` makes it, but in Buffers, which are views onto one allocation (and may be onto a pool).
+      const padded = Buffer.concat([Buffer.from([9, 9, 9, 9, 9]), bytes, Buffer.from([7, 7, 7])])
+      const given: SampleEntry = {
+        type: 'mp4a',
+        bytes: padded.subarray(5, 5 + bytes.length),
+        stsdVersion: 0,
+      }
+      expect(Buffer.isBuffer(given.bytes), where).toBe(true)
+      const kept = Array.from(given.bytes)
+      const names = codecNames(given)
+
+      const out = initEntry(given)
+      expect(Array.from(given.bytes), `${where}: the given bytes`).toEqual(kept)
+      expect(Array.from(padded.subarray(0, 5)), `${where}: the bytes before them`).toEqual([
+        9, 9, 9, 9, 9,
+      ])
+      expect(
+        Array.from(padded.subarray(5 + bytes.length)),
+        `${where}: the bytes after them`,
+      ).toEqual([7, 7, 7])
+      expect(out, where).not.toBe(given.bytes)
+      expect(out.buffer, `${where}: the written bytes' memory`).not.toBe(given.bytes.buffer)
+      expect(
+        audioFields(out).children.map((one) => one.bytes),
+        where,
+      ).toEqual(written.map((box) => new Uint8Array(box)))
+      expect(codecNames(entryOf(out))).toEqual(['mp4a.40.2'])
+
+      // Asked again, the entry is the same to every reader: the same names, and a fresh copy with the same bytes.
+      expect(codecNames(given), `${where}: the names again`).toEqual(names)
+      const again = initEntry(given)
+      expect(again, where).not.toBe(given.bytes)
+      expect(again.buffer, where).not.toBe(given.bytes.buffer)
+      expect(Array.from(again), `${where}: the entry again`).toEqual(Array.from(out))
+      expect(Array.from(given.bytes), `${where}: the given bytes again`).toEqual(kept)
+    }
   })
 
   it('carries every other sound as it is, MPEG audio layer 3 and the other object types of an mp4a included', () => {

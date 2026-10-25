@@ -33,12 +33,8 @@ const ROWS: {
   { family: 'opus', names: ['opus', 'Opus'], chromium: true, firefox: true },
   { family: 'flac', names: ['flac', 'fLaC'], chromium: true, firefox: true },
   { family: 'mp4a.40', names: ['mp4a.40.2'], chromium: true, firefox: true },
-  {
-    family: 'mp4a.40',
-    names: ['mp4a.40.2', 'mp4a.67'],
-    chromium: true,
-    firefox: true,
-  },
+  // xHE-AAC (the audio object type 42): Chrome takes it, and Firefox doesn't (the probe of 2026-10-25).
+  { family: 'mp4a.40.42', names: ['mp4a.40.42'], chromium: true, firefox: false },
   {
     family: 'iamf',
     names: ['iamf.000.000.Opus'],
@@ -73,12 +69,21 @@ describe('familyOf', () => {
   })
 
   it('keeps the object type of an MPEG-4 audio name and of MP3, and reads MPEG-2 AAC by its MPEG-4 name', () => {
-    for (const aot of ['2', '5', '29', '42']) {
+    for (const aot of ['1', '2', '5', '29']) {
       expect(familyOf(track(`mp4a.40.${aot}`))).toBe('mp4a.40')
     }
-    // MPEG-2 AAC is named `mp4a.40.N` first, and `mp4a.67` after it.
-    expect(familyOf(track('mp4a.40.2', 'mp4a.67'))).toBe('mp4a.40')
+    // MPEG-2 AAC is named `mp4a.40.N` and no other.
+    expect(familyOf(track('mp4a.40.2'))).toBe('mp4a.40')
     expect(familyOf(track('mp4a.6B', 'mp3', 'mp4a.40.34'))).toBe('mp4a.6B')
+  })
+
+  it('makes xHE-AAC (the audio object type 42) a family of its own, which the other object types of MPEG-4 audio are not in', () => {
+    expect(familyOf(track('mp4a.40.42'))).toBe('mp4a.40.42')
+    // Not a prefix match: 4 (AAC LTP) is the start of 42 and is not it.
+    expect(familyOf(track('mp4a.40.4'))).toBe('mp4a.40')
+    expect(familyOf(track('mp4a.40.420'))).toBe('mp4a.40')
+    // Only the first name is read.
+    expect(familyOf(track('mp4a.40.4', 'mp4a.40.42'))).toBe('mp4a.40')
   })
 
   it("leaves the object type off any other 'mp4a' name, which no table row is named for", () => {
@@ -98,11 +103,16 @@ describe('expectedSupport', () => {
     expect(expectedSupport(track(...row.names), 'firefox')).toBe(row.firefox)
   })
 
-  it('knows every AAC object type of MPEG-4 audio by the one family', () => {
-    for (const aot of ['2', '5', '29', '42']) {
+  it('knows every AAC object type of MPEG-4 audio but xHE-AAC by the one family', () => {
+    for (const aot of ['2', '4', '5', '29']) {
       expect(expectedSupport(track(`mp4a.40.${aot}`), 'chromium')).toBe(true)
       expect(expectedSupport(track(`mp4a.40.${aot}`), 'firefox')).toBe(true)
     }
+  })
+
+  it('has Chrome take xHE-AAC and Firefox not, as the probe found', () => {
+    expect(expectedSupport(track('mp4a.40.42'), 'chromium')).toBe(true)
+    expect(expectedSupport(track('mp4a.40.42'), 'firefox')).toBe(false)
   })
 
   it.each<[string, Engine]>([
@@ -130,36 +140,38 @@ describe('expectedSupport', () => {
 
 describe('supportVerdict', () => {
   it('plays a track that the browser takes and the table says it takes', () => {
-    expect(supportVerdict(track('avc1.64001f'), 'chromium', 'Chrome', true)).toEqual({
+    expect(supportVerdict(track('avc1.64001f'), 'chromium', 'Chrome', 'avc1.64001f')).toEqual({
       outcome: 'play',
     })
-    expect(supportVerdict(track('iamf.000.000.Opus'), 'chromium', 'Chrome', true)).toEqual({
+    expect(
+      supportVerdict(track('iamf.000.000.Opus'), 'chromium', 'Chrome', 'iamf.000.000.Opus'),
+    ).toEqual({
       outcome: 'play',
     })
   })
 
   it("skips a track that neither the browser nor the table takes, saying the browser doesn't take it", () => {
-    expect(supportVerdict(track('ac-3'), 'chromium', 'Chrome', false)).toEqual({
+    expect(supportVerdict(track('ac-3'), 'chromium', 'Chrome', null)).toEqual({
       outcome: 'skip',
       reason: "Chrome's Media Source doesn't take ac-3",
     })
-    expect(supportVerdict(track('iamf.000.000.Opus'), 'firefox', 'Firefox', false)).toEqual({
+    expect(supportVerdict(track('iamf.000.000.Opus'), 'firefox', 'Firefox', null)).toEqual({
       outcome: 'skip',
       reason: "Firefox's Media Source doesn't take iamf.000.000.Opus",
     })
     expect(
-      supportVerdict(track('mp4a.6B', 'mp3', 'mp4a.40.34'), 'chromium', 'Chrome', false),
+      supportVerdict(track('mp4a.6B', 'mp3', 'mp4a.40.34'), 'chromium', 'Chrome', null),
     ).toEqual({ outcome: 'skip', reason: "Chrome's Media Source doesn't take mp4a.6B" })
   })
 
   it('fails a browser that takes what the table says it does not, naming every name asked', () => {
-    expect(supportVerdict(track('alac'), 'firefox', 'Firefox', true)).toEqual({
+    expect(supportVerdict(track('alac'), 'firefox', 'Firefox', 'alac')).toEqual({
       outcome: 'fail',
       reason:
         "Firefox's Media Source takes alac, against support.ts: check the names, or update the table",
     })
     expect(
-      supportVerdict(track('mp4a.6B', 'mp3', 'mp4a.40.34'), 'chromium', 'Chrome', true),
+      supportVerdict(track('mp4a.6B', 'mp3', 'mp4a.40.34'), 'chromium', 'Chrome', 'mp4a.6B'),
     ).toEqual({
       outcome: 'fail',
       reason:
@@ -168,7 +180,7 @@ describe('supportVerdict', () => {
   })
 
   it('fails a browser that refuses what the table says it takes, naming every name asked', () => {
-    expect(supportVerdict(track('flac', 'fLaC'), 'chromium', 'Chrome', false)).toEqual({
+    expect(supportVerdict(track('flac', 'fLaC'), 'chromium', 'Chrome', null)).toEqual({
       outcome: 'fail',
       reason:
         "Chrome's Media Source doesn't take flac, fLaC, against support.ts: check the names, or update the table",
@@ -178,7 +190,7 @@ describe('supportVerdict', () => {
         track('vp09.00.20.08.01.02.02.02.00', 'vp09.00.20.08'),
         'firefox',
         'Firefox',
-        false,
+        null,
       ),
     ).toEqual({
       outcome: 'fail',
@@ -187,17 +199,99 @@ describe('supportVerdict', () => {
     })
   })
 
+  it('skips xHE-AAC in Firefox, which the table says does not take it, and plays it in Chrome', () => {
+    expect(supportVerdict(track('mp4a.40.42'), 'firefox', 'Firefox', null)).toEqual({
+      outcome: 'skip',
+      reason: "Firefox's Media Source doesn't take mp4a.40.42",
+    })
+    expect(supportVerdict(track('mp4a.40.42'), 'chromium', 'Chrome', 'mp4a.40.42')).toEqual({
+      outcome: 'play',
+    })
+    expect(supportVerdict(track('mp4a.40.42'), 'firefox', 'Firefox', 'mp4a.40.42')).toMatchObject({
+      outcome: 'fail',
+    })
+  })
+
+  describe('the name that the browser took', () => {
+    const LONG = 'vp09.00.20.08.01.02.02.02.00'
+    const MP3 = track('mp4a.6B', 'mp3', 'mp4a.40.34')
+
+    it('plays a track whose first name the browser took, the other names it has notwithstanding', () => {
+      expect(supportVerdict(track(LONG, 'vp09.00.20.08'), 'chromium', 'Chrome', LONG)).toEqual({
+        outcome: 'play',
+      })
+      expect(supportVerdict(track('opus', 'Opus'), 'firefox', 'Firefox', 'opus')).toEqual({
+        outcome: 'play',
+      })
+      expect(supportVerdict(track('flac', 'fLaC'), 'chromium', 'Chrome', 'flac')).toEqual({
+        outcome: 'play',
+      })
+      expect(supportVerdict(MP3, 'firefox', 'Firefox', 'mp4a.6B')).toEqual({ outcome: 'play' })
+    })
+
+    it('fails a track that the browser took by a later name, saying which name and which was first', () => {
+      expect(
+        supportVerdict(track(LONG, 'vp09.00.20.08'), 'firefox', 'Firefox', 'vp09.00.20.08'),
+      ).toEqual({
+        outcome: 'fail',
+        reason: `Firefox's Media Source took vp09.00.20.08 and not ${LONG}, the name that codecNames gives first: check that name`,
+      })
+      expect(supportVerdict(track('opus', 'Opus'), 'chromium', 'Chrome', 'Opus')).toEqual({
+        outcome: 'fail',
+        reason:
+          "Chrome's Media Source took Opus and not opus, the name that codecNames gives first: check that name",
+      })
+      expect(supportVerdict(track('flac', 'fLaC'), 'firefox', 'Firefox', 'fLaC')).toMatchObject({
+        outcome: 'fail',
+      })
+    })
+
+    it('takes mp3 for MP3 in MP4 in Firefox, which accepts it by that name alone', () => {
+      expect(supportVerdict(MP3, 'firefox', 'Firefox', 'mp3')).toEqual({ outcome: 'play' })
+      // The third name of MP3 is no exception.
+      expect(supportVerdict(MP3, 'firefox', 'Firefox', 'mp4a.40.34')).toEqual({
+        outcome: 'fail',
+        reason:
+          "Firefox's Media Source took mp4a.40.34 and not mp4a.6B, the name that codecNames gives first: check that name",
+      })
+      // Chrome takes MP3 in MP4 by no name, by the table, so that it taking one is a disagreement with the table.
+      expect(supportVerdict(MP3, 'chromium', 'Chrome', 'mp3')).toMatchObject({
+        outcome: 'fail',
+        reason: expect.stringContaining('against support.ts') as string,
+      })
+    })
+
+    it('makes the mp3 exception for MP3 alone: a name that happens to be mp3 fails for any other family', () => {
+      expect(supportVerdict(track('opus', 'mp3'), 'firefox', 'Firefox', 'mp3')).toMatchObject({
+        outcome: 'fail',
+      })
+      expect(supportVerdict(track('mp4a.40.2', 'mp3'), 'firefox', 'Firefox', 'mp3')).toMatchObject({
+        outcome: 'fail',
+      })
+    })
+
+    it('does not look at the name where the browser took none', () => {
+      expect(supportVerdict(track('ac-3'), 'chromium', 'Chrome', null)).toMatchObject({
+        outcome: 'skip',
+      })
+      expect(supportVerdict(track('flac', 'fLaC'), 'chromium', 'Chrome', null)).toMatchObject({
+        outcome: 'fail',
+        reason: expect.stringContaining('against support.ts') as string,
+      })
+    })
+  })
+
   it('fails a family that is not in the table, whatever the browser says', () => {
-    expect(supportVerdict(track('flak'), 'chromium', 'Chrome', false)).toEqual({
+    expect(supportVerdict(track('flak'), 'chromium', 'Chrome', null)).toEqual({
       outcome: 'fail',
       reason: 'add flak to support.ts',
     })
-    expect(supportVerdict(track('mp4v.20.9'), 'firefox', 'Firefox', true)).toEqual({
+    expect(supportVerdict(track('mp4v.20.9'), 'firefox', 'Firefox', 'mp4v.20.9')).toEqual({
       outcome: 'fail',
       reason: 'add mp4v to support.ts',
     })
     // The names after the first make no family, though one of them is in the table.
-    expect(supportVerdict(track('mp4a.A5', 'ac-3'), 'chromium', 'Chrome', false)).toEqual({
+    expect(supportVerdict(track('mp4a.A5', 'ac-3'), 'chromium', 'Chrome', null)).toEqual({
       outcome: 'fail',
       reason: 'add mp4a to support.ts',
     })

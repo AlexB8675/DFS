@@ -183,6 +183,23 @@ describe("a movie's header and tracks (§10.4)", () => {
     expect(Array.from(bytes.subarray(stcoAt + 12, stcoAt + 16))).toEqual([0, 0, 0, 1])
   })
 
+  it("copies a track's matrix out of the moov, even when the moov is a Node Buffer, whose slice is a view", () => {
+    const moov = Buffer.from(
+      movie({
+        tracks: [
+          { id: 1, handler: 'vide', matrix: [0, 0x10000, 0, -0x10000, 0, 0, 0, 0, 0x40000000] },
+        ],
+      }),
+    )
+    const { matrix } = trackOf(readMovie(moov), 0)
+    expect(matrix.length).toBe(36)
+    // It holds its own memory, so the moov can go, and writing to either leaves the other as it was.
+    expect(matrix.buffer).not.toBe(moov.buffer)
+    const kept = Array.from(matrix)
+    moov.fill(0xee)
+    expect(Array.from(matrix)).toEqual(kept)
+  })
+
   it('reads a movie header of version 0', () => {
     const read = readMovie(movie({ version: 0, timescale: 90000, duration: 4_000_000_000 }))
     expect(read).toEqual({ timescale: 90000, durationTicks: 4_000_000_000, tracks: [] })

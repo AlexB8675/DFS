@@ -125,6 +125,32 @@ function soundEntryOf(path: string): SoundEntry {
   }
 }
 
+/**
+ * The colour codes in the first picture's `vpcC` box (VP Codec ISO Media File Format
+ * Binding), read from the file's own bytes and not by the reader's naming: the colour
+ * primaries, the transfer characteristics and the matrix coefficients, which are
+ * ITU-T H.273 codes (9 is BT.2020, 16 is PQ), as the made file has them.
+ */
+function vpcColourOf(path: string): { primaries: number; transfer: number; matrix: number } {
+  const size = statSync(path).size
+  const entry = readIndex(path, size).tracks.find((track) => track.kind === 'video')?.entries[0]
+  if (!entry) throw new Error('The file has no picture with a sample description.')
+  // After the 8 bytes of the box's header, 78 of fields (ISO/IEC 14496-12: the data reference index and the 70 of a VisualSampleEntry), where the entry's boxes begin.
+  const inside: Box = { type: entry.type, start: 0, body: 86, end: entry.bytes.length }
+  const config = child(entry.bytes, inside, 'vpcC')
+  if (!config) throw new Error(`The '${entry.type}' entry has no 'vpcC' box.`)
+  // The box's version (1 byte) and flags (3), then the profile, the level and a byte of bit depth, chroma subsampling and range, then the three codes.
+  const version = entry.bytes[config.body]
+  if (version !== 1) {
+    throw new Error(`The 'vpcC' box is version ${version}, and only 1 holds the colour codes.`)
+  }
+  const [primaries, transfer, matrix] = entry.bytes.subarray(config.body + 7, config.body + 10)
+  if (primaries === undefined || transfer === undefined || matrix === undefined) {
+    throw new Error(`The 'vpcC' box is cut short before its colour codes.`)
+  }
+  return { primaries, transfer, matrix }
+}
+
 /** The tag of a descriptor of an `esds` (ISO/IEC 14496-1), checked, and where its body begins: after a length of one to four bytes, 7 bits each, the top bit saying that another follows. */
 function descriptorBody(bytes: Uint8Array, at: number, tag: number): number {
   if (bytes[at] !== tag) {
@@ -437,7 +463,9 @@ const SPECS: Spec[] = [
     codecs: { video: 'vp09.00', audio: 'opus' },
   },
   {
-    // VP9 profile 2, 10 bits, in HDR's colour (PQ, BT.2020): `vp09.02`.
+    // VP9 profile 2, 10 bits, in HDR's colour (PQ, BT.2020): `vp09.02`. With ffmpeg N-126374 the colour options of the output don't reach
+    // libvpx's `vpcC` (it keeps 2, 2 and the matrix), so the picture is tagged by `setparams` in the filter graph, which does; `verify`
+    // reads the codes from the made file.
     name: 'vp9-10bit-pq.mp4',
     layout: 'ftyp free mdat moov',
     streams: ['vp9', 'opus'],
@@ -449,6 +477,8 @@ const SPECS: Spec[] = [
       '2',
       '-pix_fmt',
       'yuv420p10le',
+      '-vf',
+      'setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc',
       '-color_primaries',
       'bt2020',
       '-color_trc',
@@ -461,6 +491,14 @@ const SPECS: Spec[] = [
     ],
     expect: 'plays',
     codecs: { video: 'vp09.02' },
+    verify: (path) => {
+      const { primaries, transfer, matrix } = vpcColourOf(path)
+      if (primaries !== 9 || transfer !== 16 || matrix !== 9) {
+        throw new Error(
+          `The 'vpcC' colour codes are ${primaries}, ${transfer} and ${matrix}, not 9, 16 and 9 (BT.2020, PQ, BT.2020 non-constant luminance).`,
+        )
+      }
+    },
   },
   {
     // FLAC in MP4 (`fLaC` with a `dfLa`).
@@ -571,7 +609,7 @@ const SPECS: Spec[] = [
   {
     // MPEG-2 AAC (low complexity, `mp4a.67`): the AAC file above, stream-copied, with one byte of its `esds` changed in place, the
     // objectTypeIndication, from MPEG-4 audio's 0x40 to MPEG-2 AAC LC's 0x67, which ffmpeg has no option to write. The size is the same.
-    // It is named `mp4a.40.2` first (the audio object type of its AudioSpecificConfig, which is also ffprobe's name for it) and then `mp4a.67`,
+    // It is named `mp4a.40.2` (the audio object type of its AudioSpecificConfig, which is also ffprobe's name for it) and no other,
     // and written with the object type 0x40 again, as Chrome's Media Source takes nothing else.
     name: 'h264-mpeg2aac.mp4',
     layout: 'ftyp free mdat moov',
