@@ -6,6 +6,7 @@ import { chooseTracks, fragment, initSegment, Mp4Error, presentationSeconds } fr
 import type { FrameTable, Mp4Refusal, PlayTrack } from '../index.ts'
 import { isSynthetic, loadManifest, readIndex, readRange, uniqueTitles } from '../testing/corpus.ts'
 import type { ManifestEntry } from '../testing/corpus.ts'
+import { configProblems, writtenEntry } from '../testing/entries.ts'
 import {
   decodes,
   iamfPacketSize,
@@ -29,10 +30,12 @@ import type { ProbePacket, ProbeStream } from '../testing/ffprobe.ts'
 // 5 s), within a tick. For each synthetic file the writer's output for the first
 // 10 s is read back by ffprobe and decoded by ffmpeg (`-v error -xerror`, with
 // nothing said), which proves the init segment of a codec that no browser here
-// plays; and a file expected to be refused gives that reason. The codec is
-// compared with ffprobe's name for it, any of the track's names for
-// `mime_codec_string`; an IAMF sound by the codec inside it, with its packets
-// the payload of the OBUs that its samples are. Run with
+// plays, and its sample entry holds the source's codec configuration box byte
+// for byte, which the decode does not prove (ffmpeg's decoders for AAC and AC-3
+// take what they need from the frames); and a file expected to be refused gives
+// that reason. The codec is compared with ffprobe's name for it, any of the
+// track's names for `mime_codec_string`; an IAMF sound by the codec inside it,
+// with its packets the payload of the OBUs that its samples are. Run with
 // `pnpm --filter @dfs/mp4 test:corpus`.
 
 /** A file this large (500 MB) is compared by windows and not whole. */
@@ -564,8 +567,14 @@ function fragmentRanges(track: PlayTrack, length: number, limit: number): [numbe
   return ranges
 }
 
-/** What the writer makes of the first 10 s of a track, read back by ffprobe, against the source's frames. */
+/**
+ * What the writer makes of the first 10 s of a track, against the source's
+ * frames and its entry: the entry the init segment holds carries the source's
+ * codec configuration box byte for byte, and the output is decoded by ffmpeg and
+ * read back by ffprobe. `title` is the file's, for the problems.
+ */
 async function checkWritten(
+  title: string,
   name: string,
   track: PlayTrack,
   bytes: Uint8Array,
@@ -575,7 +584,8 @@ async function checkWritten(
   const ranges = fragmentRanges(track, 2, 10)
   const last = ranges.at(-1)
   if (!last) return [`${name}: no fragments to write`]
-  const parts = [initSegment(track)]
+  const init = initSegment(track)
+  const parts = [init]
   ranges.forEach(([from, to], k) => {
     parts.push(
       fragment(track, from, to, k + 1, (offset, length) => bytes.subarray(offset, offset + length)),
@@ -583,10 +593,19 @@ async function checkWritten(
   })
   const out = resolve(folder, `${name}.mp4`)
   writeFileSync(out, Buffer.concat(parts))
+  // The entry that was written, read back from the init segment, holds the source's configuration box as it was. FFmpeg's decode below does not show it: its decoders for AAC and for AC-3 take what they need from the frames, and Safari's may need the box.
+  const sourceEntry = track.header.entries[0]
+  if (!sourceEntry) return [`${title}: ${name}: the track has no sample description`]
+  const problems = configProblems(
+    sourceEntry,
+    writtenEntry(init),
+    track.header.kind === 'video',
+  ).map((problem) => `${title}: ${name}: ${problem}`)
   // Decoded back by FFmpeg, with nothing said: no browser here plays every codec, and a decoder that starts from the init segment's entry shows that the entry says what it needs. Nothing more is asked of an output that does not decode: ffprobe may not even read it.
   const undecoded = await decodes(out)
-  if (undecoded !== null) return [`${name}: the output does not decode: ${undecoded}`]
-  const problems: string[] = []
+  if (undecoded !== null) {
+    return [...problems, `${name}: the output does not decode: ${undecoded}`]
+  }
   const packets =
     (
       (await probe(out, ['-show_entries', 'packet=size,pts,dts,flags'], false)) as {
@@ -650,7 +669,7 @@ describe('the writer against ffprobe, on the synthetic files', () => {
   const titles = uniqueTitles(synthetic.map((entry) => entry.path))
   it.each(synthetic.map((entry, i) => [titles[i] ?? entry.path, entry] as const))(
     '%s',
-    async (_title, entry) => {
+    async (title, entry) => {
       const size = statSync(entry.path).size
       const { video, audio } = chooseTracks(readIndex(entry.path, size), size)
       const bytes = readFileSync(entry.path)
@@ -658,6 +677,7 @@ describe('the writer against ffprobe, on the synthetic files', () => {
       const folder = mkdtempSync(resolve(tmpdir(), 'dfs-mp4-corpus-'))
       try {
         const problems = await checkWritten(
+          title,
           'picture',
           video,
           bytes,
@@ -667,6 +687,7 @@ describe('the writer against ffprobe, on the synthetic files', () => {
         if (audio) {
           problems.push(
             ...(await checkWritten(
+              title,
               'sound',
               audio,
               bytes,
