@@ -80,9 +80,11 @@ function refuseCut(track: TrackHeader, first: number | undefined): void {
  * read against this one they would play garbage. The sample description names
  * one of the track's data references by its 1-based index, in the 16 bits after
  * the entry's 6 reserved bytes (bytes 14 and 15 of an entry with an ordinary
- * header), and the reference is not flagged as this same file. An index of 0 or
- * past the list, or a track with no `dref`, names no reference, and the data is
- * taken to be in the file, as FFmpeg and mp4box read such a file.
+ * header), and the reference is not flagged as this same file and holds a
+ * location (a `url `'s string, an alias's record). A reference with none, even
+ * with the flag clear, can only mean this file: writers get the flag wrong. An
+ * index of 0 or past the list, or a track with no `dref`, names no reference,
+ * and the data is taken to be in the file, as FFmpeg and mp4box read such a file.
  */
 function refuseExternal(track: TrackHeader, entry: SampleEntry): void {
   const references = track.dataReferences
@@ -93,7 +95,7 @@ function refuseExternal(track: TrackHeader, entry: SampleEntry): void {
   reader.skip(6) // reserved
   const named = reader.u16()
   const reference = named === 0 ? undefined : references[named - 1]
-  if (reference && !reference.selfContained) {
+  if (reference && !reference.selfContained && reference.location) {
     throw new Mp4Error(
       'external-data',
       `its frames are in another file (data reference '${reference.type}'), which the player can't read.`,

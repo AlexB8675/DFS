@@ -10,13 +10,16 @@ import {
   audioEntry,
   avcC,
   box,
+  concat,
   ctts,
   dataEntry,
   dfLa,
   dOps,
   dref,
   esds,
+  fourcc,
   frma,
+  fullBox,
   hdlr,
   mdhd,
   movie,
@@ -28,7 +31,9 @@ import {
   stss,
   stsz,
   stts,
+  tkhd,
   trak,
+  u32,
   visualEntry,
   vpcC,
   wave,
@@ -112,6 +117,13 @@ const TWO_MEDIA_EDITS: TrackSpec['edits'] = {
     { duration: 1000, mediaTime: 2000 },
   ],
 }
+
+/** What a `url ` holds after its flags to name a place: a string, and its zero. */
+const LOCATION = [...Array.from('file:///x.mov', (letter) => letter.charCodeAt(0)), 0]
+
+/** Data references to another file: not flagged as this one, and holding a location (a `url `'s string, an alias's record). */
+const URL_ELSEWHERE = dataEntry('url ', 0, LOCATION)
+const ALIAS_ELSEWHERE = dataEntry('alis', 0, [1, 2, 3, 4])
 
 /** A `dinf` that names these data references, in order. */
 function dinfOf(...entries: Uint8Array[]): Uint8Array {
@@ -588,7 +600,7 @@ describe('the tracks a video plays (§10.4, D45)', () => {
 
   it('refuses a track whose frames are in another file', () => {
     const error = refusal('external-data', () =>
-      chooseTracks(read([picture({ dinf: dinfOf(dataEntry('url ', 0)) })]), FILE_SIZE),
+      chooseTracks(read([picture({ dinf: dinfOf(URL_ELSEWHERE) })]), FILE_SIZE),
     )
     expect(error.message).toBe(
       "The picture track can't be played: its frames are in another file (data reference 'url '), which the player can't read.",
@@ -596,10 +608,7 @@ describe('the tracks a video plays (§10.4, D45)', () => {
 
     // QuickTime's own kind of reference, an alias, is outside the file as the `url ` is.
     const alias = refusal('external-data', () =>
-      chooseTracks(
-        read([picture({ dinf: dinfOf(dataEntry('alis', 0, [1, 2, 3, 4])) })]),
-        FILE_SIZE,
-      ),
+      chooseTracks(read([picture({ dinf: dinfOf(ALIAS_ELSEWHERE) })]), FILE_SIZE),
     )
     expect(alias.message).toContain("data reference 'alis'")
 
@@ -609,7 +618,7 @@ describe('the tracks a video plays (§10.4, D45)', () => {
         read([
           picture({
             entries: [referencing(PICTURE, 2)],
-            dinf: dinfOf(dataEntry('url ', 1), dataEntry('alis', 0)),
+            dinf: dinfOf(dataEntry('url ', 1), ALIAS_ELSEWHERE),
           }),
         ]),
         FILE_SIZE,
@@ -620,7 +629,7 @@ describe('the tracks a video plays (§10.4, D45)', () => {
   })
 
   it("plays a track whose data reference is the file itself, or isn't said", () => {
-    const outside = dinfOf(dataEntry('url ', 0))
+    const outside = dinfOf(URL_ELSEWHERE)
     const plays = (tracks: TrackSpec[]): number =>
       chooseTracks(read(tracks), FILE_SIZE).video.table.count
     // The file itself, as a `url ` and as an alias say it, in the picture and in the sound.
@@ -643,7 +652,7 @@ describe('the tracks a video plays (§10.4, D45)', () => {
     expect(plays([picture({ entries: [referencing(PICTURE, 0)], dinf: outside })])).toBe(4)
     expect(plays([picture({ entries: [referencing(PICTURE, 0xffff)], dinf: outside })])).toBe(4)
     // Only the reference that the entry names counts: the second is outside the file and the entry names the first.
-    expect(plays([picture({ dinf: dinfOf(dataEntry('url ', 1), dataEntry('alis', 0)) })])).toBe(4)
+    expect(plays([picture({ dinf: dinfOf(dataEntry('url ', 1), ALIAS_ELSEWHERE) })])).toBe(4)
 
     // A picture in the file does not excuse a sound that is not: it is refused as a picture is (the sound rule of D45).
     const error = refusal('external-data', () =>
@@ -657,8 +666,58 @@ describe('the tracks a video plays (§10.4, D45)', () => {
     )
   })
 
+  it("takes a data reference that names no other file, or that can't be read, as the file itself", () => {
+    const plays = (tracks: TrackSpec[]): number =>
+      chooseTracks(read(tracks), FILE_SIZE).video.table.count
+    // A reference is another file only when it is not flagged as this one and holds a location: writers get the flag wrong.
+    expect(plays([picture({ dinf: dinfOf(dataEntry('url ', 0)) })])).toBe(4)
+    expect(plays([picture({ dinf: dinfOf(dataEntry('url ', 0, [0, 0, 0, 0])) })])).toBe(4)
+    expect(plays([picture({ dinf: dinfOf(dataEntry('alis', 0)) })])).toBe(4)
+    expect(plays([picture({ dinf: dinfOf(dataEntry('urn ', 2)) })])).toBe(4)
+    // The flag settles it when it is set, whatever the entry holds.
+    expect(plays([picture({ dinf: dinfOf(dataEntry('url ', 1, LOCATION)) })])).toBe(4)
+    // A sound is no different.
+    const silent = chooseTracks(
+      read([picture(), sound({ dinf: dinfOf(dataEntry('url ', 0)) })]),
+      FILE_SIZE,
+    )
+    expect(silent.audio?.table.count).toBe(4)
+
+    // A dref that counts 2 entries and holds 1, or has zeros after its entries, is read as far as it goes.
+    const self = dataEntry('url ', 1)
+    expect(plays([picture({ dinf: box('dinf', dref([self], 2)) })])).toBe(4)
+    expect(plays([picture({ dinf: box('dinf', dref([self], 0)) })])).toBe(4)
+    for (const zeros of [4, 5, 8, 12]) {
+      const padded = box(
+        'dinf',
+        fullBox('dref', 0, 0, u32(1), self, new Array<number>(zeros).fill(0)),
+      )
+      expect(plays([picture({ dinf: padded })]), `${zeros} zeros`).toBe(4)
+    }
+    // An entry that cannot be read is not a reference: the index that names it names none.
+    const torn = (type: string) => concat(u32(500), fourcc(type), [1, 2, 3])
+    const unreadable = box('dinf', fullBox('dref', 0, 0, u32(2), self, torn('url ')))
+    expect(plays([picture({ entries: [referencing(PICTURE, 2)], dinf: unreadable })])).toBe(4)
+    // Nor is a dref, or a dinf, that cannot be read: the track has none.
+    expect(plays([picture({ dinf: box('dinf', torn('dref')) })])).toBe(4)
+    expect(plays([picture({ dinf: box('dinf', torn('udta'), dref([URL_ELSEWHERE])) })])).toBe(4)
+    const afterStbl = box(
+      'trak',
+      tkhd({ id: 1 }),
+      box(
+        'mdia',
+        mdhd({ timescale: 30000 }),
+        hdlr('vide'),
+        box('minf', box('stbl', stsd([PICTURE]), ...goodTables()), torn('dinf')),
+      ),
+    )
+    const damagedDinf = readMovie(movie({ timescale: 1000, tracks: [afterStbl] }))
+    expect(trackOf(damagedDinf, 0).dataReferences).toBeNull()
+    expect(chooseTracks(damagedDinf, FILE_SIZE).video.table.count).toBe(4)
+  })
+
   it('asks where the frames are after the sample description is checked and before the frames are expanded', () => {
-    const outside = dinfOf(dataEntry('url ', 0))
+    const outside = dinfOf(URL_ELSEWHERE)
     // Each of these is refused for a cheaper reason than where its frames are, or a dearer one than it.
     refusal('several-descriptions', () =>
       chooseTracks(read([picture({ entries: [PICTURE, PICTURE], dinf: outside })]), FILE_SIZE),
@@ -675,34 +734,19 @@ describe('the tracks a video plays (§10.4, D45)', () => {
     )
   })
 
-  it('holds only the chosen tracks to where their frames are, and to a dref that can be read', () => {
-    const outside = dinfOf(dataEntry('url ', 0))
-    // A dref that counts 2 entries and holds 1.
-    const unreadable = box('dinf', dref([dataEntry('url ', 1)], 2))
-    // Tracks that are not chosen are not asked: a second picture, a second sound and a timecode, outside the file or unreadable.
+  it('holds only the chosen tracks to where their frames are', () => {
+    const outside = dinfOf(URL_ELSEWHERE)
+    // Tracks that are not chosen are not asked: a second picture, a second sound and a timecode, outside the file.
     const parsed = read([
       picture({ id: 1 }),
       sound({ id: 2 }),
       picture({ id: 3, dinf: outside }),
       sound({ id: 4, dinf: outside }),
       { id: 5, handler: 'tmcd', entries: [sampleEntry('tmcd')], dinf: outside },
-      picture({ id: 6, dinf: unreadable }),
-      sound({ id: 7, dinf: unreadable }),
     ])
-    expect(trackOf(parsed, 5).problem).not.toBeNull()
     const { video, audio } = chooseTracks(parsed, FILE_SIZE)
     expect(video.header.id).toBe(1)
     expect(audio?.header.id).toBe(2)
-
-    // A chosen track that is unreadable is refused with its reason, as any track that has a problem is.
-    const brokenPicture = refusal('damaged', () =>
-      chooseTracks(read([picture({ dinf: unreadable })]), FILE_SIZE),
-    )
-    expect(brokenPicture.message).toMatch(/^The picture track can't be played: .*'dref'/)
-    const brokenSound = refusal('damaged', () =>
-      chooseTracks(read([picture(), sound({ dinf: unreadable })]), FILE_SIZE),
-    )
-    expect(brokenSound.message).toMatch(/^The sound track can't be played: .*'dref'/)
   })
 
   it("refuses a track for its problem before it counts the track's descriptions", () => {

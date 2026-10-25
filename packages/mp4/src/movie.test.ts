@@ -714,7 +714,8 @@ describe('what a track needs, and what it does not (§10.4)', () => {
 })
 
 describe("where a track's frames are kept (§10.4)", () => {
-  it('reads the data references of a track, and which of them are the file itself', () => {
+  it('reads the data references of a track, which of them are the file itself, and which name a location', () => {
+    const where = Array.from('file:///x.mov', (letter) => letter.charCodeAt(0))
     const read = readMovie(
       movie({
         tracks: [
@@ -722,26 +723,32 @@ describe("where a track's frames are kept (§10.4)", () => {
           {
             id: 2,
             handler: 'soun',
-            // Only bit 0 of the flags says the data is in this file: 3 has it, 2 hasn't, and an alias's own bytes follow its flags.
+            // Only bit 0 of the flags says the data is in this file: 3 has it, 2 hasn't. A location is any byte but 0 after the flags: a URL's string, an alias's record.
             dinf: box(
               'dinf',
               dref([
                 dataEntry('url ', 1),
+                dataEntry('url ', 0, where, [0]),
                 dataEntry('alis', 0, [1, 2, 3, 4]),
                 dataEntry('rsrc', 3),
                 dataEntry('urn ', 2),
+                dataEntry('url ', 0, [0, 0, 0]),
               ]),
             ),
           },
         ],
       }),
     )
-    expect(trackOf(read, 0).dataReferences).toEqual([{ type: 'url ', selfContained: true }])
+    expect(trackOf(read, 0).dataReferences).toEqual([
+      { type: 'url ', selfContained: true, location: false },
+    ])
     expect(trackOf(read, 1).dataReferences).toEqual([
-      { type: 'url ', selfContained: true },
-      { type: 'alis', selfContained: false },
-      { type: 'rsrc', selfContained: true },
-      { type: 'urn ', selfContained: false },
+      { type: 'url ', selfContained: true, location: false },
+      { type: 'url ', selfContained: false, location: true },
+      { type: 'alis', selfContained: false, location: true },
+      { type: 'rsrc', selfContained: true, location: false },
+      { type: 'urn ', selfContained: false, location: false },
+      { type: 'url ', selfContained: false, location: false },
     ])
     expect(trackOf(read, 0).problem).toBeNull()
     expect(trackOf(read, 1).problem).toBeNull()
@@ -763,68 +770,83 @@ describe("where a track's frames are kept (§10.4)", () => {
     expect(read.tracks.map((track) => track.problem)).toEqual([null, null, null, null])
   })
 
-  it('gives a track a problem when its dinf or dref is cut short, counts wrongly, or holds an entry that is not a whole box', () => {
+  it('reads the references it can from a dinf or dref that is cut short, counts wrongly or is padded, and never gives the track a problem for it', () => {
+    const good = dataEntry('url ', 1)
+    const first = { type: 'url ', selfContained: true, location: false }
     const stbl = box('stbl', stsd([sampleEntry('avc1')]))
     // A box that claims more bytes than are left in the box it is in.
     const torn = (type: string) => concat(u32(500), fourcc(type), [1, 2, 3])
     const inMinf = (...children: Part[]) =>
       box('trak', tkhd(), box('mdia', mdhd(), hdlr('vide'), box('minf', ...children)))
-    const cases: [string, Uint8Array, string][] = [
+    // A dref that counts 2 and holds `good` and these.
+    const afterGood = (...rest: Part[]) =>
+      trak({ dinf: box('dinf', fullBox('dref', 0, 0, u32(2), good, ...rest)) })
+    const cases: [string, Uint8Array, unknown][] = [
       [
         'a dref that counts 2 entries and holds 1',
-        trak({ dinf: box('dinf', dref([dataEntry('url ', 1)], 2)) }),
-        '2 entries',
+        trak({ dinf: box('dinf', dref([good], 2)) }),
+        [first],
       ],
       [
         'a dref that counts 0 entries and holds 1',
-        trak({ dinf: box('dinf', dref([dataEntry('url ', 1)], 0)) }),
-        '0 entries',
+        trak({ dinf: box('dinf', dref([good], 0)) }),
+        [first],
       ],
       [
-        'an entry that claims more than the dref holds',
+        'a dref that counts 1 entry and holds 2',
+        trak({ dinf: box('dinf', dref([good, good], 1)) }),
+        [first, first],
+      ],
+      // The entries up to the damage are read, and not those after it.
+      ['an entry that claims more than the dref holds', afterGood(torn('url '), good), [first]],
+      [
+        'the only entry claiming more than the dref holds',
         trak({ dinf: box('dinf', fullBox('dref', 0, 0, u32(1), torn('url '))) }),
-        "'url '",
+        [],
       ],
-      [
-        'an entry too short to hold its flags',
-        trak({ dinf: box('dinf', dref([box('url ', [0, 0])])) }),
-        'runs past',
-      ],
+      ['an entry too short to hold its flags', afterGood(box('url ', [0, 0]), good), [first]],
+      // Padding of zero bytes after the entries: a terminator, and what is not.
+      ['4 bytes of zeros after the entries', afterGood([0, 0, 0, 0]), [first]],
+      ['5 bytes of zeros after the entries', afterGood([0, 0, 0, 0, 0]), [first]],
+      ['8 bytes of zeros after the entries', afterGood(new Array<number>(8).fill(0)), [first]],
+      ['12 bytes of zeros after the entries', afterGood(new Array<number>(12).fill(0)), [first]],
+      // What cannot be read at all gives nothing.
       [
         'a dref cut short before its count',
         trak({ dinf: box('dinf', box('dref', [0, 0, 0])) }),
-        'runs past',
+        null,
       ],
-      // The damage is in a box that says where the data is, or hides it: the track can't be told to have it in its own file.
       [
         'a dref whose header claims more than the dinf holds',
         trak({ dinf: box('dinf', torn('dref')) }),
-        "'dref'",
+        null,
       ],
       [
         'a dinf with damage in front of its dref',
-        trak({ dinf: box('dinf', torn('udta'), dref([dataEntry('url ', 1)])) }),
-        "'udta'",
+        trak({ dinf: box('dinf', torn('udta'), dref([good])) }),
+        null,
       ],
       // After the tables, which the damage doesn't hide.
-      ['a dinf whose header claims more than the minf holds', inMinf(stbl, torn('dinf')), "'dinf'"],
+      ['a dinf whose header claims more than the minf holds', inMinf(stbl, torn('dinf')), null],
     ]
-    for (const [name, broken, why] of cases) {
-      const read = readMovie(movie({ tracks: [{ id: 1 }, broken, { id: 3, handler: 'soun' }] }))
-      const [first, second, third] = read.tracks
+    for (const [name, damaged, expected] of cases) {
+      const read = readMovie(movie({ tracks: [{ id: 1 }, damaged, { id: 3, handler: 'soun' }] }))
+      const [before, second, after] = read.tracks
       expect(read.tracks, name).toHaveLength(3)
-      expect(first?.problem, name).toBeNull()
-      expect(third?.problem, name).toBeNull()
-      expect(second?.problem, name).toContain(why)
-      expect(second?.dataReferences, name).toBeNull()
-      // It is still the picture it was.
+      expect(before?.problem, name).toBeNull()
+      expect(after?.problem, name).toBeNull()
+      expect(second?.problem, name).toBeNull()
+      expect(second?.dataReferences, name).toEqual(expected)
+      // It is still the picture it was, with its tables.
       expect(second?.kind, name).toBe('video')
+      expect(second?.entries, name).toHaveLength(1)
     }
   })
 
   it('reads the data references of a track whose damage comes after them, or is in a box of another kind', () => {
     const torn = (type: string) => concat(u32(500), fourcc(type), [1, 2, 3])
-    const refs = dref([dataEntry('alis', 0)])
+    const refs = dref([dataEntry('alis', 0, [1, 2, 3, 4])])
+    const alias = { type: 'alis', selfContained: false, location: true }
     const stbl = box('stbl', stsd([sampleEntry('avc1')]))
     const inMinf = (...children: Part[]) =>
       box('trak', tkhd(), box('mdia', mdhd(), hdlr('vide'), box('minf', ...children)))
@@ -841,9 +863,9 @@ describe("where a track's frames are kept (§10.4)", () => {
     )
     const [after, deeper, none] = read.tracks
     expect(after?.problem).toBeNull()
-    expect(after?.dataReferences).toEqual([{ type: 'alis', selfContained: false }])
+    expect(after?.dataReferences).toEqual([alias])
     expect(deeper?.problem).toBeNull()
-    expect(deeper?.dataReferences).toEqual([{ type: 'alis', selfContained: false }])
+    expect(deeper?.dataReferences).toEqual([alias])
     expect(none?.problem).toBeNull()
     expect(none?.dataReferences).toBeNull()
   })

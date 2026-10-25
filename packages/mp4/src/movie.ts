@@ -35,8 +35,10 @@ export interface Edit {
 export interface DataReference {
   /** The entry's four-character code: `url ` or `urn `, or QuickTime's `alis` and `rsrc`. */
   type: string
-  /** The entry's flag 0x000001: the data is in this same file. Without it the data is in another (a QuickTime reference movie). */
+  /** The entry's flag 0x000001: the data is in this same file. */
   selfContained: boolean
+  /** Whether the entry holds a byte other than 0 after its version and flags: the location string of a `url ` or `urn `, the alias record of an `alis`. An entry without one names no other file, whatever its flag says, as writers get the flag wrong. */
+  location: boolean
 }
 
 /** The sample tables the repackager reads. */
@@ -76,7 +78,7 @@ export interface TrackHeader {
   matrix: Uint8Array
   /** The track's edit list, or null when it has none. */
   edits: Edit[] | null
-  /** The entries of `mdia/minf/dinf/dref`, in order (an entry names one by its 1-based index); null when the track has no `dinf` or no `dref`. */
+  /** The entries of `mdia/minf/dinf/dref` that could be read, in order (a sample description names one by its 1-based index); null when the track has no `dinf`, or no `dref` that could be read. Never a problem of the track. */
   dataReferences: DataReference[] | null
   entries: SampleEntry[]
   /** The stbl's tables, each a whole box (header included), as byte views of the moov, not expanded. */
@@ -240,41 +242,34 @@ function readEntries(moov: Uint8Array, stsd: Box): SampleEntry[] {
 
 /**
  * The data references of a `minf`: the entries of the `dref` in its `dinf`, each
- * a full box of the reference's type whose flag 0x000001 says the data is in this
- * file. They are counted, as the entries of an `stsd` are, and a count that
- * disagrees with the boxes found, or an entry that is not a whole box, is damage.
- * A track may have no `dinf`, or one with no `dref` (null): it is among the
- * boxes that were read, or the track has none. Damage is the track's problem
- * when it is the `dinf` itself, or anything in the `dinf` in front of the
- * `dref`, which it hides, so that the track can't be told to keep its data in
- * its own file. After them, and elsewhere in the `minf`, it is not.
+ * a full box of the reference's type, with what they say of where the data is.
+ * This is read as far as it goes and never makes a track a problem: the box was
+ * not read before there was a rule that needs it, so an oddity in it must not
+ * refuse a file that played. The entries are those of the boxes that could be
+ * read, up to the first that could not (a box that claims more than its range
+ * holds, one too short to hold its flags, or the zero padding some writers leave
+ * after the entries), and the entry count is not looked at: writers get it
+ * wrong. A `dinf`, or a `dref` in it, that cannot be read gives null, as a track
+ * with none does; one that holds no entry that can be read gives an empty list.
  */
 function readDataReferences(moov: Uint8Array, inMinf: LeadingBoxes): DataReference[] | null {
   const dinf = inMinf.boxes.find((box) => box.type === 'dinf')
-  if (!dinf) {
-    if (inMinf.damage?.type === 'dinf') throw inMinf.damage.error
-    return null
-  }
-  const inDinf = childrenOf(moov, dinf)
-  const dref = inDinf.boxes.find((box) => box.type === 'dref')
-  if (!dref) {
-    if (inDinf.damage) throw inDinf.damage.error
-    return null
-  }
-  const reader = bodyOf(moov, dref)
-  reader.skip(4) // version and flags
-  const count = reader.u32()
-  const found = childBoxes(moov, reader.position, dref.end)
-  if (found.length !== count) {
-    throw damaged(
-      `The 'dref' box at offset ${dref.start} counts ${count} entries and holds ${found.length}.`,
-    )
-  }
-  return found.map((entry) => {
+  if (!dinf) return null
+  const dref = childrenOf(moov, dinf).boxes.find((box) => box.type === 'dref')
+  // The entries start after the version, flags and count: 8 bytes.
+  if (!dref || dref.end - dref.body < 8) return null
+  const references: DataReference[] = []
+  for (const entry of leadingBoxes(moov, dref.body + 8, dref.end).boxes) {
+    if (entry.type === '\0\0\0\0' || entry.end - entry.body < 4) break
     const flags = bodyOf(moov, entry)
     flags.skip(1) // version
-    return { type: entry.type, selfContained: (flags.u24() & 1) === 1 }
-  })
+    references.push({
+      type: entry.type,
+      selfContained: (flags.u24() & 1) === 1,
+      location: moov.subarray(entry.body + 4, entry.end).some((byte) => byte !== 0),
+    })
+  }
+  return references
 }
 
 /**
