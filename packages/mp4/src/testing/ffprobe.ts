@@ -2,7 +2,8 @@
 // FFmpeg's own MP4 demuxer, whose view of the same tables is what the reader's is
 // compared with. Its output is cached in the corpus folder, keyed by the file's
 // path, size and modification time and by the arguments, because a large video
-// takes minutes to list and does not change. Tests and scripts only.
+// takes minutes to list and does not change. ffmpeg decodes what the writer
+// writes, to prove that its init segments are whole. Tests and scripts only.
 
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
@@ -73,6 +74,55 @@ export function streamStart(stream: ProbeStream): number | null {
   return null
 }
 
+/** A leb128 number at `at` (IAMF v1.0 §3.2) and how many bytes it takes, or null when it is cut short or takes more than 8. */
+function leb128At(bytes: Uint8Array, at: number): { value: number; length: number } | null {
+  let value = 0
+  for (let length = 1; length <= 8; length += 1) {
+    const byte = bytes[at + length - 1]
+    if (byte === undefined) return null
+    value += (byte & 0x7f) * 128 ** (length - 1)
+    if ((byte & 0x80) === 0) return { value, length }
+  }
+  return null
+}
+
+/**
+ * The size of the packet that FFmpeg lists for a sample of an IAMF sound. A
+ * sample of an `iamf` entry is an OBU (IAMF v1.0 §3.2), and what FFmpeg gives
+ * as its packet is the codec's own, which is the Audio Frame OBU's payload: not
+ * the OBU's header, its size, the trimming of the samples at its end and at its
+ * start, the extension header, or (for type 5, whose substream is not in the
+ * type) the substream's ID. Null when the sample is not one Audio Frame OBU
+ * (types 5 to 23) or its sizes do not add up; FFmpeg's packet is then not
+ * something this can name.
+ */
+export function iamfPacketSize(sample: Uint8Array): number | null {
+  const header = sample[0]
+  if (header === undefined) return null
+  const type = header >> 3
+  if (type < 5 || type > 23) return null
+  const size = leb128At(sample, 1)
+  if (!size) return null
+  const at = 1 + size.length
+  if (at + size.value !== sample.length) return null
+  // The fields that come before the payload, counted from the OBU's own size.
+  let before = 0
+  const skipNumber = (): boolean => {
+    const number = leb128At(sample, at + before)
+    if (!number) return false
+    before += number.length
+    return true
+  }
+  if ((header & 2) !== 0 && !(skipNumber() && skipNumber())) return null
+  if ((header & 1) !== 0) {
+    const extension = leb128At(sample, at + before)
+    if (!extension) return null
+    before += extension.length + extension.value
+  }
+  if (type === 5 && !skipNumber()) return null
+  return before <= size.value ? size.value - before : null
+}
+
 /**
  * Runs a program (ffprobe) with its output in `outPath`. Rejects with its
  * complaint when it fails, and with a sentence that says so when it can't be run
@@ -111,6 +161,72 @@ export function runToFile(program: string, args: string[], outPath: string): Pro
       })
     })
   })
+}
+
+/** The most of a program's complaint that is kept: enough to say what went wrong, not a log. */
+const COMPLAINT_CHARS = 4000
+
+/**
+ * Runs a program with its output thrown away: its exit code (null when it was
+ * stopped by a signal) and what it wrote to stderr. Rejects with a sentence when
+ * it can't be run at all (not installed, not on the PATH).
+ */
+export function runForComplaint(
+  program: string,
+  args: string[],
+): Promise<{ code: number | null; complaint: string }> {
+  return new Promise((done, fail) => {
+    const child = spawn(program, args, { stdio: ['ignore', 'ignore', 'pipe'] })
+    let complaint = ''
+    let finished = false
+    child.stderr.on('data', (chunk: Buffer) => {
+      if (complaint.length < COMPLAINT_CHARS) complaint += chunk.toString()
+    })
+    // A program that can't be run emits an error and then a close: the first of them settles it.
+    child.on('error', (error) => {
+      if (finished) return
+      finished = true
+      fail(
+        new Error(
+          `${program} could not be run (is it installed and on the PATH?): ${error.message}`,
+        ),
+      )
+    })
+    child.on('close', (code) => {
+      if (finished) return
+      finished = true
+      done({ code, complaint: complaint.slice(0, COMPLAINT_CHARS) })
+    })
+  })
+}
+
+/**
+ * What is wrong with an ffmpeg decode that ran as `-v error -xerror`, or null
+ * when nothing is: a clean decode exits 0 and says nothing. An exit of 0 with
+ * something said is a problem too, because a decoder that gives up on a packet
+ * may say so and go on.
+ */
+export function decodeProblem(result: { code: number | null; complaint: string }): string | null {
+  const said = result.complaint.trim()
+  if (result.code === null) return 'ffmpeg was stopped before it ended'
+  if (result.code !== 0) {
+    return said === ''
+      ? `ffmpeg exited with ${result.code}`
+      : `ffmpeg exited with ${result.code}: ${said}`
+  }
+  return said === '' ? null : `ffmpeg exited with 0 but said: ${said}`
+}
+
+/**
+ * Decodes a file with FFmpeg, every frame of the picture and of the sound it
+ * would play, and throws the output away (`-f null -`): what is said of it is
+ * `decodeProblem`'s, null when it decodes cleanly. This is what proves that an
+ * init segment says what a decoder needs where no browser here plays the codec.
+ */
+export async function decodes(path: string): Promise<string | null> {
+  return decodeProblem(
+    await runForComplaint('ffmpeg', ['-v', 'error', '-xerror', '-i', path, '-f', 'null', '-']),
+  )
 }
 
 /**

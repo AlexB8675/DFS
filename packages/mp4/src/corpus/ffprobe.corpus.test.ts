@@ -4,9 +4,11 @@ import { resolve } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import { chooseTracks, fragment, initSegment, Mp4Error, presentationSeconds } from '../index.ts'
 import type { FrameTable, Mp4Refusal, PlayTrack } from '../index.ts'
-import { isSynthetic, loadManifest, readIndex, uniqueTitles } from '../testing/corpus.ts'
+import { isSynthetic, loadManifest, readIndex, readRange, uniqueTitles } from '../testing/corpus.ts'
 import type { ManifestEntry } from '../testing/corpus.ts'
 import {
+  decodes,
+  iamfPacketSize,
   probe,
   probeEditedPackets,
   probePackets,
@@ -25,8 +27,13 @@ import type { ProbePacket, ProbeStream } from '../testing/ffprobe.ts'
 // times with the edit list applied, which is what `offsetSeconds` has to get
 // right: the start of each track, and its first frames (up to 300, from the first
 // 5 s), within a tick. For each synthetic file the writer's output for the first
-// 10 s is read back by ffprobe, and a file expected to be refused gives that
-// reason. Run with `pnpm --filter @dfs/mp4 test:corpus`.
+// 10 s is read back by ffprobe and decoded by ffmpeg (`-v error -xerror`, with
+// nothing said), which proves the init segment of a codec that no browser here
+// plays; and a file expected to be refused gives that reason. The codec is
+// compared with ffprobe's name for it, any of the track's names for
+// `mime_codec_string`; an IAMF sound by the codec inside it, with its packets
+// the payload of the OBUs that its samples are. Run with
+// `pnpm --filter @dfs/mp4 test:corpus`.
 
 /** A file this large (500 MB) is compared by windows and not whole. */
 const WHOLE_FILE_LIMIT = 500 * 1024 * 1024
@@ -85,30 +92,54 @@ class Differences {
   }
 }
 
-/** Frame `i` of the table against a packet of ffprobe: `pos` (when `withPos`), `size`, `dts`, `pts` and the keyframe flag, all in the stream's ticks. */
+/** The size that ffprobe lists for frame `i`. */
+type PacketSize = (i: number) => number | undefined
+
+/**
+ * The size that ffprobe lists for each frame of a track, read from the bytes
+ * that `sample` gives. It is the frame's own, except in an IAMF sound: FFmpeg
+ * lists the codec's packet, which it takes out of the OBU that the sample is
+ * (`iamfPacketSize`), and -1 where the sample is no such OBU.
+ */
+function listedSizes(
+  track: PlayTrack,
+  sample: (offset: number, length: number) => Uint8Array,
+): PacketSize {
+  const { table } = track
+  if (track.header.entries[0]?.type !== 'iamf') return (i) => table.sizes[i]
+  return (i) => iamfPacketSize(sample(table.offsets[i] ?? 0, table.sizes[i] ?? 0)) ?? -1
+}
+
+/** Frame `i` of the table against a packet of ffprobe: `pos` (when `withPos`), `size` (as `listed` says), `dts`, `pts` and the keyframe flag, all in the stream's ticks. */
 function compareFrame(
   found: Differences,
   table: FrameTable,
   i: number,
   packet: ProbePacket,
   withPos: boolean,
+  listed: PacketSize,
 ): void {
   if (withPos) found.note('pos', i, table.offsets[i], Number(packet.pos))
-  found.note('size', i, table.sizes[i], Number(packet.size))
+  found.note('size', i, listed(i), Number(packet.size))
   found.note('dts', i, table.dts[i], packet.dts)
   found.note('pts', i, (table.dts[i] ?? 0) + (table.cts[i] ?? 0), packet.pts)
   found.note('keyframe', i, table.sync[i] === 1, packet.flags?.includes('K') ?? false)
 }
 
 /** Every frame of a track against every packet of ffprobe's list, in order. */
-function compareWhole(label: string, table: FrameTable, packets: ProbePacket[]): string[] {
+function compareWhole(
+  label: string,
+  table: FrameTable,
+  packets: ProbePacket[],
+  listed: PacketSize,
+): string[] {
   const problems: string[] = []
   if (packets.length !== table.count) {
     problems.push(`${label}: ${table.count} frames, but ffprobe lists ${packets.length} packets`)
   }
   const found = new Differences()
   for (let i = 0; i < Math.min(table.count, packets.length); i += 1) {
-    compareFrame(found, table, i, packets[i] ?? {}, true)
+    compareFrame(found, table, i, packets[i] ?? {}, true, listed)
   }
   return [...problems, ...found.report(label)]
 }
@@ -118,6 +149,7 @@ function compareWindows(
   label: string,
   table: FrameTable,
   packets: ProbePacket[],
+  listed: PacketSize,
 ): { problems: string[]; matched: number } {
   const byOffset = new Map<number, number>()
   for (let i = table.count - 1; i >= 0; i -= 1) byOffset.set(table.offsets[i] ?? 0, i)
@@ -134,7 +166,7 @@ function compareWindows(
       continue
     }
     matched += 1
-    compareFrame(found, table, i, packet, false)
+    compareFrame(found, table, i, packet, false, listed)
   }
   if (unknown > 1) problems.push(`${label}: ${unknown} packets of ffprobe are at no frame of ours`)
   // A window that matched nothing proves nothing.
@@ -267,8 +299,9 @@ const AAC_PROFILES: Record<string, number> = {
 /**
  * What the codec string must start with, from ffprobe's codec name, tag and
  * profile: `avc1.64` for High, `hvc1.2.` or `hev1.2.` for Main 10, `av01.0.`,
- * `mp4a.40.2`, `opus`. Null when ffprobe names a codec that the player does not
- * take (then the track should have been refused), and the profile's part is
+ * `vp09.02` for VP9's profile 2, `mp4a.40.2`, `mp4a.6B` for MP3, `opus`, `flac`,
+ * `ac-3`, `ec-3`, `alac`. Null when ffprobe names a codec that the player does
+ * not take (then the track should have been refused), and the profile's part is
  * left off when ffprobe names a profile that this table doesn't know.
  */
 function codecPrefix(stream: ProbeStream): string | null {
@@ -291,11 +324,57 @@ function codecPrefix(stream: ProbeStream): string | null {
       const type = AAC_PROFILES[profile]
       return type === undefined ? 'mp4a.40.' : `mp4a.40.${type}`
     }
+    case 'vp9': {
+      const idc = /^Profile (\d)$/.exec(profile)?.[1]
+      return idc === undefined ? 'vp09.' : `vp09.0${idc}`
+    }
     case 'opus':
       return 'opus'
+    case 'flac':
+      return 'flac'
+    case 'ac3':
+      return 'ac-3'
+    case 'eac3':
+      return 'ec-3'
+    case 'alac':
+      return 'alac'
+    case 'mp3':
+      return 'mp4a.6B'
     default:
       return null
   }
+}
+
+/** The MPEG-4 audio names that FFmpeg gives MPEG-2 AAC, by its profile: the object types 0x66 to 0x68 are the audio object types 1 to 3 (it calls them AAC Main, LC and SSR). */
+const MPEG4_NAME_OF_MPEG2_AAC: Record<string, string> = {
+  'mp4a.66': 'mp4a.40.1',
+  'mp4a.67': 'mp4a.40.2',
+  'mp4a.68': 'mp4a.40.3',
+}
+
+/** IAMF's name for a codec inside it (`iamf.000.000.Opus`), as the codec's own RFC 6381 string, which is what FFmpeg names the stream by. */
+const IAMF_INNER: Record<string, string> = { Opus: 'opus', fLaC: 'flac' }
+
+/** What FFmpeg has no tag for in a stream: it gives an IAMF sound the tag of 0, because the stream is the codec inside it. */
+const NO_TAG = '[0][0][0][0]'
+
+/**
+ * The names of a track that ffprobe's reading is compared with. `first` is the
+ * track's own codec string, which the profile's prefix is matched against;
+ * `all` is every name the track has, which ffprobe's `mime_codec_string` may be
+ * any of (VP9's short form, MP3's `mp4a.40.34`). Both also have, for MPEG-2
+ * AAC, the MPEG-4 name FFmpeg gives it. An IAMF sound is named by the codec
+ * inside it: that is what FFmpeg reads as the stream's codec. No name at all
+ * when its string is not `iamf.PPP.AAA.<codec>`.
+ */
+function namesToCompare(track: PlayTrack, iamf: boolean): { first: string[]; all: string[] } {
+  if (iamf) {
+    const inner = /^iamf\.\d{3}\.\d{3}\.(.+)$/.exec(track.codec)?.[1]
+    const names = inner === undefined ? [] : [IAMF_INNER[inner] ?? inner]
+    return { first: names, all: names }
+  }
+  const alsoMpeg4 = (name: string): string[] => [name, MPEG4_NAME_OF_MPEG2_AAC[name] ?? []].flat()
+  return { first: alsoMpeg4(track.codec), all: track.codecNames.flatMap(alsoMpeg4) }
 }
 
 /** The track against ffprobe's reading of its stream (edit lists applied): its codec, rotation, time base and where it starts. */
@@ -308,20 +387,26 @@ function compareStream(
   if (!stream) return [`${label}: ffprobe has no such stream`]
   const problems: string[] = []
 
+  const entryType = track.header.entries[0]?.type
+  const iamf = entryType === 'iamf'
+  const names = namesToCompare(track, iamf)
+  if (iamf && names.first.length === 0) {
+    problems.push(`${label}: codec string ${track.codec} is not iamf.PPP.AAA.<codec>`)
+  }
   const prefix = codecPrefix(stream)
   if (prefix === null) {
     problems.push(
       `${label}: ffprobe says ${stream.codec_name ?? 'nothing'}, which the player doesn't take, but the track was accepted (codec ${track.codec})`,
     )
-  } else if (!track.codec.toLowerCase().startsWith(prefix.toLowerCase())) {
+  } else if (!names.first.some((name) => name.toLowerCase().startsWith(prefix.toLowerCase()))) {
     problems.push(
       `${label}: codec string ${track.codec} doesn't start with ${prefix} (ffprobe: ${stream.codec_name}, ${stream.profile})`,
     )
   }
-  // FFmpeg's own RFC 6381 string, where it makes one (not for every codec): the same, to the character.
-  if (stream.mime_codec_string !== undefined && stream.mime_codec_string !== track.codec) {
+  // FFmpeg's own RFC 6381 string, where it makes one (not for every codec): any of the track's names, to the character.
+  if (stream.mime_codec_string !== undefined && !names.all.includes(stream.mime_codec_string)) {
     problems.push(
-      `${label}: codec string ${track.codec}, ffprobe's mime_codec_string ${stream.mime_codec_string}`,
+      `${label}: codec names ${track.codecNames.join(', ')}, ffprobe's mime_codec_string ${stream.mime_codec_string}`,
     )
   }
   if (wanted !== undefined && !track.codec.startsWith(wanted)) {
@@ -329,8 +414,7 @@ function compareStream(
       `${label}: codec string ${track.codec} doesn't start with ${wanted}, as the manifest says`,
     )
   }
-  const entryType = track.header.entries[0]?.type
-  if (entryType !== stream.codec_tag_string) {
+  if (entryType !== stream.codec_tag_string && !(iamf && stream.codec_tag_string === NO_TAG)) {
     problems.push(`${label}: sample entry ${entryType}, ffprobe's tag ${stream.codec_tag_string}`)
   }
 
@@ -408,12 +492,13 @@ async function checkPlays(entry: ManifestEntry): Promise<void> {
       ...compareEdited(name, track, await probeEditedPackets(entry.path, select, EDITED_PACKETS)),
     )
     const packets = await probePackets(entry.path, select, intervals)
+    const listed = listedSizes(track, (offset, length) => readRange(entry.path, offset, length))
     if (windowed) {
-      const result = compareWindows(name, track.table, packets)
+      const result = compareWindows(name, track.table, packets, listed)
       problems.push(...result.problems)
       frames += result.matched
     } else {
-      problems.push(...compareWhole(name, track.table, packets))
+      problems.push(...compareWhole(name, track.table, packets, listed))
       frames += track.table.count
     }
   }
@@ -433,7 +518,7 @@ function checkRefused(entry: ManifestEntry, reason: Mp4Refusal): void {
 afterAll(() => {
   if (entries.length === 0) return
   console.log(
-    `Corpus: ${totals.files} files compared (${totals.windowed} by windows), ${totals.frames} frames, ${totals.refused} refusals checked, ${totals.written} written tracks read back, ${totals.noStart} streams with no start time from ffprobe.`,
+    `Corpus: ${totals.files} files compared (${totals.windowed} by windows), ${totals.frames} frames, ${totals.refused} refusals checked, ${totals.written} written tracks read back and decoded, ${totals.noStart} streams with no start time from ffprobe.`,
   )
 })
 
@@ -498,7 +583,10 @@ async function checkWritten(
   })
   const out = resolve(folder, `${name}.mp4`)
   writeFileSync(out, Buffer.concat(parts))
-
+  // Decoded back by FFmpeg, with nothing said: no browser here plays every codec, and a decoder that starts from the init segment's entry shows that the entry says what it needs. Nothing more is asked of an output that does not decode: ffprobe may not even read it.
+  const undecoded = await decodes(out)
+  if (undecoded !== null) return [`${name}: the output does not decode: ${undecoded}`]
+  const problems: string[] = []
   const packets =
     (
       (await probe(out, ['-show_entries', 'packet=size,pts,dts,flags'], false)) as {
@@ -506,14 +594,14 @@ async function checkWritten(
       }
     ).packets ?? []
   const [written] = await probeStreams(out, false)
-  const problems: string[] = []
   const count = last[1]
   if (packets.length !== count) {
     problems.push(`${name}: wrote ${count} frames, ffprobe reads ${packets.length} from the output`)
   }
   const found = new Differences()
+  const listed = listedSizes(track, (offset, length) => bytes.subarray(offset, offset + length))
   for (let i = 0; i < Math.min(count, packets.length); i += 1) {
-    compareFrame(found, track.table, i, packets[i] ?? {}, false)
+    compareFrame(found, track.table, i, packets[i] ?? {}, false, listed)
   }
   problems.push(...found.report(`${name} written`))
 
@@ -521,9 +609,13 @@ async function checkWritten(
   if (written.codec_name !== source.codec_name) {
     problems.push(`${name}: written as ${written.codec_name}, from ${source.codec_name}`)
   }
-  if (written.codec_tag_string !== source.codec_tag_string) {
+  // The tag is the source's, unless the init entry has another type than the source's: QuickTime's `.mp3` is written as `mp4a`.
+  const writtenType = String.fromCharCode(...track.entry.subarray(4, 8))
+  const wantedTag =
+    writtenType === track.header.entries[0]?.type ? source.codec_tag_string : writtenType
+  if (written.codec_tag_string !== wantedTag) {
     problems.push(
-      `${name}: written with the tag ${written.codec_tag_string}, from ${source.codec_tag_string}`,
+      `${name}: written with the tag ${written.codec_tag_string}, from ${source.codec_tag_string} (the init entry is a '${writtenType}')`,
     )
   }
   if (track.header.kind === 'video') {
