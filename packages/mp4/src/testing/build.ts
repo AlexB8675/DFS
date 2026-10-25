@@ -230,6 +230,16 @@ export function stsd(entries: readonly Uint8Array[], count = entries.length): Ui
   return fullBox('stsd', 0, 0, u32(count), ...entries)
 }
 
+/** An entry of `dref`: a full box of the reference's type (`url `, `urn `, QuickTime's `alis` or `rsrc`) with its flags, bit 0x000001 of which says the data is in this same file. */
+export function dataEntry(type: string, flags: number, ...rest: Part[]): Uint8Array {
+  return fullBox(type, 0, flags, ...rest)
+}
+
+/** `dref`: the data references, counted. `count` says another number than the entries there are. */
+export function dref(entries: readonly Uint8Array[], count = entries.length): Uint8Array {
+  return fullBox('dref', 0, 0, u32(count), ...entries)
+}
+
 export interface EditSpec {
   /** In the movie's timescale. */
   duration: number | bigint
@@ -272,6 +282,8 @@ export interface TrackSpec {
   matrix?: readonly number[]
   /** `edts`, if the track has one. */
   edits?: { version: Version; edits: readonly EditSpec[] }
+  /** A whole `dinf`, in place of the empty one that a track has by default (`box('dinf', dref(...))` says where its data is); null for a track with none. */
+  dinf?: Uint8Array | null
   /** The sample entries of `stsd`, as `sampleEntry` makes them. */
   entries?: readonly Uint8Array[]
   /** The sample tables, each a whole box: `stts`, `stsz`, `stco` and so on. */
@@ -295,7 +307,7 @@ export function trak(spec: TrackSpec = {}): Uint8Array {
       'minf',
       // The media header and the data information that a real track holds before its table.
       fullBox('vmhd', 0, 1, new Array<number>(8).fill(0)),
-      box('dinf'),
+      ...(spec.dinf === null ? [] : [spec.dinf ?? box('dinf')]),
       spec.stbl ?? box('stbl', stsd(spec.entries ?? [sampleEntry('avc1')]), ...(spec.tables ?? [])),
     ),
   )

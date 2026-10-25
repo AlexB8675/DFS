@@ -1,8 +1,9 @@
+import { firstBox, Reader } from './boxes.ts'
 import { codecNames, initEntry } from './codecs.ts'
 import { Mp4Error } from './errors.ts'
 import { frameTable } from './frames.ts'
 import type { FrameTable } from './frames.ts'
-import type { Movie, TrackHeader } from './movie.ts'
+import type { Movie, SampleEntry, TrackHeader } from './movie.ts'
 import { keyframeIndexes, trackTiming } from './timing.ts'
 import type { TrackTiming } from './timing.ts'
 
@@ -74,11 +75,39 @@ function refuseCut(track: TrackHeader, first: number | undefined): void {
 }
 
 /**
+ * Refuses a track whose frames are kept in another file, as a QuickTime
+ * reference movie keeps them: its tables place the frames in that file, and
+ * read against this one they would play garbage. The sample description names
+ * one of the track's data references by its 1-based index, in the 16 bits after
+ * the entry's 6 reserved bytes (bytes 14 and 15 of an entry with an ordinary
+ * header), and the reference is not flagged as this same file. An index of 0 or
+ * past the list, or a track with no `dref`, names no reference, and the data is
+ * taken to be in the file, as FFmpeg and mp4box read such a file.
+ */
+function refuseExternal(track: TrackHeader, entry: SampleEntry): void {
+  const references = track.dataReferences
+  if (!references) return
+  const whole = firstBox(entry.bytes, 0, entry.bytes.length)
+  if (!whole) throw new Mp4Error('damaged', `The '${entry.type}' sample description holds no box.`)
+  const reader = new Reader(entry.bytes, whole.body, whole.end)
+  reader.skip(6) // reserved
+  const named = reader.u16()
+  const reference = named === 0 ? undefined : references[named - 1]
+  if (reference && !reference.selfContained) {
+    throw new Mp4Error(
+      'external-data',
+      `its frames are in another file (data reference '${reference.type}'), which the player can't read.`,
+    )
+  }
+}
+
+/**
  * One chosen track, checked from the cheapest rule to the dearest, and the first
  * that fails is the reason: its `problem`; one sample description; the codec
- * names (and the entry that carries them) and an edit list that can be placed,
- * both read from a few bytes; and only then its frames, which a sound in PCM
- * (refused above, as an unsupported codec) can number in millions. A picture
+ * names (and the entry that carries them); where its frames are kept (not in
+ * another file, `refuseExternal`) and an edit list that can be placed, both read
+ * from a few bytes; and only then its frames, which a sound in PCM (refused
+ * above, as an unsupported codec) can number in millions. A picture
  * with no keyframe has nowhere to start decoding. The edit list is placed with
  * the time the first frame is shown: the media edit starts there if it begins
  * earlier, as FFmpeg has it (the writers meant the first frame at the edit's
@@ -106,6 +135,7 @@ function playTrack(
     }
     const names = codecNames(only)
     const entry = initEntry(only)
+    refuseExternal(track, only)
     trackTiming(track, movieTimescale)
     const table = frameTable(track, fileSize)
     const first = firstPresented(table)

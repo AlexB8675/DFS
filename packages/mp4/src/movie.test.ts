@@ -7,6 +7,8 @@ import type { Part } from './testing/build.ts'
 import {
   box,
   concat,
+  dataEntry,
+  dref,
   edts,
   fourcc,
   fullBox,
@@ -127,6 +129,7 @@ describe("a movie's header and tracks (§10.4)", () => {
         ...[0x40, 0, 0, 0],
       ),
       edits: null,
+      dataReferences: null,
       entries: [{ type: 'avc1', bytes: avc1, stsdVersion: 0 }],
       tables: {
         stts: videoTables[0],
@@ -160,6 +163,7 @@ describe("a movie's header and tracks (§10.4)", () => {
         ...[0x40, 0, 0, 0],
       ),
       edits: null,
+      dataReferences: null,
       entries: [{ type: 'mp4a', bytes: mp4a, stsdVersion: 0 }],
       tables: {
         stts: audioTables[0],
@@ -417,6 +421,7 @@ describe('what a movie that is not sound refuses, and what only a track does (§
       height: 48,
       matrix: expect.any(Uint8Array) as Uint8Array,
       edits: null,
+      dataReferences: null,
       entries: [],
       tables: {},
       problem: third.problem,
@@ -708,7 +713,143 @@ describe('what a track needs, and what it does not (§10.4)', () => {
   })
 })
 
-/** Two tracks with small tables, an edit list on one, in a `moov` that also holds a `udta`. */
+describe("where a track's frames are kept (§10.4)", () => {
+  it('reads the data references of a track, and which of them are the file itself', () => {
+    const read = readMovie(
+      movie({
+        tracks: [
+          { id: 1, dinf: box('dinf', dref([dataEntry('url ', 1)])) },
+          {
+            id: 2,
+            handler: 'soun',
+            // Only bit 0 of the flags says the data is in this file: 3 has it, 2 hasn't, and an alias's own bytes follow its flags.
+            dinf: box(
+              'dinf',
+              dref([
+                dataEntry('url ', 1),
+                dataEntry('alis', 0, [1, 2, 3, 4]),
+                dataEntry('rsrc', 3),
+                dataEntry('urn ', 2),
+              ]),
+            ),
+          },
+        ],
+      }),
+    )
+    expect(trackOf(read, 0).dataReferences).toEqual([{ type: 'url ', selfContained: true }])
+    expect(trackOf(read, 1).dataReferences).toEqual([
+      { type: 'url ', selfContained: true },
+      { type: 'alis', selfContained: false },
+      { type: 'rsrc', selfContained: true },
+      { type: 'urn ', selfContained: false },
+    ])
+    expect(trackOf(read, 0).problem).toBeNull()
+    expect(trackOf(read, 1).problem).toBeNull()
+  })
+
+  it('has no data references for a track with no dinf or no dref, and an empty list for a dref with no entry', () => {
+    const read = readMovie(
+      movie({
+        tracks: [
+          { id: 1, dinf: null },
+          // The default: a `dinf` with nothing in it.
+          { id: 2 },
+          { id: 3, dinf: box('dinf', box('free', [1, 2, 3])) },
+          { id: 4, dinf: box('dinf', dref([])) },
+        ],
+      }),
+    )
+    expect(read.tracks.map((track) => track.dataReferences)).toEqual([null, null, null, []])
+    expect(read.tracks.map((track) => track.problem)).toEqual([null, null, null, null])
+  })
+
+  it('gives a track a problem when its dinf or dref is cut short, counts wrongly, or holds an entry that is not a whole box', () => {
+    const stbl = box('stbl', stsd([sampleEntry('avc1')]))
+    // A box that claims more bytes than are left in the box it is in.
+    const torn = (type: string) => concat(u32(500), fourcc(type), [1, 2, 3])
+    const inMinf = (...children: Part[]) =>
+      box('trak', tkhd(), box('mdia', mdhd(), hdlr('vide'), box('minf', ...children)))
+    const cases: [string, Uint8Array, string][] = [
+      [
+        'a dref that counts 2 entries and holds 1',
+        trak({ dinf: box('dinf', dref([dataEntry('url ', 1)], 2)) }),
+        '2 entries',
+      ],
+      [
+        'a dref that counts 0 entries and holds 1',
+        trak({ dinf: box('dinf', dref([dataEntry('url ', 1)], 0)) }),
+        '0 entries',
+      ],
+      [
+        'an entry that claims more than the dref holds',
+        trak({ dinf: box('dinf', fullBox('dref', 0, 0, u32(1), torn('url '))) }),
+        "'url '",
+      ],
+      [
+        'an entry too short to hold its flags',
+        trak({ dinf: box('dinf', dref([box('url ', [0, 0])])) }),
+        'runs past',
+      ],
+      [
+        'a dref cut short before its count',
+        trak({ dinf: box('dinf', box('dref', [0, 0, 0])) }),
+        'runs past',
+      ],
+      // The damage is in a box that says where the data is, or hides it: the track can't be told to have it in its own file.
+      [
+        'a dref whose header claims more than the dinf holds',
+        trak({ dinf: box('dinf', torn('dref')) }),
+        "'dref'",
+      ],
+      [
+        'a dinf with damage in front of its dref',
+        trak({ dinf: box('dinf', torn('udta'), dref([dataEntry('url ', 1)])) }),
+        "'udta'",
+      ],
+      // After the tables, which the damage doesn't hide.
+      ['a dinf whose header claims more than the minf holds', inMinf(stbl, torn('dinf')), "'dinf'"],
+    ]
+    for (const [name, broken, why] of cases) {
+      const read = readMovie(movie({ tracks: [{ id: 1 }, broken, { id: 3, handler: 'soun' }] }))
+      const [first, second, third] = read.tracks
+      expect(read.tracks, name).toHaveLength(3)
+      expect(first?.problem, name).toBeNull()
+      expect(third?.problem, name).toBeNull()
+      expect(second?.problem, name).toContain(why)
+      expect(second?.dataReferences, name).toBeNull()
+      // It is still the picture it was.
+      expect(second?.kind, name).toBe('video')
+    }
+  })
+
+  it('reads the data references of a track whose damage comes after them, or is in a box of another kind', () => {
+    const torn = (type: string) => concat(u32(500), fourcc(type), [1, 2, 3])
+    const refs = dref([dataEntry('alis', 0)])
+    const stbl = box('stbl', stsd([sampleEntry('avc1')]))
+    const inMinf = (...children: Part[]) =>
+      box('trak', tkhd(), box('mdia', mdhd(), hdlr('vide'), box('minf', ...children)))
+    const read = readMovie(
+      movie({
+        tracks: [
+          // In the dinf, after the dref; in the minf, after the dinf and the stbl.
+          trak({ dinf: box('dinf', refs, torn('udta')) }),
+          inMinf(box('dinf', refs), stbl, torn('udta')),
+          // In the minf, with no dinf at all, after the stbl: nothing says the data is anywhere else.
+          inMinf(stbl, torn('udta')),
+        ],
+      }),
+    )
+    const [after, deeper, none] = read.tracks
+    expect(after?.problem).toBeNull()
+    expect(after?.dataReferences).toEqual([{ type: 'alis', selfContained: false }])
+    expect(deeper?.problem).toBeNull()
+    expect(deeper?.dataReferences).toEqual([{ type: 'alis', selfContained: false }])
+    expect(none?.problem).toBeNull()
+    expect(none?.dataReferences).toBeNull()
+  })
+})
+
+/** Two tracks with small tables and data references, an edit list on one, in a `moov` that also holds a `udta`. */
 function index(): Uint8Array {
   return movie({
     version: 1,
@@ -724,6 +865,7 @@ function index(): Uint8Array {
         width: 1920,
         height: 1080,
         edits: { version: 0, edits: [{ duration: 600, mediaTime: 1001 }] },
+        dinf: box('dinf', dref([dataEntry('url ', 1)])),
         entries: [sampleEntry('avc1', [1, 2, 3, 4, 5, 6, 7, 8])],
         tables: [
           table('stts', u32(1), u32(30), u32(1001)),
@@ -740,6 +882,7 @@ function index(): Uint8Array {
         timescale: 48000,
         duration: 96000,
         language: 0x2681,
+        dinf: box('dinf', dref([dataEntry('alis', 1, [1, 2, 3, 4]), dataEntry('url ', 0)])),
         entries: [sampleEntry('mp4a', [9, 8, 7])],
         tables: [table('stts', u32(1), u32(9), u32(1024)), table('co64', u32(1), u64(2n ** 32n))],
       },
@@ -750,14 +893,25 @@ function index(): Uint8Array {
 
 /** `bytes` cut at `length`, with the size of every box the cut falls inside rewritten to end there, so that only what is cut off is missing, and everything left claims no more than it holds. */
 function cutAt(bytes: Uint8Array, length: number): Uint8Array {
-  const containers = new Set(['moov', 'trak', 'edts', 'mdia', 'minf', 'stbl'])
+  // The boxes whose children are boxes, and the bytes of its own that each holds before them (a `dref` has its version, flags and count).
+  const containers = new Map([
+    ['moov', 0],
+    ['trak', 0],
+    ['edts', 0],
+    ['mdia', 0],
+    ['minf', 0],
+    ['dinf', 0],
+    ['dref', 8],
+    ['stbl', 0],
+  ])
   const out = bytes.slice(0, length)
   const view = new DataView(out.buffer)
   const shrink = (from: number, to: number): void => {
     for (const entry of childBoxes(bytes, from, to)) {
       if (entry.start < length && length < entry.end) {
         if (entry.start + 4 <= length) view.setUint32(entry.start, length - entry.start)
-        if (containers.has(entry.type)) shrink(entry.body, entry.end)
+        const fields = containers.get(entry.type)
+        if (fields !== undefined) shrink(entry.body + fields, entry.end)
         return
       }
     }

@@ -3,12 +3,13 @@ import type { Box, LeadingBoxes } from './boxes.ts'
 import { Mp4Error } from './errors.ts'
 
 // The movie in a `moov`, and the header of each of its tracks (DESIGN.md §10.4,
-// D45): what the repackager needs to choose a picture and a sound, and where
-// their sample tables are, without expanding any of them. A track is read
-// leniently: one whose boxes can't be read is kept, with a `problem` that says
-// why, because only the tracks that are chosen have to be sound, and a file
-// with a broken subtitle or timecode track still plays. Only a `moov` that
-// can't be walked, or has no readable `mvhd`, turns the whole file away.
+// D45): what the repackager needs to choose a picture and a sound, where their
+// sample tables are and where their frames are kept, without expanding any of
+// them. A track is read leniently: one whose boxes can't be read is kept, with
+// a `problem` that says why, because only the tracks that are chosen have to be
+// sound, and a file with a broken subtitle or timecode track still plays. Only
+// a `moov` that can't be walked, or has no readable `mvhd`, turns the whole
+// file away.
 
 /** One sample description of a track: the `stsd` entry box. */
 export interface SampleEntry {
@@ -28,6 +29,14 @@ export interface Edit {
   mediaTime: number
   /** 16.16 fixed point, as stored. */
   rate: number
+}
+
+/** One data reference of a track: an entry of the `dref` in its `dinf`, which says where the frames of the sample descriptions that name it are kept. */
+export interface DataReference {
+  /** The entry's four-character code: `url ` or `urn `, or QuickTime's `alis` and `rsrc`. */
+  type: string
+  /** The entry's flag 0x000001: the data is in this same file. Without it the data is in another (a QuickTime reference movie). */
+  selfContained: boolean
 }
 
 /** The sample tables the repackager reads. */
@@ -67,6 +76,8 @@ export interface TrackHeader {
   matrix: Uint8Array
   /** The track's edit list, or null when it has none. */
   edits: Edit[] | null
+  /** The entries of `mdia/minf/dinf/dref`, in order (an entry names one by its 1-based index); null when the track has no `dinf` or no `dref`. */
+  dataReferences: DataReference[] | null
   entries: SampleEntry[]
   /** The stbl's tables, each a whole box (header included), as byte views of the moov, not expanded. */
   tables: Partial<Record<TableType, Uint8Array>>
@@ -228,6 +239,45 @@ function readEntries(moov: Uint8Array, stsd: Box): SampleEntry[] {
 }
 
 /**
+ * The data references of a `minf`: the entries of the `dref` in its `dinf`, each
+ * a full box of the reference's type whose flag 0x000001 says the data is in this
+ * file. They are counted, as the entries of an `stsd` are, and a count that
+ * disagrees with the boxes found, or an entry that is not a whole box, is damage.
+ * A track may have no `dinf`, or one with no `dref` (null): it is among the
+ * boxes that were read, or the track has none. Damage is the track's problem
+ * when it is the `dinf` itself, or anything in the `dinf` in front of the
+ * `dref`, which it hides, so that the track can't be told to keep its data in
+ * its own file. After them, and elsewhere in the `minf`, it is not.
+ */
+function readDataReferences(moov: Uint8Array, inMinf: LeadingBoxes): DataReference[] | null {
+  const dinf = inMinf.boxes.find((box) => box.type === 'dinf')
+  if (!dinf) {
+    if (inMinf.damage?.type === 'dinf') throw inMinf.damage.error
+    return null
+  }
+  const inDinf = childrenOf(moov, dinf)
+  const dref = inDinf.boxes.find((box) => box.type === 'dref')
+  if (!dref) {
+    if (inDinf.damage) throw inDinf.damage.error
+    return null
+  }
+  const reader = bodyOf(moov, dref)
+  reader.skip(4) // version and flags
+  const count = reader.u32()
+  const found = childBoxes(moov, reader.position, dref.end)
+  if (found.length !== count) {
+    throw damaged(
+      `The 'dref' box at offset ${dref.start} counts ${count} entries and holds ${found.length}.`,
+    )
+  }
+  return found.map((entry) => {
+    const flags = bodyOf(moov, entry)
+    flags.skip(1) // version
+    return { type: entry.type, selfContained: (flags.u24() & 1) === 1 }
+  })
+}
+
+/**
  * The sample descriptions and the tables of an `stbl`: the first of each kind
  * of box, as `child` finds the first. A damaged box that comes after them is
  * not the track's problem, unless it is one of these.
@@ -264,6 +314,7 @@ function readTrack(moov: Uint8Array, trak: Box): TrackHeader {
     height: 0,
     matrix: new Uint8Array(36),
     edits: null,
+    dataReferences: null,
     entries: [],
     tables: {},
     problem: null,
@@ -294,7 +345,10 @@ function readTrack(moov: Uint8Array, trak: Box): TrackHeader {
     if (edts) track.edits = readEdits(moov, edts)
 
     const minf = need(inMdia, mdia, 'minf')
-    const { entries, tables } = readSampleTables(moov, need(childrenOf(moov, minf), minf, 'stbl'))
+    const inMinf = childrenOf(moov, minf)
+    // The `dinf`, which comes before the `stbl` in a file, is read before it.
+    track.dataReferences = readDataReferences(moov, inMinf)
+    const { entries, tables } = readSampleTables(moov, need(inMinf, minf, 'stbl'))
     track.entries = entries
     track.tables = tables
   } catch (error) {

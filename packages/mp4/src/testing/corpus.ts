@@ -36,6 +36,7 @@ const REFUSALS: readonly string[] = [
   'several-descriptions',
   'edit-list',
   'unsupported-codec',
+  'external-data',
   'damaged',
 ]
 
