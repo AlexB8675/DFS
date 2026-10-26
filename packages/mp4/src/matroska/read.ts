@@ -469,8 +469,25 @@ export function readMatroska(chunks: readonly Chunk[], fileSize: number): Step<M
     )
   }
   const pictureTicks = frameTicksOf(video, scale, started)
-  const decoded = decodeTimes(startDecode(depth, pictureTicks), started, true).timed
-  const pictureShift = Math.max(0, -(decoded[0]?.dts ?? 0))
+  // The shift is minus the first frame's decode time, which the cursor gives as the
+  // least presentation time of the first depth + 1 frames less depth frames' length.
+  // When the file has fewer than that (it ends, or the 4 MiB do) the frames seen are
+  // all there are for `decodeTimes`, and that is exact for a file that ends. When the
+  // read ended at its bound with more of the Segment behind it, the frames that are
+  // not seen may be presented before the least seen, by up to depth frames (a leading
+  // picture of an open GOP is within the reorder window), so the least of the 16 can
+  // be that much lower, and the first decode time depth frames below that: the shift
+  // is 2 x depth frames and 1 tick below the least seen, which no stream of that depth
+  // goes under. A shift that is too large only delays the timeline, which the offset
+  // takes back.
+  let pictureShift: number
+  if (started.length < depth + 1 && head.firstCluster + FIRST_FRAMES_BYTES < head.segment.end) {
+    const least = Math.min(...started.map((frame) => frame.pts))
+    pictureShift = Math.max(0, Math.round(2 * depth * pictureTicks) + 1 - least)
+  } else {
+    const decoded = decodeTimes(startDecode(depth, pictureTicks), started, true).timed
+    pictureShift = Math.max(0, -(decoded[0]?.dts ?? 0))
+  }
   const pictureStart = { depth, depthStated: stated, frameTicks: pictureTicks, shift: pictureShift }
   const picture = saying(PICTURE, () =>
     playTrack(

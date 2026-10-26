@@ -3,13 +3,15 @@ import { Mp4Error } from '../errors.ts'
 import type { Mp4Refusal } from '../errors.ts'
 import { heldBytes } from '../source.ts'
 import type { ByteRange, Chunk, SoundOffer } from '../source.ts'
-import { bits, concat } from '../testing/build.ts'
+import { bits, concat, u16 } from '../testing/build.ts'
 import { matroskaMovie } from '../testing/ebml.ts'
 import type { Movie, MovieFrame, MovieSpec, TrackSpec } from '../testing/ebml.ts'
+import type { RawFrame } from './clusters.ts'
 import { ac3Config } from './frameheaders.ts'
 import { HEADER_READ, MAX_INDEX_READS } from './limits.ts'
 import { readMatroska } from './read.ts'
 import type { MatroskaIndex, MatroskaPlayTrack } from './read.ts'
+import { decodeTimes, startDecode } from './timing.ts'
 
 // The index of a Matroska or WebM file (DESIGN.md §10.4, D45): its picture, its
 // sounds in order of preference, each with its sample entry, names and timing,
@@ -575,8 +577,130 @@ describe('a picture with large frames', () => {
       { start: 3 * MIB, end: 4 * MIB },
       { start: 4 * MIB, end: first + 4 * MIB },
     ])
-    // The 2 frames it has are pts 0 and 100, in a stream that ends there: the last gets the least pts and the first one frame less.
-    expect(index.video.read).toMatchObject({ depth: 2, shift: 33 })
+    // It has 2 frames of the 3 that depth 2 needs, with the rest of the Segment behind: the shift is 2 x 2 frames of 33.333333 ticks, rounded, and 1, less the least pts seen, 0.
+    expect(index.video.read).toMatchObject({ depth: 2, shift: 134 })
+  })
+})
+
+/** An exp-Golomb code (ITU-T H.264 §9.1) as a field of `bits`: the value plus 1, in as many bits as twice its length less one. */
+function ue(value: number): readonly [number, number] {
+  return [value + 1, 2 * Math.floor(Math.log2(value + 1)) + 1]
+}
+
+/** The `avcC` of a Main profile picture of 320x240 and 4 reference frames whose SPS has no VUI, and so states no bitstream restriction: its reorder depth is the most that H.264 holds back, 15, and is not stated. */
+function unstatedAvc(): Uint8Array {
+  const rbsp = bits(
+    [77, 8], // profile_idc
+    [0, 8], // the constraint flags
+    [30, 8], // level_idc
+    ue(0), // seq_parameter_set_id
+    ue(0), // log2_max_frame_num_minus4
+    ue(0), // pic_order_cnt_type
+    ue(2), // log2_max_pic_order_cnt_lsb_minus4
+    ue(4), // max_num_ref_frames
+    [0, 1], // gaps_in_frame_num_value_allowed_flag
+    ue(19), // pic_width_in_mbs_minus1
+    ue(14), // pic_height_in_map_units_minus1
+    [1, 1], // frame_mbs_only_flag
+    [1, 1], // direct_8x8_inference_flag
+    [0, 1], // frame_cropping_flag
+    [0, 1], // vui_parameters_present_flag
+  )
+  const sps = concat([0x67], rbsp)
+  return concat(
+    [1, 77, 0, 30, 0xff, 0xe1],
+    u16(sps.length),
+    sps,
+    [1],
+    u16(4),
+    [0x68, 0xeb, 0xe3, 0xcb],
+  )
+}
+
+describe("a picture whose first frames don't all fit in the first read", () => {
+  const FRAME_TICKS = 33.333333
+  const DEPTH = 15
+  const H264: TrackSpec = {
+    number: 1,
+    type: 1,
+    codecId: 'V_MPEG4/ISO/AVC',
+    codecPrivate: unstatedAvc(),
+    defaultDuration: 33_333_333,
+    video: { pixelWidth: 320, pixelHeight: 240 },
+  }
+
+  /** A movie of the picture with frames of this size at these times (ms) in decode order, the first a keyframe. */
+  function frames(size: number, times: readonly number[]): Movie {
+    return movie({
+      tracks: [H264],
+      clusters: [
+        {
+          timestamp: 0,
+          frames: times.map((time, at) => frame(1, time, { keyframe: at === 0, size })),
+        },
+      ],
+    })
+  }
+
+  it('takes its depth as the most that H.264 holds back, which its SPS does not state', () => {
+    const { index } = open(frames(10, [0, 33, 67]).bytes)
+    expect(index.video.read).toMatchObject({ depth: DEPTH, depthStated: false })
+    expect(index.video.codec).toBe('avc1.4d001e')
+  })
+
+  it('shifts by the longest the first decode time can be before 0, when the 4 MiB hold only 3 frames of the 16', () => {
+    // Frames of 1.2 MiB: 3 of them end before the bound at 4 MiB from the first Cluster, the fourth does not, and 3 more follow.
+    const times = [200, 233, 267, 300, 333, 367]
+    const { index, asks } = open(frames(Math.floor(1.2 * MIB), times).bytes)
+    expect(asks).toHaveLength(4)
+    // The least presentation time seen is 200, and the 16 frames could start 15 frames before the least: 2 x 15 x 33.333333 is 999.99999, which is 1000 rounded, and 1 more, less 200.
+    expect(index.video.read.shift).toBe(1000 + 1 - 200)
+    expect(index.video.timing.offsetSeconds).toBe(-0.801)
+  })
+
+  it('keeps the exact shift when the file ends before 16 frames, for there are no others', () => {
+    // Three frames in a file of 3 frames: the first decode time is 2 frames before the least presentation time, as it is for a stream that ends.
+    const { index } = open(frames(10, [0, 33, 67]).bytes)
+    expect(index.video.read.shift).toBe(67)
+    expect(index.video.timing.offsetSeconds).toBe(-0.067)
+  })
+
+  const orders: [string, (at: number) => number][] = [
+    ['frames in rising order', (at) => Math.round(at * FRAME_TICKS)],
+    // The worst case of an open GOP: each of the 15 frames after the keyframe is presented before all the ones decoded before it.
+    [
+      'frames presented before the keyframe',
+      (at) => (at <= 15 ? 500 - Math.round(at * FRAME_TICKS) : (at - 15) * 33),
+    ],
+  ]
+  describe.each(orders)('with %s', (_, time) => {
+    const stream = Array.from({ length: 18 }, (_unused, at) => time(at))
+    const whole: RawFrame[] = stream.slice(0, 16).map((pts, at) => ({
+      track: 1,
+      offset: at,
+      size: 1,
+      pts,
+      keyframe: at === 0,
+      duration: FRAME_TICKS,
+      body: at,
+    }))
+    // What the cursor gives the first frame once it has all 16: its decode time.
+    const first = decodeTimes(startDecode(DEPTH, FRAME_TICKS), whole, true).timed[0]?.dts ?? NaN
+
+    it.each(Array.from({ length: 16 }, (_unused, at) => at + 1))(
+      'shifts enough for the first decode time of the 16 when the first read holds %i',
+      (count) => {
+        // The size is the mean of the sizes at which `count` and `count + 1` frames end at the bound, and 2 frames more follow.
+        const size = Math.floor((4 * MIB) / count / 2 + (4 * MIB) / (count + 1) / 2)
+        const { index } = open(frames(size, stream.slice(0, count + 2)).bytes)
+        const { shift } = index.video.read
+        expect(first).toBeGreaterThanOrEqual(-shift)
+        if (count < DEPTH + 1) {
+          const least = Math.min(...stream.slice(0, count))
+          expect(shift).toBe(Math.max(0, Math.round(2 * DEPTH * FRAME_TICKS) + 1 - least))
+        }
+      },
+    )
   })
 })
 
