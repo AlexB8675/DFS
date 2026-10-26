@@ -22,10 +22,12 @@ import type { DecodeState, TimedFrame } from './timing.ts'
 // What a span restarts. A cursor made for a start (the file's, or a seek's) has not
 // started its picture: its frames wait for a keyframe, as the index counted from the
 // first one, and those before it are left out. A file's damage (`readClusters` skips
-// a stretch of it) does the same to the picture, which can't be decoded on without
-// what was skipped: the frames it held are dropped, its decode state starts again and
-// it waits for a keyframe. The sound's frames each stand alone, and its state goes
-// on over the gap, the frame before it lasting to the one after.
+// a stretch of it) does the same to the picture's frames after it, which can't be
+// decoded without what was skipped: its decode state starts again and it waits for a
+// keyframe. The frames before the skip are whole, so they all come out, those held
+// for the next frame's decode time with a duration of their own (as at the Segment's
+// end). The sound's frames each stand alone, and its state goes on over the gap, the
+// frame before it lasting to the one after.
 //
 // The tables are in the track's timescale (`trackTimescale`). A frame's decode time
 // is the file's with the track's shift added (the index's, so that none is before
@@ -208,9 +210,10 @@ function fragmentTrack(
  * - A cursor whose picture has not started drops the picture's frames before its
  *   first keyframe; the sound's are kept from where the cursor is.
  * - `skipped` lists the stretches of the file that were damaged and passed over, in
- *   order and joined where they touch. The picture restarts after each, as after a
- *   seek: the frames it held are dropped, its decode state is fresh and it waits for a
- *   keyframe. The sound goes on over it.
+ *   order and joined where they touch. The picture's frames before a skip all come
+ *   out, those held among them with a duration of their own, as at the Segment's end;
+ *   after it the picture restarts as after a seek: its decode state is fresh and it
+ *   waits for a keyframe. The sound goes on over it.
  * - When the chunk ends before the next element is whole, nothing is read and the
  *   cursor comes back at the same `at`: the caller reads a bigger chunk from `at` and
  *   calls again, and the engine doubles its read until the cursor moves. The size
@@ -262,11 +265,10 @@ export function matroskaFrames(
   }
   let piece: RawFrame[] = []
   let skips = 0
-  /** Ends the piece before the next skip: its frames go to the state, which the skip then starts again, so that what the state held is dropped. */
+  /** Ends the piece before the next skip: its frames go to the state as at the Segment's end, so that those it held come out (they are whole, and wait only for the decode time of a next frame that the damage takes), and the state that comes back is a fresh start, as the skip needs; the picture then waits for a keyframe. */
   const restart = (): void => {
-    feed(piece, false)
+    feed(piece, true)
     piece = []
-    picture = startDecode(picture.depth, picture.frameTicks)
     started = false
     skips += 1
   }

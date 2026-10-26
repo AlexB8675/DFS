@@ -783,14 +783,14 @@ describe('damage in the middle of a file (§10.4)', () => {
     expect(result.cursor.ended).toBe(true)
     expect(result.cursor.searching).toBe(false)
 
-    // The frame held when the damage came (at 100) is lost with the picture's state, and the frame at 200 comes before the next keyframe.
+    // The frames before the damage all come out, the one held when it came (at 100) with a duration of its own, the default's 33; the frame at 200, after it, comes before the next keyframe and is left out.
     const pictures = rowsOf(must(result.frames[0]).table)
-    expect(pictures.map((row) => row.dts)).toEqual([0, 33, 67, 233, 267])
-    expect(pictures.map((row) => row.duration)).toEqual([33, 34, 33, 34, 33])
-    expect(pictures.map((row) => row.sync)).toEqual([1, 0, 0, 1, 0])
+    expect(pictures.map((row) => row.dts)).toEqual([0, 33, 67, 100, 233, 267])
+    expect(pictures.map((row) => row.duration)).toEqual([33, 34, 33, 33, 34, 33])
+    expect(pictures.map((row) => row.sync)).toEqual([1, 0, 0, 1, 1, 0])
     expect(pictures.map((row) => row.offset)).toEqual(
-      [frames.key0, frames.next33, frames.next67, frames.key233, frames.next267].map((one) =>
-        locate(movie.bytes, must(one.data)),
+      [frames.key0, frames.next33, frames.next67, frames.key100, frames.key233, frames.next267].map(
+        (one) => locate(movie.bytes, must(one.data)),
       ),
     )
     expect(result.cursor.pictureStarted).toBe(true)
@@ -820,11 +820,97 @@ describe('damage in the middle of a file (§10.4)', () => {
     const result = matroskaFrames(index, matroskaStart(index, 2), { start: 0, bytes: twice })
     // The second damage skips to the end of the Segment: the cluster's remaining frames (the one after 220) go with it.
     expect(merged(result.skipped)).toEqual([damage, { start: other, end: twice.length }])
-    // The keyframe at 233 was read before the second skip, and is held with the picture's state, which the skip drops: the picture waits for a keyframe again, and there is none.
+    // The keyframe at 233 was read before the second skip and is held when it comes: it comes out, with a duration of its own, and the picture waits for a keyframe again, and there is none.
     const pictures = rowsOf(must(result.frames[0]).table)
-    expect(pictures.map((row) => row.dts)).toEqual([0, 33, 67])
+    expect(pictures.map((row) => row.dts)).toEqual([0, 33, 67, 100, 233])
+    expect(pictures.map((row) => row.duration)).toEqual([33, 34, 33, 33, 33])
+    expect(pictures.map((row) => row.sync)).toEqual([1, 0, 0, 1, 1])
     expect(result.cursor.pictureStarted).toBe(false)
     expect(result.cursor.ended).toBe(true)
+  })
+})
+
+describe('the picture before a skip, when it reorders (§10.4)', () => {
+  const built = bFrames()
+  const { movie } = built
+  const index = indexOf(movie.bytes)
+  const third = must(movie.clusters[2]).start
+
+  /** The file with the block of the picture's frame number `which` (in decode order) broken, and where that block starts. */
+  function broken(which: number): { bytes: Uint8Array; at: number } {
+    const bytes = Uint8Array.from(movie.bytes)
+    const at = blockStart(movie.bytes, must(built.pictureData[which]))
+    bytes[at + 2] = 0
+    return { bytes, at }
+  }
+
+  /** The dts of a table, which must rise from frame to frame, across a skip as within a piece. */
+  function rising(rows: readonly Row[]): void {
+    for (const [at, row] of rows.entries()) {
+      if (at > 0) expect(row.dts).toBeGreaterThan(must(rows[at - 1]).dts)
+    }
+  }
+
+  it('gives out every frame before the skip, depth 2 and all, and waits for a keyframe after it', () => {
+    // The frame at 167 (the sixth in decode order) is broken, and the skip reaches the third cluster, which begins with a keyframe.
+    const { bytes, at } = broken(5)
+    const result = matroskaFrames(index, matroskaStart(index, null), { start: 0, bytes })
+    expect(result.skipped).toEqual([{ start: at, end: third }])
+    const pictures = rowsOf(must(result.frames[0]).table)
+    // Before: the five frames read (presented at 0, 100, 33, 67 and 233), the last held when the skip came and given a duration of its own, 33. After: the third cluster's eight, the decode times started again from its keyframe's (267, less 67, 33 and 0), the shift of 67 on all of them.
+    expect(pictures.map((row) => row.dts)).toEqual([
+      ...[0, 34, 67, 100, 134],
+      ...[267, 301, 334, 367, 401, 434, 467, 501],
+    ])
+    expect(pictures.map((row) => row.duration)).toEqual([
+      ...[34, 33, 33, 34, 33],
+      ...[34, 33, 33, 34, 33, 33, 34, 33],
+    ])
+    expect(pictures.map((row) => row.cts)).toEqual([
+      ...[67, 133, 33, 34, 166],
+      ...[67, 133, 33, 34, 166, 67, 0, 33],
+    ])
+    expect(pictures.map((row) => row.sync)).toEqual([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0])
+    expect(pictures.map((row) => row.offset)).toEqual(
+      [...built.pictureData.slice(0, 5), ...built.pictureData.slice(8)].map((data) =>
+        locate(movie.bytes, data),
+      ),
+    )
+    rising(pictures)
+    expect(result.cursor.pictureStarted).toBe(true)
+    expect(result.cursor.picture.held).toEqual([])
+  })
+
+  it('gives out the frames before a skip that come before the first decode time is known', () => {
+    // The third frame (presented at 33) is broken, so only two frames were read; they count as all there are (their last gets the least presentation time, the one before a frame's length less), and the skip reaches the second cluster, which has no keyframe: the picture waits for the third cluster's.
+    const { bytes, at } = broken(2)
+    const result = matroskaFrames(index, matroskaStart(index, null), { start: 0, bytes })
+    expect(result.skipped).toEqual([{ start: at, end: must(movie.clusters[1]).start }])
+    const pictures = rowsOf(must(result.frames[0]).table)
+    expect(pictures.map((row) => row.dts)).toEqual([
+      ...[34, 67],
+      ...[267, 301, 334, 367, 401, 434, 467, 501],
+    ])
+    expect(pictures.map((row) => row.duration)).toEqual([
+      ...[33, 33],
+      ...[34, 33, 33, 34, 33, 33, 34, 33],
+    ])
+    expect(pictures.map((row) => row.cts)).toEqual([
+      ...[33, 100],
+      ...[67, 133, 33, 34, 166, 67, 0, 33],
+    ])
+    expect(pictures.map((row) => row.sync)).toEqual([1, 0, 1, 0, 0, 0, 0, 0, 0, 0])
+    rising(pictures)
+  })
+
+  it('gives the same frames cut at any one byte', () => {
+    const { bytes } = broken(5)
+    const whole = matroskaFrames(index, matroskaStart(index, 2), { start: 0, bytes })
+    const wholeRows = new Map<number, Row[]>()
+    collect(wholeRows, whole.frames)
+    for (let cut = must(movie.clusters[0]).start + 1; cut < bytes.length; cut += 1) {
+      expect(drive(index, bytes, [cut], 2).rows).toEqual(wholeRows)
+    }
   })
 })
 
