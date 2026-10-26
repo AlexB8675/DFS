@@ -94,6 +94,11 @@ function seeking(...targets: [id: number, index: number][]): FilePart {
   return (at) => seekHead(targets.map(([id, index]) => [id, at[index] ?? 0]))
 }
 
+/** Cues that a SeekHead names and the head has not read: where they start in the file, and no end. */
+function unread(file: MatroskaFile, index: number): { start: number; end: null } {
+  return { start: offset(file, index), end: null }
+}
+
 const crc = (): Uint8Array => element(ID.CRC32, [0xde, 0xad, 0xbe, 0xef])
 const padding = (size: number): Uint8Array => element(ID.Void, new Uint8Array(size))
 const tags = (size: number): Uint8Array => element(ID.Tags, new Uint8Array(size))
@@ -131,8 +136,8 @@ describe('the head of a Matroska file (§10.4)', () => {
       timestampScale: 1_000_000,
       durationTicks: 4021,
       tracks: span(file, 2),
-      // The Cues come after the first Cluster, so only the SeekHead says where they are.
-      cues: span(file, 4),
+      // The Cues come after the first Cluster, so only the SeekHead says where they are: the head gives their position, unread, and no end.
+      cues: unread(file, 4),
       firstCluster: offset(file, 3),
       reads: 0,
     })
@@ -175,7 +180,7 @@ describe('the head of a Matroska file (§10.4)', () => {
     expect(head.timestampScale).toBe(1_000)
     expect(head.durationTicks).toBe(7.5)
     expect(head.tracks).toEqual(span(file, 3))
-    expect(head.cues).toEqual(span(file, 5))
+    expect(head.cues).toEqual(unread(file, 5))
     expect(head.firstCluster).toBe(offset(file, 4))
   })
 
@@ -190,7 +195,7 @@ describe('the head of a Matroska file (§10.4)', () => {
     expect(damaged(() => open(zero.bytes)).message).toMatch(/TimestampScale/)
   })
 
-  it('has no duration when Info has none, and refuses one that is not a time', () => {
+  it('has no duration when Info has none, or one that is not a time, and reads the head all the same', () => {
     expect(open(matroskaFile([info({}), tracks(), cluster()]).bytes).head.durationTicks).toBeNull()
     expect(
       open(matroskaFile([info({ duration: 0 }), tracks(), cluster()]).bytes).head.durationTicks,
@@ -198,13 +203,28 @@ describe('the head of a Matroska file (§10.4)', () => {
     // Single and double floats alike.
     const single = element(ID.Info, float(ID.Duration, 12.5, 4))
     expect(open(matroskaFile([single, tracks(), cluster()]).bytes).head.durationTicks).toBe(12.5)
-    for (const duration of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
-      const file = matroskaFile([info({ duration }), tracks(), cluster()])
-      damaged(() => open(file.bytes))
+    // A Duration is advisory (the index finds the end by the last frame without one), so what is no time is none: below 0, NaN, infinite, or a float of no width a float has.
+    const bad = [
+      info({ scale: 5, duration: -1 }),
+      info({ scale: 5, duration: Number.NaN }),
+      info({ scale: 5, duration: Number.POSITIVE_INFINITY }),
+      info({ scale: 5, duration: Number.NEGATIVE_INFINITY }),
+      element(ID.Info, uint(ID.TimestampScale, 5), element(ID.Duration, [1, 2])),
+      element(ID.Info, uint(ID.TimestampScale, 5), element(ID.Duration, [1, 2, 3])),
+      element(ID.Info, uint(ID.TimestampScale, 5), element(ID.Duration, new Uint8Array(9))),
+    ]
+    for (const entry of bad) {
+      const file = matroskaFile([entry, tracks(), cluster()])
+      const { head } = open(file.bytes)
+      expect(head.durationTicks).toBeNull()
+      // The rest of Info, and of the head, is read as it is.
+      expect(head.timestampScale).toBe(5)
+      expect(head.tracks).toEqual(span(file, 1))
+      expect(head.firstCluster).toBe(offset(file, 2))
     }
-    // A float of 3 bytes is not one.
-    const odd = element(ID.Info, element(ID.Duration, [1, 2, 3]))
-    damaged(() => open(matroskaFile([odd, tracks(), cluster()]).bytes))
+    // The first Duration is the one that counts: a good one after a bad one is not taken.
+    const twice = element(ID.Info, element(ID.Duration, [1, 2]), float(ID.Duration, 9))
+    expect(open(matroskaFile([twice, tracks(), cluster()]).bytes).head.durationTicks).toBeNull()
   })
 
   it('has defaults when Info is nowhere, since a file without one has the defaults of Matroska', () => {
@@ -336,7 +356,7 @@ describe('the Segment of a Matroska file (§10.4)', () => {
 
   it('ends a Segment that claims more than the file at the end of the file, as a recording cut off', () => {
     // The Cues are cut, and the Cluster too: the file ends 20 bytes into it.
-    const file = matroskaFile([seeking([ID.Cues, 3]), info({}), tracks(), cluster(), cues()])
+    const file = matroskaFile([seeking([ID.Cues, 4]), info({}), tracks(), cluster(), cues()])
     const cut = file.bytes.subarray(0, offset(file, 3) + 20)
     const { head } = open(cut)
     expect(head.segment).toEqual({ data: file.segmentData, end: cut.length })
@@ -489,11 +509,23 @@ describe('Tracks and Cues, which the head locates (§10.4)', () => {
     expect(open(atEnd.bytes).head.cues).toBeNull()
   })
 
-  it('leaves out an entry whose position holds another element, or none, as a stale one does', () => {
-    // The Cues are said to be at the Cluster.
+  it('gives the position that an entry names for the Cues as it is, unread, so a stale one is for the seek to find out', () => {
+    // The Cues are said to be at the Cluster, or in the middle of a Void: the head does not look.
     const file = matroskaFile([seeking([ID.Cues, 3]), info({}), tracks(), cluster()])
-    expect(open(file.bytes).head.cues).toBeNull()
+    const { head, asks } = open(file.bytes)
+    expect(head.cues).toEqual(unread(file, 3))
+    expect(asks).toEqual([])
+    const zero = matroskaFile([
+      (at) => seekHead([[ID.Cues, (at[3] ?? 0) + 6]]),
+      info({}),
+      tracks(),
+      element(ID.Void, new Uint8Array(40)),
+      cluster(),
+    ])
+    expect(open(zero.bytes).head.cues).toEqual({ start: offset(zero, 3) + 6, end: null })
+  })
 
+  it('leaves out an entry for Tracks whose position holds another element, or none, as a stale one does', () => {
     // Tracks are said to be at the Info, and then where they are: the first entry is stale, the second is right.
     const stale = matroskaFile([
       seeking([ID.Tracks, 1], [ID.Tracks, 3]),
@@ -505,13 +537,17 @@ describe('Tracks and Cues, which the head locates (§10.4)', () => {
 
     // An entry that points into the middle of an element is not a header either: here, into a zero.
     const zero = matroskaFile([
-      (at) => seekHead([[ID.Cues, (at[3] ?? 0) + 6]]),
+      (at) =>
+        seekHead([
+          [ID.Tracks, (at[3] ?? 0) + 6],
+          [ID.Tracks, at[4] ?? 0],
+        ]),
       info({}),
-      tracks(),
-      element(ID.Void, new Uint8Array(40)),
       cluster(),
+      element(ID.Void, new Uint8Array(40)),
+      tracks(),
     ])
-    expect(open(zero.bytes).head.cues).toBeNull()
+    expect(open(zero.bytes).head.tracks).toEqual(span(zero, 4))
   })
 
   it('does not take Tracks from an entry that leads to another element, and so refuses the file', () => {
@@ -550,7 +586,7 @@ describe('Tracks and Cues, which the head locates (§10.4)', () => {
       cluster(),
       cues(),
     ])
-    expect(open(among.bytes).head.cues).toEqual(span(among, 4))
+    expect(open(among.bytes).head.cues).toEqual(unread(among, 4))
   })
 
   it('refuses a SeekPosition that is not a number a file has', () => {
@@ -570,71 +606,82 @@ describe('Tracks and Cues, which the head locates (§10.4)', () => {
     damaged(() => open(file.bytes))
   })
 
-  it('reads a second SeekHead that the first names, when the Cues are in it, and not otherwise', () => {
-    // The first SeekHead knows only where the second is, after the Cluster.
+  it('reads a second SeekHead that the first names, when Tracks are in it, and not otherwise', () => {
+    // The first SeekHead knows only where the second is, after the Cluster, and the second where the Tracks and the Cues are.
     const file = matroskaFile([
-      seeking([ID.SeekHead, 4]),
+      seeking([ID.SeekHead, 3]),
       info({}),
-      tracks(),
       cluster(),
-      seeking([ID.Cues, 5]),
+      seeking([ID.Tracks, 4], [ID.Cues, 5]),
+      tracks(),
       cues(),
     ])
-    expect(open(file.bytes).head.cues).toEqual(span(file, 5))
+    const { head } = open(file.bytes)
+    expect(head.tracks).toEqual(span(file, 4))
+    // Its entry for the Cues is read like the first's: unread.
+    expect(head.cues).toEqual(unread(file, 5))
+
+    // Info is another reason: the second SeekHead says where it is.
+    const infoNamed = matroskaFile([
+      seeking([ID.SeekHead, 3]),
+      tracks(),
+      cluster(),
+      seeking([ID.Info, 4]),
+      info({ scale: 7 }),
+    ])
+    expect(open(infoNamed.bytes).head.timestampScale).toBe(7)
 
     // The second names a third, which is not followed: one level deep.
     const deep = matroskaFile([
-      seeking([ID.SeekHead, 4]),
+      seeking([ID.SeekHead, 3]),
       info({}),
-      tracks(),
       cluster(),
-      seeking([ID.SeekHead, 5]),
-      seeking([ID.Cues, 6]),
-      cues(),
+      seeking([ID.SeekHead, 4]),
+      seeking([ID.Tracks, 5]),
+      tracks(),
     ])
-    expect(open(deep.bytes).head.cues).toBeNull()
+    expect(damaged(() => open(deep.bytes)).message).toMatch(/Tracks/)
 
     // A second SeekHead that stands before the Cluster is met by the walk like the first.
     const met = matroskaFile([
       seeking([ID.SeekHead, 1]),
-      seeking([ID.Cues, 5]),
+      seeking([ID.Tracks, 5]),
       info({}),
-      tracks(),
       cluster(),
       cues(),
+      tracks(),
     ])
-    expect(open(met.bytes).head.cues).toEqual(span(met, 5))
+    expect(open(met.bytes).head.tracks).toEqual(span(met, 5))
 
     // A SeekHead that names itself, or the first, is read once.
     const loop = matroskaFile([
-      seeking([ID.SeekHead, 0], [ID.SeekHead, 4]),
+      seeking([ID.SeekHead, 0], [ID.SeekHead, 3]),
       info({}),
-      tracks(),
       cluster(),
-      seeking([ID.SeekHead, 4], [ID.SeekHead, 0], [ID.Cues, 5]),
-      cues(),
+      seeking([ID.SeekHead, 3], [ID.SeekHead, 0], [ID.Tracks, 4]),
+      tracks(),
     ])
-    expect(open(loop.bytes).head.cues).toEqual(span(loop, 5))
+    expect(open(loop.bytes).head.tracks).toEqual(span(loop, 4))
   })
 
   it('reads a second SeekHead from afar by asking for it, and no more than that', () => {
     // A Cluster of 2 MiB between: the second SeekHead is not in the head.
     const file = matroskaFile([
-      seeking([ID.SeekHead, 4]),
+      seeking([ID.SeekHead, 3]),
       info({}),
-      tracks(),
       cluster(2 * MIB),
-      seeking([ID.Cues, 5]),
-      cues(),
+      seeking([ID.Tracks, 4]),
+      tracks(),
     ])
     const { head, asks } = open(file.bytes)
-    expect(asks).toEqual([{ start: offset(file, 4), end: file.bytes.length }])
-    expect(head.cues).toEqual(span(file, 5))
+    expect(asks).toEqual([{ start: offset(file, 3), end: file.bytes.length }])
+    expect(head.tracks).toEqual(span(file, 4))
     expect(head.reads).toBe(1)
   })
 
-  it('reads no second SeekHead when it has what it looks for, which would be a read for nothing', () => {
-    const file = matroskaFile([
+  it('reads no second SeekHead when Tracks and Info are found, which would be a read for nothing, nor for the Cues alone', () => {
+    // The Cues are met by the walk.
+    const met = matroskaFile([
       seeking([ID.SeekHead, 5]),
       info({}),
       tracks(),
@@ -642,19 +689,45 @@ describe('Tracks and Cues, which the head locates (§10.4)', () => {
       cluster(2 * MIB),
       seeking([ID.Cues, 3]),
     ])
-    const { head, asks } = open(file.bytes)
-    expect(asks).toEqual([])
-    expect(head.cues).toEqual(span(file, 3))
-    expect(head.reads).toBe(0)
+    const found = open(met.bytes)
+    expect(found.asks).toEqual([])
+    expect(found.head.cues).toEqual(span(met, 3))
+    expect(found.head.reads).toBe(0)
+
+    // The Cues are in the second SeekHead alone, which nothing else asks for: the file has none that the head knows of.
+    const alone = matroskaFile([
+      seeking([ID.SeekHead, 4]),
+      info({}),
+      tracks(),
+      cluster(2 * MIB),
+      seeking([ID.Cues, 5]),
+      cues(),
+    ])
+    const none = open(alone.bytes)
+    expect(none.asks).toEqual([])
+    expect(none.head.cues).toBeNull()
+    expect(none.head.reads).toBe(0)
   })
 
-  it('asks for the header of Cues that are named and far, to know where they end', () => {
-    // The Cues come after a Cluster of 2 MiB, as ffmpeg writes them.
-    const file = matroskaFile([seeking([ID.Cues, 4]), info({}), tracks(), cluster(2 * MIB), cues()])
-    const { head, asks } = open(file.bytes)
-    expect(asks).toEqual([{ start: offset(file, 4), end: file.bytes.length }])
-    expect(head.cues).toEqual(span(file, 4))
-    expect(head.reads).toBe(1)
+  it('is done at once with a file that has its Cues after the last Cluster, as ffmpeg and OBS write it', () => {
+    // A SeekHead that names the Cues, and 2 MiB of Clusters: the head of 1 MiB holds all up to the first Cluster.
+    const file = matroskaFile([
+      seeking([ID.Info, 1], [ID.Tracks, 2], [ID.Cues, 4]),
+      info({ scale: 1_000_000, duration: 4021 }),
+      tracks(),
+      cluster(2 * MIB),
+      cues(),
+    ])
+    const first = readHead([{ start: 0, bytes: file.bytes.subarray(0, HEAD) }], file.bytes.length)
+    if (!('done' in first)) throw new Error('expected the head at the first call')
+    // Where the SeekHead says, as an offset in the file, and not read: the head has no end to give.
+    expect(first.done.cues).toEqual({ start: offset(file, 4), end: null })
+    expect(first.done.cues?.start).toBeGreaterThan(HEAD)
+    expect(first.done.reads).toBe(0)
+    expect(first.done.firstCluster).toBe(offset(file, 3))
+    expect(first.done.tracks).toEqual(span(file, 2))
+    expect(first.done.durationTicks).toBe(4021)
+    expect(open(file.bytes).asks).toEqual([])
   })
 
   it('refuses SeekHead and Info that are bigger than a read of a header, which no file has', () => {
@@ -780,7 +853,7 @@ describe('what the walk asks for when the head is not enough (§10.4)', () => {
     for (let cut = 0; cut <= file.bytes.length; cut += 1) {
       const { head } = open(file.bytes, { head: cut })
       expect(head.timestampScale).toBe(3)
-      expect(head.cues).toEqual(span(file, 4))
+      expect(head.cues).toEqual(unread(file, 4))
     }
   })
 
@@ -892,13 +965,15 @@ describe('what the walk asks for when the head is not enough (§10.4)', () => {
   it('is the same however the caller holds what the walk asks for, which it counts the same', () => {
     const files = [
       matroskaFile([info({}), tracks(), tags(3 * MIB), cluster(70_000)]),
-      matroskaFile([seeking([ID.Cues, 4]), info({}), tracks(), cluster(2 * MIB), cues()]),
+      // Tracks that a SeekHead names, past a Cluster of 2 MiB.
+      matroskaFile([seeking([ID.Tracks, 3]), info({}), cluster(2 * MIB), tracks()]),
+      // A second SeekHead, past a Cluster of 1 MiB, that names them.
       matroskaFile([
-        seeking([ID.SeekHead, 4]),
+        seeking([ID.SeekHead, 3]),
         info({}),
-        tracks(),
         cluster(MIB),
-        seeking([ID.Cues, 5]),
+        seeking([ID.Tracks, 4], [ID.Cues, 5]),
+        tracks(),
         cues(),
       ]),
     ]

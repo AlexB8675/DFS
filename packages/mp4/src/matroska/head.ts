@@ -15,12 +15,16 @@ import { HEADER_READ, MAX_INDEX_READS } from './limits.ts'
 // (1 MiB, as for an MP4) and nearly every file is done with those: ffmpeg writes
 // the SeekHead, Info and Tracks first and a megabyte of Tags at most, and
 // mkvmerge much the same. What takes another read is a first Cluster behind a
-// large Tags or Attachments, and a Cues or a second SeekHead named by the first
-// that stands after the Clusters.
+// large Tags or Attachments, and Tracks or Info that a SeekHead names after the
+// Clusters.
 //
-// Tracks and Cues are only located here, from where their headers are to where
-// the elements end; a later step reads them. SeekHead and Info are read, which
-// needs them whole.
+// Tracks are located here, from where their header is to where the element ends;
+// a later step reads them. The Cues are not read at all: where the walk meets
+// them (before the first Cluster) their header is seen and so their end, and
+// where only a SeekHead says (ffmpeg and OBS put them after the last Cluster,
+// which is nearly every file) the head gives the position and no end, so that
+// opening a file pays no read for what only a seek uses. SeekHead and Info are
+// read, which needs them whole.
 
 /** What the head of a Matroska file says, with every offset an offset in the file. */
 export interface MatroskaHead {
@@ -29,12 +33,18 @@ export interface MatroskaHead {
   segment: { data: number; end: number }
   /** Nanoseconds in a tick of the file's timestamps. */
   timestampScale: number
-  /** The duration, in ticks; null when Info has none. */
+  /** The duration, in ticks; null when Info has none, or one that is no time (a Duration is advisory: the index finds the end by the last frame without it). */
   durationTicks: number | null
   /** The Tracks element, from its header to its end. */
   tracks: ByteRange
-  /** The Cues element, from its header to its end; null when the file says of none where it is. */
-  cues: ByteRange | null
+  /**
+   * The Cues element: `start` is where its header is, and `end` where it ends when
+   * the walk met it before the first Cluster. When only an entry of a SeekHead
+   * names it, `end` is null and `start` is that position as it is, unread: the head
+   * doesn't look there (a seek reads the header first, and is the one to find
+   * that the entry is stale). Null when no SeekHead read says where they are.
+   */
+  cues: { start: number; end: number | null } | null
   /** Where the first Cluster's header is. */
   firstCluster: number
   /** How many reads, after the head, the walk needed: each range it needed beyond the first chunk, whether it found it held in another chunk or asked for it. */
@@ -243,19 +253,34 @@ interface Timing {
   duration: number | null
 }
 
+/**
+ * A Duration in ticks, or null when the element holds no time: a float that
+ * can't be read (of a width a float hasn't, NaN or infinite) or below 0. It is
+ * advisory, and the index finds the end of the file by its last frame when Info
+ * has none, so what is no time is none and not a damaged file.
+ */
+function readDuration(bytes: Uint8Array, el: Element): number | null {
+  let duration: number
+  try {
+    duration = readFloat(bytes, el)
+  } catch (error) {
+    if (error instanceof Mp4Error) return null
+    throw error
+  }
+  return duration >= 0 ? duration : null
+}
+
 function readInfo(bytes: Uint8Array, el: Element): Timing {
   let scale: number | undefined
-  let duration: number | undefined
+  let duration: number | null | undefined
   for (const child of children(bytes, inside(el))) {
     if (child.id === ID.TimestampScale) scale ??= readUint(bytes, child)
-    else if (child.id === ID.Duration) duration ??= readFloat(bytes, child)
+    // The first Duration is the one that counts, good or not.
+    else if (child.id === ID.Duration && duration === undefined)
+      duration = readDuration(bytes, child)
   }
   if (scale === 0) {
     throw damaged(`Info at offset ${el.start} has a TimestampScale of 0, so no time passes in it.`)
-  }
-  // A time is a number of ticks that is not less than 0 (a float may be NaN or infinite).
-  if (duration !== undefined && !(Number.isFinite(duration) && duration >= 0)) {
-    throw damaged(`Info at offset ${el.start} has a Duration that is not a time: ${duration}.`)
   }
   return { scale: scale ?? DEFAULT_SCALE, duration: duration ?? null }
 }
@@ -329,7 +354,7 @@ function walkHead(held: Held, fileSize: number): MatroskaHead {
   const segment = { data: segmentEl.data, end: Math.min(segmentEl.end, fileSize) }
 
   let tracks: ByteRange | null = null
-  let cues: ByteRange | null = null
+  let cues: MatroskaHead['cues'] = null
   let timing: Timing | null = null
   let firstCluster: number | null = null
   // The entries of each SeekHead that was read, in order; those of them that name a SeekHead, from the ones that the walk met; and where each SeekHead read starts.
@@ -373,7 +398,7 @@ function walkHead(held: Held, fileSize: number): MatroskaHead {
     throw damaged(`The Segment has no Cluster, so the file holds no frames.`)
   }
 
-  // What the walk did not meet, from the entries of the SeekHeads: the header at the position an entry gives is read, to see that the element is there and where it ends. An entry that doesn't lead to its element (a stale position) is left out, and the walk's own find is not looked for again.
+  // What the walk did not meet, from the entries of the SeekHeads. Tracks and Info are looked for at the position an entry gives: its header is read, to see that the element is there and where it ends, and an entry that doesn't lead to its element (a stale position) is left out.
   const locate = (id: number): Element | null => {
     for (const seek of named) {
       if (seek.id !== id) continue
@@ -397,13 +422,9 @@ function walkHead(held: Held, fileSize: number): MatroskaHead {
       const el = locate(ID.Info)
       if (el !== null) timing = readInfo(held.whole(el, 'Info'), el)
     }
-    if (cues === null) {
-      const el = locate(ID.Cues)
-      if (el !== null) cues = { start: el.start, end: el.end }
-    }
-    if (tracks !== null && timing !== null && cues !== null) break
+    if (tracks !== null && timing !== null) break
 
-    // Something is still not found: a SeekHead that the first one names may say. One level deep, and only when it is looked for.
+    // Tracks or Info is still not found: a SeekHead that the first one names may say. One level deep, and only when one of the two is looked for: the Cues alone are not worth a read.
     const next = heads.find((seek) => !read.has(seek.at))
     if (next === undefined) break
     read.add(next.at)
@@ -416,6 +437,12 @@ function walkHead(held: Held, fileSize: number): MatroskaHead {
     }
     if (el.id !== ID.SeekHead || !el.sized || el.end > segment.end) continue
     named.push(...readSeekHead(held.whole(el, 'SeekHead'), el, segment))
+  }
+
+  // The Cues, when the walk did not meet them: where the first entry says, as it is. The head gives the position without reading there, so that opening a file doesn't pay for what only a seek uses.
+  if (cues === null) {
+    const seek = named.find((entry) => entry.id === ID.Cues)
+    if (seek !== undefined) cues = { start: seek.at, end: null }
   }
 
   if (tracks === null) {
