@@ -15,6 +15,8 @@ import {
   segment,
   sizeBytes,
   string,
+  trackEntry,
+  tracksElement,
   uint,
   unknownSize,
 } from './ebml.ts'
@@ -288,5 +290,143 @@ describe('the Matroska shapes of the builder (§10.4)', () => {
     const file = matroskaFile([element(ID.Void, [0])], { header, unknown: true })
     expect(file.segmentData).toBe(header.length + 4 + 8)
     expect(bytes(file.bytes.subarray(header.length + 4, header.length + 12))).toEqual(unknownSize())
+  })
+})
+
+describe('the track builder (§10.4)', () => {
+  it('writes a TrackEntry of the fields it is given, in the order a file has them, and none it is not', () => {
+    expect(bytes(trackEntry({}))).toEqual([0xae, 0x80])
+    // The number (and the UID of the same value), the type, the flag and the codec: 3 + 4 + 3 + 3 + 7 bytes.
+    expect(bytes(trackEntry({ number: 3, type: 1, default: false, codecId: 'V_AV1' }))).toEqual([
+      ...[0xae, 0x94],
+      ...[0xd7, 0x81, 3],
+      ...[0x73, 0xc5, 0x81, 3],
+      ...[0x83, 0x81, 1],
+      ...[0x88, 0x81, 0],
+      ...[0x86, 0x85, 0x56, 0x5f, 0x41, 0x56, 0x31],
+    ])
+    // The extra elements are the last, whatever they are.
+    expect(bytes(trackEntry({ type: 2, extra: [element(ID.Void, [9])] }))).toEqual([
+      ...[0xae, 0x86],
+      ...[0x83, 0x81, 2],
+      ...[0xec, 0x81, 9],
+    ])
+  })
+
+  it('writes a Video element with its Colour and the Projection that holds the roll, and an Audio element with its floats', () => {
+    // 1920 is 0x0780 and 1080 is 0x0438; -90 as a double is 0xC056800000000000.
+    expect(
+      bytes(
+        trackEntry({
+          video: { pixelWidth: 1920, pixelHeight: 1080, colour: {}, rollDegrees: -90 },
+        }),
+      ),
+    ).toEqual([
+      ...[0xae, 0x9f],
+      ...[0xe0, 0x9d],
+      ...[0xb0, 0x82, 0x07, 0x80],
+      ...[0xba, 0x82, 0x04, 0x38],
+      ...[0x55, 0xb0, 0x80],
+      ...[0x76, 0x70, 0x8f],
+      ...[0x76, 0x71, 0x81, 0],
+      ...[0x76, 0x75, 0x88, 0xc0, 0x56, 0x80, 0, 0, 0, 0, 0],
+    ])
+    // 48000 as a double is 0x40E7700000000000.
+    expect(bytes(trackEntry({ audio: { samplingFrequency: 48000, channels: 2 } }))).toEqual([
+      ...[0xae, 0x8f],
+      ...[0xe1, 0x8d],
+      ...[0xb5, 0x88, 0x40, 0xe7, 0x70, 0, 0, 0, 0, 0],
+      ...[0x9f, 0x81, 2],
+    ])
+    // The nine fields of a Colour, each in its own ID.
+    expect(
+      bytes(
+        trackEntry({
+          video: {
+            colour: {
+              matrix: 1,
+              primaries: 2,
+              transfer: 3,
+              range: 4,
+              bitsPerChannel: 5,
+              chromaSubsamplingHorz: 6,
+              chromaSubsamplingVert: 7,
+              chromaSitingHorz: 8,
+              chromaSitingVert: 9,
+            },
+          },
+        }),
+      ),
+    ).toEqual([
+      ...[0xae, 0xa9],
+      ...[0xe0, 0xa7],
+      ...[0x55, 0xb0, 0xa4],
+      ...[0x55, 0xb1, 0x81, 1],
+      ...[0x55, 0xb2, 0x81, 5],
+      ...[0x55, 0xb3, 0x81, 6],
+      ...[0x55, 0xb4, 0x81, 7],
+      ...[0x55, 0xb7, 0x81, 8],
+      ...[0x55, 0xb8, 0x81, 9],
+      ...[0x55, 0xb9, 0x81, 4],
+      ...[0x55, 0xba, 0x81, 3],
+      ...[0x55, 0xbb, 0x81, 2],
+    ])
+  })
+
+  it('writes ContentEncodings, none when it is not given and an empty one when it is given none', () => {
+    expect(bytes(trackEntry({ encodings: [] }))).toEqual([0xae, 0x83, 0x6d, 0x80, 0x80])
+    // Header stripping: an order, a compression of algorithm 3 with its settings, in an encoding of 16 bytes.
+    expect(
+      bytes(
+        trackEntry({
+          encodings: [{ compression: { algo: 3, settings: new Uint8Array([0x0b, 0x77]) } }],
+        }),
+      ),
+    ).toEqual([
+      ...[0xae, 0x96],
+      ...[0x6d, 0x80, 0x93],
+      ...[0x62, 0x40, 0x90],
+      ...[0x50, 0x31, 0x81, 0],
+      ...[0x50, 0x34, 0x89],
+      ...[0x42, 0x54, 0x81, 3],
+      ...[0x42, 0x55, 0x82, 0x0b, 0x77],
+    ])
+    // An empty compression, and a scope, a type and an encryption (of AES, 5).
+    expect(
+      bytes(trackEntry({ encodings: [{ scope: 2, type: 1, compression: {}, encryption: true }] })),
+    ).toEqual([
+      ...[0xae, 0x9c],
+      ...[0x6d, 0x80, 0x99],
+      ...[0x62, 0x40, 0x96],
+      ...[0x50, 0x31, 0x81, 0],
+      ...[0x50, 0x32, 0x81, 2],
+      ...[0x50, 0x33, 0x81, 1],
+      ...[0x50, 0x34, 0x80],
+      ...[0x50, 0x35, 0x84, 0x47, 0xe1, 0x81, 5],
+    ])
+  })
+
+  it('writes a BlockAdditionMapping with the type and the extra data it is given', () => {
+    expect(
+      bytes(
+        trackEntry({ blockAdditions: [{ type: 0x64766343, extraData: new Uint8Array([1, 2]) }] }),
+      ),
+    ).toEqual([
+      ...[0xae, 0x8f],
+      ...[0x41, 0xe4, 0x8c],
+      ...[0x41, 0xe7, 0x84, 0x64, 0x76, 0x63, 0x43],
+      ...[0x41, 0xed, 0x82, 1, 2],
+    ])
+    expect(bytes(trackEntry({ blockAdditions: [{}] }))).toEqual([0xae, 0x83, 0x41, 0xe4, 0x80])
+  })
+
+  it('writes the Tracks element around the entries it is given', () => {
+    const entry = trackEntry({ number: 1 })
+    expect(bytes(tracksElement([entry, entry]))).toEqual([
+      ...[0x16, 0x54, 0xae, 0x6b, 0x92],
+      ...bytes(entry),
+      ...bytes(entry),
+    ])
+    expect(bytes(tracksElement([]))).toEqual([0x16, 0x54, 0xae, 0x6b, 0x80])
   })
 })

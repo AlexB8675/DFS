@@ -224,3 +224,221 @@ export function matroskaFile(
     segmentData,
   }
 }
+
+/** The nine fields of a Colour element, named as the reader names them, each written as the unsigned integer it is. */
+export interface ColourSpec {
+  matrix?: number
+  primaries?: number
+  transfer?: number
+  range?: number
+  bitsPerChannel?: number
+  chromaSubsamplingHorz?: number
+  chromaSubsamplingVert?: number
+  chromaSitingHorz?: number
+  chromaSitingVert?: number
+}
+
+/** A track's Video element: the sizes are unsigned integers, `rollDegrees` is the float of a ProjectionPoseRoll in a Projection, and an empty `colour` is an empty Colour element. */
+export interface VideoSpec {
+  pixelWidth?: number
+  pixelHeight?: number
+  displayWidth?: number
+  displayHeight?: number
+  displayUnit?: number
+  colour?: ColourSpec
+  rollDegrees?: number
+}
+
+/** A track's Audio element: the two frequencies are floats, the rest unsigned integers. */
+export interface AudioSpec {
+  samplingFrequency?: number
+  outputSamplingFrequency?: number
+  channels?: number
+  bitDepth?: number
+}
+
+/**
+ * One ContentEncoding. `compression` is a ContentCompression, which is empty
+ * (so that its algorithm is the default) when it is `{}`; `encryption` is a
+ * ContentEncryption, of the AES algorithm.
+ */
+export interface EncodingSpec {
+  scope?: number
+  type?: number
+  compression?: { algo?: number; settings?: Uint8Array }
+  encryption?: boolean
+}
+
+/**
+ * A TrackEntry's fields, each written as the element RFC 9559 gives it and left
+ * out when not given, so that a test can leave out what the reader defaults or
+ * refuses. `type` is the TrackType (1 for a picture, 2 for a sound, 17 for
+ * subtitles). `encodings` is the ContentEncodings: absent when undefined, empty
+ * when `[]`. `extra` is whole elements written last, after all of these, so that
+ * a test can put a child that is broken, or one the reader doesn't know, behind them.
+ */
+export interface TrackSpec {
+  number?: number
+  type?: number
+  enabled?: boolean
+  default?: boolean
+  forced?: boolean
+  language?: string
+  codecId?: string
+  codecPrivate?: Uint8Array
+  codecDelay?: number
+  seekPreRoll?: number
+  defaultDuration?: number
+  timestampScale?: number
+  video?: VideoSpec
+  audio?: AudioSpec
+  encodings?: EncodingSpec[]
+  blockAdditions?: { type?: number; extraData?: Uint8Array }[]
+  extra?: Uint8Array[]
+}
+
+/** The IDs of elements that a real file's tracks hold and the reader never looks at, which the builder writes as a file has them. */
+const TRACK_UID = 0x73c5
+const PROJECTION_TYPE = 0x7671
+const CONTENT_ENCODING_ORDER = 0x5031
+const CONTENT_ENC_ALGO = 0x47e1
+
+/** An unsigned integer element for each field of `values` that is given, in the order of `ids`. */
+function uints<Key extends string>(
+  ids: readonly (readonly [Key, number])[],
+  values: Partial<Record<Key, number>>,
+): Uint8Array[] {
+  const parts: Uint8Array[] = []
+  for (const [key, id] of ids) {
+    const value = values[key]
+    if (value !== undefined) parts.push(uint(id, value))
+  }
+  return parts
+}
+
+function colourElement(spec: ColourSpec): Uint8Array {
+  return element(
+    ID.Colour,
+    ...uints(
+      [
+        ['matrix', ID.MatrixCoefficients],
+        ['bitsPerChannel', ID.BitsPerChannel],
+        ['chromaSubsamplingHorz', ID.ChromaSubsamplingHorz],
+        ['chromaSubsamplingVert', ID.ChromaSubsamplingVert],
+        ['chromaSitingHorz', ID.ChromaSitingHorz],
+        ['chromaSitingVert', ID.ChromaSitingVert],
+        ['range', ID.Range],
+        ['transfer', ID.TransferCharacteristics],
+        ['primaries', ID.Primaries],
+      ],
+      spec,
+    ),
+  )
+}
+
+function videoElement(spec: VideoSpec): Uint8Array {
+  const parts = uints(
+    [
+      ['pixelWidth', ID.PixelWidth],
+      ['pixelHeight', ID.PixelHeight],
+      ['displayWidth', ID.DisplayWidth],
+      ['displayHeight', ID.DisplayHeight],
+      ['displayUnit', ID.DisplayUnit],
+    ],
+    spec,
+  )
+  if (spec.colour !== undefined) parts.push(colourElement(spec.colour))
+  if (spec.rollDegrees !== undefined) {
+    parts.push(
+      element(
+        ID.Projection,
+        uint(PROJECTION_TYPE, 0),
+        float(ID.ProjectionPoseRoll, spec.rollDegrees),
+      ),
+    )
+  }
+  return element(ID.Video, ...parts)
+}
+
+function audioElement(spec: AudioSpec): Uint8Array {
+  const parts: Uint8Array[] = []
+  if (spec.samplingFrequency !== undefined) {
+    parts.push(float(ID.SamplingFrequency, spec.samplingFrequency))
+  }
+  if (spec.outputSamplingFrequency !== undefined) {
+    parts.push(float(ID.OutputSamplingFrequency, spec.outputSamplingFrequency))
+  }
+  if (spec.channels !== undefined) parts.push(uint(ID.Channels, spec.channels))
+  if (spec.bitDepth !== undefined) parts.push(uint(ID.BitDepth, spec.bitDepth))
+  return element(ID.Audio, ...parts)
+}
+
+function encodingElement(spec: EncodingSpec, order: number): Uint8Array {
+  const parts: Uint8Array[] = [uint(CONTENT_ENCODING_ORDER, order)]
+  if (spec.scope !== undefined) parts.push(uint(ID.ContentEncodingScope, spec.scope))
+  if (spec.type !== undefined) parts.push(uint(ID.ContentEncodingType, spec.type))
+  if (spec.compression !== undefined) {
+    const { algo, settings } = spec.compression
+    const fields: Uint8Array[] = []
+    if (algo !== undefined) fields.push(uint(ID.ContentCompAlgo, algo))
+    if (settings !== undefined) fields.push(binary(ID.ContentCompSettings, settings))
+    parts.push(element(ID.ContentCompression, ...fields))
+  }
+  if (spec.encryption === true) {
+    parts.push(element(ID.ContentEncryption, uint(CONTENT_ENC_ALGO, 5)))
+  }
+  return element(ID.ContentEncoding, ...parts)
+}
+
+/**
+ * A TrackEntry of the fields it is given, written in the order a real file has
+ * them: the number (and the UID that goes with it), the type, the flags, the
+ * track's own settings, its codec and its encodings, then the extra data of its
+ * codec, the Video or Audio element and the extra elements.
+ */
+export function trackEntry(spec: TrackSpec): Uint8Array {
+  const parts: Uint8Array[] = []
+  if (spec.number !== undefined) {
+    parts.push(uint(ID.TrackNumber, spec.number), uint(TRACK_UID, spec.number))
+  }
+  if (spec.type !== undefined) parts.push(uint(ID.TrackType, spec.type))
+  if (spec.enabled !== undefined) parts.push(uint(ID.FlagEnabled, spec.enabled ? 1 : 0))
+  if (spec.default !== undefined) parts.push(uint(ID.FlagDefault, spec.default ? 1 : 0))
+  if (spec.forced !== undefined) parts.push(uint(ID.FlagForced, spec.forced ? 1 : 0))
+  if (spec.defaultDuration !== undefined) {
+    parts.push(uint(ID.DefaultDuration, spec.defaultDuration))
+  }
+  if (spec.timestampScale !== undefined) {
+    parts.push(float(ID.TrackTimestampScale, spec.timestampScale))
+  }
+  if (spec.language !== undefined) parts.push(string(ID.Language, spec.language))
+  if (spec.codecId !== undefined) parts.push(string(ID.CodecID, spec.codecId))
+  if (spec.codecPrivate !== undefined) parts.push(binary(ID.CodecPrivate, spec.codecPrivate))
+  if (spec.codecDelay !== undefined) parts.push(uint(ID.CodecDelay, spec.codecDelay))
+  if (spec.seekPreRoll !== undefined) parts.push(uint(ID.SeekPreRoll, spec.seekPreRoll))
+  if (spec.encodings !== undefined) {
+    parts.push(
+      element(
+        ID.ContentEncodings,
+        ...spec.encodings.map((encoding, order) => encodingElement(encoding, order)),
+      ),
+    )
+  }
+  for (const addition of spec.blockAdditions ?? []) {
+    const fields: Uint8Array[] = []
+    if (addition.type !== undefined) fields.push(uint(ID.BlockAddIDType, addition.type))
+    if (addition.extraData !== undefined) {
+      fields.push(binary(ID.BlockAddIDExtraData, addition.extraData))
+    }
+    parts.push(element(ID.BlockAdditionMapping, ...fields))
+  }
+  if (spec.video !== undefined) parts.push(videoElement(spec.video))
+  if (spec.audio !== undefined) parts.push(audioElement(spec.audio))
+  parts.push(...(spec.extra ?? []))
+  return element(ID.TrackEntry, ...parts)
+}
+
+/** A Tracks element around the entries (a TrackEntry from `trackEntry`, or any bytes a test wants in its place). */
+export function tracksElement(entries: Uint8Array[]): Uint8Array {
+  return element(ID.Tracks, ...entries)
+}
