@@ -4,10 +4,21 @@ import type { Mp4Refusal } from '../errors.ts'
 import { heldBytes } from '../source.ts'
 import type { ByteRange, Chunk, SoundOffer } from '../source.ts'
 import { bits, concat, u16 } from '../testing/build.ts'
-import { matroskaMovie } from '../testing/ebml.ts'
+import {
+  cluster,
+  element,
+  info,
+  matroskaFile,
+  matroskaMovie,
+  seekHead,
+  simpleBlock,
+  trackEntry,
+  tracksElement,
+} from '../testing/ebml.ts'
 import type { Movie, MovieFrame, MovieSpec, TrackSpec } from '../testing/ebml.ts'
 import type { RawFrame } from './clusters.ts'
 import { ac3Config } from './frameheaders.ts'
+import { ID } from './ids.ts'
 import { HEADER_READ, MAX_INDEX_READS } from './limits.ts'
 import { readMatroska } from './read.ts'
 import type { MatroskaIndex, MatroskaPlayTrack } from './read.ts'
@@ -238,6 +249,7 @@ describe('the index of a WebM of VP9 and Opus (§10.4)', () => {
     expect(index.segment).toEqual({ data: file.segmentData, end: file.bytes.length })
     expect(index.firstCluster).toBe(first)
     expect(index.cues).toBeNull()
+    expect(index.reads).toBe(0)
   })
 
   it("names the picture by the keyframe's header and offsets neither track by anything but the Opus pre-skip", () => {
@@ -936,12 +948,22 @@ describe('the duration, when Info has none', () => {
 })
 
 describe('the reads that opening a file takes (the cap)', () => {
-  /** A file with this many Tags of 2 MiB before its first Cluster, which take a read each to pass. */
+  /** A file with this many Tags of 2 MiB before its first Cluster, which take a read each to pass. The Cluster is larger than the header read that follows the last of them, so that the first frames are a read of their own. */
   function tagged(count: number): Movie {
     return movie({
       tracks: [VP9, opus(2)],
       tags: Array.from({ length: count }, () => 2 * MIB),
-      clusters: [{ timestamp: 0, frames: start() }],
+      clusters: [
+        {
+          timestamp: 0,
+          frames: [
+            frame(1, 0, { keyframe: true, data: key(100 * 1024) }),
+            frame(2, 0, { keyframe: true }),
+            frame(1, 33, { size: 100 * 1024 }),
+            frame(2, 20, { keyframe: true }),
+          ],
+        },
+      ],
     })
   }
 
@@ -954,14 +976,15 @@ describe('the reads that opening a file takes (the cap)', () => {
     return chunks
   }
 
-  it('opens a file whose head takes 11 reads, for the first frames are the 12th', () => {
+  it('opens a file that needs exactly 12 reads: the head takes 11, and the first frames are the 12th', () => {
     const file = tagged(MAX_INDEX_READS - 1)
     const { index, asks } = open(file.bytes)
-    expect(asks).toHaveLength(MAX_INDEX_READS - 1)
+    expect(asks).toHaveLength(MAX_INDEX_READS)
+    expect(index.reads).toBe(MAX_INDEX_READS)
     expect(index.video.codec).toBe('vp09.00.20.08.01.02.02.02.00')
     // A caller that has read it all is no worse off, and no better.
     const step = readMatroska(ahead(file.bytes), file.bytes.length)
-    expect('done' in step).toBe(true)
+    expect('done' in step && step.done.reads).toBe(MAX_INDEX_READS)
   })
 
   it('refuses a file whose first frames would be the 13th read, with a sentence that names the cap', () => {
@@ -1008,6 +1031,96 @@ describe('the reads that opening a file takes (the cap)', () => {
   })
 })
 
+describe('what the open counts as a read', () => {
+  it('counts nothing for the Tracks that a SeekHead names, when the head already read the bytes', () => {
+    // The Tracks are after the Cluster, behind more Tags: the head reads the header after the first Tags (1), and the header at the Tracks, whose 64 KiB hold the whole element (2). The first frames are another read (3); the Tracks are none.
+    const blocks = start().map((one) =>
+      simpleBlock({
+        track: one.track,
+        timecode: one.time,
+        frames: [one.data ?? new Uint8Array(8)],
+        keyframe: one.keyframe,
+      }),
+    )
+    const file = matroskaFile([
+      (at) =>
+        seekHead([
+          [ID.Info, at[1] ?? 0],
+          [ID.Tracks, at[5] ?? 0],
+        ]),
+      info({ duration: 4021 }),
+      element(ID.Tags, new Uint8Array(2 * MIB)),
+      cluster(0, blocks),
+      element(ID.Tags, new Uint8Array(100_000)),
+      tracksElement([trackEntry(VP9), trackEntry(opus(2))]),
+    ])
+    const first = file.offsets[3] ?? NaN
+    const tracks = file.offsets[5] ?? NaN
+    const { index, asks } = open(file.bytes)
+    expect(asks).toEqual([
+      { start: first, end: first + HEADER_READ },
+      { start: tracks, end: file.bytes.length },
+      { start: first, end: file.bytes.length },
+    ])
+    expect(index.reads).toBe(3)
+    expect(index.firstCluster).toBe(first)
+    expect(index.video.codec).toBe('vp09.00.20.08.01.02.02.02.00')
+  })
+
+  it("counts nothing for the first frames that the head's header read holds", () => {
+    // 3 MiB of Tags, and a Cluster that the 64 KiB read after them holds to the file's end: that read is the only one.
+    const file = movie({
+      tracks: [VP9, opus(2)],
+      tags: [TAGS],
+      clusters: [{ timestamp: 0, frames: start() }],
+    })
+    const { index, asks } = open(file.bytes)
+    expect(asks).toHaveLength(1)
+    expect(index.reads).toBe(1)
+  })
+
+  it('counts nothing for the tail that the first frames read already reached', () => {
+    // A file of a little over 3 MiB with no Duration, and a sound with no frame, so that the first frames are read to the Segment's end in 3 windows. The last megabyte is in them.
+    const frames = (at: number): MovieFrame[] => [
+      frame(1, at * 1000, {
+        keyframe: at === 0,
+        data: at === 0 ? key(640 * 1024) : undefined,
+        size: 640 * 1024,
+      }),
+    ]
+    const file = movie({
+      duration: undefined,
+      tracks: [VP9, opus(2)],
+      clusters: [0, 1, 2, 3, 4].map((at) => ({ timestamp: at * 1000, frames: frames(at) })),
+    })
+    const { index, asks } = open(file.bytes)
+    expect(file.bytes.length).toBeGreaterThan(3 * MIB)
+    expect(asks).toEqual([
+      { start: MIB, end: 2 * MIB },
+      { start: 2 * MIB, end: 3 * MIB },
+      { start: 3 * MIB, end: file.bytes.length },
+    ])
+    expect(index.reads).toBe(3)
+    // The last frame is at 4000 ms and lasts 33.333333 ticks, 33 when rounded.
+    expect(index.durationSeconds).toBe(4.033)
+  })
+
+  it('counts the tail when the first frames did not reach it', () => {
+    const file = movie({
+      duration: undefined,
+      tracks: [VP9, opus(2)],
+      clusters: [
+        { timestamp: 0, frames: start() },
+        { timestamp: 1000, frames: [frame(1, 1000, { keyframe: true, size: 1.5 * MIB })] },
+        { timestamp: 2000, frames: [frame(1, 2000, { keyframe: true })] },
+      ],
+    })
+    const { index, asks } = open(file.bytes)
+    expect(asks).toEqual([{ start: file.bytes.length - MIB, end: file.bytes.length }])
+    expect(index.reads).toBe(1)
+  })
+})
+
 describe('the Tracks element', () => {
   it('is asked for whole when the head does not hold it', () => {
     // Tracks of 100 000 bytes with a head of 256: the head finds where the Tracks end and where the Cluster is, and the Tracks themselves are another ask.
@@ -1017,7 +1130,8 @@ describe('the Tracks element', () => {
     })
     const { index, asks } = open(file.bytes, { head: 256 })
     expect(asks).toEqual([{ start: file.tracks.end, end: file.bytes.length }, file.tracks])
-    expect(plain(index)).toEqual(plain(open(file.bytes).index))
+    // The head holds less, so it took more reads to open; the rest is the same.
+    expect(plain({ ...index, reads: 0 })).toEqual(plain({ ...open(file.bytes).index, reads: 0 }))
   })
 
   it('refuses one larger than 16 MiB without asking for it', () => {

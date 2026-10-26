@@ -19,7 +19,7 @@ import {
   unknownSize,
 } from '../testing/ebml.ts'
 import type { FilePart, MatroskaFile } from '../testing/ebml.ts'
-import { readHead } from './head.ts'
+import { covers, readHead, readHeadCovered } from './head.ts'
 import type { MatroskaHead } from './head.ts'
 import { ID } from './ids.ts'
 import { HEADER_READ, MAX_INDEX_READS } from './limits.ts'
@@ -1166,5 +1166,51 @@ describe('the bytes a caller holds (§10.4)', () => {
     expect(heldPrefix(chunks, 55, 90)).toHaveLength(0)
     expect(heldPrefix(chunks, 60, 61)).toHaveLength(1)
     expect(heldPrefix(chunks, 20, 20)).toHaveLength(0)
+  })
+})
+
+describe('the ranges the head has had (§10.4)', () => {
+  /** A file with Tags of 2 MiB (the head's 1 MiB holds the start of the first) before its Cluster. */
+  function tagged(): MatroskaFile {
+    return matroskaFile([info({}), tracks(), tags(2 * MIB), cluster()])
+  }
+
+  it('gives the head that readHead gives, and the first chunk and the window of each ask as the ranges', () => {
+    const file = tagged()
+    const chunks: Chunk[] = [{ start: 0, bytes: file.bytes.subarray(0, HEAD) }]
+    const first = readHeadCovered(chunks, file.bytes.length)
+    // The header after the Tags is not held: it is asked for, and is a read.
+    expect('need' in first).toBe(true)
+    const ask = 'need' in first ? first.need : { start: 0, end: 0 }
+    expect(ask).toEqual({ start: offset(file, 3), end: file.bytes.length })
+    chunks.push({ start: ask.start, bytes: file.bytes.subarray(ask.start, ask.end) })
+
+    const step = readHeadCovered(chunks, file.bytes.length)
+    if (!('done' in step)) throw new Error('expected the head')
+    expect(step.done.head).toEqual(open(file.bytes).head)
+    expect(step.done.head.reads).toBe(1)
+    expect(step.done.covered).toEqual([{ start: 0, end: HEAD }, ask])
+    expect(covers(step.done.covered, 0, HEAD)).toBe(true)
+    expect(covers(step.done.covered, ask.start, ask.end)).toBe(true)
+    // The bytes between the two are none the walk has had.
+    expect(covers(step.done.covered, HEAD - 1, HEAD + 1)).toBe(false)
+  })
+
+  it('gives the same ranges whatever a caller has read ahead', () => {
+    const file = tagged()
+    const exact = open(file.bytes)
+    const step = readHeadCovered(
+      [
+        { start: 0, bytes: file.bytes.subarray(0, HEAD) },
+        { start: HEAD, bytes: file.bytes.subarray(HEAD) },
+      ],
+      file.bytes.length,
+    )
+    if (!('done' in step)) throw new Error('expected the head')
+    expect(step.done.head).toEqual(exact.head)
+    expect(step.done.covered).toEqual([
+      { start: 0, end: HEAD },
+      { start: offset(file, 3), end: file.bytes.length },
+    ])
   })
 })

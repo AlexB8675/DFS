@@ -8,7 +8,7 @@ import { findCluster, readClusters } from './clusters.ts'
 import type { ClusterTrack, RawFrame } from './clusters.ts'
 import { readHeader } from './ebml.ts'
 import { frameSamples, sampleRate } from './frameheaders.ts'
-import { readHead } from './head.ts'
+import { covers, readHeadCovered } from './head.ts'
 import type { MatroskaHead } from './head.ts'
 import { FIRST_FRAMES_BYTES, MAX_INDEX_READS, TAIL_BYTES, TRACKS_LIMIT } from './limits.ts'
 import { needsKeyframe, pictureEntry, pictureMatrix, pictureSize } from './pictures.ts'
@@ -45,9 +45,11 @@ import type { MatroskaTrack } from './tracks.ts'
 //
 // Every read the index asks for lies inside the file and is never one that the
 // caller holds. The reads are counted as the head's are: for each range that the
-// open needs beyond the first chunk (the head), whether it finds it held or asks
-// for it, so that the count is the same however much a caller has read ahead, and
-// a file that needs more than `MAX_INDEX_READS` is refused.
+// open needs that the walk has not had already (the first chunk, what the head's
+// reads would have given, what the open's own earlier reads would), whether it
+// finds it held or asks for it, so that the count is the same however much a
+// caller has read ahead, and a file that needs more than `MAX_INDEX_READS` is
+// refused.
 
 /** The sentences that a track's refusal begins with, as the MP4 reader's `playTrack` has them. */
 const PICTURE = "The picture track can't be played: "
@@ -100,6 +102,8 @@ export interface MatroskaIndex {
   cues: { start: number; end: number | null } | null
   /** The file's duration in seconds: Info's (a Duration of 0 is none, as a recording that is still being written leaves it), else the end of the last frame of the last Cluster in the last megabyte, on the file's own timeline as Info's is (no track's offset is applied); null when neither is found. */
   durationSeconds: number | null
+  /** How many reads, after the first chunk, opening the file needed: the head's own and the open's, each counted for the bytes that no earlier read of the open had, however a caller answered them (the count that `MAX_INDEX_READS` caps). */
+  reads: number
   video: MatroskaPlayTrack
   /** Every enabled sound, in the order of preference (D45), with what the player needs to offer it or to say why it can't. */
   sounds: readonly SoundOffer[]
@@ -129,29 +133,41 @@ function saying<T>(prefix: string, make: () => T): T {
 }
 
 /**
- * The reads that the open has needed so far. A read is a range of the file that
- * the open needs beyond the head (the first chunk): it counts whether the caller
- * is found to hold it or is asked for it, as the head's walk counts, and the
- * one that would be past `MAX_INDEX_READS` refuses the file.
+ * The reads that the open has needed so far, counted as the head's walk counts its
+ * own. A read is a range of the file that the open needs, and it counts when the
+ * walk has not had the bytes already: the head (the first chunk), what each read
+ * of the head's walk would have given a caller who answered it exactly, and what
+ * each read counted here would have given. So the Tracks that the head's header
+ * read at a SeekHead's position holds, the first frames that the header read after
+ * the Tags holds, and a tail that the windows of the first frames have reached cost
+ * no read, whether the caller is found to hold them or is asked for them. What a
+ * caller has read ahead is counted for nothing, and the one read that would be past
+ * `MAX_INDEX_READS` refuses the file.
  */
 class Reads {
   private count: number
-  private readonly head: number
+  private readonly covered: ByteRange[]
 
-  /** `spent` reads are the head's own; `head` is how many bytes of the file's start the first chunk holds. */
-  constructor(spent: number, head: number) {
+  /** `spent` reads are the head's own, and `covered` the ranges its walk has had. */
+  constructor(spent: number, covered: readonly ByteRange[]) {
     this.count = spent
-    this.head = head
+    this.covered = [...covered]
+  }
+
+  /** The reads the open has needed so far, the head's included. */
+  get reads(): number {
+    return this.count
   }
 
   charge(range: ByteRange): void {
-    if (range.end <= this.head) return
+    if (covers(this.covered, range.start, range.end)) return
     if (this.count >= MAX_INDEX_READS) {
       throw damaged(
         `Opening the file needs more than ${MAX_INDEX_READS} reads after its first bytes, which is the most that opening a file takes, so the file is refused.`,
       )
     }
     this.count += 1
+    this.covered.push(range)
   }
 }
 
@@ -416,14 +432,10 @@ function readLastEnd(open: Open, tracks: readonly { read: MatroskaRead }[]): Ste
  * A file that is not a Matroska or WebM one of a version this reader knows, or whose open would need more than `MAX_INDEX_READS` reads after the head, is `damaged`.
  */
 export function readMatroska(chunks: readonly Chunk[], fileSize: number): Step<MatroskaIndex> {
-  const headed = readHead(chunks, fileSize)
+  const headed = readHeadCovered(chunks, fileSize)
   if ('need' in headed) return headed
-  const head = headed.done
-  const open: Open = {
-    chunks,
-    head,
-    reads: new Reads(head.reads, chunks[0]?.bytes.length ?? 0),
-  }
+  const { head, covered } = headed.done
+  const open: Open = { chunks, head, reads: new Reads(head.reads, covered) }
   const scale = head.timestampScale
 
   const listed = readTrackList(open)
@@ -565,6 +577,7 @@ export function readMatroska(chunks: readonly Chunk[], fileSize: number): Step<M
       firstCluster: head.firstCluster,
       cues: head.cues,
       durationSeconds,
+      reads: open.reads.reads,
       video: picture,
       sounds: offers,
       sound,

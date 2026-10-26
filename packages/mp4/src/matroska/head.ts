@@ -83,7 +83,7 @@ class Need extends Error {
 }
 
 /** Whether [start, end) lies in the ranges, which may touch or overlap, taken together. */
-function covers(ranges: readonly ByteRange[], start: number, end: number): boolean {
+export function covers(ranges: readonly ByteRange[], start: number, end: number): boolean {
   let at = start
   while (at < end) {
     let reach = at
@@ -119,7 +119,7 @@ class Held {
   private readonly chunks: readonly Chunk[]
   private readonly fileSize: number
   /** The ranges of the file that the walk has had so far: the head, and what each read it has needed would have given. */
-  private readonly covered: ByteRange[]
+  readonly covered: ByteRange[]
 
   constructor(chunks: readonly Chunk[], fileSize: number) {
     this.chunks = chunks
@@ -473,6 +473,12 @@ function walkHead(held: Held, fileSize: number): MatroskaHead {
   }
 }
 
+/** The head, and the ranges of the file that the walk has had: the first chunk, and what each read it needed would have given a caller who answered it exactly. */
+export interface CoveredHead {
+  head: MatroskaHead
+  covered: readonly ByteRange[]
+}
+
 /**
  * The head of the file of `fileSize` bytes, from the chunks the caller holds,
  * the first of which starts at 0 (a RangeError when it doesn't, or when no chunk
@@ -489,6 +495,19 @@ function walkHead(held: Held, fileSize: number): MatroskaHead {
  * refused as `Mp4Error('damaged')`.
  */
 export function readHead(chunks: readonly Chunk[], fileSize: number): Step<MatroskaHead> {
+  const step = readHeadCovered(chunks, fileSize)
+  return 'done' in step ? { done: step.done.head } : step
+}
+
+/**
+ * `readHead`, and with the head the ranges of the file that its walk has had (its
+ * `reads` are the reads that made them, less the first chunk, which is the first
+ * of them). The index counts its own reads against these, so that bytes the walk
+ * has already needed (the Tracks that the header read at a SeekHead's position
+ * holds, the first frames that the header read after the Tags holds) are no
+ * read again.
+ */
+export function readHeadCovered(chunks: readonly Chunk[], fileSize: number): Step<CoveredHead> {
   if (!Number.isSafeInteger(fileSize) || fileSize < 0) {
     throw new RangeError(`${fileSize} is not a size that a file has.`)
   }
@@ -502,8 +521,10 @@ export function readHead(chunks: readonly Chunk[], fileSize: number): Step<Matro
     )
   }
 
+  const held = new Held(chunks, fileSize)
   try {
-    return { done: walkHead(new Held(chunks, fileSize), fileSize) }
+    const walked = walkHead(held, fileSize)
+    return { done: { head: walked, covered: [...held.covered] } }
   } catch (error) {
     if (error instanceof Need) return { need: error.range }
     throw error
