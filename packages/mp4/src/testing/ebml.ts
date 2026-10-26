@@ -1,5 +1,5 @@
 import { ID } from '../matroska/ids.ts'
-import { concat } from './build.ts'
+import { concat, i16 } from './build.ts'
 import type { Part } from './build.ts'
 
 // A builder for the EBML the Matroska tests read, used by tests only (DESIGN.md
@@ -91,6 +91,20 @@ export function uint(id: number, value: number | bigint): Uint8Array {
   let width = 1
   while (wide >= 1n << BigInt(8 * width)) width += 1
   return element(id, bigEndian(wide, width))
+}
+
+/** A signed integer element, in the fewest whole bytes that hold it in two's complement, and at least one. */
+export function int(id: number, value: number | bigint): Uint8Array {
+  if (typeof value === 'number' && !Number.isInteger(value)) {
+    throw new RangeError(`${value} is not an integer.`)
+  }
+  const wide = BigInt(value)
+  if (wide < -(1n << 63n) || wide >= 1n << 63n) {
+    throw new RangeError(`${value} doesn't fit in 8 bytes, signed.`)
+  }
+  let width = 1
+  while (wide < -(1n << BigInt(8 * width - 1)) || wide >= 1n << BigInt(8 * width - 1)) width += 1
+  return element(id, bigEndian(BigInt.asUintN(8 * width, wide), width))
 }
 
 /** A float element of 4 bytes or 8. */
@@ -441,4 +455,88 @@ export function trackEntry(spec: TrackSpec): Uint8Array {
 /** A Tracks element around the entries (a TrackEntry from `trackEntry`, or any bytes a test wants in its place). */
 export function tracksElement(entries: Uint8Array[]): Uint8Array {
   return element(ID.Tracks, ...entries)
+}
+
+/** The three ways a block can lace its frames (RFC 9559 §10.3): Xiph's, EBML's and fixed-size. */
+export type Lacing = 'xiph' | 'ebml' | 'fixed'
+
+/** What a block holds: its track, its timecode (signed 16 bits, from its cluster's), and its frames, which are laced when `lacing` says how. */
+export interface BlockSpec {
+  track: number
+  timecode: number
+  lacing?: Lacing
+  frames: Part[]
+}
+
+/** What the flags byte of a block says of its lacing, in bits 0x06: Xiph 01, fixed-size 10 and EBML 11. */
+const LACING_FLAGS: Record<Lacing, number> = { xiph: 0x02, fixed: 0x04, ebml: 0x06 }
+
+/** A frame's size in Xiph lacing: as many bytes of 255 as it holds, then the rest (below 255), so that a size is told by its last byte. */
+function xiphSize(size: number): number[] {
+  return [...new Array<number>(Math.floor(size / 255)).fill(255), size % 255]
+}
+
+/**
+ * A size, in EBML lacing, that follows another: the difference as a vint of
+ * the fewest bytes that hold it, the value being offset by 2^(7n - 1) - 1 so that
+ * a negative difference is a positive number (an all-1 value is left unused, as
+ * for a size).
+ */
+function ebmlDifference(difference: number): number[] {
+  for (let width = 1; width <= 7; width += 1) {
+    const offset = 2 ** (7 * width - 1) - 1
+    if (Math.abs(difference) <= offset) return sizeBytes(difference + offset, width)
+  }
+  throw new RangeError(`${difference} is a difference too wide for a test's block.`)
+}
+
+/** The body of a block: the track as a vint, the timecode, the flags, and for a laced block the count less 1 and the sizes of all frames but the last, then the frames. */
+function blockBody({ track, timecode, lacing, frames }: BlockSpec, flags: number): Uint8Array {
+  if (frames.length === 0) throw new RangeError('A block holds at least one frame.')
+  const head = [...sizeBytes(track), ...i16(timecode), flags | (lacing ? LACING_FLAGS[lacing] : 0)]
+  if (lacing === undefined) {
+    if (frames.length !== 1) throw new RangeError('A block with no lacing holds one frame.')
+    return concat(head, ...frames)
+  }
+  if (frames.length > 256) throw new RangeError('A lace holds 256 frames at most.')
+  const sizes = frames.map((frame) => frame.length)
+  const stored = sizes.slice(0, -1)
+  let laced: number[] = []
+  if (lacing === 'xiph') {
+    laced = stored.flatMap((size) => xiphSize(size))
+  } else if (lacing === 'ebml') {
+    laced = stored.flatMap((size, index) =>
+      index === 0 ? sizeBytes(size) : ebmlDifference(size - (stored[index - 1] ?? 0)),
+    )
+  } else if (sizes.some((size) => size !== sizes[0])) {
+    throw new RangeError('The frames of fixed-size lacing are all of one size.')
+  }
+  return concat(head, [frames.length - 1], laced, ...frames)
+}
+
+/** A SimpleBlock: the block's body, with the keyframe flag (0x80) when `keyframe`. */
+export function simpleBlock({
+  keyframe = false,
+  ...spec
+}: BlockSpec & { keyframe?: boolean }): Uint8Array {
+  return element(ID.SimpleBlock, blockBody(spec, keyframe ? 0x80 : 0))
+}
+
+/**
+ * A BlockGroup: a Block (whose flags carry the lacing and no keyframe, as a
+ * BlockGroup's keyframe is told by its having no reference), then the BlockDuration
+ * and the ReferenceBlock (a signed number of ticks, from this block to the one it
+ * refers to) when given them.
+ */
+export function blockGroup({
+  reference,
+  duration,
+  ...spec
+}: BlockSpec & { reference?: number; duration?: number }): Uint8Array {
+  return element(
+    ID.BlockGroup,
+    element(ID.Block, blockBody(spec, 0)),
+    ...(duration === undefined ? [] : [uint(ID.BlockDuration, duration)]),
+    ...(reference === undefined ? [] : [int(ID.ReferenceBlock, reference)]),
+  )
 }

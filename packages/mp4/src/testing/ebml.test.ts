@@ -3,16 +3,19 @@ import { ID } from '../matroska/ids.ts'
 import type { MatroskaFile } from './ebml.ts'
 import {
   binary,
+  blockGroup,
   ebmlHeader,
   element,
   elementSized,
   float,
   idBytes,
   info,
+  int,
   matroskaFile,
   seekEntry,
   seekHead,
   segment,
+  simpleBlock,
   sizeBytes,
   string,
   trackEntry,
@@ -428,5 +431,143 @@ describe('the track builder (§10.4)', () => {
       ...bytes(entry),
     ])
     expect(bytes(tracksElement([]))).toEqual([0x16, 0x54, 0xae, 0x6b, 0x80])
+  })
+})
+
+describe('the block builder (§10.4)', () => {
+  it("writes a signed integer in the fewest whole bytes of two's complement, and at least one", () => {
+    expect(bytes(int(0xfb, 0))).toEqual([0xfb, 0x81, 0x00])
+    expect(bytes(int(0xfb, 127))).toEqual([0xfb, 0x81, 0x7f])
+    expect(bytes(int(0xfb, 128))).toEqual([0xfb, 0x82, 0x00, 0x80])
+    expect(bytes(int(0xfb, -1))).toEqual([0xfb, 0x81, 0xff])
+    expect(bytes(int(0xfb, -33))).toEqual([0xfb, 0x81, 0xdf])
+    expect(bytes(int(0xfb, -128))).toEqual([0xfb, 0x81, 0x80])
+    expect(bytes(int(0xfb, -129))).toEqual([0xfb, 0x82, 0xff, 0x7f])
+    expect(bytes(int(0xfb, -(2n ** 63n)))).toEqual([0xfb, 0x88, 0x80, 0, 0, 0, 0, 0, 0, 0])
+    expect(() => int(0xfb, 2n ** 63n)).toThrow(RangeError)
+    expect(() => int(0xfb, 1.5)).toThrow(RangeError)
+  })
+
+  it('writes a SimpleBlock as the track number, the timecode, the flags and the frame', () => {
+    // Track 1 is the vint 0x81; the timecode -5 is 0xFFFB; the flags 0x80 are the keyframe.
+    expect(
+      bytes(simpleBlock({ track: 1, timecode: -5, keyframe: true, frames: [[9, 8, 7]] })),
+    ).toEqual([0xa3, 0x87, 0x81, 0xff, 0xfb, 0x80, 9, 8, 7])
+    expect(bytes(simpleBlock({ track: 1, timecode: 300, frames: [new Uint8Array([9])] }))).toEqual([
+      0xa3, 0x85, 0x81, 0x01, 0x2c, 0x00, 9,
+    ])
+    // Track 200 does not fit the 7 bits of one byte: it is the vint 0x40C8.
+    expect(bytes(simpleBlock({ track: 200, timecode: 0, frames: [[9]] }))).toEqual([
+      0xa3, 0x86, 0x40, 0xc8, 0x00, 0x00, 0x00, 9,
+    ])
+  })
+
+  it('writes Xiph lacing as the count less one, then each size but the last as runs of 255 and a last byte', () => {
+    const frames = [
+      new Uint8Array(300).fill(1),
+      new Uint8Array(255).fill(2),
+      new Uint8Array(10).fill(3),
+    ]
+    const block = simpleBlock({ track: 1, timecode: 0, lacing: 'xiph', frames })
+    // The element is 9 bytes of head and sizes and 565 of frames: 574 bytes, a size of 2 bytes.
+    expect(bytes(block.subarray(0, 3))).toEqual([0xa3, 0x42, 0x3e])
+    // The flags say Xiph (0x02); the count is 3 less 1; 300 is 255 and then 45; 255 is 255 and
+    // then 0, as a size ends with a byte below 255; the last size is not written.
+    expect(bytes(block.subarray(3, 12))).toEqual([0x81, 0x00, 0x00, 0x02, 2, 255, 45, 255, 0])
+    expect(block.length).toBe(12 + 565)
+    expect(block[12]).toBe(1)
+    expect(block[12 + 300]).toBe(2)
+    expect(block[12 + 555]).toBe(3)
+  })
+
+  it('writes EBML lacing as the first size and then the differences, each in the fewest bytes', () => {
+    // RFC 9559 §10.3's sizes: 800 is the vint 0x4320; 500 less 800 is -300, which with the
+    // 8191 that a 2-byte difference is offset by is 7891 = 0x1ED3, so 0x5ED3; 1000 less 500 is
+    // 500, which is 8691 = 0x21F3, so 0x61F3. The last size (20) is not written.
+    const frames = [800, 500, 1000, 20].map((size, index) => new Uint8Array(size).fill(index + 1))
+    const block = simpleBlock({ track: 1, timecode: 0, lacing: 'ebml', frames })
+    // 11 bytes of head and sizes and 2320 of frames: 2331 = 0x091B, a size of 2 bytes.
+    expect(bytes(block.subarray(0, 3))).toEqual([0xa3, 0x49, 0x1b])
+    expect(bytes(block.subarray(3, 14))).toEqual([
+      ...[0x81, 0x00, 0x00, 0x06, 3],
+      ...[0x43, 0x20, 0x5e, 0xd3, 0x61, 0xf3],
+    ])
+    expect(block.length).toBe(3 + 11 + 2320)
+
+    // Sizes of 100, 90, 95 and 5: the first is 0xE4; the differences -10 and 5 fit one byte,
+    // which is offset by 63: 53 is 0xB5 and 68 is 0xC4.
+    const small = [100, 90, 95, 5].map((size) => new Uint8Array(size))
+    expect(
+      bytes(simpleBlock({ track: 1, timecode: 0, lacing: 'ebml', frames: small }).subarray(0, 11)),
+    ).toEqual([...[0xa3, 0x41, 0x2a], ...[0x81, 0x00, 0x00, 0x06, 3, 0xe4, 0xb5, 0xc4]])
+  })
+
+  it('writes fixed lacing as the count less one and no sizes', () => {
+    const frames = [1, 2, 3, 4].map((fill) => new Uint8Array(192).fill(fill))
+    const block = simpleBlock({ track: 1, timecode: 0, lacing: 'fixed', frames })
+    // 5 bytes of head and 768 of frames: 773 = 0x0305.
+    expect(bytes(block.subarray(0, 8))).toEqual([0xa3, 0x43, 0x05, 0x81, 0x00, 0x00, 0x04, 3])
+    expect(block.length).toBe(8 + 768)
+    expect(block[8]).toBe(1)
+    expect(block[8 + 192]).toBe(2)
+    expect(block[8 + 768 - 1]).toBe(4)
+  })
+
+  it('writes a laced block of one frame as the count 0 and no sizes, in every lacing', () => {
+    expect(bytes(simpleBlock({ track: 1, timecode: 0, lacing: 'xiph', frames: [[7]] }))).toEqual([
+      0xa3, 0x86, 0x81, 0x00, 0x00, 0x02, 0x00, 7,
+    ])
+    expect(bytes(simpleBlock({ track: 1, timecode: 0, lacing: 'ebml', frames: [[7]] }))).toEqual([
+      0xa3, 0x86, 0x81, 0x00, 0x00, 0x06, 0x00, 7,
+    ])
+    expect(bytes(simpleBlock({ track: 1, timecode: 0, lacing: 'fixed', frames: [[7]] }))).toEqual([
+      0xa3, 0x86, 0x81, 0x00, 0x00, 0x04, 0x00, 7,
+    ])
+  })
+
+  it('refuses blocks that no file holds', () => {
+    // No frame, and two frames with no lacing to tell them apart.
+    expect(() => simpleBlock({ track: 1, timecode: 0, frames: [] })).toThrow(RangeError)
+    expect(() => simpleBlock({ track: 1, timecode: 0, frames: [[1], [2]] })).toThrow(RangeError)
+    // Fixed lacing is of frames of one size; a lace holds at most 256 frames.
+    expect(() =>
+      simpleBlock({ track: 1, timecode: 0, lacing: 'fixed', frames: [[1], [2, 3]] }),
+    ).toThrow(RangeError)
+    const many = Array.from({ length: 257 }, () => [1])
+    expect(() => simpleBlock({ track: 1, timecode: 0, lacing: 'xiph', frames: many })).toThrow(
+      RangeError,
+    )
+    expect(() => simpleBlock({ track: 1, timecode: 40000, frames: [[1]] })).toThrow(RangeError)
+    expect(() => simpleBlock({ track: -1, timecode: 0, frames: [[1]] })).toThrow(RangeError)
+  })
+
+  it('writes a BlockGroup as a Block, then the duration and the reference when it is given them', () => {
+    // The Block is the track, the timecode, flags of 0 (a keyframe is a BlockGroup with no reference)
+    // and the frame.
+    expect(bytes(blockGroup({ track: 1, timecode: 0, frames: [[1]] }))).toEqual([
+      ...[0xa0, 0x87],
+      ...[0xa1, 0x85, 0x81, 0x00, 0x00, 0x00, 1],
+    ])
+    expect(
+      bytes(blockGroup({ track: 1, timecode: 0, duration: 60, reference: -33, frames: [[1]] })),
+    ).toEqual([
+      ...[0xa0, 0x8d],
+      ...[0xa1, 0x85, 0x81, 0x00, 0x00, 0x00, 1],
+      ...[0x9b, 0x81, 60],
+      ...[0xfb, 0x81, 0xdf],
+    ])
+    // A reference of 0 is still a reference, and a duration of 0 a duration.
+    expect(
+      bytes(blockGroup({ track: 1, timecode: 0, duration: 0, reference: 0, frames: [[1]] })),
+    ).toEqual([
+      ...[0xa0, 0x8d],
+      ...[0xa1, 0x85, 0x81, 0x00, 0x00, 0x00, 1],
+      ...[0x9b, 0x81, 0],
+      ...[0xfb, 0x81, 0],
+    ])
+    // Its Block is laced as a SimpleBlock is.
+    expect(
+      bytes(blockGroup({ track: 1, timecode: 0, lacing: 'xiph', frames: [[1], [2, 3]] })),
+    ).toEqual([...[0xa0, 0x8b], ...[0xa1, 0x89, 0x81, 0x00, 0x00, 0x02, 1, 1, 1, 2, 3]])
   })
 })
