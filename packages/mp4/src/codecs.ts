@@ -692,7 +692,7 @@ export function codecString(entry: SampleEntry): string {
 }
 
 /** An ISO version 0 sound entry of this type for this many channels and this sample rate (16.16), followed by the boxes given. */
-function isoSound(
+export function soundEntry(
   type: string,
   channels: number,
   rate: number,
@@ -752,7 +752,7 @@ function audioConfigType(type: string): string | null {
  * stream, with no buffer size, no bit rates and no DecoderSpecificInfo, then
  * an SLConfigDescriptor of 2, which is what MP4 files carry.
  */
-function mp3Esds(): Uint8Array {
+export function mp3Esds(): Uint8Array {
   return Uint8Array.of(
     ...[0x00, 0x00, 0x00, 0x23], // the size of the box
     ...[0x65, 0x73, 0x64, 0x73], // 'esds'
@@ -768,24 +768,38 @@ function mp3Esds(): Uint8Array {
   )
 }
 
+/** Whether a rate in hertz is one that a rate field can hold: a number, not below the least that 16.16 has (a rate that rounds to 0 is none). */
+function isRate(hertz: number): boolean {
+  return Number.isFinite(hertz) && Math.round(hertz * 0x10000) > 0
+}
+
 /**
  * The rate field of an ISO sound entry for a rate in hertz, in 16.16: the rate
  * as it is when its whole part fits the 16 bits that ISO has for it, and
  * otherwise halved as often as it takes, as FFmpeg writes it (96000 as 48000,
  * 88200 as 44100, 192000 as 48000). A rate that is no number, or is below what
- * 16.16 can hold, which an entry that plays doesn't say, is `damaged`.
+ * 16.16 can hold, which an entry that plays doesn't say, is `damaged`; the
+ * sentence reads on its own and after a prefix, as a Matroska track's do.
  */
-function isoRate(entry: SampleEntry, hertz: number): number {
-  let rate = Math.round(hertz * 0x10000)
-  if (!Number.isFinite(hertz) || !(rate > 0)) {
-    throw damaged(`The '${entry.type}' sample description gives a sample rate of ${hertz}.`)
+export function soundRateField(hertz: number): number {
+  if (!isRate(hertz)) {
+    throw damaged(`a sample rate of ${hertz} is not one that a sound entry can hold.`)
   }
+  let rate = Math.round(hertz * 0x10000)
   let half = hertz
   while (rate > 0xffffffff) {
     half /= 2
     rate = Math.round(half * 0x10000)
   }
   return rate
+}
+
+/** The rate field of an entry read from an MP4 (`soundRateField`), for which a rate that is none is `damaged` with the entry's type in the sentence. */
+function isoRate(entry: SampleEntry, hertz: number): number {
+  if (!isRate(hertz)) {
+    throw damaged(`The '${entry.type}' sample description gives a sample rate of ${hertz}.`)
+  }
+  return soundRateField(hertz)
 }
 
 /**
@@ -842,5 +856,5 @@ export function initEntry(entry: SampleEntry): Uint8Array {
     config[mpeg2At - found.box.start] = MPEG4_AUDIO
   }
   const type = entry.type === '.mp3' ? 'mp4a' : entry.type
-  return isoSound(type, audio.channels, rate, [config, ...others])
+  return soundEntry(type, audio.channels, rate, [config, ...others])
 }
