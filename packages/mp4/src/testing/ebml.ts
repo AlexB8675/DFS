@@ -594,12 +594,16 @@ export interface MovieFrame {
   size?: number
   /** A BlockDuration in ticks, which puts the frame in a BlockGroup (a keyframe there has no ReferenceBlock, any other refers to the block before). */
   duration?: number
+  /** Frames laced in one block, in the lacing given: the block then holds these frames and not `data` or `size`, and `time` is the first frame's (the others follow it by the track's frame durations). */
+  lace?: { lacing: Lacing; frames: Part[] }
 }
 
 /** A Cluster of a built movie: its Timestamp in ticks and its frames, in decode order. */
 export interface MovieCluster {
   timestamp: number
   frames: MovieFrame[]
+  /** Write the cluster with the unknown size, as a writer that is still writing leaves it. */
+  unknown?: boolean
 }
 
 /** What a small whole file is built from. */
@@ -634,8 +638,11 @@ export interface Movie extends MatroskaFile {
 
 /** The block of a frame, in a SimpleBlock or, with a duration, a BlockGroup. */
 function frameBlock(frame: MovieFrame, timestamp: number): Uint8Array {
-  const data = frame.data ?? new Uint8Array(frame.size ?? 8)
-  const spec = { track: frame.track, timecode: frame.time - timestamp, frames: [data] }
+  const timecode = frame.time - timestamp
+  const spec: BlockSpec =
+    frame.lace === undefined
+      ? { track: frame.track, timecode, frames: [frame.data ?? new Uint8Array(frame.size ?? 8)] }
+      : { track: frame.track, timecode, lacing: frame.lace.lacing, frames: frame.lace.frames }
   if (frame.duration === undefined) return simpleBlock({ ...spec, keyframe: frame.keyframe })
   return blockGroup({
     ...spec,
@@ -669,6 +676,7 @@ export function matroskaMovie(spec: MovieSpec): Movie {
       cluster(
         one.timestamp,
         one.frames.map((frame) => frameBlock(frame, one.timestamp)),
+        { unknown: one.unknown },
       ),
     )
   }
