@@ -13,11 +13,22 @@ import type { DecodeState, TimedFrame } from './timing.ts'
 // call: the cursor says where the last one stopped, `readClusters` finds the frames
 // of the picture and of the sound in the chunk, `decodeTimes` gives them the times
 // that Matroska leaves out (it stores only when a frame is presented), and what
-// comes out is a table of frames for each track, in decode order, that `fragment`
-// writes as it is, and the cursor to go on with. A frame is given out once its decode
+// comes out is tables of frames, in decode order, that `fragment` writes as they
+// are, and the cursor to go on with. A frame is given out once its decode
 // time and the next one's are known, so the last frame of a span is held in the
 // cursor until the next span, whose chunk need not hold its bytes: the table has
 // only where they are in the file, and the engine reads them when it writes.
+//
+// A fragment gives each frame's decode time only as the first frame's plus the
+// durations before it, so a table the writer takes whole must be continuous: each
+// frame's decode time and duration reach the next frame's decode time. The frames
+// of one decode state are, for a duration is the distance to the next frame's decode
+// time; a skip breaks the run, for the state starts again after it and its times
+// jump. So `frames` lists the picture's runs, each its own table in the order they come
+// (the frames before a skip, the frames after it, and so on), and then the sound's,
+// which is one table whatever it skips, for its state goes on and its durations span
+// the gap. A caller writes each table as its own fragment or fragments (the engine
+// cuts them further by time as it likes), and never joins two.
 //
 // What a span restarts. A cursor made for a start (the file's, or a seek's) has not
 // started its picture: its frames wait for a keyframe, as the index counted from the
@@ -201,12 +212,17 @@ function fragmentTrack(
  * RangeError, the caller's miscount. The cursor given is never changed: a new one is
  * returned.
  *
- * - `frames` lists the picture first and then the sound, in decode order, and leaves
- *   out a track that has no frame to give. A frame comes out once its decode time and
- *   the next one's are known; the frames still waiting are in the returned cursor,
- *   and their bytes may lie in a chunk the caller no longer holds (the table has only
- *   offsets, and the engine reads the bytes of a frame when it writes it). At the
- *   Segment's end (`cursor.ended`) everything held comes out.
+ * - `frames` lists the picture's continuous runs in order, then the sound's, each
+ *   run a table of its own in decode order, and leaves out a track that has no frame
+ *   to give. Within a table every frame's decode time and duration reach the next
+ *   frame's decode time: a skip in the picture ends a run and starts the next, so
+ *   that a caller writes each table as its own fragment(s) and no fragment spans a
+ *   skip. The sound is one table, its durations spanning any gap.
+ * - A frame comes out once its decode time and the next one's are known; the frames
+ *   still waiting are in the returned cursor, and their bytes may lie in a chunk the
+ *   caller no longer holds (the table has only offsets, and the engine reads the
+ *   bytes of a frame when it writes it). At the Segment's end (`cursor.ended`)
+ *   everything held comes out.
  * - A cursor whose picture has not started drops the picture's frames before its
  *   first keyframe; the sound's are kept from where the cursor is.
  * - `skipped` lists the stretches of the file that were damaged and passed over, in
@@ -249,7 +265,7 @@ export function matroskaFrames(
   // The picture, in pieces: the frames before each skip go to the state as it is, and
   // the skip starts it again.
   const pictureFrames = read.frames.filter((frame) => frame.track === video.read.number)
-  const pictureTimed: TimedFrame[] = []
+  const pictureRuns: TimedFrame[][] = []
   let picture = cursor.picture
   let started = cursor.pictureStarted
   const feed = (frames: readonly RawFrame[], end: boolean): void => {
@@ -260,7 +276,7 @@ export function matroskaFrames(
       started = first !== -1
     }
     const done = decodeTimes(picture, usable, end)
-    pictureTimed.push(...done.timed)
+    if (done.timed.length > 0) pictureRuns.push(done.timed)
     picture = done.state
   }
   let piece: RawFrame[] = []
@@ -290,8 +306,10 @@ export function matroskaFrames(
   }
 
   const frames: FragmentTrack[] = []
-  const pictureTrack = fragmentTrack(index, video, pictureTimed)
-  if (pictureTrack !== null) frames.push(pictureTrack)
+  for (const run of pictureRuns) {
+    const pictureTrack = fragmentTrack(index, video, run)
+    if (pictureTrack !== null) frames.push(pictureTrack)
+  }
   const soundTrack = sound === null ? null : fragmentTrack(index, sound, soundTimed)
   if (soundTrack !== null) frames.push(soundTrack)
 

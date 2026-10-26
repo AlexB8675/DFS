@@ -187,7 +187,15 @@ interface Row {
   sync: number
 }
 
+/** A fragment's `trun` gives each frame's decode time as the first one's plus the durations before it, so a table the writer takes whole must be continuous: each frame's decode time and duration reach the next frame's decode time. */
+function continuous(table: FrameTable): void {
+  for (let at = 0; at + 1 < table.count; at += 1) {
+    expect(must(table.dts[at]) + must(table.durations[at])).toBe(must(table.dts[at + 1]))
+  }
+}
+
 function rowsOf(table: FrameTable): Row[] {
+  continuous(table)
   expect(table.offsets).toHaveLength(table.count)
   expect(table.sizes).toHaveLength(table.count)
   expect(table.dts).toHaveLength(table.count)
@@ -202,6 +210,29 @@ function rowsOf(table: FrameTable): Row[] {
     duration: must(table.durations[at]),
     sync: must(table.sync[at]),
   }))
+}
+
+/** The rows of each table of the track with this id, in the order the tables come. */
+function runsOf(frames: readonly FragmentTrack[], id: number): Row[][] {
+  return frames.filter((track) => track.header.id === id).map((track) => rowsOf(track.table))
+}
+
+/** All the rows of the track with this id over its tables, in order. */
+function allRows(frames: readonly FragmentTrack[], id: number): Row[] {
+  return runsOf(frames, id).flat()
+}
+
+/** The base media decode time of the `tfdt` of a fragment (version 1, 64 bits). */
+function baseTime(written: Uint8Array): number {
+  const at = written.findIndex(
+    (byte, i) =>
+      byte === 0x74 &&
+      written[i + 1] === 0x66 &&
+      written[i + 2] === 0x64 &&
+      written[i + 3] === 0x74,
+  )
+  if (at === -1) throw new Error('there is no tfdt')
+  return Number(new DataView(written.buffer, written.byteOffset).getBigUint64(at + 8))
 }
 
 /** The tables of a call, as rows added to those of a track's earlier calls. */
@@ -401,6 +432,7 @@ describe('the frames of a span of a file with B-frames and a laced sound (§10.4
 
     const [pictureTrack, soundTrack] = result.frames.map((track) => must(track))
     const table = must(pictureTrack).table
+    continuous(table)
     expect(table.count).toBe(16)
     expect(table.timescale).toBe(1000)
     expect(Array.from(table.dts)).toEqual(PICTURE_DTS)
@@ -414,6 +446,7 @@ describe('the frames of a span of a file with B-frames and a laced sound (§10.4
     expect(must(pictureTrack).prefix).toEqual(new Uint8Array(0))
 
     const sounds = must(soundTrack).table
+    continuous(sounds)
     expect(sounds.count).toBe(21)
     expect(sounds.timescale).toBe(1000)
     expect(Array.from(sounds.dts)).toEqual(SOUND_DTS)
@@ -783,8 +816,9 @@ describe('damage in the middle of a file (§10.4)', () => {
     expect(result.cursor.ended).toBe(true)
     expect(result.cursor.searching).toBe(false)
 
-    // The frames before the damage all come out, the one held when it came (at 100) with a duration of its own, the default's 33; the frame at 200, after it, comes before the next keyframe and is left out.
-    const pictures = rowsOf(must(result.frames[0]).table)
+    // The frames before the damage all come out, the one held when it came (at 100) with a duration of its own, the default's 33; the frame at 200, after it, comes before the next keyframe and is left out. The frames before the damage and those after it are two tables (see below).
+    expect(result.frames.map((track) => track.header.id)).toEqual([1, 1, 2])
+    const pictures = allRows(result.frames, 1)
     expect(pictures.map((row) => row.dts)).toEqual([0, 33, 67, 100, 233, 267])
     expect(pictures.map((row) => row.duration)).toEqual([33, 34, 33, 33, 34, 33])
     expect(pictures.map((row) => row.sync)).toEqual([1, 0, 0, 1, 1, 0])
@@ -796,9 +830,36 @@ describe('damage in the middle of a file (§10.4)', () => {
     expect(result.cursor.pictureStarted).toBe(true)
 
     // The sound goes on across the skip, its frame before it lasting to the one after.
-    const sounds = rowsOf(must(result.frames[1]).table)
+    const sounds = allRows(result.frames, 2)
     expect(sounds.map((row) => row.dts)).toEqual([0, 20, 100, 200, 220])
     expect(sounds.map((row) => row.duration)).toEqual([20, 80, 100, 20, 20])
+  })
+
+  it('gives the picture before the skip and after it as two tables, each of which the writer takes as its own fragment', () => {
+    const result = matroskaFrames(index, matroskaStart(index, 2), { start: 0, bytes })
+    // Two tables of the picture, in order, of the same track, and then the sound's (one: its durations span the skip).
+    expect(result.frames.map((track) => track.header.id)).toEqual([1, 1, 2])
+    const [before, after] = runsOf(result.frames, 1)
+    // The first ends with the frames flushed at the skip (the keyframe at 100 last), the second starts at the keyframe after it.
+    const at = (one: Known): number => locate(movie.bytes, one.data)
+    expect(must(before).map((row) => row.dts)).toEqual([0, 33, 67, 100])
+    expect(must(before).map((row) => row.offset)).toEqual(
+      [frames.key0, frames.next33, frames.next67, frames.key100].map(at),
+    )
+    expect(must(after).map((row) => row.dts)).toEqual([233, 267])
+    expect(must(after).map((row) => row.offset)).toEqual([frames.key233, frames.next267].map(at))
+    expect(must(after).map((row) => row.sync)).toEqual([1, 0])
+    expect(runsOf(result.frames, 2)).toHaveLength(1)
+
+    // Written as fragments of their own, each begins at its own first decode time: the frames after the skip are at 233, not at 100 + 33.
+    const [first, second] = result.frames
+    const bytesAt = (offset: number, size: number): Uint8Array =>
+      bytes.subarray(offset, offset + size)
+    const one = must(first)
+    const two = must(second)
+    expect(one.header.id).toBe(two.header.id)
+    expect(baseTime(fragment(one, 0, one.table.count, 1, bytesAt))).toBe(0)
+    expect(baseTime(fragment(two, 0, two.table.count, 2, bytesAt))).toBe(233)
   })
 
   it('is told of it once the walk is over, cut at every byte, with the same frames', () => {
@@ -821,7 +882,12 @@ describe('damage in the middle of a file (§10.4)', () => {
     // The second damage skips to the end of the Segment: the cluster's remaining frames (the one after 220) go with it.
     expect(merged(result.skipped)).toEqual([damage, { start: other, end: twice.length }])
     // The keyframe at 233 was read before the second skip and is held when it comes: it comes out, with a duration of its own, and the picture waits for a keyframe again, and there is none.
-    const pictures = rowsOf(must(result.frames[0]).table)
+    expect(result.frames.map((track) => track.header.id)).toEqual([1, 1, 2])
+    const pictures = allRows(result.frames, 1)
+    expect(runsOf(result.frames, 1).map((run) => run.map((row) => row.dts))).toEqual([
+      [0, 33, 67, 100],
+      [233],
+    ])
     expect(pictures.map((row) => row.dts)).toEqual([0, 33, 67, 100, 233])
     expect(pictures.map((row) => row.duration)).toEqual([33, 34, 33, 33, 33])
     expect(pictures.map((row) => row.sync)).toEqual([1, 0, 0, 1, 1])
@@ -856,7 +922,9 @@ describe('the picture before a skip, when it reorders (§10.4)', () => {
     const { bytes, at } = broken(5)
     const result = matroskaFrames(index, matroskaStart(index, null), { start: 0, bytes })
     expect(result.skipped).toEqual([{ start: at, end: third }])
-    const pictures = rowsOf(must(result.frames[0]).table)
+    expect(result.frames.map((track) => track.header.id)).toEqual([1, 1])
+    expect(runsOf(result.frames, 1).map((run) => run.length)).toEqual([5, 8])
+    const pictures = allRows(result.frames, 1)
     // Before: the five frames read (presented at 0, 100, 33, 67 and 233), the last held when the skip came and given a duration of its own, 33. After: the third cluster's eight, the decode times started again from its keyframe's (267, less 67, 33 and 0), the shift of 67 on all of them.
     expect(pictures.map((row) => row.dts)).toEqual([
       ...[0, 34, 67, 100, 134],
@@ -886,7 +954,9 @@ describe('the picture before a skip, when it reorders (§10.4)', () => {
     const { bytes, at } = broken(2)
     const result = matroskaFrames(index, matroskaStart(index, null), { start: 0, bytes })
     expect(result.skipped).toEqual([{ start: at, end: must(movie.clusters[1]).start }])
-    const pictures = rowsOf(must(result.frames[0]).table)
+    expect(result.frames.map((track) => track.header.id)).toEqual([1, 1])
+    expect(runsOf(result.frames, 1).map((run) => run.length)).toEqual([2, 8])
+    const pictures = allRows(result.frames, 1)
     expect(pictures.map((row) => row.dts)).toEqual([
       ...[34, 67],
       ...[267, 301, 334, 367, 401, 434, 467, 501],
