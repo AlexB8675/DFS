@@ -26,12 +26,22 @@ import type { MatroskaTrack } from './tracks.ts'
 /** Bytes before the Tracks element, so that its offsets in the bytes are never 0-based. */
 const PREFIX = 7
 
-/** The tracks of an element that holds the entries it is given, read from bytes that have more before it. */
-function readEntries(entries: Uint8Array[]): MatroskaTrack[] {
+/** What `readTracks` gives for a Tracks element that holds the entries it is given, read from bytes that have more before it. */
+function readResult(entries: Uint8Array[]): {
+  tracks: MatroskaTrack[]
+  damage: Mp4Error | null
+} {
   const bytes = concat(new Uint8Array(PREFIX).fill(0xaa), tracksElement(entries))
   const tracks = readHeader(bytes, PREFIX, bytes.length)
   if (tracks === null) throw new Error('the Tracks header is not whole')
   return readTracks(bytes, tracks)
+}
+
+/** The tracks of a Tracks element that walks to its end, which must have no damage. */
+function readEntries(entries: Uint8Array[]): MatroskaTrack[] {
+  const { tracks, damage } = readResult(entries)
+  expect(damage).toBeNull()
+  return tracks
 }
 
 function read(specs: TrackSpec[]): MatroskaTrack[] {
@@ -476,12 +486,8 @@ describe('reading the tracks of a Tracks element (§10.4)', () => {
       const readWhole = (bytes: Uint8Array): MatroskaTrack[] => {
         const tracks = readHeader(bytes, 0, bytes.length)
         if (tracks === null) throw new Error('the Tracks header is not whole')
-        return readTracks(bytes, tracks)
+        return readTracks(bytes, tracks).tracks
       }
-
-      // An entry that claims more than the Tracks element holds.
-      const small = elementSized(ID.Tracks, sizeBytes(entry.length - 3), entry)
-      refused(() => readWhole(small), 'damaged')
 
       // A Tracks element that claims more than the bytes hold.
       const whole = tracksElement([entry])
@@ -491,11 +497,101 @@ describe('reading the tracks of a Tracks element (§10.4)', () => {
       const open = elementSized(ID.Tracks, unknownSize(), entry)
       refused(() => readWhole(open), 'damaged')
 
-      // A child whose header the Tracks element cuts short.
-      refused(() => readWhole(element(ID.Tracks, entry, [0xae])), 'damaged')
-
       // And the same entry, whole, is read.
       expect(numbers(readWhole(whole))).toEqual([1])
+    })
+  })
+
+  describe('the damage that stops the walk of the Tracks element', () => {
+    /** An entry that the Tracks element cannot walk past, in each way that it can't. */
+    const UNWALKABLE: [string, Uint8Array, RegExp][] = [
+      ['an entry that claims more than the Tracks element holds', overrun(ID.TrackEntry), /claims/],
+      [
+        'an entry of unknown size',
+        elementSized(ID.TrackEntry, unknownSize(), trackEntry(picture(9))),
+        /unknown size/,
+      ],
+      ['an entry whose header the Tracks element cuts short', new Uint8Array([0xae]), /cut short/],
+    ]
+
+    // Whatever stands after an entry that can't be walked past can't be told from its data, so each of these ends its Tracks element.
+    it.each(UNWALKABLE)(
+      'keeps the tracks before %s, with the damage, and the picture and the sounds play',
+      (_name, damaged, says) => {
+        const { tracks, damage } = readResult([
+          trackEntry(picture(1)),
+          trackEntry(sound(2)),
+          damaged,
+        ])
+        expect(numbers(tracks)).toEqual([1, 2])
+        expect(tracks.every((track) => track.problem === null && track.refusal === null)).toBe(true)
+        expect(damage).toBeInstanceOf(Mp4Error)
+        expect(damage?.reason).toBe('damaged')
+        expect(damage?.message).toMatch(says)
+
+        // A picture was read before the damage, so the damage costs nothing.
+        const chosen = chooseMatroskaTracks(tracks, damage)
+        expect(chosen.video).toBe(tracks[0])
+        expect(chosen.sounds).toEqual([tracks[1]])
+      },
+    )
+
+    it('keeps a broken entry that is still whole in the Tracks element on the track, and the walk goes on', () => {
+      const { tracks, damage } = readResult([
+        trackEntry(picture(1)),
+        trackEntry({ ...sound(2), extra: [overrun(ID.CodecPrivate)] }),
+        trackEntry(sound(3)),
+      ])
+      expect(numbers(tracks)).toEqual([1, 2, 3])
+      expect(tracks[1]?.problem).not.toBeNull()
+      expect(damage).toBeNull()
+    })
+
+    it.each(UNWALKABLE)(
+      'refuses for the damage, and not as having no picture, when %s stops the walk before any picture',
+      (_name, damaged) => {
+        const { tracks, damage } = readResult([trackEntry(sound(1)), damaged])
+        expect(numbers(tracks)).toEqual([1])
+        expect(damage).toBeInstanceOf(Mp4Error)
+        const refusal = refused(() => chooseMatroskaTracks(tracks, damage), 'damaged')
+        expect(refusal).toBe(damage)
+      },
+    )
+
+    it('refuses for the damage when it is the first thing in the Tracks element', () => {
+      const { tracks, damage } = readResult([overrun(ID.TrackEntry)])
+      expect(tracks).toEqual([])
+      expect(damage).toBeInstanceOf(Mp4Error)
+      expect(refused(() => chooseMatroskaTracks(tracks, damage), 'damaged')).toBe(damage)
+    })
+
+    it('refuses for the damage when the picture read before it is disabled, as it is no picture that plays', () => {
+      const { tracks, damage } = readResult([
+        trackEntry(picture(1, { enabled: false })),
+        trackEntry(sound(2)),
+        overrun(ID.TrackEntry),
+      ])
+      expect(numbers(tracks)).toEqual([1, 2])
+      expect(refused(() => chooseMatroskaTracks(tracks, damage), 'damaged')).toBe(damage)
+    })
+
+    it('has no damage when the Tracks element walks to its end', () => {
+      expect(readResult([trackEntry(picture(1)), trackEntry(sound(2))]).damage).toBeNull()
+      expect(readResult([]).damage).toBeNull()
+      // The CRC-32 and the Void that stand between the entries are not damage.
+      const { damage } = readResult([
+        element(ID.CRC32, [1, 2, 3, 4]),
+        trackEntry(picture(1)),
+        element(ID.Void, [0, 0]),
+      ])
+      expect(damage).toBeNull()
+    })
+
+    it('still refuses as having no picture when there is no damage to give', () => {
+      const { tracks, damage } = readResult([trackEntry(sound(1))])
+      expect(damage).toBeNull()
+      refused(() => chooseMatroskaTracks(tracks, damage), 'no-picture')
+      refused(() => chooseMatroskaTracks(tracks), 'no-picture')
     })
   })
 

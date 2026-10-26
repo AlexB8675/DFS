@@ -8,8 +8,10 @@ import { ID } from './ids.ts'
 // MP4, a track is read leniently: one whose entry can't be read is kept with a
 // `problem` that says why, and one that is read but can't be played is kept with
 // a `refusal`, because only the tracks that are chosen have to be sound, and a
-// file with a broken subtitle track still plays. Only a Tracks element that
-// can't be walked turns the whole file away.
+// file with a broken subtitle track still plays. The Tracks element is read the
+// same way: the entries before damage that stops its walk are kept, and the
+// damage turns the file away only when no picture was read before it (see
+// `readTracks` and `chooseMatroskaTracks`).
 //
 // A track has a `problem` or a `refusal`, never both: a refusal is a reason that
 // a track that was read can't be played, which a track that couldn't be read has
@@ -112,11 +114,12 @@ function first(found: readonly Element[], id: number): Element | undefined {
 
 /**
  * The elements directly inside `parent`, as `children` finds them, but as far
- * as the entry can be walked: an element that can't be (its header is cut short
+ * as `parent` can be walked: an element that can't be (its header is cut short
  * by `parent`, it is of unknown size or it runs past `parent`) stops the walk,
  * and the elements before it are kept, with the damage that stopped it. A track
  * is told by its TrackType and its flag, which come early in an entry, so
- * damage after them is no reason to lose them.
+ * damage after them is no reason to lose them; the same goes for the entries of
+ * a Tracks element, of which a damaged one is no reason to lose those before it.
  */
 function leading(
   bytes: Uint8Array,
@@ -472,40 +475,68 @@ function readEntry(bytes: Uint8Array, entry: Element): MatroskaTrack {
  * The tracks of a file, in the order of its Tracks element, which is held whole:
  * `bytes` holds it, and `tracks` is its element in those bytes. A track whose
  * entry can't be read is in the result with its `problem`, never refused (see
- * `MatroskaTrack`); only a Tracks element that can't be walked (an entry that
- * claims more than it holds, a header cut short, or a size it doesn't have) is
- * refused, as `Mp4Error('damaged')`. Two tracks of the same number are both kept
- * as they are read.
+ * `MatroskaTrack`). The Tracks element itself is walked as far as it can be, as
+ * `leading` walks an entry, and every entry before the damage is read: an entry
+ * that claims more than the Tracks element holds, one whose header is cut short
+ * or one of unknown size stops the walk, and the `damage` that stopped it is
+ * given beside the tracks that came before it (null when the walk reached the
+ * end), for `chooseMatroskaTracks` to decide what it costs, as `need` in
+ * movie.ts does for an MP4. Only a Tracks element that is no element to walk (it
+ * has no size, or claims more than `bytes` holds) is refused, as
+ * `Mp4Error('damaged')`. Two tracks of the same number are both kept as they are
+ * read.
  */
-export function readTracks(bytes: Uint8Array, tracks: Element): MatroskaTrack[] {
+export function readTracks(
+  bytes: Uint8Array,
+  tracks: Element,
+): { tracks: MatroskaTrack[]; damage: Mp4Error | null } {
   if (!tracks.sized) {
     throw damaged(
       `The Tracks element at offset ${tracks.start} has an unknown size, which only a Segment or a Cluster may have.`,
     )
   }
-  return children(bytes, tracks)
-    .filter((child) => child.id === ID.TrackEntry)
-    .map((entry) => readEntry(bytes, entry))
+  if (tracks.end > bytes.length) {
+    throw damaged(
+      `The Tracks element at offset ${tracks.start} claims ${tracks.end - tracks.data} bytes, but ${Math.max(bytes.length - tracks.data, 0)} are held.`,
+    )
+  }
+  const { found, damage } = leading(bytes, tracks)
+  return {
+    tracks: found
+      .filter((child) => child.id === ID.TrackEntry)
+      .map((entry) => readEntry(bytes, entry)),
+    damage,
+  }
 }
 
 /**
  * The picture and the sounds that a file plays (D45). The picture is the first
  * enabled picture track, whatever is wrong with it: a first picture that can't
  * be read or played refuses the file, and isn't passed over for a second. A file
- * with no enabled picture is refused as `no-picture`. The sounds are the enabled
- * sound tracks, the first of them that is flagged default first (else the first
- * in the file is), then all the others in the order of the file, so that the
- * sound that plays is the one the file says to play and the others are there to
- * choose. A sound that has a problem or a refusal keeps its place: the index
- * decides what that costs.
+ * with no enabled picture is refused as `no-picture`, unless `damage` (what
+ * stopped the walk of the Tracks element, from `readTracks`) is given: the
+ * picture may have been in the part of the element that couldn't be walked, so
+ * the damage is the refusal then, as `need` in movie.ts gives the damage that
+ * stopped a walk as the reason for what it lacks. A picture that was read before
+ * the damage costs nothing to it. The sounds are the enabled sound tracks, the
+ * first of them that is flagged default first (else the first in the file is),
+ * then all the others in the order of the file, so that the sound that plays is
+ * the one the file says to play and the others are there to choose. A sound that
+ * has a problem or a refusal keeps its place: the index decides what that costs.
  */
-export function chooseMatroskaTracks(tracks: readonly MatroskaTrack[]): {
+export function chooseMatroskaTracks(
+  tracks: readonly MatroskaTrack[],
+  damage: Mp4Error | null = null,
+): {
   video: MatroskaTrack
   sounds: MatroskaTrack[]
 } {
   const video = tracks.find((track) => track.kind === 'video' && track.enabled)
   if (video === undefined) {
-    throw new Mp4Error('no-picture', 'The file has no picture track, so there is nothing to play.')
+    throw (
+      damage ??
+      new Mp4Error('no-picture', 'The file has no picture track, so there is nothing to play.')
+    )
   }
   const enabled = tracks.filter((track) => track.kind === 'audio' && track.enabled)
   const preferred = enabled.find((track) => track.default)
