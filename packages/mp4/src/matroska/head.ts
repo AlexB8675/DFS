@@ -106,6 +106,9 @@ function covers(ranges: readonly ByteRange[], start: number, end: number): boole
  * gives that, would have read: a header that isn't held is asked for as
  * `[pos, pos + HEADER_READ)`, so the headers within that range are not another
  * read; an element that has to be whole is asked for from its header to its end.
+ * A probe counts as much when what it finds is no header (a stale entry of a
+ * SeekHead points at one): every position the walk looks at, that no read has
+ * had, is a read, so that no file can make a caller read more than the cap.
  * So the count is the walk's, the same however much a caller has read ahead,
  * and the chunks that the walk never needed count for nothing. A walk that has
  * needed `MAX_INDEX_READS` and needs another is refused.
@@ -146,26 +149,34 @@ class Held {
     const held = heldPrefix(this.chunks, pos, Math.min(pos + MAX_HEADER, limit))
     const window = { start: pos, end: Math.min(pos + HEADER_READ, this.fileSize) }
 
-    let found: Element | null
+    let found: Element | null = null
+    let malformed = false
     try {
       found = readHeader(held, 0, held.length)
     } catch (error) {
       if (!(error instanceof Mp4Error)) throw error
+      malformed = true
+    }
+
+    // Bytes that aren't held whole, and that `limit` doesn't cut: the walk asks for them, which is a read whatever they turn out to be.
+    if (found === null && !malformed && pos + held.length < limit) {
+      this.charge(window)
+      throw new Need(window)
+    }
+
+    // The bytes that the walk looked at to tell what is there: a header that parses is the bytes it takes, and one that is malformed or that `limit` cuts short is all that is held of it. Each is a read when no read has had them, a header that proves damaged as much as one that parses: a probe that fails would otherwise be free, and a SeekHead of many stale entries would make a caller read as many ranges, the step after the step.
+    const looked = pos + (found === null ? held.length : found.data)
+    if (!covers(this.covered, pos, looked)) this.charge(window)
+    if (malformed) {
       throw new BadHeader(
         `The element at offset ${pos} has a header that no element has: an ID wider than 4 bytes, a size wider than 8, or a size past 2^53 - 1.`,
       )
     }
     if (found === null) {
-      if (pos + held.length >= limit) {
-        throw new BadHeader(
-          `The element at offset ${pos} is cut short: its header is not whole before offset ${limit}, where what holds it ends.`,
-        )
-      }
-      this.charge(window)
-      throw new Need(window)
+      throw new BadHeader(
+        `The element at offset ${pos} is cut short: its header is not whole before offset ${limit}, where what holds it ends.`,
+      )
     }
-
-    if (!covers(this.covered, pos, pos + found.data)) this.charge(window)
     return {
       id: found.id,
       start: pos,
@@ -267,7 +278,7 @@ function readDuration(bytes: Uint8Array, el: Element): number | null {
     if (error instanceof Mp4Error) return null
     throw error
   }
-  return duration >= 0 ? duration : null
+  return Number.isFinite(duration) && duration >= 0 ? duration : null
 }
 
 function readInfo(bytes: Uint8Array, el: Element): Timing {

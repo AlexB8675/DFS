@@ -941,6 +941,83 @@ describe('what the walk asks for when the head is not enough (§10.4)', () => {
     damaged(() => readHead(ahead, file.bytes.length))
   })
 
+  it('counts a read for each probe at a stale entry of a SeekHead, so that many entries cannot make a caller read many ranges', () => {
+    // A SeekHead of 40 entries that name Tracks, each in a different place 70 000 bytes from the next (more than a read of a header), in a Void of zeros: a byte that starts no element. The real Tracks are nowhere.
+    const entries = 40
+    const file = matroskaFile([
+      (at) =>
+        seekHead(
+          Array.from({ length: entries }, (_, index): [number, number] => [
+            ID.Tracks,
+            (at[2] ?? 0) + 100 + index * 70_000,
+          ]),
+        ),
+      info({}),
+      padding(3 * MIB),
+      cluster(),
+    ])
+    const asks: ByteRange[] = []
+    const error = damaged(() => open(file.bytes, { asks }))
+    // Not a read for each entry: the cap, and the sentence that names it.
+    expect(asks.length).toBeLessThanOrEqual(MAX_INDEX_READS)
+    expect(error.message).toContain(String(MAX_INDEX_READS))
+    expect(error.message).toMatch(/reads/)
+
+    // The same through the steps of the protocol, counted by the calls: no more than the cap and one that is refused.
+    const chunks: Chunk[] = [{ start: 0, bytes: file.bytes.subarray(0, HEAD) }]
+    let calls = 0
+    let refused: unknown
+    while (refused === undefined && calls < TURNS) {
+      calls += 1
+      try {
+        const step = readHead(chunks, file.bytes.length)
+        if ('done' in step) throw new Error('expected a refusal')
+        const { start, end } = step.need
+        chunks.push({ start, bytes: file.bytes.subarray(start, end) })
+      } catch (thrown) {
+        refused = thrown
+      }
+    }
+    expect(refused).toBeInstanceOf(Mp4Error)
+    expect(calls).toBeLessThanOrEqual(MAX_INDEX_READS + 1)
+  })
+
+  it('counts a read for a probe that is malformed or cut short by the Segment, though the caller held it', () => {
+    // Tracks are found, and Info is not: the SeekHead names it at 3 places far from each other, each a byte of 0 (a header that no element has).
+    const probes = 3
+    const malformed = matroskaFile([
+      (at) =>
+        seekHead(
+          Array.from({ length: probes }, (_, index): [number, number] => [
+            ID.Info,
+            (at[2] ?? 0) + 100 + index * 70_000,
+          ]),
+        ),
+      tracks(),
+      padding(3 * MIB),
+      cluster(),
+    ])
+    // The head is cut before the first of them, so that each is a read.
+    const found = open(malformed.bytes, { head: 5000 })
+    expect(found.asks.length).toBeGreaterThanOrEqual(probes)
+    expect(found.head.reads).toBe(found.asks.length)
+    expect(found.head.timestampScale).toBe(1_000_000)
+
+    // A probe near the end of a Segment that is shorter than the file: the bytes are held, and the Segment ends in the middle of their header.
+    const stuff = new Uint8Array(3 * MIB).fill(0x1a)
+    const children = (n: number): Uint8Array[] => [
+      seekHead([[ID.Info, n - 3]]),
+      tracks(),
+      element(ID.Cluster, binary(ID.SimpleBlock, stuff)),
+    ]
+    const n = seekHead([[ID.Info, 0]]).length + tracks().length + 2 * MIB
+    const bytes = concat(ebmlHeader(), elementSized(ID.Segment, sizeBytes(n), ...children(n)))
+    const cutShort = open(bytes, { head: 5000 })
+    expect(cutShort.asks.length).toBeGreaterThanOrEqual(1)
+    expect(cutShort.head.reads).toBe(cutShort.asks.length)
+    expect(cutShort.head.segment.end - cutShort.head.segment.data).toBe(n)
+  })
+
   it('opens a healthy file that a caller has read as 30 chunks of a megabyte, which touch', () => {
     // A Tags of 29.5 MiB: the file is 30 MiB or so, and the walk needs the one read to the Cluster.
     const file = matroskaFile([
