@@ -540,3 +540,43 @@ export function blockGroup({
     ...(reference === undefined ? [] : [int(ID.ReferenceBlock, reference)]),
   )
 }
+
+/** The table of the CRC-32 that zlib and Matroska use (the polynomial 0xEDB88320, reflected): the remainder of each byte. */
+const CRC_TABLE = Uint32Array.from({ length: 256 }, (_, byte) => {
+  let remainder = byte
+  for (let bit = 0; bit < 8; bit += 1) {
+    remainder = remainder & 1 ? 0xedb88320 ^ (remainder >>> 1) : remainder >>> 1
+  }
+  return remainder >>> 0
+})
+
+/** The CRC-32 of `bytes`, as an unsigned number. */
+function crc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff
+  for (const byte of bytes) crc = (CRC_TABLE[(crc ^ byte) & 0xff] ?? 0) ^ (crc >>> 8)
+  return (crc ^ 0xffffffff) >>> 0
+}
+
+/**
+ * A Cluster: the Timestamp (in ticks, in the fewest bytes that hold it) and then
+ * the children, which are blocks and whatever else a test wants in the cluster.
+ * With `crc` the CRC-32 comes first, as ffmpeg writes it, over everything after it
+ * and little-endian, as RFC 9559 gives it. With `unknown` the size is the unknown
+ * one, which a writer that is still writing leaves. The two may be given together,
+ * for a test that wants both.
+ */
+export function cluster(
+  timestamp: number,
+  children: Uint8Array[],
+  { unknown = false, crc = false }: { unknown?: boolean; crc?: boolean } = {},
+): Uint8Array {
+  const body = concat(uint(ID.Timestamp, timestamp), ...children)
+  const sum = crc32(body)
+  const data = crc
+    ? concat(
+        element(ID.CRC32, [sum & 0xff, (sum >>> 8) & 0xff, (sum >>> 16) & 0xff, sum >>> 24]),
+        body,
+      )
+    : body
+  return unknown ? elementSized(ID.Cluster, unknownSize(), data) : element(ID.Cluster, data)
+}

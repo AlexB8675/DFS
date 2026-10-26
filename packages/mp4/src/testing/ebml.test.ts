@@ -1,9 +1,11 @@
+import { crc32 } from 'node:zlib'
 import { describe, expect, it } from 'vitest'
 import { ID } from '../matroska/ids.ts'
 import type { MatroskaFile } from './ebml.ts'
 import {
   binary,
   blockGroup,
+  cluster,
   ebmlHeader,
   element,
   elementSized,
@@ -569,5 +571,50 @@ describe('the block builder (§10.4)', () => {
     expect(
       bytes(blockGroup({ track: 1, timecode: 0, lacing: 'xiph', frames: [[1], [2, 3]] })),
     ).toEqual([...[0xa0, 0x8b], ...[0xa1, 0x89, 0x81, 0x00, 0x00, 0x02, 1, 1, 1, 2, 3]])
+  })
+})
+
+describe('the cluster builder (§10.4)', () => {
+  it('writes a Cluster as its Timestamp and then the children it is given', () => {
+    // The Timestamp 7 is the element E7 81 07; the Cluster's size is the 3 bytes of that and the 3 of the Void.
+    expect(bytes(cluster(7, [element(ID.Void, [0])]))).toEqual([
+      ...[0x1f, 0x43, 0xb6, 0x75, 0x86],
+      ...[0xe7, 0x81, 0x07],
+      ...[0xec, 0x81, 0x00],
+    ])
+    // A Timestamp past one byte is as wide as it needs to be.
+    expect(bytes(cluster(300, []))).toEqual([
+      ...[0x1f, 0x43, 0xb6, 0x75, 0x84],
+      ...[0xe7, 0x82, 0x01, 0x2c],
+    ])
+  })
+
+  it('writes the size of a live writer as the unknown size, which runs on to what ends it', () => {
+    expect(bytes(cluster(7, [], { unknown: true }))).toEqual([
+      ...[0x1f, 0x43, 0xb6, 0x75, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+      ...[0xe7, 0x81, 0x07],
+    ])
+  })
+
+  it('writes the CRC-32 that ffmpeg writes first, over everything that follows it, little-endian', () => {
+    const block = simpleBlock({ track: 1, timecode: 0, keyframe: true, frames: [[1, 2, 3]] })
+    const whole = cluster(5, [block], { crc: true })
+    // The Cluster's data is the CRC-32 (6 bytes), the Timestamp (3) and the block (9).
+    expect(bytes(whole.subarray(0, 6))).toEqual([0x1f, 0x43, 0xb6, 0x75, 0x80 | 18, 0xbf])
+    expect(whole[6]).toBe(0x84)
+    const covered = whole.subarray(11)
+    expect(bytes(covered)).toEqual([...[0xe7, 0x81, 0x05], ...bytes(block)])
+    const sum = crc32(covered)
+    expect(bytes(whole.subarray(7, 11))).toEqual([
+      sum & 0xff,
+      (sum >>> 8) & 0xff,
+      (sum >>> 16) & 0xff,
+      sum >>> 24,
+    ])
+  })
+
+  it('refuses a Timestamp that no file holds', () => {
+    expect(() => cluster(-1, [])).toThrow(RangeError)
+    expect(() => cluster(1.5, [])).toThrow(RangeError)
   })
 })
