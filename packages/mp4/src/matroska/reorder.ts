@@ -10,8 +10,19 @@ import type { MatroskaTrack } from './tracks.ts'
 // film than where it was taken, and a frame that is given no decode duration
 // stalls Media Source. AVC and HEVC state it in their first sequence parameter set
 // (SPS); AV1 and VP9 have no frames that are decoded out of order in this sense,
-// so theirs is 0. A configuration that can't be read is `damaged`, with a sentence
-// that reads after "The picture track can't be played: ".
+// so theirs is 0. An H.264 SPS may leave it out, and then the depth is the most
+// that an H.264 decoder holds back, 15: a depth too small stalls Media Source, one
+// too large only delays the decode times, and the level of a stream is no sure
+// bound on how far it reorders. `stated` says which of the two a depth is, for the
+// checks that hold only where the configuration gives the depth. A configuration
+// that can't be read is `damaged`, with a sentence that reads after "The picture
+// track can't be played: ".
+
+/** A picture's reorder depth, and whether its configuration states it (`stated`) or it is the most the codec can hold back (an H.264 SPS that leaves it out). */
+export interface ReorderDepth {
+  depth: number
+  stated: boolean
+}
 
 /** The most that a picture's reorder depth can be: no codec's DPB holds more than 16 frames, and a depth past it is a field that was read wrong. */
 const MAX_DEPTH = 16
@@ -38,39 +49,14 @@ const HIGH_PROFILES: ReadonlySet<number> = new Set([
   100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135,
 ])
 
-/** Baseline: it has no B-frames, so a stream that states nothing of its reordering has none. */
+/** Baseline: it has no B-frames, so a stream that states nothing of its reordering has none (the same holds for a stream with no reference frames). */
 const BASELINE_PROFILE = 66
 
 /** The most leading zeros that an exp-Golomb code can have (ITU-T H.264 §9.1): with 31 the value is 2^32 - 2 at most, the most that 32 bits hold. */
 const MAX_ZEROS = 31
 
-/**
- * MaxDpbMbs of each level (ITU-T H.264 Table A-1), the macroblocks that a
- * decoded picture buffer holds, as ffmpeg's `level_max_dpb_mbs` (h264_ps.c) has
- * them. A level that is not here has no limit that ffmpeg knows, and a stream
- * that states no reordering at such a level may reorder by as much as it can.
- */
-const MAX_DPB_MBS: ReadonlyMap<number, number> = new Map([
-  [10, 396],
-  [11, 900],
-  [12, 2376],
-  [13, 2376],
-  [20, 2376],
-  [21, 4752],
-  [22, 8100],
-  [30, 8100],
-  [31, 18000],
-  [32, 20480],
-  [40, 32768],
-  [41, 32768],
-  [42, 34816],
-  [50, 110400],
-  [51, 184320],
-  [52, 184320],
-])
-
-/** The most frames a decoded picture buffer is taken to hold when nothing says less: ffmpeg's `MAX_DELAYED_PIC_COUNT` (16) less one. */
-const MAX_DPB_FRAMES = 15
+/** The most frames an H.264 decoder holds back, which is the depth of an SPS that states none: ffmpeg's `MAX_DELAYED_PIC_COUNT` (16) less one. */
+const UNSTATED_DEPTH = 15
 
 function damaged(message: string): Mp4Error {
   return new Mp4Error('damaged', message)
@@ -190,17 +176,17 @@ function skipHrd(r: BitReader, what: string): void {
 }
 
 /**
- * The reorder depth that the first SPS of an `avcC` states (ITU-T H.264
+ * The reorder depth that the first SPS of an `avcC` gives (ITU-T H.264
  * §7.3.2.1.1 and Annex E.1.1): `max_num_reorder_frames` of its VUI's bitstream
- * restriction. An SPS that has no restriction states none, and then, as ffmpeg's
- * `h264_ps.c` has it, the depth is 0 for a stream with no reference frames or of
- * the Baseline profile, which has no B-frames, and for any other the frames that
- * the level's decoded picture buffer holds of a picture of this size, at most 15,
- * and 15 for a level that is not in the table. That is never less than what the
- * stream reorders, so the decode times that it gives stay valid; ffmpeg instead
- * measures such a stream.
+ * restriction, which is stated. An SPS with no restriction (no VUI, or the flag
+ * 0) states none: the depth is then 0 for a stream with no reference frames or of
+ * the Baseline profile, which has no B-frames, and for any other 15, the most that
+ * an H.264 decoder holds back, and neither is stated. The level and the size of
+ * the picture are not used to bound it: the level a stream is labelled with can
+ * be too low for how it is coded, and a count of frames from it falls short then,
+ * where a depth that is too large only delays the decode times.
  */
-function avcDepth(config: Uint8Array): number {
+function avcDepth(config: Uint8Array): ReorderDepth {
   const whole = `the sequence parameter set in its 'avcC' record`
   if (config.length < AVC_SETS + 1) {
     throw damaged(
@@ -230,7 +216,7 @@ function avcDepth(config: Uint8Array): number {
   const r = bitReader(rbspOf(nal.subarray(1)), whole)
   const profile = r.bits(8)
   r.skip(8) // the constraint flags and the reserved bits
-  const level = r.bits(8)
+  r.skip(8) // level_idc
   r.ue() // seq_parameter_set_id
   if (HIGH_PROFILES.has(profile)) {
     const chromaFormat = r.ue()
@@ -266,10 +252,9 @@ function avcDepth(config: Uint8Array): number {
     )
   }
   r.skip(1) // gaps_in_frame_num_value_allowed_flag
-  const widthMbs = r.ue() + 1 // pic_width_in_mbs_minus1
-  const heightUnits = r.ue() + 1 // pic_height_in_map_units_minus1
-  const frameMbsOnly = r.flag()
-  if (!frameMbsOnly) r.skip(1) // mb_adaptive_frame_field_flag
+  r.ue() // pic_width_in_mbs_minus1
+  r.ue() // pic_height_in_map_units_minus1
+  if (!r.flag()) r.skip(1) // frame_mbs_only_flag, then mb_adaptive_frame_field_flag
   r.skip(1) // direct_8x8_inference_flag
   if (r.flag()) {
     // frame_cropping_flag: the offsets of the left, right, top and bottom.
@@ -301,15 +286,12 @@ function avcDepth(config: Uint8Array): number {
       // bitstream_restriction_flag: the depth is stated.
       r.skip(1) // motion_vectors_over_pic_boundaries_flag
       for (let field = 0; field < 4; field += 1) r.ue() // the denominators and the longest vectors
-      return checked(r.ue(), whole)
+      return { depth: checked(r.ue(), whole), stated: true }
     }
   }
 
-  if (references === 0 || profile === BASELINE_PROFILE) return 0
-  const dpbMbs = MAX_DPB_MBS.get(level)
-  if (dpbMbs === undefined) return MAX_DPB_FRAMES
-  const frameHeightMbs = (frameMbsOnly ? 1 : 2) * heightUnits
-  return Math.min(Math.floor(dpbMbs / (widthMbs * frameHeightMbs)), MAX_DPB_FRAMES)
+  if (references === 0 || profile === BASELINE_PROFILE) return { depth: 0, stated: false }
+  return { depth: UNSTATED_DEPTH, stated: false }
 }
 
 /**
@@ -320,7 +302,7 @@ function avcDepth(config: Uint8Array): number {
  * highest are 88 bits for a profile and 8 for a level, and through the picture's
  * size, bit depths and picture order count, none of which it needs.
  */
-function hevcDepth(config: Uint8Array): number {
+function hevcDepth(config: Uint8Array): ReorderDepth {
   const cut = () =>
     damaged(
       `the 'hvcC' record in its CodecPrivate holds ${config.length} bytes, which are too few for the arrays of parameter sets that it says it has.`,
@@ -395,7 +377,7 @@ function hevcDepth(config: Uint8Array): number {
     depth = checked(r.ue(), whole) // sps_max_num_reorder_pics
     r.ue() // sps_max_latency_increase_plus1
   }
-  return depth
+  return { depth, stated: true }
 }
 
 /** The CodecPrivate of a track: a track that has none (or an empty one) can't state its reorder depth. */
@@ -410,19 +392,22 @@ function privateOf(track: MatroskaTrack): Uint8Array {
 
 /**
  * How many frames a picture's decode runs ahead of its presentation, as its
- * codec's configuration states it. AVC and HEVC are read from the first SPS of
- * the CodecPrivate (`avcDepth`, `hevcDepth`); AV1 and VP9 are 0 whatever their
- * CodecPrivate holds, and so is any other CodecID, which is refused elsewhere.
- * An SPS that is missing or can't be read, or states a value past its field's
- * range, is `damaged`.
+ * codec's configuration gives it, and whether the configuration states it.
+ * AVC and HEVC are read from the first SPS of the CodecPrivate (`avcDepth`,
+ * `hevcDepth`): an HEVC SPS always states it, and an H.264 SPS does when it has a
+ * bitstream restriction, else the depth is 15 (0 for a stream with no reference
+ * frames, or of the Baseline profile) and not stated. AV1 and VP9 are 0 and
+ * stated whatever their CodecPrivate holds, as they don't reorder; so is any
+ * other CodecID, which is refused elsewhere. An SPS that is missing or can't be
+ * read, or states a value past its field's range, is `damaged`.
  */
-export function reorderDepth(track: MatroskaTrack): number {
+export function reorderDepth(track: MatroskaTrack): ReorderDepth {
   switch (track.codecId) {
     case 'V_MPEG4/ISO/AVC':
       return avcDepth(privateOf(track))
     case 'V_MPEGH/ISO/HEVC':
       return hevcDepth(privateOf(track))
     default:
-      return 0
+      return { depth: 0, stated: true }
   }
 }

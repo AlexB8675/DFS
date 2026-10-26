@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { Mp4Error } from '../errors.ts'
 import { concat, hvcC, u16 } from '../testing/build.ts'
 import { reorderDepth } from './reorder.ts'
+import type { ReorderDepth } from './reorder.ts'
 import type { MatroskaTrack } from './tracks.ts'
 
 // How far a picture's decode runs ahead of its presentation, as its codec's
@@ -57,6 +58,14 @@ function track(codecId: string, codecPrivate: Uint8Array | null): MatroskaTrack 
     refusal: null,
     problem: null,
   }
+}
+
+/** A depth that the configuration states, and one that is only the most the codec can hold back. */
+function stated(depth: number): ReorderDepth {
+  return { depth, stated: true }
+}
+function unstated(depth: number): ReorderDepth {
+  return { depth, stated: false }
 }
 
 const AVC = 'V_MPEG4/ISO/AVC'
@@ -253,7 +262,7 @@ function avcRecord(spsList: readonly Uint8Array[]): Uint8Array {
 }
 
 /** The reorder depth of an SPS built here, in its `avcC`. */
-function avcDepth(spec: AvcSps): number {
+function avcDepth(spec: AvcSps): ReorderDepth {
   return reorderDepth(track(AVC, avcRecord([avcSps(spec)])))
 }
 
@@ -332,38 +341,40 @@ function hevcRecordOf(sps: Uint8Array): Uint8Array {
 }
 
 /** The reorder depth of an SPS built here, in its `hvcC`. */
-function hevcDepth(spec: HevcSps): number {
+function hevcDepth(spec: HevcSps): ReorderDepth {
   return reorderDepth(track(HEVC, hevcRecordOf(hevcSps(spec))))
 }
 
 describe('the reorder depth of an AVC picture', () => {
   it('is max_num_reorder_frames of the SPS that x264 wrote for a high profile with B-frames, as ffprobe reports has_b_frames', () => {
-    expect(reorderDepth(track(AVC, fromHex(X264_B_FRAMES)))).toBe(2)
+    expect(reorderDepth(track(AVC, fromHex(X264_B_FRAMES)))).toEqual(stated(2))
   })
 
   it('is 0 for x264 with no B-frames', () => {
-    expect(reorderDepth(track(AVC, fromHex(X264_NO_B_FRAMES)))).toBe(0)
+    expect(reorderDepth(track(AVC, fromHex(X264_NO_B_FRAMES)))).toEqual(stated(0))
   })
 
-  it('is 0 for x264 Baseline', () => {
-    expect(reorderDepth(track(AVC, fromHex(X264_BASELINE)))).toBe(0)
+  it('is 0, and stated, for x264 Baseline, whose SPS carries a bitstream restriction', () => {
+    expect(reorderDepth(track(AVC, fromHex(X264_BASELINE)))).toEqual(stated(0))
   })
 
   it('reads the first SPS of the record, and no other', () => {
     const first = avcSps({ vui: { restriction: { reorder: 3 } } })
     const second = avcSps({ vui: { restriction: { reorder: 6 } } })
-    expect(reorderDepth(track(AVC, avcRecord([first, second])))).toBe(3)
-    expect(reorderDepth(track(AVC, avcRecord([second, first])))).toBe(6)
+    expect(reorderDepth(track(AVC, avcRecord([first, second])))).toEqual(stated(3))
+    expect(reorderDepth(track(AVC, avcRecord([second, first])))).toEqual(stated(6))
   })
 
   describe('when the SPS gives it (bitstream_restriction_flag 1)', () => {
     it('is max_num_reorder_frames, whatever the level and the references say', () => {
       for (const reorder of [0, 1, 4, 16]) {
-        expect(avcDepth({ vui: { restriction: { reorder } } }), `reorder ${reorder}`).toBe(reorder)
+        expect(avcDepth({ vui: { restriction: { reorder } } }), `reorder ${reorder}`).toEqual(
+          stated(reorder),
+        )
         expect(
           avcDepth({ level: 51, refs: 0, vui: { restriction: { reorder } } }),
           `reorder ${reorder}, no references`,
-        ).toBe(reorder)
+        ).toEqual(stated(reorder))
       }
     })
 
@@ -379,18 +390,20 @@ describe('the reorder depth of an AVC picture', () => {
         picStruct: true,
         restriction: { reorder: 5 },
       }
-      expect(avcDepth({ vui: everything })).toBe(5)
+      expect(avcDepth({ vui: everything })).toEqual(stated(5))
       // Each field on its own, and its absence, so that no skip is balanced by another that is wrong.
-      expect(avcDepth({ vui: { aspect: 1, restriction: { reorder: 3 } } })).toBe(3)
-      expect(avcDepth({ vui: { aspect: 255, restriction: { reorder: 3 } } })).toBe(3)
-      expect(avcDepth({ vui: { overscan: true, restriction: { reorder: 3 } } })).toBe(3)
-      expect(avcDepth({ vui: { signal: true, restriction: { reorder: 3 } } })).toBe(3)
-      expect(avcDepth({ vui: { chromaLoc: true, restriction: { reorder: 3 } } })).toBe(3)
-      expect(avcDepth({ vui: { timing: true, restriction: { reorder: 3 } } })).toBe(3)
-      expect(avcDepth({ vui: { nalHrd: 1, restriction: { reorder: 3 } } })).toBe(3)
-      expect(avcDepth({ vui: { vclHrd: 1, restriction: { reorder: 3 } } })).toBe(3)
-      expect(avcDepth({ vui: { nalHrd: 4, vclHrd: 1, restriction: { reorder: 3 } } })).toBe(3)
-      expect(avcDepth({ vui: { picStruct: true, restriction: { reorder: 3 } } })).toBe(3)
+      expect(avcDepth({ vui: { aspect: 1, restriction: { reorder: 3 } } })).toEqual(stated(3))
+      expect(avcDepth({ vui: { aspect: 255, restriction: { reorder: 3 } } })).toEqual(stated(3))
+      expect(avcDepth({ vui: { overscan: true, restriction: { reorder: 3 } } })).toEqual(stated(3))
+      expect(avcDepth({ vui: { signal: true, restriction: { reorder: 3 } } })).toEqual(stated(3))
+      expect(avcDepth({ vui: { chromaLoc: true, restriction: { reorder: 3 } } })).toEqual(stated(3))
+      expect(avcDepth({ vui: { timing: true, restriction: { reorder: 3 } } })).toEqual(stated(3))
+      expect(avcDepth({ vui: { nalHrd: 1, restriction: { reorder: 3 } } })).toEqual(stated(3))
+      expect(avcDepth({ vui: { vclHrd: 1, restriction: { reorder: 3 } } })).toEqual(stated(3))
+      expect(avcDepth({ vui: { nalHrd: 4, vclHrd: 1, restriction: { reorder: 3 } } })).toEqual(
+        stated(3),
+      )
+      expect(avcDepth({ vui: { picStruct: true, restriction: { reorder: 3 } } })).toEqual(stated(3))
     })
 
     it('is read past the fields of every profile, and of every picture order count type', () => {
@@ -398,25 +411,28 @@ describe('the reorder depth of an AVC picture', () => {
         expect(
           avcDepth({ profile, vui: { timing: true, restriction: { reorder: 3 } } }),
           `profile ${profile}`,
-        ).toBe(3)
+        ).toEqual(stated(3))
         expect(
           avcDepth({ profile, chroma: 3, vui: { restriction: { reorder: 3 } } }),
           `profile ${profile}, 4:4:4`,
-        ).toBe(3)
+        ).toEqual(stated(3))
       }
       for (const profile of [66, 77, 88]) {
         expect(
           avcDepth({ profile, vui: { restriction: { reorder: 3 } } }),
           `profile ${profile}`,
-        ).toBe(3)
+        ).toEqual(stated(3))
       }
       for (const pocType of [0, 1, 2] as const) {
-        expect(avcDepth({ pocType, vui: { restriction: { reorder: 3 } } }), `type ${pocType}`).toBe(
-          3,
-        )
+        expect(
+          avcDepth({ pocType, vui: { restriction: { reorder: 3 } } }),
+          `type ${pocType}`,
+        ).toEqual(stated(3))
       }
-      expect(avcDepth({ frameMbsOnly: false, vui: { restriction: { reorder: 3 } } })).toBe(3)
-      expect(avcDepth({ cropping: true, vui: { restriction: { reorder: 3 } } })).toBe(3)
+      expect(avcDepth({ frameMbsOnly: false, vui: { restriction: { reorder: 3 } } })).toEqual(
+        stated(3),
+      )
+      expect(avcDepth({ cropping: true, vui: { restriction: { reorder: 3 } } })).toEqual(stated(3))
     })
 
     it('is read past the scaling lists, those that are skipped and those that end early', () => {
@@ -430,9 +446,10 @@ describe('the reorder depth of an AVC picture', () => {
           return index < 6 ? flat16 : flat64
         })
       for (const kind of ['none', 'ends', 'full'] as const) {
-        expect(avcDepth({ scaling: lists(kind), vui: { restriction: { reorder: 3 } } }), kind).toBe(
-          3,
-        )
+        expect(
+          avcDepth({ scaling: lists(kind), vui: { restriction: { reorder: 3 } } }),
+          kind,
+        ).toEqual(stated(3))
       }
       // A list that has some entries, then ends at a delta that brings nextScale to 0 (8 + 3 - 11): the rest of its entries are not written.
       const endsLate = [...new Array<number>(5).fill(0), 3, -11]
@@ -441,7 +458,7 @@ describe('the reorder depth of an AVC picture', () => {
           scaling: [endsLate, null, flat16, null, null, null, endsLate, flat64],
           vui: { restriction: { reorder: 3 } },
         }),
-      ).toBe(3)
+      ).toEqual(stated(3))
       // 4:4:4 has 12 lists.
       expect(
         avcDepth({
@@ -449,84 +466,56 @@ describe('the reorder depth of an AVC picture', () => {
           scaling: Array.from({ length: 12 }, (_, index) => (index < 6 ? flat16 : flat64)),
           vui: { restriction: { reorder: 3 } },
         }),
-      ).toBe(3)
+      ).toEqual(stated(3))
     })
 
     it('is read from an SPS of which the emulation prevention bytes are taken out', () => {
       const sps = avcSps({ vui: { timing: true, restriction: { reorder: 3 } } })
       // The 32 zero bits of num_units_in_tick hold a run of zero bytes, which comes out with a 03 in it.
       expect(Array.from(sps).join(',')).toMatch(/(^|,)0,0,3(,|$)/)
-      expect(avcDepth({ vui: { timing: true, restriction: { reorder: 3 } } })).toBe(3)
+      expect(avcDepth({ vui: { timing: true, restriction: { reorder: 3 } } })).toEqual(stated(3))
     })
 
     it('is damaged when it is more than 16', () => {
       const error = damaged(() => avcDepth({ vui: { restriction: { reorder: 17 } } }))
       expect(error.message).toContain('17')
-      expect(avcDepth({ vui: { restriction: { reorder: 16 } } })).toBe(16)
+      expect(avcDepth({ vui: { restriction: { reorder: 16 } } })).toEqual(stated(16))
     })
   })
 
   describe('when the SPS leaves it out', () => {
-    it('is 0 when it has no reference frames, or the profile is Baseline', () => {
-      expect(avcDepth({ refs: 0 })).toBe(0)
-      expect(avcDepth({ refs: 0, vui: { timing: true } })).toBe(0)
-      expect(avcDepth({ profile: 66 })).toBe(0)
-      expect(avcDepth({ profile: 66, level: 40, vui: { timing: true } })).toBe(0)
+    it('is 15, the most that a decoder holds back, and not stated, whatever the level and the size of the picture', () => {
+      // The brief's two pictures: 320x240 at level 30 and 1920x1088 at level 40.
+      expect(avcDepth({ level: 30, widthMbs: 20, heightUnits: 15 })).toEqual(unstated(15))
+      expect(avcDepth({ level: 40, widthMbs: 120, heightUnits: 68 })).toEqual(unstated(15))
+      // A picture too big for the DPB of its level, which a count of the frames that the level holds would give 0 (8100 / 32400): the depth is no smaller for it.
+      expect(avcDepth({ level: 30, widthMbs: 240, heightUnits: 135 })).toEqual(unstated(15))
+      for (const level of [
+        9, 10, 11, 12, 13, 20, 21, 22, 30, 31, 32, 40, 41, 42, 50, 51, 52, 60, 255,
+      ]) {
+        expect(avcDepth({ level, widthMbs: 240, heightUnits: 135 }), `level ${level}`).toEqual(
+          unstated(15),
+        )
+      }
     })
 
-    it('is the DPB of the level in frames of the picture, at most 15', () => {
-      // 320x240 is 300 macroblocks: min(floor(8100 / 300), 15).
-      expect(avcDepth({ level: 30, widthMbs: 20, heightUnits: 15 })).toBe(15)
-      // 1920x1088 is 8160 macroblocks: floor(32768 / 8160).
-      expect(avcDepth({ level: 40, widthMbs: 120, heightUnits: 68 })).toBe(4)
-    })
-
-    it('is the same with a VUI that has no bitstream restriction, and for every profile that has references', () => {
-      const plain = { level: 40, widthMbs: 120, heightUnits: 68 }
-      expect(avcDepth({ ...plain, vui: { timing: true, nalHrd: 1 } })).toBe(4)
-      expect(avcDepth({ ...plain, vui: { aspect: 255, signal: true } })).toBe(4)
-      expect(avcDepth({ ...plain, profile: 77 })).toBe(4)
-      expect(avcDepth({ ...plain, profile: 88 })).toBe(4)
+    it('is 15 with a VUI that has no bitstream restriction, and for every profile that has references', () => {
+      expect(avcDepth({ vui: { timing: true, nalHrd: 1 } })).toEqual(unstated(15))
+      expect(avcDepth({ vui: { aspect: 255, signal: true } })).toEqual(unstated(15))
+      expect(avcDepth({ profile: 77 })).toEqual(unstated(15))
+      expect(avcDepth({ profile: 88 })).toEqual(unstated(15))
+      expect(avcDepth({ frameMbsOnly: false })).toEqual(unstated(15))
       for (const profile of HIGH_PROFILES) {
-        expect(avcDepth({ ...plain, profile }), `profile ${profile}`).toBe(4)
+        expect(avcDepth({ profile }), `profile ${profile}`).toEqual(unstated(15))
       }
     })
 
-    it('counts the height of a picture that may have fields in frames: its map units are 2 macroblocks high', () => {
-      // 34 map units of 32 lines are 1088 lines, 68 macroblocks: 8160 in all, as the frames of a progressive picture are.
-      expect(avcDepth({ level: 40, widthMbs: 120, heightUnits: 34, frameMbsOnly: false })).toBe(4)
-      // 68 map units are 136 macroblocks: 16320 in all, floor(32768 / 16320).
-      expect(avcDepth({ level: 40, widthMbs: 120, heightUnits: 68, frameMbsOnly: false })).toBe(2)
-    })
-
-    // The frames that each level holds (MaxDpbMbs of Table A-1 over the macroblocks of the picture) of a picture of 300, 8160 and 32400 macroblocks.
-    it.each([
-      [10, 1, 0, 0],
-      [11, 3, 0, 0],
-      [12, 7, 0, 0],
-      [13, 7, 0, 0],
-      [20, 7, 0, 0],
-      [21, 15, 0, 0],
-      [22, 15, 0, 0],
-      [30, 15, 0, 0],
-      [31, 15, 2, 0],
-      [32, 15, 2, 0],
-      [40, 15, 4, 1],
-      [41, 15, 4, 1],
-      [42, 15, 4, 1],
-      [50, 15, 13, 3],
-      [51, 15, 15, 5],
-      [52, 15, 15, 5],
-    ])('is as the table has it for level_idc %i: %i, %i and %i frames', (level, small, hd, uhd) => {
-      expect(avcDepth({ level, widthMbs: 20, heightUnits: 15 }), '320x240').toBe(small)
-      expect(avcDepth({ level, widthMbs: 120, heightUnits: 68 }), '1920x1088').toBe(hd)
-      expect(avcDepth({ level, widthMbs: 240, heightUnits: 135 }), '3840x2160').toBe(uhd)
-    })
-
-    it('is 15 for a level that is not in the table', () => {
-      for (const level of [0, 60, 62, 255]) {
-        expect(avcDepth({ level, widthMbs: 240, heightUnits: 135 }), `level ${level}`).toBe(15)
-      }
+    it('is 0, not stated, when it has no reference frames, or the profile is Baseline', () => {
+      expect(avcDepth({ refs: 0 })).toEqual(unstated(0))
+      expect(avcDepth({ refs: 0, vui: { timing: true } })).toEqual(unstated(0))
+      expect(avcDepth({ refs: 0, level: 51 })).toEqual(unstated(0))
+      expect(avcDepth({ profile: 66 })).toEqual(unstated(0))
+      expect(avcDepth({ profile: 66, level: 40, vui: { timing: true } })).toEqual(unstated(0))
     })
   })
 
@@ -601,7 +590,7 @@ describe('the reorder depth of an HEVC picture', () => {
       { type: 33, units: [fromHex(X265_SPS)] },
       { type: 34, units: [fromHex(X265_PPS)] },
     ])
-    expect(reorderDepth(track(HEVC, record))).toBe(2)
+    expect(reorderDepth(track(HEVC, record))).toEqual(stated(2))
   })
 
   it('is the reorder depth of the first SPS, wherever the arrays put it', () => {
@@ -611,7 +600,7 @@ describe('the reorder depth of an HEVC picture', () => {
       { type: 33, units: [one, two] },
       { type: 32, units: [fromHex(X265_VPS)] },
     ])
-    expect(reorderDepth(track(HEVC, spsFirst))).toBe(1)
+    expect(reorderDepth(track(HEVC, spsFirst))).toEqual(stated(1))
     // An array of SPSs that holds none comes before one that does.
     const emptyFirst = hevcRecord([
       { type: 32, units: [fromHex(X265_VPS)] },
@@ -619,19 +608,19 @@ describe('the reorder depth of an HEVC picture', () => {
       { type: 34, units: [fromHex(X265_PPS)] },
       { type: 33, units: [two, one] },
     ])
-    expect(reorderDepth(track(HEVC, emptyFirst))).toBe(2)
+    expect(reorderDepth(track(HEVC, emptyFirst))).toEqual(stated(2))
   })
 
   it('is the depth of the highest sub-layer, the last that the ordering info gives', () => {
-    expect(hevcDepth({ reorder: [0] })).toBe(0)
-    expect(hevcDepth({ reorder: [4] })).toBe(4)
-    expect(hevcDepth({ subLayers: 2, reorder: [1, 2, 3] })).toBe(3)
-    expect(hevcDepth({ subLayers: 6, reorder: [0, 1, 2, 3, 4, 5, 6] })).toBe(6)
+    expect(hevcDepth({ reorder: [0] })).toEqual(stated(0))
+    expect(hevcDepth({ reorder: [4] })).toEqual(stated(4))
+    expect(hevcDepth({ subLayers: 2, reorder: [1, 2, 3] })).toEqual(stated(3))
+    expect(hevcDepth({ subLayers: 6, reorder: [0, 1, 2, 3, 4, 5, 6] })).toEqual(stated(6))
   })
 
   it('is the one value of the highest sub-layer when the ordering info is given for it alone', () => {
-    expect(hevcDepth({ subLayers: 2, ordering: false, reorder: [4] })).toBe(4)
-    expect(hevcDepth({ subLayers: 6, ordering: false, reorder: [5] })).toBe(5)
+    expect(hevcDepth({ subLayers: 2, ordering: false, reorder: [4] })).toEqual(stated(4))
+    expect(hevcDepth({ subLayers: 6, ordering: false, reorder: [5] })).toEqual(stated(5))
   })
 
   it('is read past the profiles and levels of the sub-layers below the highest', () => {
@@ -642,10 +631,10 @@ describe('the reorder depth of an HEVC picture', () => {
         subLevel: [false, true, true],
         reorder: [0, 1, 2, 3],
       }),
-    ).toBe(3)
-    expect(hevcDepth({ subLayers: 1, subProfile: [true], subLevel: [true], reorder: [2, 5] })).toBe(
-      5,
-    )
+    ).toEqual(stated(3))
+    expect(
+      hevcDepth({ subLayers: 1, subProfile: [true], subLevel: [true], reorder: [2, 5] }),
+    ).toEqual(stated(5))
     expect(
       hevcDepth({
         subLayers: 2,
@@ -654,30 +643,32 @@ describe('the reorder depth of an HEVC picture', () => {
         ordering: false,
         reorder: [2],
       }),
-    ).toBe(2)
+    ).toEqual(stated(2))
   })
 
   it('is read past the chroma format, the conformance window and the other fields before the ordering info', () => {
-    expect(hevcDepth({ chroma: 3, reorder: [3] })).toBe(3)
-    expect(hevcDepth({ chroma: 0, reorder: [3] })).toBe(3)
-    expect(hevcDepth({ conformance: true, reorder: [3] })).toBe(3)
-    expect(hevcDepth({ chroma: 3, conformance: true, subLayers: 1, reorder: [1, 3] })).toBe(3)
+    expect(hevcDepth({ chroma: 3, reorder: [3] })).toEqual(stated(3))
+    expect(hevcDepth({ chroma: 0, reorder: [3] })).toEqual(stated(3))
+    expect(hevcDepth({ conformance: true, reorder: [3] })).toEqual(stated(3))
+    expect(hevcDepth({ chroma: 3, conformance: true, subLayers: 1, reorder: [1, 3] })).toEqual(
+      stated(3),
+    )
   })
 
   it('is read from an SPS of which the emulation prevention bytes are taken out', () => {
     // The 43 zero bits and the compatibility flags of the general profile hold a run of zero bytes.
     const sps = hevcSps({ reorder: [3] })
     expect(Array.from(sps).join(',')).toMatch(/(^|,)0,0,3(,|$)/)
-    expect(hevcDepth({ reorder: [3] })).toBe(3)
+    expect(hevcDepth({ reorder: [3] })).toEqual(stated(3))
   })
 
   it('is damaged when it is more than 16', () => {
     damaged(() => hevcDepth({ reorder: [17] }))
-    expect(hevcDepth({ reorder: [16] })).toBe(16)
+    expect(hevcDepth({ reorder: [16] })).toEqual(stated(16))
     // The depth is the highest sub-layer's, but the value of every sub-layer has the range.
     damaged(() => hevcDepth({ subLayers: 1, reorder: [20, 2] }))
     damaged(() => hevcDepth({ subLayers: 1, reorder: [2, 17] }))
-    expect(hevcDepth({ subLayers: 1, reorder: [16, 2] })).toBe(2)
+    expect(hevcDepth({ subLayers: 1, reorder: [16, 2] })).toEqual(stated(2))
   })
 
   it('is damaged when a chroma_format_idc is past its range', () => {
@@ -744,16 +735,18 @@ describe('the reorder depth of an HEVC picture', () => {
 describe('the reorder depth of other pictures', () => {
   it('is 0 for AV1 and VP9, whatever their CodecPrivate holds', () => {
     for (const codecId of ['V_AV1', 'V_VP9']) {
-      expect(reorderDepth(track(codecId, null)), codecId).toBe(0)
-      expect(reorderDepth(track(codecId, new Uint8Array(0))), codecId).toBe(0)
-      expect(reorderDepth(track(codecId, Uint8Array.of(0x81, 0x04, 0x0c, 0x00))), codecId).toBe(0)
-      expect(reorderDepth(track(codecId, fromHex(X264_B_FRAMES))), codecId).toBe(0)
+      expect(reorderDepth(track(codecId, null)), codecId).toEqual(stated(0))
+      expect(reorderDepth(track(codecId, new Uint8Array(0))), codecId).toEqual(stated(0))
+      expect(reorderDepth(track(codecId, Uint8Array.of(0x81, 0x04, 0x0c, 0x00))), codecId).toEqual(
+        stated(0),
+      )
+      expect(reorderDepth(track(codecId, fromHex(X264_B_FRAMES))), codecId).toEqual(stated(0))
     }
   })
 
   it('is 0 for a codec that is refused elsewhere', () => {
-    expect(reorderDepth(track('V_VP8', null))).toBe(0)
-    expect(reorderDepth(track('V_MPEG4/ISO/ASP', fromHex(X264_B_FRAMES)))).toBe(0)
-    expect(reorderDepth(track('V_UNKNOWN', null))).toBe(0)
+    expect(reorderDepth(track('V_VP8', null))).toEqual(stated(0))
+    expect(reorderDepth(track('V_MPEG4/ISO/ASP', fromHex(X264_B_FRAMES)))).toEqual(stated(0))
+    expect(reorderDepth(track('V_UNKNOWN', null))).toEqual(stated(0))
   })
 })
