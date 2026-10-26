@@ -41,9 +41,25 @@ function checkRange(bytes: Uint8Array, from: number, to: number): void {
   }
 }
 
-/** Refuses an element whose data isn't inside `bytes`, and gives that width. */
-function dataWidth(bytes: Uint8Array, el: Element): number {
+/**
+ * Refuses an element whose data can't be read as a value: one of unknown size,
+ * whose `end` is only the limit its header was read with and so isn't where its
+ * data ends (only a Segment or a Cluster may be of unknown size, and neither
+ * has a value), and one whose data isn't inside `bytes`.
+ */
+function checkValue(bytes: Uint8Array, el: Element): void {
+  if (!el.sized) {
+    throw new Mp4Error(
+      'damaged',
+      `The element at offset ${el.start} has an unknown size, which a value can't have: only a Segment or a Cluster may.`,
+    )
+  }
   checkRange(bytes, el.data, el.end)
+}
+
+/** Refuses an element that has no value to read (see `checkValue`), and gives the width of its data. */
+function dataWidth(bytes: Uint8Array, el: Element): number {
+  checkValue(bytes, el)
   return el.end - el.data
 }
 
@@ -204,7 +220,11 @@ export function readInt(bytes: Uint8Array, el: Element): number {
   return Number(value)
 }
 
-/** A float of 4 or 8 bytes, big-endian; 0 bytes is 0. Any other width is a damaged file. */
+/**
+ * A float of 4 or 8 bytes, big-endian; 0 bytes is 0. Any other width is a
+ * damaged file, and so is a value that is no number (NaN, or infinite either
+ * way), which a file's float is never meant to be.
+ */
 export function readFloat(bytes: Uint8Array, el: Element): number {
   const width = dataWidth(bytes, el)
   if (width === 0) return 0
@@ -215,7 +235,14 @@ export function readFloat(bytes: Uint8Array, el: Element): number {
     )
   }
   const view = new DataView(bytes.buffer, bytes.byteOffset + el.data, width)
-  return width === 4 ? view.getFloat32(0) : view.getFloat64(0)
+  const value = width === 4 ? view.getFloat32(0) : view.getFloat64(0)
+  if (!Number.isFinite(value)) {
+    throw new Mp4Error(
+      'damaged',
+      `The float at offset ${el.data} is not a number: it is NaN or infinite.`,
+    )
+  }
+  return value
 }
 
 /**
@@ -225,7 +252,7 @@ export function readFloat(bytes: Uint8Array, el: Element): number {
  * for.
  */
 export function readString(bytes: Uint8Array, el: Element): string {
-  checkRange(bytes, el.data, el.end)
+  checkValue(bytes, el)
   let end = el.data
   while (end < el.end && bytes[end] !== 0) end += 1
   return new TextDecoder('utf-8').decode(bytes.subarray(el.data, end))
@@ -233,6 +260,6 @@ export function readString(bytes: Uint8Array, el: Element): string {
 
 /** The data of an element, as a view onto the same memory (not a copy). */
 export function readBytes(bytes: Uint8Array, el: Element): Uint8Array {
-  checkRange(bytes, el.data, el.end)
+  checkValue(bytes, el)
   return bytes.subarray(el.data, el.end)
 }

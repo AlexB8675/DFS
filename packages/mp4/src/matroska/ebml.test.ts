@@ -360,8 +360,38 @@ describe('the values of an element (§10.4)', () => {
       expect(readFloat(double, header(double))).toBe(0.1)
       const negative = float(ID.Duration, -1234.5)
       expect(readFloat(negative, header(negative))).toBe(-1234.5)
-      const infinite = float(ID.Duration, Infinity)
-      expect(readFloat(infinite, header(infinite))).toBe(Infinity)
+      // The largest and the smallest numbers a float holds are numbers, and -0 is 0.
+      const largest = float(ID.Duration, Number.MAX_VALUE)
+      expect(readFloat(largest, header(largest))).toBe(Number.MAX_VALUE)
+      const largestSingle = float(ID.Duration, 3.4028234663852886e38, 4)
+      expect(readFloat(largestSingle, header(largestSingle))).toBe(3.4028234663852886e38)
+      const smallest = float(ID.Duration, Number.MIN_VALUE)
+      expect(readFloat(smallest, header(smallest))).toBe(Number.MIN_VALUE)
+      const negativeZero = float(ID.Duration, -0)
+      expect(Object.is(readFloat(negativeZero, header(negativeZero)), -0)).toBe(true)
+    })
+
+    it('refuses a value that is not a number: NaN, or infinite either way', () => {
+      for (const width of [4, 8] as const) {
+        for (const value of [NaN, Infinity, -Infinity]) {
+          const bytes = float(ID.Duration, value, width)
+          damaged(() => readFloat(bytes, header(bytes)))
+        }
+      }
+    })
+
+    it('refuses a NaN of any pattern of bits, not only the one that a builder writes', () => {
+      // A signalling NaN, and a negative NaN with a payload, in a single and in a double.
+      const patterns = [
+        [0x7f, 0xa0, 0x00, 0x01],
+        [0xff, 0xc0, 0x00, 0x01],
+        [0x7f, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01],
+        [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+      ]
+      for (const pattern of patterns) {
+        const { bytes, el } = holding(pattern)
+        damaged(() => readFloat(bytes, el))
+      }
     })
 
     it('reads nothing as 0', () => {
@@ -435,6 +465,55 @@ describe('the values of an element (§10.4)', () => {
         }),
       )
     })
+  })
+})
+
+describe('the value of an element of unknown size (§10.4)', () => {
+  /**
+   * An element of unknown size that holds `data`, read up to the end of the bytes.
+   * Its end is that limit and no more, so what is in front of it would be read as
+   * a value if a reader took it for one: only a Segment or a Cluster may be of
+   * unknown size, and neither has a value.
+   */
+  function unknown(data: number[]): { bytes: Uint8Array; el: Element } {
+    const bytes = elementSized(ID.Timestamp, unknownSize(1), data)
+    const el = header(bytes)
+    expect(el.sized).toBe(false)
+    expect(el.end).toBe(bytes.length)
+    return { bytes, el }
+  }
+
+  it('is refused by readUint', () => {
+    const { bytes, el } = unknown([5])
+    damaged(() => readUint(bytes, el))
+  })
+
+  it('is refused by readInt', () => {
+    const { bytes, el } = unknown([0xff])
+    damaged(() => readInt(bytes, el))
+  })
+
+  it('is refused by readFloat', () => {
+    // 4 bytes that are 1.0, which would be read as a number.
+    const { bytes, el } = unknown([0x3f, 0x80, 0x00, 0x00])
+    damaged(() => readFloat(bytes, el))
+  })
+
+  it('is refused by readString', () => {
+    const { bytes, el } = unknown([0x77, 0x65, 0x62, 0x6d])
+    damaged(() => readString(bytes, el))
+  })
+
+  it('is refused by readBytes', () => {
+    const { bytes, el } = unknown([1, 2, 3])
+    damaged(() => readBytes(bytes, el))
+  })
+
+  it('is refused even when it has no bytes, which a sized element would read as empty', () => {
+    const { bytes, el } = unknown([])
+    for (const read of [readUint, readInt, readFloat, readString, readBytes]) {
+      damaged(() => read(bytes, el))
+    }
   })
 })
 
