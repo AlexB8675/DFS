@@ -1,12 +1,14 @@
+import { ID } from '../matroska/ids.ts'
 import { concat } from './build.ts'
 import type { Part } from './build.ts'
 
 // A builder for the EBML the Matroska tests read, used by tests only (DESIGN.md
 // §10.4): the elements are written out here, byte by byte, as RFC 8794 gives
 // them, so the reader is checked against what the standard says and not against
-// what it was written to read. Numbers are big-endian, as in a file. Later
-// tasks add the Matroska shapes (the header, the Segment, tracks, clusters) on
-// top of these.
+// what it was written to read. Numbers are big-endian, as in a file. The
+// Matroska shapes (the header, the Segment, Info, the SeekHead and the layout of
+// a whole file) are built on top of the elements; later tasks add the tracks and
+// the clusters.
 
 /** What an element is built from: bytes, or numbers that are bytes (the same as for a box). */
 export type { Part }
@@ -108,4 +110,117 @@ export function string(id: number, text: string): Uint8Array {
 /** A binary element: the bytes as they are. */
 export function binary(id: number, bytes: Part): Uint8Array {
   return element(id, bytes)
+}
+
+/** The IDs of two header elements that the reader never looks at, which the builder writes as a real file has them. */
+const EBML_VERSION = 0x4286
+const DOC_TYPE_VERSION = 0x4287
+
+/**
+ * The EBML header of a file, as ffmpeg writes it: version 1, read version 1, an
+ * ID of 4 bytes at most and a size of 8, then the DocType, the DocType's version
+ * (4) and its read version, which is 2 unless asked for.
+ */
+export function ebmlHeader({
+  docType = 'matroska',
+  readVersion = 2,
+}: { docType?: string; readVersion?: number } = {}): Uint8Array {
+  return element(
+    ID.EBML,
+    uint(EBML_VERSION, 1),
+    uint(ID.EBMLReadVersion, 1),
+    uint(ID.EBMLMaxIDLength, 4),
+    uint(ID.EBMLMaxSizeLength, 8),
+    string(ID.DocType, docType),
+    uint(DOC_TYPE_VERSION, 4),
+    uint(ID.DocTypeReadVersion, readVersion),
+  )
+}
+
+/**
+ * One entry of a SeekHead: the ID of an element and where it is, counted from
+ * the start of the Segment's data. The position is always 8 bytes wide, as a
+ * writer that comes back to fill it in writes it, so that the SeekHead is as
+ * long whatever the positions are, which a layout needs to know them.
+ */
+export function seekEntry(id: number, position: number): Uint8Array {
+  if (!Number.isSafeInteger(position) || position < 0) {
+    throw new RangeError(`${position} is not a position.`)
+  }
+  return element(
+    ID.Seek,
+    binary(ID.SeekID, idBytes(id)),
+    element(ID.SeekPosition, bigEndian(BigInt(position), 8)),
+  )
+}
+
+/** A SeekHead of the entries given, each an element's ID and its position from the Segment's data. */
+export function seekHead(entries: [id: number, position: number][]): Uint8Array {
+  return element(ID.SeekHead, ...entries.map(([id, position]) => seekEntry(id, position)))
+}
+
+/** Info with the TimestampScale and the Duration (in ticks) that it is given, and with none of them left out when they are not. */
+export function info({ scale, duration }: { scale?: number; duration?: number }): Uint8Array {
+  const parts: Uint8Array[] = []
+  if (scale !== undefined) parts.push(uint(ID.TimestampScale, scale))
+  if (duration !== undefined) parts.push(float(ID.Duration, duration))
+  return element(ID.Info, ...parts)
+}
+
+/** A Segment around its children, of the size they add up to or, with `unknown`, of unknown size, as a recording that is still being written has it. */
+export function segment(
+  children: Uint8Array[],
+  { unknown = false }: { unknown?: boolean } = {},
+): Uint8Array {
+  return unknown
+    ? elementSized(ID.Segment, unknownSize(), ...children)
+    : element(ID.Segment, ...children)
+}
+
+/** A part of a file's Segment: its bytes, or a function of where every part starts (from the Segment's data) that gives them. */
+export type FilePart = Uint8Array | ((positions: number[]) => Uint8Array)
+
+/** A file laid out: its bytes, the offset of each part in the file, and the offset where the Segment's data starts. */
+export interface MatroskaFile {
+  bytes: Uint8Array
+  offsets: number[]
+  segmentData: number
+}
+
+/**
+ * A file of the EBML header (`header`, a Matroska one unless given) and a
+ * Segment of the parts, one after the other, with the offset of each part in the
+ * file, so that a test can name exact positions. A part may be a function of the
+ * positions of all the parts from the Segment's data (what a SeekHead holds),
+ * which is called twice, once to measure and once with the real positions, and
+ * must give as many bytes each time.
+ */
+export function matroskaFile(
+  parts: FilePart[],
+  { header = ebmlHeader(), unknown = false }: { header?: Uint8Array; unknown?: boolean } = {},
+): MatroskaFile {
+  const measured = parts.map((part) =>
+    typeof part === 'function' ? part(parts.map(() => 0)) : part,
+  )
+  const positions: number[] = []
+  let at = 0
+  for (const part of measured) {
+    positions.push(at)
+    at += part.length
+  }
+  const children = parts.map((part, index) => {
+    if (typeof part !== 'function') return part
+    const bytes = part(positions)
+    if (bytes.length !== measured[index]?.length) {
+      throw new RangeError(`Part ${index} is not as long with the real positions as without them.`)
+    }
+    return bytes
+  })
+  const whole = segment(children, { unknown })
+  const segmentData = header.length + (whole.length - at)
+  return {
+    bytes: concat(header, whole),
+    offsets: positions.map((position) => segmentData + position),
+    segmentData,
+  }
 }
