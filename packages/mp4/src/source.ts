@@ -5,6 +5,8 @@
 // caller reads, adds as a chunk and calls it again with. The same shape serves
 // both containers.
 
+import type { Mp4Error } from './errors.ts'
+
 /** A range of a file: from `start` up to, and not including, `end`. */
 export interface ByteRange {
   start: number
@@ -19,6 +21,17 @@ export interface Chunk {
 
 /** What a reader gives each time it is called: its result, or the range of the file it needs to go on. */
 export type Step<T> = { done: T } | { need: ByteRange }
+
+/**
+ * A sound track of a file that the player may choose, in the order of preference
+ * (DESIGN.md §10.4, D45: the first plays unless the user chooses another). One
+ * the reader can repackage has the names that Media Source is asked about, the
+ * first of them the codec; one that it can't has the refusal, a sentence that
+ * reads on its own. `id` is the track's number in the file.
+ */
+export type SoundOffer =
+  | { id: number; language: string; codecNames: readonly string[]; codec: string }
+  | { id: number; language: string; refusal: Mp4Error }
 
 /** Where a chunk ends in the file. */
 function endOf(chunk: Chunk): number {

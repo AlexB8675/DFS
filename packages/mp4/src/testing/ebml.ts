@@ -1,4 +1,5 @@
 import { ID } from '../matroska/ids.ts'
+import type { ByteRange } from '../source.ts'
 import { concat, i16 } from './build.ts'
 import type { Part } from './build.ts'
 
@@ -579,4 +580,125 @@ export function cluster(
       )
     : body
   return unknown ? elementSized(ID.Cluster, unknownSize(), data) : element(ID.Cluster, data)
+}
+
+/** One frame of a built movie. */
+export interface MovieFrame {
+  track: number
+  /** When it is presented, in ticks from the start of the file: the block's timecode is this less its cluster's Timestamp, so it lies within a signed 16 bits of it. */
+  time: number
+  keyframe?: boolean
+  /** The frame's bytes; else `size` bytes of zero. */
+  data?: Part
+  /** The length of a frame of zeros, 8 when neither this nor `data` is given. */
+  size?: number
+  /** A BlockDuration in ticks, which puts the frame in a BlockGroup (a keyframe there has no ReferenceBlock, any other refers to the block before). */
+  duration?: number
+}
+
+/** A Cluster of a built movie: its Timestamp in ticks and its frames, in decode order. */
+export interface MovieCluster {
+  timestamp: number
+  frames: MovieFrame[]
+}
+
+/** What a small whole file is built from. */
+export interface MovieSpec {
+  /** The DocType, 'matroska' unless given. */
+  docType?: string
+  /** The TimestampScale; Info leaves it out when it is not given. */
+  scale?: number
+  /** Info's Duration, in ticks; left out when not given. */
+  duration?: number
+  tracks: TrackSpec[]
+  clusters: MovieCluster[]
+  /** A Tags element of each of these sizes (in bytes of data), one after the other, after the Tracks and before the first Cluster. */
+  tags?: number[]
+  /** A SeekHead first, naming Info, the Tracks and the Cues when there are any, as ffmpeg writes one. */
+  seek?: boolean
+  /** A Cues element after the last Cluster. */
+  cues?: boolean
+}
+
+/** A built movie: the file, and where its parts are. */
+export interface Movie extends MatroskaFile {
+  /** The Tracks element, from its header to its end. */
+  tracks: ByteRange
+  /** Each Tags element, from its header to its end. */
+  tags: ByteRange[]
+  /** Each Cluster, from its header to its end. */
+  clusters: ByteRange[]
+  /** Where the Cues' header is, when there are any. */
+  cues: number | null
+}
+
+/** The block of a frame, in a SimpleBlock or, with a duration, a BlockGroup. */
+function frameBlock(frame: MovieFrame, timestamp: number): Uint8Array {
+  const data = frame.data ?? new Uint8Array(frame.size ?? 8)
+  const spec = { track: frame.track, timecode: frame.time - timestamp, frames: [data] }
+  if (frame.duration === undefined) return simpleBlock({ ...spec, keyframe: frame.keyframe })
+  return blockGroup({
+    ...spec,
+    duration: frame.duration,
+    reference: frame.keyframe === true ? undefined : -1,
+  })
+}
+
+/**
+ * A small whole file of the tracks and clusters given, laid out as ffmpeg lays
+ * one out: the SeekHead if asked for, Info, Tracks, Tags if asked for, the
+ * Clusters and the Cues if asked for. The positions of the parts come back with
+ * it, so that a test can name exact offsets.
+ */
+export function matroskaMovie(spec: MovieSpec): Movie {
+  const parts: FilePart[] = []
+  let seekAt: number | null = null
+  if (spec.seek === true) {
+    seekAt = parts.length
+    parts.push(new Uint8Array(0))
+  }
+  const infoAt = parts.length
+  parts.push(info({ scale: spec.scale, duration: spec.duration }))
+  const tracksAt = parts.length
+  parts.push(tracksElement(spec.tracks.map((track) => trackEntry(track))))
+  const tagsAt = parts.length
+  for (const size of spec.tags ?? []) parts.push(element(ID.Tags, new Uint8Array(size)))
+  const clustersAt = parts.length
+  for (const one of spec.clusters) {
+    parts.push(
+      cluster(
+        one.timestamp,
+        one.frames.map((frame) => frameBlock(frame, one.timestamp)),
+      ),
+    )
+  }
+  let cuesAt: number | null = null
+  if (spec.cues === true) {
+    cuesAt = parts.length
+    parts.push(element(ID.Cues, element(ID.CuePoint, uint(ID.CueTime, 0))))
+  }
+  if (seekAt !== null) {
+    const entries: [number, number][] = [
+      [ID.Info, infoAt],
+      [ID.Tracks, tracksAt],
+    ]
+    if (cuesAt !== null) entries.push([ID.Cues, cuesAt])
+    // The length of a SeekHead is the same whatever the positions are (they are 8 bytes wide), so the part is measured with zeros and built again with the real ones.
+    parts[seekAt] = (at) => seekHead(entries.map(([id, index]) => [id, at[index] ?? 0]))
+  }
+
+  const file = matroskaFile(parts, {
+    header: ebmlHeader(spec.docType === undefined ? {} : { docType: spec.docType }),
+  })
+  const span = (index: number): ByteRange => ({
+    start: file.offsets[index] ?? 0,
+    end: file.offsets[index + 1] ?? file.bytes.length,
+  })
+  return {
+    ...file,
+    tracks: span(tracksAt),
+    tags: (spec.tags ?? []).map((_, index) => span(tagsAt + index)),
+    clusters: spec.clusters.map((_, index) => span(clustersAt + index)),
+    cues: cuesAt === null ? null : (file.offsets[cuesAt] ?? 0),
+  }
 }

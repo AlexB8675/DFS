@@ -8,3 +8,12 @@ export const HEADER_READ = 64 * 1024
 
 /** The most reads, after the head, that opening a file takes: 12. A file that needs another is damaged. */
 export const MAX_INDEX_READS = 12
+
+/** The most that a Tracks element takes: 16 MiB. A larger one is damaged, and is not read. */
+export const TRACKS_LIMIT = 16 * 1024 * 1024
+
+/** The most that the index reads, from the first Cluster, to find the first frames: 4 MiB, 1 MiB at a time, stopping as soon as it has them. */
+export const FIRST_FRAMES_BYTES = 4 * 1024 * 1024
+
+/** What the index reads at the Segment's end to find the end of the last frame, when Info has no Duration: 1 MiB, and not before the first Cluster. */
+export const TAIL_BYTES = 1024 * 1024
