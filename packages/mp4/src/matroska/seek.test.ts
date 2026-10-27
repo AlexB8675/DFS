@@ -30,7 +30,14 @@ import type {
 } from '../testing/ebml.ts'
 import { children, readHeader } from './ebml.ts'
 import { ID } from './ids.ts'
-import { CUES_LIMIT, HEADER_READ, MAX_SEEK_READS, SEARCH_READ, TAIL_BYTES } from './limits.ts'
+import {
+  CUES_LIMIT,
+  FIRST_FRAMES_BYTES,
+  HEADER_READ,
+  MAX_SEEK_READS,
+  SEARCH_READ,
+  TAIL_BYTES,
+} from './limits.ts'
 import { readMatroska } from './read.ts'
 import type { MatroskaIndex } from './read.ts'
 import { matroskaSeek, readCues } from './seek.ts'
@@ -255,24 +262,34 @@ function pictureFrame(time: number, tag: number, keyframe: boolean): MovieFrame 
  * Clusters of one second each: cluster k starts at k seconds with a frame that is a
  * keyframe in every `keyEvery`th cluster (the first always), and holds one more
  * frame, of `pad` bytes, half a second on, so that a cluster is as long as a test
- * needs.
+ * needs. A keyframe is of `key` bytes when that is more than the 8 that a keyframe
+ * of the tests is.
  */
 function seconds(
   count: number,
   {
     keyEvery = 1,
     pad = 8,
+    key = 8,
     unknown = false,
-  }: { keyEvery?: number; pad?: number; unknown?: boolean } = {},
+  }: { keyEvery?: number; pad?: number; key?: number; unknown?: boolean } = {},
 ): MovieCluster[] {
-  return Array.from({ length: count }, (_, k) => ({
-    timestamp: 1000 * k,
-    unknown,
-    frames: [
-      pictureFrame(1000 * k, k & 0xff, k % keyEvery === 0),
-      { track: 1, time: 1000 * k + 500, size: pad },
-    ],
-  }))
+  return Array.from({ length: count }, (_, k) => {
+    const first = pictureFrame(1000 * k, k & 0xff, k % keyEvery === 0)
+    return {
+      timestamp: 1000 * k,
+      unknown,
+      frames: [
+        first.keyframe === true && key > 8 ? bigKey(1000 * k, key) : first,
+        { track: 1, time: 1000 * k + 500, size: pad },
+      ],
+    }
+  })
+}
+
+/** A keyframe of the picture of `size` bytes, presented at `time` ticks: the header of one, then zeros. */
+function bigKey(time: number, size: number): MovieFrame {
+  return { track: 1, time, keyframe: true, data: concat(VP9_KEYFRAME, new Uint8Array(size - 5)) }
 }
 
 function movieOf(clusters: MovieCluster[], over: Partial<MovieSpec> = {}): Movie {
@@ -1061,5 +1078,152 @@ describe('seeking by a search of the clusters (§10.4)', () => {
     const ahead = seek(index, bare.bytes, 150.5, { held: everything(bare.bytes) })
     expect(ahead.cursor).toEqual(exact.cursor)
     expect(landsBefore(index, bare.bytes, exact.cursor, 150.5)).toBe(0)
+  })
+})
+
+describe('seeking in files of big clusters and big keyframes (§10.4)', () => {
+  const MIB = 1024 * 1024
+
+  it('lands in the cluster at or before the time when every cluster is longer than a guess, with no Cues', () => {
+    // 40 clusters of 1 MiB, of unknown size: most guesses land inside one, and find no cluster in their read.
+    const unknown = movieOf(seconds(40, { pad: MIB, unknown: true }))
+    const sized = movieOf(seconds(24, { pad: MIB }))
+    for (const movie of [unknown, sized]) {
+      const index = indexOf(movie.bytes)
+      expect(index.cues).toBeNull()
+      const count = movie.clusters.length
+      for (const time of [0.3, 5.5, 13.2, 17, count - 0.5, count + 10]) {
+        const expected = Math.min(Math.floor(time), count - 1)
+        const exact = seek(index, movie.bytes, time)
+        expect(exact.asks.length).toBeLessThanOrEqual(MAX_SEEK_READS)
+        expect(inCluster(movie.clusters, exact.cursor.at)).toBe(expected)
+        expect(landsBefore(index, movie.bytes, exact.cursor, time)).toBe(expected)
+        const ahead = seek(index, movie.bytes, time, { held: everything(movie.bytes) })
+        expect(ahead.cursor).toEqual(exact.cursor)
+      }
+    }
+  })
+
+  it('finds a cluster whose header lies across the end of the first read of a guess', () => {
+    // Cluster 6 starts 6 bytes before the first guess's read ends, with 1 MiB clusters: the read has its ID and not its size. The pad of cluster 5 moves cluster 6 by as much, and the guess by half as much.
+    const pads = upTo(12).map(() => MIB)
+    const build = (): Movie =>
+      movieOf(
+        seconds(12).map((one, k) => ({
+          ...one,
+          frames: [
+            ...one.frames.slice(0, 1),
+            { track: 1, time: 1000 * k + 500, size: must(pads[k]) },
+          ],
+        })),
+      )
+    const across = (movie: Movie): number => {
+      const first = must(movie.clusters[0]).start
+      const guess = first + Math.floor((movie.bytes.length - first) / 2)
+      return must(movie.clusters[6]).start - (guess + SEARCH_READ - 6)
+    }
+    let movie = build()
+    for (let round = 0; round < 8 && across(movie) !== 0; round += 1) {
+      pads[5] = must(pads[5]) - 2 * across(movie)
+      movie = build()
+    }
+    expect(across(movie)).toBe(0)
+    const index = indexOf(movie.bytes)
+    const { cursor } = seek(index, movie.bytes, 6.5)
+    expect(inCluster(movie.clusters, cursor.at)).toBe(6)
+    expect(landsBefore(index, movie.bytes, cursor, 6.5)).toBe(6)
+  })
+
+  it('confirms a keyframe of 600 KiB, by the Cues and by the search, and finds the point before a cue that lies', () => {
+    const key = 600 * 1024
+    const clusters = seconds(20, { key })
+    const plain = movieOf(clusters)
+    // By the search: no Cues.
+    const index = indexOf(plain.bytes)
+    for (const time of [0.5, 7.5, 12, 19.9]) {
+      const { cursor, asks } = seek(index, plain.bytes, time)
+      expect(asks.length).toBeLessThanOrEqual(MAX_SEEK_READS)
+      expect(inCluster(plain.clusters, cursor.at)).toBe(Math.floor(time))
+      expect(landsBefore(index, plain.bytes, cursor, time)).toBe(Math.floor(time))
+      const ahead = seek(index, plain.bytes, time, { held: everything(plain.bytes) })
+      expect(ahead.cursor).toEqual(cursor)
+    }
+
+    // By the Cues, where cluster 5 is dated 5.0 s by its cue and holds its keyframe at 5.8 s.
+    const lying = seconds(20, { key })
+    lying[5] = { timestamp: 5000, frames: [bigKey(5800, key)] }
+    const file = movieOf(lying, {
+      seek: true,
+      cuePoints: (at) =>
+        upTo(20).map((k) => ({
+          time: 1000 * k,
+          cluster: must(at[k]),
+          relative: blockAt(plain, k, 0),
+        })),
+    })
+    const opened = indexOf(file.bytes)
+    const early = seek(opened, file.bytes, 5.2)
+    expect(inCluster(file.clusters, early.cursor.at)).toBe(4)
+    expect(landsBefore(opened, file.bytes, early.cursor, 5.2)).toBe(4)
+    const ahead = seek(opened, file.bytes, 5.2, { held: everything(file.bytes) })
+    expect(ahead.cursor).toEqual(early.cursor)
+    // The block is read whole from the cursor, in the one ask.
+    const block = dataOf(file, 5) + blockAt(plain, 5, 0)
+    expect(early.asks.filter((ask) => ask.start === block)).toHaveLength(1)
+    expect(must(early.asks.find((ask) => ask.start === block)).end).toBeGreaterThan(block + key)
+    const late = seek(opened, file.bytes, 5.9)
+    expect(inCluster(file.clusters, late.cursor.at)).toBe(5)
+    expect(landsBefore(opened, file.bytes, late.cursor, 5.9)).toBe(5.8)
+  })
+
+  it('confirms a keyframe of 5 MiB, which is over what is read whole, by the header of its block', () => {
+    const key = 5 * MIB
+    expect(key).toBeGreaterThan(FIRST_FRAMES_BYTES)
+    // Cluster 5 holds a keyframe of 5 MiB, the others are small.
+    const build = (time: number): MovieCluster[] => {
+      const clusters = seconds(8)
+      clusters[5] = { timestamp: 5000, frames: [bigKey(time, key)] }
+      return clusters
+    }
+    // By the search.
+    const bare = movieOf(build(5000))
+    const index = indexOf(bare.bytes)
+    const found = seek(index, bare.bytes, 5.5)
+    expect(inCluster(bare.clusters, found.cursor.at)).toBe(5)
+    expect(landsBefore(index, bare.bytes, found.cursor, 5.5)).toBe(5)
+    // A block of 5 MiB that is not a keyframe, with a small keyframe behind it: the header says it is not one, and the keyframe behind is not reached (the block is more than is read whole), so the search goes to the cluster before.
+    const behind = seconds(8)
+    behind[5] = {
+      timestamp: 5000,
+      frames: [{ track: 1, time: 5000, size: key }, pictureFrame(5300, 53, true)],
+    }
+    const delta = movieOf(behind)
+    const before = seek(indexOf(delta.bytes), delta.bytes, 5.5)
+    expect(inCluster(delta.clusters, before.cursor.at)).toBe(4)
+    // By the Cues, with the cue of cluster 5 telling the time of the keyframe (5000) or lying about it (the keyframe is at 5800).
+    for (const [time, wanted] of [
+      [5000, 5],
+      [5800, 4],
+    ] as const) {
+      const clusters = build(time)
+      const plain = movieOf(clusters)
+      const file = movieOf(clusters, {
+        seek: true,
+        cuePoints: (at) =>
+          upTo(8).map((k) => ({
+            time: 1000 * k,
+            cluster: must(at[k]),
+            relative: blockAt(plain, k, 0),
+          })),
+      })
+      const opened = indexOf(file.bytes)
+      const sought = seek(opened, file.bytes, 5.2)
+      expect(inCluster(file.clusters, sought.cursor.at)).toBe(wanted)
+      expect(landsBefore(opened, file.bytes, sought.cursor, 5.2)).toBe(wanted)
+      const ahead = seek(opened, file.bytes, 5.2, { held: everything(file.bytes) })
+      expect(ahead.cursor).toEqual(sought.cursor)
+      // None of the asks is for the block, which is more than is read whole.
+      for (const ask of sought.asks) expect(ask.end - ask.start).toBeLessThanOrEqual(SEARCH_READ)
+    }
   })
 })

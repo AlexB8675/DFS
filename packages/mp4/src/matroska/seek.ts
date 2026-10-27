@@ -2,12 +2,19 @@ import { Mp4Error } from '../errors.ts'
 import { heldBytes } from '../source.ts'
 import type { ByteRange, Chunk, Step } from '../source.ts'
 import { findCluster, readClusters } from './clusters.ts'
-import type { ClusterPlace, RawFrame } from './clusters.ts'
+import type { ClusterPlace, ClusterRead } from './clusters.ts'
 import { children, readHeader, readUint } from './ebml.ts'
 import type { Element } from './ebml.ts'
 import { covers } from './head.ts'
 import { ID, TOP_LEVEL } from './ids.ts'
-import { CUES_LIMIT, HEADER_READ, MAX_SEEK_READS, SEARCH_READ, TAIL_BYTES } from './limits.ts'
+import {
+  CUES_LIMIT,
+  FIRST_FRAMES_BYTES,
+  HEADER_READ,
+  MAX_SEEK_READS,
+  SEARCH_READ,
+  TAIL_BYTES,
+} from './limits.ts'
 import type { MatroskaIndex } from './read.ts'
 import { matroskaStart } from './spans.ts'
 import type { MatroskaCursor } from './spans.ts'
@@ -35,11 +42,21 @@ import type { MatroskaCursor } from './spans.ts'
 // By a search of the clusters when it has none (a recording that was cut off, one
 // written as it was shot, Cues too long to read). The Segment is bisected by the
 // byte: each guess reads 256 KiB and takes the first cluster in it, whose Timestamp
-// says which half the time is in. When what is left is no more than a read, the
-// last cluster at or before the time is read from, and the clusters in that read are
-// the candidates: the latest of them that holds a keyframe at or before the time is
-// where reading starts. When none does, the search is made again for a cluster
-// before the first of them. A file with no such cluster is read from its first.
+// says which half the time is in; a guess that finds none (a cluster is longer than
+// a read, as a cluster of a recording at an ordinary bitrate is) goes on reading
+// forward, a read at a time, until it finds one or reaches the end of the range. When
+// what is left is no more than a read, the last cluster at or before the time is
+// read from, and the clusters in that read are the candidates: the latest of them
+// that holds a keyframe at or before the time is where reading starts. When none
+// does, the search is made again for a cluster before the first of them. A file with
+// no such cluster is read from its first. Cues too long to read that run to the
+// Segment's end are left out of the range, for no cluster is in them.
+//
+// A keyframe is looked for in the bytes read, and a picture block that the bytes
+// stop short of is read whole, from where they start to its end, in one more read
+// (its header says how long it is), when that is no more than `FIRST_FRAMES_BYTES`
+// (a keyframe of 4K can be a megabyte); a SimpleBlock longer than that is judged by
+// its first bytes, which say its track, its time and whether it is a keyframe.
 //
 // Every read is counted as the head's and the index's are (`MAX_SEEK_READS`): for
 // each range the seek needs that it has not needed already, whether it finds it held
@@ -165,6 +182,59 @@ function cuesHeader(bytes: Uint8Array, at = 0): Element | null {
   return el !== null && el.id === ID.Cues && el.sized ? el : null
 }
 
+/** A picture keyframe that a seek has found: when it is presented in ticks, and where. */
+interface Key {
+  pts: number
+  offset: number
+}
+
+/** What the first bytes of a SimpleBlock say: its track, its time from its cluster's, and whether it is a keyframe. */
+interface BlockHead {
+  track: number
+  timecode: number
+  keyframe: boolean
+}
+
+/** A block of the picture that the bytes stop short of: where it starts and ends in the file, the cluster it is in, and for a SimpleBlock whose first bytes are held, what they say. */
+interface Cut {
+  at: number
+  end: number
+  place: ClusterPlace
+  head: BlockHead | null
+}
+
+/** The track, the time and the flags of the SimpleBlock whose header is `el` in `bytes`; null when the bytes end first. */
+function blockHead(bytes: Uint8Array, el: Element): BlockHead | null {
+  const first = bytes[el.data]
+  if (first === undefined || first === 0) return null
+  const width = Math.clz32(first) - 23
+  const flags = el.data + width + 2
+  if (flags >= bytes.length) return null
+  let track = first & (0xff >> width)
+  for (let at = el.data + 1; at < el.data + width; at += 1) track = track * 256 + (bytes[at] ?? 0)
+  const view = new DataView(bytes.buffer, bytes.byteOffset + el.data + width, 2)
+  return { track, timecode: view.getInt16(0), keyframe: ((bytes[flags] ?? 0) & 0x80) !== 0 }
+}
+
+/**
+ * The block that a `readClusters` over `bytes` (starting at `base` in the file)
+ * stopped at because the bytes end before it does: its end is read from its header.
+ * Null when the read went to the end of the bytes, or stopped at something else
+ * (the header of an element is cut by the bytes' end too, and says nothing).
+ */
+function cutOf(read: ClusterRead, bytes: Uint8Array, base: number): Cut | null {
+  const at = read.next - base
+  if (read.cluster === null || read.searching || at < 0 || at >= bytes.length) return null
+  const el = headerAt(bytes, at)
+  if (el === null || !el.sized || !BLOCKS.has(el.id) || el.end <= bytes.length) return null
+  return {
+    at: read.next,
+    end: base + el.end,
+    place: read.cluster,
+    head: el.id === ID.SimpleBlock ? blockHead(bytes, el) : null,
+  }
+}
+
 /** One seek, from the beginning. */
 class Seeking {
   private reads = 0
@@ -173,6 +243,8 @@ class Seeking {
   private readonly index: MatroskaIndex
   private readonly seconds: number
   private readonly chunks: readonly Chunk[]
+  /** Where the clusters can end: the Segment's end, or the start of a Cues element that is too long to be read and runs to it (a search is then made without it). */
+  private clusters: number
   /** The picture's CodecDelay in seconds, which RFC 9559 takes off every timestamp. The index's offset is that and the shift of the decode times, which presents nothing earlier. */
   private readonly delay: number
 
@@ -180,6 +252,7 @@ class Seeking {
     this.index = index
     this.seconds = seconds
     this.chunks = chunks
+    this.clusters = index.segment.end
     const { timing, read, header } = index.video
     this.delay = -timing.offsetSeconds - read.shift / header.timescale
   }
@@ -239,7 +312,7 @@ class Seeking {
     const { segment } = this.index
     let bytes: Uint8Array
     if (cues.end !== null) {
-      if (cues.end - cues.start > CUES_LIMIT) return 'unusable'
+      if (cues.end - cues.start > CUES_LIMIT) return this.tooLong(cues.start, cues.end)
       bytes = this.take({ start: cues.start, end: cues.end })
     } else {
       const window = this.take({
@@ -248,7 +321,7 @@ class Seeking {
       })
       const el = cuesHeader(window)
       if (el === null || cues.start + el.end > segment.end) return 'absent'
-      if (el.end > CUES_LIMIT) return 'unusable'
+      if (el.end > CUES_LIMIT) return this.tooLong(cues.start, cues.start + el.end)
       bytes =
         el.end <= window.length
           ? window.subarray(0, el.end)
@@ -269,6 +342,12 @@ class Seeking {
       if (error instanceof Mp4Error) return 'unusable'
       throw error
     }
+  }
+
+  /** The Cues that are from `start` to `end` are too long to be read. When they run to the Segment's end no cluster is in them, so a search need not look there. */
+  private tooLong(start: number, end: number): 'unusable' {
+    if (end === this.index.segment.end && start > this.index.firstCluster) this.clusters = start
+    return 'unusable'
   }
 
   /**
@@ -366,23 +445,24 @@ class Seeking {
   /**
    * The picture's first keyframe from the landing, as playing from it finds it, in
    * the bytes of the cluster's header when they hold the landing and have one, else
-   * in `SEARCH_READ` bytes from it. `block` is false when the landing was named by
-   * a point and is not at a block of its cluster.
+   * in `SEARCH_READ` bytes from it; a block that those bytes stop short of is read
+   * whole (`wholeBlock`). `block` is false when the landing was named by a point
+   * and is not at a block of its cluster.
    */
   private keyframeFrom(
     landing: Landing,
     named: boolean,
     header: Chunk,
-  ): { block: boolean; key: RawFrame | null } {
+  ): { block: boolean; key: Key | null } {
     const { segment, video } = this.index
-    const from = (bytes: Uint8Array): { block: boolean; key: RawFrame | null } => {
+    const from = (bytes: Uint8Array): { block: boolean; key: Key | null; cut: Cut | null } => {
       if (named && landing.cluster !== null) {
         const el = headerAt(bytes)
         if (
           el !== null &&
           !(BLOCKS.has(el.id) && el.sized && landing.at + el.end <= landing.cluster.end)
         ) {
-          return { block: false, key: null }
+          return { block: false, key: null, cut: null }
         }
       }
       const read = readClusters(
@@ -393,17 +473,53 @@ class Seeking {
         segment.end,
         [video.read],
       )
-      return { block: true, key: read.frames.find((frame) => frame.keyframe) ?? null }
+      const key = read.frames.find((frame) => frame.keyframe) ?? null
+      return { block: true, key, cut: key === null ? cutOf(read, bytes, landing.at) : null }
     }
 
     const headerEnd = header.start + header.bytes.length
+    const whole = { start: landing.at, end: Math.min(landing.at + SEARCH_READ, segment.end) }
+    let cut: Cut | null = null
     if (landing.at >= header.start && landing.at < headerEnd) {
       const seen = from(header.bytes.subarray(landing.at - header.start))
       if (!seen.block || seen.key !== null) return seen
+      cut = seen.cut
+      if (cut === null && whole.end <= headerEnd) return { block: true, key: null }
     }
-    const whole = { start: landing.at, end: Math.min(landing.at + SEARCH_READ, segment.end) }
-    if (whole.end <= headerEnd && landing.at >= header.start) return { block: true, key: null }
-    return from(this.take(whole))
+    // A block that the header's bytes stop short of and that runs past the read from the landing is read whole instead of that read, which it holds.
+    if (cut === null || cut.end <= whole.end) {
+      const seen = from(this.take(whole))
+      if (!seen.block || seen.key !== null) return seen
+      cut = seen.cut
+    }
+    return { block: true, key: cut === null ? null : this.wholeBlock(landing, cut) }
+  }
+
+  /**
+   * The picture's keyframe in the block `cut` that the bytes read from `landing`
+   * stop short of, if it is one: the block is read whole, from the landing to its
+   * end (one read), when that is no more than `FIRST_FRAMES_BYTES` and inside the
+   * Segment; else a SimpleBlock is judged by its first bytes (its track, its time
+   * and its keyframe flag), and any other block says nothing.
+   */
+  private wholeBlock(landing: Landing, cut: Cut): Key | null {
+    const { segment, video } = this.index
+    if (cut.end > segment.end || cut.end - landing.at > FIRST_FRAMES_BYTES) {
+      const { head } = cut
+      return head !== null && head.track === video.read.number && head.keyframe
+        ? { pts: cut.place.timestamp + head.timecode, offset: cut.at }
+        : null
+    }
+    const bytes = this.take({ start: landing.at, end: cut.end })
+    const read = readClusters(
+      { start: landing.at, bytes },
+      landing.at,
+      landing.cluster,
+      false,
+      segment.end,
+      [video.read],
+    )
+    return read.frames.find((frame) => frame.keyframe) ?? null
   }
 
   // The search.
@@ -443,19 +559,26 @@ class Seeking {
    * The last cluster at or before the time that the search bisects to (null when
    * no guess finds one): the range [first cluster, Segment's end) is halved by the
    * byte, and each guess reads `SEARCH_READ` bytes and takes the first cluster in
-   * them. One at or before the time becomes the best so far, and where the range
-   * starts; one after, or none, is where it ends. It stops when what is left is no
-   * more than a read, which the gap halving each time brings about.
+   * them. A guess that finds none goes on reading forward, a read at a time, until
+   * it finds one or reaches the end of the range (a cluster is longer than a read, or
+   * the guess is in a stretch that has none). A cluster at or before the time
+   * becomes the best so far, and where the range starts; one after, or none, is
+   * where it ends, at the guess. It stops when what is left is no more than a read,
+   * which the gap halving each time brings about.
    */
   private bisect(below: number): { start: number; place: ClusterPlace } | null {
     const { segment, firstCluster } = this.index
     let lo = firstCluster
-    let hi = segment.end
+    let hi = this.clusters
     let best: { start: number; place: ClusterPlace } | null = null
     while (hi - lo > SEARCH_READ) {
       const guess = lo + Math.floor((hi - lo) / 2)
-      const bytes = this.take({ start: guess, end: Math.min(guess + SEARCH_READ, segment.end) })
-      const found = findCluster({ start: guess, bytes }, guess, segment.end)
+      // Each read after the first starts a header's length (`HEADER_READ`, which bounds a cluster's first elements) before the end of the one before, so that a cluster whose header lies across that end is seen whole.
+      let found: { start: number; place: ClusterPlace } | null = null
+      for (let from = guess; found === null && from < hi; from += SEARCH_READ - HEADER_READ) {
+        const bytes = this.take({ start: from, end: Math.min(from + SEARCH_READ, segment.end) })
+        found = findCluster({ start: from, bytes }, from, segment.end)
+      }
       if (found !== null && found.start < hi && this.early(found.place.timestamp, below)) {
         best = found
         lo = found.start
@@ -495,6 +618,20 @@ class Seeking {
       )
       if (key !== undefined && this.timeOf(key.pts) <= this.seconds) chosen = cluster.start
     }
+
+    // The last cluster in the read may have a block that the read stops short of, and its keyframe be that block: it is read whole, from the cluster's start.
+    const last = starts[starts.length - 1]
+    const cut = cutOf(read, chunk.bytes, chunk.start)
+    if (
+      last !== undefined &&
+      cut !== null &&
+      cut.at >= last.start &&
+      this.early(last.place.timestamp, below) &&
+      !read.frames.some((frame) => frame.keyframe && frame.offset >= last.start)
+    ) {
+      const key = this.wholeBlock({ at: last.start, cluster: null }, cut)
+      if (key !== null && this.timeOf(key.pts) <= this.seconds) chosen = last.start
+    }
     return chosen
   }
 }
@@ -516,6 +653,8 @@ class Seeking {
  *   of the picture or that lead to something that is no cluster, the cursor is at
  *   the start of a cluster found by a search, with `cluster` null, for the first
  *   cluster when there is none at or before the time.
+ * - A picture block that a read stops short of, where the keyframe is looked for, is
+ *   read whole (up to `FIRST_FRAMES_BYTES`, else its first bytes judge it).
  * - A seek that has needed `MAX_SEEK_READS` reads stops at the first cluster.
  *
  * A sound that is not one of the index's, or a time that is no number, is a
