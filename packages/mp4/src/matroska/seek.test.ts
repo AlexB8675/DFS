@@ -734,6 +734,101 @@ describe('seeking by the Cues (§10.4)', () => {
     expect(landsBefore(index, movie.bytes, past.cursor, 1e6)).toBe(9)
   })
 
+  it("starts at the cluster's own start when the bytes at a point's block have no readable header", () => {
+    // Cluster 5 begins with a Void of zeros, then its keyframe; the cue's block position is inside the zeros: no element there, so the point is not at a block, and the readClusters that follows it would pass the damage and find a keyframe in a later cluster.
+    const blocks = upTo(10).map((k) =>
+      k === 5
+        ? cluster(5000, [
+            element(ID.Void, new Uint8Array(8)),
+            simpleBlock({ track: 1, timecode: 0, keyframe: true, frames: [vp9Key(5)] }),
+            simpleBlock({ track: 1, timecode: 500, frames: [new Uint8Array(8)] }),
+          ])
+        : rawCluster(k, 8),
+    )
+    const built = assemble(blocks, {
+      back: (starts) =>
+        cues(
+          starts.map((start, k) => ({
+            time: 1000 * k,
+            cluster: start,
+            // The Timestamp, the Void's header of 2 bytes, and 1 byte of its zeros.
+            relative: stampLength(k) + (k === 5 ? 3 : 0),
+          })),
+          { positionWidth: 8 },
+        ),
+      seek: 'back',
+    })
+    const { bytes } = built.file
+    const index = indexOf(bytes)
+    const { cursor } = seek(index, bytes, 5.5)
+    expect(cursor).toEqual({ ...matroskaStart(index, null), at: must(built.clusters[5]) })
+    expect(landsBefore(index, bytes, cursor, 5.5)).toBe(5)
+  })
+
+  it("keeps the block that a point names when the cluster's header bytes end within the block's header", () => {
+    // The keyframe of cluster 5 follows a Void that ends 1 byte before the first read of the cluster does: its header is not whole in those bytes, and the read from the block tells that it is one.
+    const gap = HEADER_READ - 1 - 7 - stampLength(5)
+    const blocks = upTo(10).map((k) =>
+      k === 5
+        ? cluster(5000, [
+            element(ID.Void, new Uint8Array(gap - 4)),
+            simpleBlock({ track: 1, timecode: 0, keyframe: true, frames: [vp9Key(5)] }),
+            simpleBlock({ track: 1, timecode: 500, frames: [new Uint8Array(8)] }),
+          ])
+        : rawCluster(k, 8),
+    )
+    const built = assemble(blocks, {
+      back: (starts) =>
+        cues(
+          starts.map((start, k) => ({
+            time: 1000 * k,
+            cluster: start,
+            relative: stampLength(k) + (k === 5 ? gap : 0),
+          })),
+          { positionWidth: 8 },
+        ),
+      seek: 'back',
+    })
+    const { bytes } = built.file
+    const index = indexOf(bytes)
+    const start = must(built.clusters[5])
+    const { cursor } = seek(index, bytes, 5.5)
+    expect(cursor.at - start).toBe(HEADER_READ - 1)
+    expect(cursor.cluster).toEqual({ timestamp: 5000, end: must(built.clusters[6]), sized: true })
+    expect(landsBefore(index, bytes, cursor, 5.5)).toBe(5)
+  })
+
+  it("starts at the first cluster for a time before the first point when that point's cluster is not the first", () => {
+    // Cues that begin at the fourth cluster.
+    const file = cued(seconds(10), [3, 4, 5, 6, 7, 8, 9])
+    const opened = indexOf(file.bytes)
+    const { cursor, asks } = seek(opened, file.bytes, 1.5)
+    expect(cursor).toEqual(matroskaStart(opened, null))
+    expect(inCluster(file.clusters, cursor.at)).toBe(0)
+    // Nothing of the clusters was read.
+    expect(asks).toEqual([{ start: must(file.cues), end: file.bytes.length }])
+    // From the first point on they are used.
+    expect(inCluster(file.clusters, seek(opened, file.bytes, 3.2).cursor.at)).toBe(3)
+  })
+
+  it("starts at the first cluster when the first point's keyframe is after the time and its cluster is not the first", () => {
+    // Cues that begin at the third cluster, whose keyframe is at 2.8 s after a delta frame at 2.0 s.
+    const lying = seconds(10)
+    lying[2] = {
+      timestamp: 2000,
+      frames: [pictureFrame(2000, 20, false), pictureFrame(2800, 21, true)],
+    }
+    const file = cued(lying, [2, 3, 4, 5, 6, 7, 8, 9])
+    const opened = indexOf(file.bytes)
+    const { cursor } = seek(opened, file.bytes, 2.2)
+    expect(cursor).toEqual(matroskaStart(opened, null))
+    expect(landsBefore(opened, file.bytes, cursor, 2.2)).toBe(0)
+    // Once the time is past the keyframe the point is good.
+    const good = seek(opened, file.bytes, 2.9)
+    expect(inCluster(file.clusters, good.cursor.at)).toBe(2)
+    expect(landsBefore(opened, file.bytes, good.cursor, 2.9)).toBe(2.8)
+  })
+
   it("takes a picture's CodecDelay off the times of the cues, but not the shift of its decode times", () => {
     // A picture with a CodecDelay of half a second: a keyframe at 5000 ticks is shown at 4.5 s.
     const delayed = cued(seconds(10), upTo(10), { tracks: [{ ...VP9, codecDelay: 500_000_000 }] })

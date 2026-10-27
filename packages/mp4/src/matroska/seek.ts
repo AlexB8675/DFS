@@ -37,7 +37,9 @@ import type { MatroskaCursor } from './spans.ts'
 // bytes it names: its cluster must be there, and the picture's first keyframe from
 // the block (or the cluster) must be presented no later than the time, else the
 // point before it is used, for a writer may date a cue by its cluster and not by the
-// keyframe in it.
+// keyframe in it. With no point before it (the time is before the first, or the first
+// is the one that lies) the seek goes to the file's first cluster, which is at or
+// before any time, unless the point's own cluster is it.
 //
 // By a search of the clusters when it has none (a recording that was cut off, one
 // written as it was shot, Cues too long to read). The Segment is bisected by the
@@ -74,6 +76,9 @@ export interface CuePoint {
   cluster: number
   relative: number | null
 }
+
+/** The most that the header of an element takes: an ID of 4 bytes and a size of 8. */
+const MAX_HEADER = 12
 
 /** The bytes of a Cues element's ID. */
 const CUES_ID = [0x1c, 0x53, 0xbb, 0x6b]
@@ -392,6 +397,10 @@ class Seeking {
     }
     const before = at === -1
     if (before) at = 0
+    // Points that begin partway into the file say nothing of what is before them: that is the file's start.
+    const { firstCluster } = this.index
+    if (before && (points[0]?.cluster ?? 0) > firstCluster)
+      return { at: firstCluster, cluster: null }
     for (;;) {
       const point = points[at]
       if (point === undefined) return null
@@ -405,11 +414,12 @@ class Seeking {
    * Where a point leads. Its cluster is read (its header, the first `HEADER_READ`
    * bytes) and must be at the point's position. The cursor is at the block the
    * point names when that is a block of the cluster, else at the cluster, which
-   * `readClusters` enters; for a time before the first point it is at the cluster
-   * (the start of the file, as a start has it). The picture's first keyframe from
+   * `readClusters` enters; for a time before the first point, whose cluster is then the
+   * file's first, it is at the cluster (the start of the file, as a start has it). The picture's first keyframe from
    * there is looked for in the header's bytes and then in `SEARCH_READ` bytes from
    * the cursor, and 'lies' says it is presented after the time while there is a
-   * point before this one (`back`); a keyframe that the bytes do not show leaves
+   * point before this one (`back`); with none, the cursor is at the first cluster
+   * (the point's own when that is it). A keyframe that the bytes do not show leaves
    * the point as it is.
    */
   private onCue(point: CuePoint, before: boolean, back: boolean): Landing | 'lies' | null {
@@ -437,7 +447,12 @@ class Seeking {
     for (const { landing, named: byName } of landings) {
       const seen = this.keyframeFrom(landing, byName, header)
       if (!seen.block) continue
-      if (seen.key !== null && back && this.timeOf(seen.key.pts) > this.seconds) return 'lies'
+      if (seen.key !== null && this.timeOf(seen.key.pts) > this.seconds) {
+        if (back) return 'lies'
+        // Nothing is before this point to go back to: the file's start, if its cluster is not that.
+        const { firstCluster } = this.index
+        if (point.cluster > firstCluster) return { at: firstCluster, cluster: null }
+      }
       return landing
     }
     return own
@@ -456,12 +471,19 @@ class Seeking {
     header: Chunk,
   ): { block: boolean; key: Key | null } {
     const { segment, video } = this.index
-    const from = (bytes: Uint8Array): { block: boolean; key: Key | null; cut: Cut | null } => {
+    // `final` says that no longer read from the landing is to come: the bytes of the cluster's header may end before a header does, and then the read that follows them tells.
+    const from = (
+      bytes: Uint8Array,
+      final: boolean,
+    ): { block: boolean; key: Key | null; cut: Cut | null } => {
       if (named && landing.cluster !== null) {
         const el = headerAt(bytes)
+        // No header to read there is no block, as much as one that is another element.
+        const missing = el === null && (final || bytes.length >= MAX_HEADER)
         if (
-          el !== null &&
-          !(BLOCKS.has(el.id) && el.sized && landing.at + el.end <= landing.cluster.end)
+          missing ||
+          (el !== null &&
+            !(BLOCKS.has(el.id) && el.sized && landing.at + el.end <= landing.cluster.end))
         ) {
           return { block: false, key: null, cut: null }
         }
@@ -482,14 +504,14 @@ class Seeking {
     const whole = { start: landing.at, end: Math.min(landing.at + SEARCH_READ, segment.end) }
     let cut: Cut | null = null
     if (landing.at >= header.start && landing.at < headerEnd) {
-      const seen = from(header.bytes.subarray(landing.at - header.start))
+      const seen = from(header.bytes.subarray(landing.at - header.start), whole.end <= headerEnd)
       if (!seen.block || seen.key !== null) return seen
       cut = seen.cut
       if (cut === null && whole.end <= headerEnd) return { block: true, key: null }
     }
     // A block that the header's bytes stop short of and that runs past the read from the landing is read whole instead of that read, which it holds.
     if (cut === null || cut.end <= whole.end) {
-      const seen = from(this.take(whole))
+      const seen = from(this.take(whole), true)
       if (!seen.block || seen.key !== null) return seen
       cut = seen.cut
     }
@@ -656,9 +678,10 @@ class Seeking {
  *
  * - With Cues, the cursor is at the block of the last point at or before the time,
  *   with its cluster read; without a block position, at the cluster. A point whose
- *   keyframe is presented after the time gives way to the point before it. A time
- *   before the first point is the start of its cluster; one past the last is the
- *   last point's.
+ *   keyframe is presented after the time gives way to the point before it, and the
+ *   first point's, or a time before it, to the first cluster (the point's own, when
+ *   that is it); a block position that is not a block of its cluster gives the
+ *   cluster's start. A time past the last point is the last point's.
  * - Without them, or with Cues too long to read (`CUES_LIMIT`), that do not walk, that have no point
  *   of the picture or that lead to something that is no cluster, the cursor is at
  *   the start of a cluster found by a search, with `cluster` null, for the first
