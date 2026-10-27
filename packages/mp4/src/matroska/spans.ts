@@ -24,11 +24,12 @@ import type { DecodeState, TimedFrame } from './timing.ts'
 // frame's decode time and duration reach the next frame's decode time. The frames
 // of one decode state are, for a duration is the distance to the next frame's decode
 // time; a skip breaks the run, for the state starts again after it and its times
-// jump. So `frames` lists the picture's runs, each its own table in the order they come
-// (the frames before a skip, the frames after it, and so on), and then the sound's,
-// which is one table whatever it skips, for its state goes on and its durations span
-// the gap. A caller writes each table as its own fragment or fragments (the engine
-// cuts them further by time as it likes), and never joins two.
+// jump, and a frame must not last across the gap (in nanoseconds a gap of over 4.29 s
+// does not fit the 32 bits of a duration). So `frames` lists
+// the picture's runs, each its own table in the order they come (the frames before a
+// skip, the frames after it, and so on), and then the sound's runs in the same way.
+// A caller writes each table as its own fragment or fragments (the engine cuts them
+// further by time as it likes), and never joins two.
 //
 // What a span restarts. A cursor made for a start (the file's, or a seek's) has not
 // started its picture: its frames wait for a keyframe, as the index counted from the
@@ -37,8 +38,9 @@ import type { DecodeState, TimedFrame } from './timing.ts'
 // decoded without what was skipped: its decode state starts again and it waits for a
 // keyframe. The frames before the skip are whole, so they all come out, those held
 // for the next frame's decode time with a duration of their own (as at the Segment's
-// end). The sound's frames each stand alone, and its state goes on over the gap, the
-// frame before it lasting to the one after.
+// end). The sound is split at a skip in the same way, its frames before the skip
+// flushed and its state started again; it needs no keyframe to wait for, for every
+// sound frame is one.
 //
 // The tables are in the track's timescale (`trackTimescale`). A frame's decode time
 // is the file's with the track's shift added (the index's, so that none is before
@@ -205,6 +207,63 @@ function fragmentTrack(
   }
 }
 
+/** What the frames of a track in a span come to: its runs, its state to go on with and whether it has started. */
+interface Runs {
+  runs: TimedFrame[][]
+  state: DecodeState
+  started: boolean
+}
+
+/**
+ * Gives the frames of one track, in file order, to its decode state in pieces cut at
+ * the skips: the frames of a piece go to the state, and at a skip the piece is ended
+ * as at the Segment's end (`decodeTimes` with `end`), so that the frames the state
+ * held come out with a duration of their own (they are whole, and wait only for the
+ * decode time of a next frame that the damage takes), and the state that comes back
+ * is a fresh start. Each piece's timed frames are a run of their own, the times in
+ * which are continuous. A track that `waits` (the picture) has not started until a
+ * keyframe, and the frames before one are left out, at the start and again after
+ * every skip; one that does not (the sound, whose every frame is a keyframe) is
+ * started always. `ended` ends the last piece too.
+ */
+function inRuns(
+  frames: readonly RawFrame[],
+  skipped: readonly ByteRange[],
+  from: { state: DecodeState; started: boolean },
+  waits: boolean,
+  ended: boolean,
+): Runs {
+  const runs: TimedFrame[][] = []
+  let { state, started } = from
+  const feed = (piece: readonly RawFrame[], end: boolean): void => {
+    let usable = piece
+    if (waits && !started) {
+      const first = piece.findIndex((frame) => frame.keyframe)
+      usable = first === -1 ? [] : piece.slice(first)
+      started = first !== -1
+    }
+    const done = decodeTimes(state, usable, end)
+    if (done.timed.length > 0) runs.push(done.timed)
+    state = done.state
+  }
+
+  let piece: RawFrame[] = []
+  let skips = 0
+  const restart = (): void => {
+    feed(piece, true)
+    piece = []
+    started = !waits
+    skips += 1
+  }
+  for (const frame of frames) {
+    while (frame.offset >= (skipped[skips]?.start ?? Infinity)) restart()
+    piece.push(frame)
+  }
+  while (skips < skipped.length) restart()
+  feed(piece, ended)
+  return { runs, state, started }
+}
+
 /**
  * Turns the part of the file in `chunk` that the cursor reaches into the frames of
  * the picture and of the chosen sound that it completes, and says where to go on.
@@ -215,9 +274,9 @@ function fragmentTrack(
  * - `frames` lists the picture's continuous runs in order, then the sound's, each
  *   run a table of its own in decode order, and leaves out a track that has no frame
  *   to give. Within a table every frame's decode time and duration reach the next
- *   frame's decode time: a skip in the picture ends a run and starts the next, so
- *   that a caller writes each table as its own fragment(s) and no fragment spans a
- *   skip. The sound is one table, its durations spanning any gap.
+ *   frame's decode time: a skip ends a run and starts the next, in the sound as in the
+ *   picture, so that a caller writes each table as its own fragment(s) and no
+ *   fragment spans a skip, and no frame lasts across the gap.
  * - A frame comes out once its decode time and the next one's are known; the frames
  *   still waiting are in the returned cursor, and their bytes may lie in a chunk the
  *   caller no longer holds (the table has only offsets, and the engine reads the
@@ -229,7 +288,8 @@ function fragmentTrack(
  *   order and joined where they touch. The picture's frames before a skip all come
  *   out, those held among them with a duration of their own, as at the Segment's end;
  *   after it the picture restarts as after a seek: its decode state is fresh and it
- *   waits for a keyframe. The sound goes on over it.
+ *   waits for a keyframe. The sound's frames before a skip come out likewise and its
+ *   state starts again, with no keyframe to wait for.
  * - When the chunk ends before the next element is whole, nothing is read and the
  *   cursor comes back at the same `at`: the caller reads a bigger chunk from `at` and
  *   calls again, and the engine doubles its read until the cursor moves. The size
@@ -262,56 +322,36 @@ export function matroskaFrames(
   )
   const skipped = joined(read.skipped)
 
-  // The picture, in pieces: the frames before each skip go to the state as it is, and
-  // the skip starts it again.
-  const pictureFrames = read.frames.filter((frame) => frame.track === video.read.number)
-  const pictureRuns: TimedFrame[][] = []
-  let picture = cursor.picture
-  let started = cursor.pictureStarted
-  const feed = (frames: readonly RawFrame[], end: boolean): void => {
-    let usable = frames
-    if (!started) {
-      const first = frames.findIndex((frame) => frame.keyframe)
-      usable = first === -1 ? [] : frames.slice(first)
-      started = first !== -1
-    }
-    const done = decodeTimes(picture, usable, end)
-    if (done.timed.length > 0) pictureRuns.push(done.timed)
-    picture = done.state
-  }
-  let piece: RawFrame[] = []
-  let skips = 0
-  /** Ends the piece before the next skip: its frames go to the state as at the Segment's end, so that those it held come out (they are whole, and wait only for the decode time of a next frame that the damage takes), and the state that comes back is a fresh start, as the skip needs; the picture then waits for a keyframe. */
-  const restart = (): void => {
-    feed(piece, true)
-    piece = []
-    started = false
-    skips += 1
-  }
-  for (const frame of pictureFrames) {
-    while (frame.offset >= (skipped[skips]?.start ?? Infinity)) restart()
-    piece.push(frame)
-  }
-  while (skips < skipped.length) restart()
-  feed(piece, read.ended)
-
-  // The sound, which goes on over a skip.
-  let audio = cursor.audio
-  let soundTimed: TimedFrame[] = []
-  if (sound !== null && audio !== null) {
-    const frames = read.frames.filter((frame) => frame.track === sound.read.number)
-    const done = decodeTimes(audio, frames, read.ended)
-    soundTimed = done.timed
-    audio = done.state
-  }
+  // The picture and the sound each in runs, cut at the skips.
+  const picture = inRuns(
+    read.frames.filter((frame) => frame.track === video.read.number),
+    skipped,
+    { state: cursor.picture, started: cursor.pictureStarted },
+    true,
+    read.ended,
+  )
+  const audio =
+    sound === null || cursor.audio === null
+      ? null
+      : inRuns(
+          read.frames.filter((frame) => frame.track === sound.read.number),
+          skipped,
+          { state: cursor.audio, started: true },
+          false,
+          read.ended,
+        )
 
   const frames: FragmentTrack[] = []
-  for (const run of pictureRuns) {
+  for (const run of picture.runs) {
     const pictureTrack = fragmentTrack(index, video, run)
     if (pictureTrack !== null) frames.push(pictureTrack)
   }
-  const soundTrack = sound === null ? null : fragmentTrack(index, sound, soundTimed)
-  if (soundTrack !== null) frames.push(soundTrack)
+  if (sound !== null && audio !== null) {
+    for (const run of audio.runs) {
+      const soundTrack = fragmentTrack(index, sound, run)
+      if (soundTrack !== null) frames.push(soundTrack)
+    }
+  }
 
   return {
     frames,
@@ -322,9 +362,9 @@ export function matroskaFrames(
       searching: read.searching,
       ended: read.ended,
       sound: cursor.sound,
-      picture,
-      audio,
-      pictureStarted: started,
+      picture: picture.state,
+      audio: audio === null ? null : audio.state,
+      pictureStarted: picture.started,
     },
     skipped,
   }

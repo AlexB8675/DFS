@@ -817,7 +817,7 @@ describe('damage in the middle of a file (§10.4)', () => {
     expect(result.cursor.searching).toBe(false)
 
     // The frames before the damage all come out, the one held when it came (at 100) with a duration of its own, the default's 33; the frame at 200, after it, comes before the next keyframe and is left out. The frames before the damage and those after it are two tables (see below).
-    expect(result.frames.map((track) => track.header.id)).toEqual([1, 1, 2])
+    expect(result.frames.map((track) => track.header.id)).toEqual([1, 1, 2, 2])
     const pictures = allRows(result.frames, 1)
     expect(pictures.map((row) => row.dts)).toEqual([0, 33, 67, 100, 233, 267])
     expect(pictures.map((row) => row.duration)).toEqual([33, 34, 33, 33, 34, 33])
@@ -829,16 +829,16 @@ describe('damage in the middle of a file (§10.4)', () => {
     )
     expect(result.cursor.pictureStarted).toBe(true)
 
-    // The sound goes on across the skip, its frame before it lasting to the one after.
+    // The sound is split at the skip as the picture is: its frame before it (at 100) comes out with a duration of its own, 20, and does not last to the frame after the gap.
     const sounds = allRows(result.frames, 2)
     expect(sounds.map((row) => row.dts)).toEqual([0, 20, 100, 200, 220])
-    expect(sounds.map((row) => row.duration)).toEqual([20, 80, 100, 20, 20])
+    expect(sounds.map((row) => row.duration)).toEqual([20, 80, 20, 20, 20])
   })
 
   it('gives the picture before the skip and after it as two tables, each of which the writer takes as its own fragment', () => {
     const result = matroskaFrames(index, matroskaStart(index, 2), { start: 0, bytes })
-    // Two tables of the picture, in order, of the same track, and then the sound's (one: its durations span the skip).
-    expect(result.frames.map((track) => track.header.id)).toEqual([1, 1, 2])
+    // Two tables of the picture, in order, of the same track, and then the two of the sound.
+    expect(result.frames.map((track) => track.header.id)).toEqual([1, 1, 2, 2])
     const [before, after] = runsOf(result.frames, 1)
     // The first ends with the frames flushed at the skip (the keyframe at 100 last), the second starts at the keyframe after it.
     const at = (one: Known): number => locate(movie.bytes, one.data)
@@ -849,7 +849,10 @@ describe('damage in the middle of a file (§10.4)', () => {
     expect(must(after).map((row) => row.dts)).toEqual([233, 267])
     expect(must(after).map((row) => row.offset)).toEqual([frames.key233, frames.next267].map(at))
     expect(must(after).map((row) => row.sync)).toEqual([1, 0])
-    expect(runsOf(result.frames, 2)).toHaveLength(1)
+    expect(runsOf(result.frames, 2).map((run) => run.map((row) => row.dts))).toEqual([
+      [0, 20, 100],
+      [200, 220],
+    ])
 
     // Written as fragments of their own, each begins at its own first decode time: the frames after the skip are at 233, not at 100 + 33.
     const [first, second] = result.frames
@@ -860,6 +863,17 @@ describe('damage in the middle of a file (§10.4)', () => {
     expect(one.header.id).toBe(two.header.id)
     expect(baseTime(fragment(one, 0, one.table.count, 1, bytesAt))).toBe(0)
     expect(baseTime(fragment(two, 0, two.table.count, 2, bytesAt))).toBe(233)
+
+    // The sound's two tables likewise: the second begins at 200, not at 100 + 20.
+    const [soundBefore, soundAfter] = result.frames.slice(2).map((track) => must(track))
+    expect(must(soundBefore).header.id).toBe(2)
+    expect(must(soundBefore).prefix).toEqual(must(soundAfter).prefix)
+    expect(
+      baseTime(fragment(must(soundBefore), 0, must(soundBefore).table.count, 3, bytesAt)),
+    ).toBe(0)
+    expect(baseTime(fragment(must(soundAfter), 0, must(soundAfter).table.count, 4, bytesAt))).toBe(
+      200,
+    )
   })
 
   it('is told of it once the walk is over, cut at every byte, with the same frames', () => {
@@ -882,17 +896,74 @@ describe('damage in the middle of a file (§10.4)', () => {
     // The second damage skips to the end of the Segment: the cluster's remaining frames (the one after 220) go with it.
     expect(merged(result.skipped)).toEqual([damage, { start: other, end: twice.length }])
     // The keyframe at 233 was read before the second skip and is held when it comes: it comes out, with a duration of its own, and the picture waits for a keyframe again, and there is none.
-    expect(result.frames.map((track) => track.header.id)).toEqual([1, 1, 2])
+    expect(result.frames.map((track) => track.header.id)).toEqual([1, 1, 2, 2])
     const pictures = allRows(result.frames, 1)
     expect(runsOf(result.frames, 1).map((run) => run.map((row) => row.dts))).toEqual([
       [0, 33, 67, 100],
       [233],
+    ])
+    // The sound's frame at 200 was read before the second skip and comes out with it, a table of its own with a duration of its own.
+    expect(runsOf(result.frames, 2).map((run) => run.map((row) => row.dts))).toEqual([
+      [0, 20, 100],
+      [200],
     ])
     expect(pictures.map((row) => row.dts)).toEqual([0, 33, 67, 100, 233])
     expect(pictures.map((row) => row.duration)).toEqual([33, 34, 33, 33, 33])
     expect(pictures.map((row) => row.sync)).toEqual([1, 0, 0, 1, 1])
     expect(result.cursor.pictureStarted).toBe(false)
     expect(result.cursor.ended).toBe(true)
+  })
+})
+
+describe('a skip that loses a long stretch of the sound, in a nanosecond timescale (§10.4)', () => {
+  // A TimestampScale of 333 333 ns does not divide a second: the tables count in nanoseconds, where a frame that lasted across a gap of over 4.29 s would not fit the 32 bits of a duration. The second cluster is damaged and the third begins 16 000 ticks (5.33 s) after it.
+  const frames = {
+    key0: picture(0, 0x20, { keyframe: true }),
+    sound0: sound(0, 0x40),
+    next100: picture(100, 0x21),
+    sound60: sound(60, 0x41),
+    next200: picture(200, 0x22),
+    sound120: sound(120, 0x42),
+    broken: sound(180, 0x43),
+    lost300: picture(300, 0x23),
+    key16200: picture(16200, 0x24, { keyframe: true }),
+    sound16200: sound(16200, 0x44),
+    next16300: picture(16300, 0x25),
+    sound16260: sound(16260, 0x45),
+  }
+  const movie = vp9Opus(
+    [
+      { timestamp: 0, frames: [frames.key0, frames.sound0, frames.next100, frames.sound60] },
+      { timestamp: 200, frames: [frames.next200, frames.sound120, frames.broken, frames.lost300] },
+      {
+        timestamp: 16200,
+        frames: [frames.key16200, frames.sound16200, frames.next16300, frames.sound16260],
+      },
+    ],
+    { scale: 333_333 },
+  )
+  const index = indexOf(movie.bytes)
+  const bytes = Uint8Array.from(movie.bytes)
+  const brokenAt = blockStart(movie.bytes, must(frames.broken.data))
+  bytes[brokenAt + 2] = 0
+
+  it('splits the sound at the skip, so that no frame lasts across the gap', () => {
+    const result = matroskaFrames(index, matroskaStart(index, 2), { start: 0, bytes })
+    expect(result.skipped).toEqual([{ start: brokenAt, end: must(movie.clusters[2]).start }])
+    expect(result.frames.map((track) => track.header.id)).toEqual([1, 1, 2, 2])
+    expect(result.frames.every((track) => track.table.timescale === 1e9)).toBe(true)
+
+    // Each run is continuous (`runsOf` holds each table to it). The sound's frames last 60 ticks each, 19 999 980 ns: the one before the skip is the 60 ticks of its own and not the 16 080 to the frame after the gap.
+    const [before, after] = runsOf(result.frames, 2)
+    expect(must(before).map((row) => row.dts)).toEqual([0, 19_999_980, 39_999_960])
+    expect(must(before).map((row) => row.duration)).toEqual([19_999_980, 19_999_980, 19_999_980])
+    expect(must(after).map((row) => row.dts)).toEqual([5_399_994_600, 5_419_994_580])
+    expect(must(after).map((row) => row.duration)).toEqual([19_999_980, 19_999_980])
+    const pictures = runsOf(result.frames, 1)
+    expect(pictures.map((run) => run.map((row) => row.dts))).toEqual([
+      [0, 33_333_300, 66_666_600],
+      [5_399_994_600, 5_433_327_900],
+    ])
   })
 })
 
