@@ -4,8 +4,26 @@
 // gives either its result or the next range of the file it needs, which the
 // caller reads, adds as a chunk and calls it again with. The same shape serves
 // both containers.
+//
+// Step 5's engine meets a file through five functions that are the same for an
+// MP4 and for a Matroska file: `openSource` gives the index (the picture, the
+// sounds and the duration), `startCursor` and `seekCursor` say where to start
+// reading, `nextRead` where to read next, and `framesIn` the frames that a chunk
+// completes, as the tables the writer takes. Each container's own functions do the
+// work (`mp4source.ts`, and `matroska/`); these choose between them by the
+// index's `container`.
 
-import type { Mp4Error } from './errors.ts'
+import { Mp4Error } from './errors.ts'
+import { locateMoov, moovIn } from './locate.ts'
+import { readMatroska } from './matroska/read.ts'
+import type { MatroskaIndex } from './matroska/read.ts'
+import { matroskaSeek } from './matroska/seek.ts'
+import { matroskaFrames, matroskaStart } from './matroska/spans.ts'
+import type { MatroskaCursor } from './matroska/spans.ts'
+import { readMovie } from './movie.ts'
+import { mp4Frames, mp4Index, mp4Next, mp4Seek, mp4Start } from './mp4source.ts'
+import type { Mp4Cursor, Mp4Index } from './mp4source.ts'
+import type { FragmentTrack } from './write.ts'
 
 /** A range of a file: from `start` up to, and not including, `end`. */
 export interface ByteRange {
@@ -98,4 +116,148 @@ export function heldBytes(chunks: readonly Chunk[], start: number, end: number):
   }
   const held = heldPrefix(chunks, start, end)
   return held.length === end - start ? held : null
+}
+
+/** A container that a file can be in. */
+export type Container = 'mp4' | 'matroska'
+
+/** The types of box that an MP4 may start with: the file type, the index, the samples, and the padding and QuickTime's small boxes that writers put before them. */
+const FIRST_BOXES: readonly string[] = ['ftyp', 'moov', 'mdat', 'free', 'skip', 'wide', 'pnot']
+
+/**
+ * The container of a file, from its first bytes: Matroska starts with EBML's magic
+ * number, `1A 45 DF A3`, and an MP4 with a box whose type is one a file starts with
+ * (`ftyp`, `moov`, `mdat`, `free`, `skip`, `wide`, `pnot`). Null for anything else,
+ * and for a head too short to say (4 bytes for Matroska, 8 for an MP4's first
+ * box header).
+ */
+export function sniff(head: Uint8Array): Container | null {
+  if (
+    head.length >= 4 &&
+    head[0] === 0x1a &&
+    head[1] === 0x45 &&
+    head[2] === 0xdf &&
+    head[3] === 0xa3
+  ) {
+    return 'matroska'
+  }
+  if (head.length >= 8 && FIRST_BOXES.includes(String.fromCharCode(...head.subarray(4, 8)))) {
+    return 'mp4'
+  }
+  return null
+}
+
+/** What opening a file gives, whichever container it is in. */
+export type SourceIndex = Mp4Index | MatroskaIndex
+
+/** Where reading goes on in a file, whichever container it is in. */
+export type Cursor = Mp4Cursor | MatroskaCursor
+
+/**
+ * Opens the file of `fileSize` bytes from the chunks the caller holds, the first
+ * of which starts at 0 (the head, a megabyte): gives the index, or the next range of
+ * the file that it needs, which the caller reads, adds as a chunk and calls again
+ * with them all. The container is told from the head (`sniff`).
+ *
+ * - An MP4's `moov` is located in the head (`locateMoov`), asked for when the chunks
+ *   do not hold it whole (it is at the end of a phone's recording), and then read:
+ *   `moovIn`, `readMovie` and `mp4Index`. A file with no `moov` to be found is
+ *   `damaged`.
+ * - A Matroska file is opened by `readMatroska`, which asks for what it needs.
+ * - A file that is neither is `damaged`.
+ *
+ * A file the reader turns away is an `Mp4Error`, and nothing else is thrown for it.
+ * A first chunk that does not start at 0, or a size that is not a count of bytes, is
+ * a RangeError, the caller's mistake.
+ */
+export function openSource(chunks: readonly Chunk[], fileSize: number): Step<SourceIndex> {
+  const head = chunks[0]
+  if (head?.start !== 0) {
+    throw new RangeError('The first chunk must start at the first byte of the file.')
+  }
+  if (!Number.isSafeInteger(fileSize) || fileSize < 0) {
+    throw new RangeError(`${fileSize} is not a size that a file has.`)
+  }
+
+  const container = sniff(head.bytes)
+  if (container === 'matroska') return readMatroska(chunks, fileSize)
+  if (container === 'mp4') {
+    const moov = locateMoov(head.bytes, fileSize)
+    if (moov === null) throw new Mp4Error('damaged', 'No moov was found in the file.')
+    const bytes = heldBytes(chunks, moov.start, moov.end)
+    if (bytes === null) return { need: moov }
+    return { done: mp4Index(readMovie(moovIn(bytes)), fileSize) }
+  }
+  throw new Mp4Error('damaged', 'The file is neither MP4 nor Matroska.')
+}
+
+/** The cursor and the index belong to different containers: a mistake of the caller. */
+function mismatch(index: SourceIndex, cursor: Cursor): RangeError {
+  return new RangeError(
+    `A cursor of ${cursor.container} cannot be used with the index of ${index.container}.`,
+  )
+}
+
+/**
+ * A cursor at the start of the file, for the sound with this id or none. For a
+ * Matroska file any sound of `index.soundTracks` will do; for an MP4 the sound
+ * that plays (`index.sound`), for the index holds the frames of that one alone:
+ * another sound is a RangeError whose sentence says to make an index with it
+ * (`{ ...index, sound: mp4Sound(index, id) }`).
+ */
+export function startCursor(index: SourceIndex, sound: number | null): Cursor {
+  return index.container === 'matroska' ? matroskaStart(index, sound) : mp4Start(index, sound)
+}
+
+/**
+ * Where to start reading the file for the time `seconds` on the playback timeline,
+ * for the sound with this id or none: a cursor, or the next range of the file that
+ * the seek needs, which the caller reads, adds as a chunk and calls again with them
+ * all. A Matroska seek reads (`matroskaSeek`); an MP4's tables are held, so it is
+ * done at once, at the picture's keyframe at or before the time and the sound frame
+ * that covers it, and `chunks` are not looked at.
+ */
+export function seekCursor(
+  index: SourceIndex,
+  seconds: number,
+  sound: number | null,
+  chunks: readonly Chunk[],
+): Step<Cursor> {
+  if (index.container === 'matroska') return matroskaSeek(index, seconds, sound, chunks)
+  return { done: mp4Seek(index, seconds, sound) }
+}
+
+/**
+ * The offset of the file to read from next, or null when every frame has been
+ * given: the cursor's place in a Matroska file, and in an MP4 the least offset of
+ * the next frames of the picture and of the sound.
+ */
+export function nextRead(index: SourceIndex, cursor: Cursor): number | null {
+  if (index.container === 'matroska') {
+    if (cursor.container !== 'matroska') throw mismatch(index, cursor)
+    return cursor.ended ? null : cursor.at
+  }
+  if (cursor.container !== 'mp4') throw mismatch(index, cursor)
+  return mp4Next(index, cursor)
+}
+
+/**
+ * The frames of the picture and the sound that the chunk completes, as tables the
+ * writer takes (`frames`, each a continuous run: the picture's first, then the
+ * sound's), the cursor to go on with, and the stretches of the file that were
+ * damaged and passed over (always none in an MP4). When the chunk completes
+ * nothing, the cursor comes back where it was and the caller reads a bigger chunk
+ * from where `nextRead` says. The cursor given is never changed.
+ */
+export function framesIn(
+  index: SourceIndex,
+  cursor: Cursor,
+  chunk: Chunk,
+): { frames: FragmentTrack[]; cursor: Cursor; skipped: ByteRange[] } {
+  if (index.container === 'matroska') {
+    if (cursor.container !== 'matroska') throw mismatch(index, cursor)
+    return matroskaFrames(index, cursor, chunk)
+  }
+  if (cursor.container !== 'mp4') throw mismatch(index, cursor)
+  return mp4Frames(index, cursor, chunk)
 }

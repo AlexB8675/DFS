@@ -262,3 +262,23 @@ export function byteSpan(parts: readonly { table: FrameTable; from: number; to: 
   }
   return start === Infinity ? { start: 0, end: 0 } : { start, end }
 }
+
+/**
+ * Where the picture ends, in seconds with the track's offset applied: the end of
+ * the frame shown last (which isn't the last one decoded where frames are
+ * reordered), and no later than where the media edit ends when the track has one
+ * (`timing.endSeconds`, the player's `appendWindowEnd`), as footage a trim cut
+ * stays behind the edit list and is not played. A seek is made inside it, and the
+ * index's duration is it.
+ */
+export function pictureEnd(track: { table: FrameTable; timing: TrackTiming }): number {
+  const { table, timing } = track
+  let end = 0
+  for (let i = 0; i < table.count; i += 1) {
+    end = Math.max(
+      end,
+      presentationSeconds(table, timing, i) + (table.durations[i] ?? 0) / table.timescale,
+    )
+  }
+  return timing.endSeconds === null ? end : Math.min(end, timing.endSeconds)
+}

@@ -9,6 +9,7 @@ import {
   frameAtOrAfter,
   keyframeAtOrBefore,
   keyframeIndexes,
+  pictureEnd,
   presentationSeconds,
   trackTiming,
 } from './timing.ts'
@@ -610,5 +611,48 @@ describe('the bytes of a run of frames (§10.4)', () => {
     // The ends of the table are in range: an empty range at 0 or at the count is empty and left out.
     expect(byteSpan([{ table: video, from: 0, to: 0 }])).toEqual({ start: 0, end: 0 })
     expect(byteSpan([{ table: video, from: 4, to: 4 }])).toEqual({ start: 0, end: 0 })
+  })
+})
+
+/** A table of `count` frames of `ticks` each at 1000 ticks a second, all keyframes, with no bytes placed. */
+function evenFrames(count: number, ticks = 100): FrameTable {
+  const dts = Float64Array.from({ length: count }, (_, at) => at * ticks)
+  return {
+    count,
+    timescale: 1000,
+    offsets: new Float64Array(count),
+    sizes: new Uint32Array(count),
+    dts,
+    durations: new Uint32Array(count).fill(ticks),
+    cts: new Int32Array(count),
+    sync: new Uint8Array(count).fill(1),
+  }
+}
+
+describe('where the picture ends (§10.4)', () => {
+  it('is where the last frame to be shown ends, with the offset applied', () => {
+    // Ten frames of 0.1 s (100 ticks of 1000 a second), the offset -0.2 s: shown from -0.2 s to 0.8 s.
+    const track = {
+      table: evenFrames(10),
+      timing: { offsetSeconds: -0.2, endSeconds: null },
+    }
+    expect(pictureEnd(track)).toBeCloseTo(0.8, 9)
+  })
+
+  it('goes by the frame shown last, which is not the last one decoded when frames are reordered', () => {
+    // The third frame is decoded last but shown at 0.1 s; the second is shown last, at 0.3 s (a composition offset of 200 ticks).
+    const reordered = evenFrames(3)
+    reordered.cts[1] = 200
+    reordered.cts[2] = -100
+    const track = { table: reordered, timing: { offsetSeconds: 0, endSeconds: null } }
+    expect(pictureEnd(track)).toBeCloseTo(0.4, 9)
+  })
+
+  it("stops at the edit's end when the track has one, so that a trimmed recording is not sought past it", () => {
+    // Ten frames shown until 1 s, but the media edit ends at 0.6 s: the footage after it is cut by the append window.
+    const track = { table: evenFrames(10), timing: { offsetSeconds: 0, endSeconds: 0.6 } }
+    expect(pictureEnd(track)).toBeCloseTo(0.6, 9)
+    // An edit that ends after the frames do changes nothing.
+    expect(pictureEnd({ ...track, timing: { offsetSeconds: 0, endSeconds: 5 } })).toBeCloseTo(1, 9)
   })
 })

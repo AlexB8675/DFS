@@ -119,7 +119,7 @@ function refuseExternal(track: TrackHeader, entry: SampleEntry): void {
  * never start in the player's buffer. The frames are held to the file they are
  * in, `fileSize` bytes: a track whose frames don't lie inside it is `damaged`.
  */
-function playTrack(
+export function playTrack(
   track: TrackHeader,
   movieTimescale: number,
   fileSize: number,
