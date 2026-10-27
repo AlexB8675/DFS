@@ -1083,6 +1083,12 @@ describe('seeking by a search of the clusters (§10.4)', () => {
 
 describe('seeking in files of big clusters and big keyframes (§10.4)', () => {
   const MIB = 1024 * 1024
+  // The most asks one seek of those files makes (measured over the targets of the tests: 16, 23, 24 and 17), and a few over it.
+  const BOUND_15 = 20
+  const BOUND_3 = 27
+  const BOUND_6 = 28
+  const BOUND_STRETCH = 21
+  const BOUND_STRETCH_20 = 27
 
   it('lands in the cluster at or before the time when every cluster is longer than a guess, with no Cues', () => {
     // 40 clusters of 1 MiB, of unknown size: most guesses land inside one, and find no cluster in their read.
@@ -1101,6 +1107,68 @@ describe('seeking in files of big clusters and big keyframes (§10.4)', () => {
         const ahead = seek(index, movie.bytes, time, { held: everything(movie.bytes) })
         expect(ahead.cursor).toEqual(exact.cursor)
       }
+    }
+  })
+
+  it('crosses clusters of 1.5, 3 and 6 MiB in a few reads, and lands in the cluster at or before the time, with no Cues', () => {
+    // Without Cues, with one keyframe a cluster: the clusters of a recording at an ordinary bitrate, and of a high one.
+    for (const [count, size, most] of [
+      [40, 1.5 * MIB, BOUND_15],
+      [30, 3 * MIB, BOUND_3],
+      [24, 6 * MIB, BOUND_6],
+    ] as const) {
+      const movie = movieOf(seconds(count, { pad: size, unknown: true }))
+      const index = indexOf(movie.bytes)
+      let widest = 0
+      for (const share of [0.01, 0.15, 0.3, 0.45, 0.6, 0.75, 0.9, 0.99]) {
+        const time = share * count
+        const exact = seek(index, movie.bytes, time)
+        widest = Math.max(widest, exact.asks.length)
+        expect(inCluster(movie.clusters, exact.cursor.at), `${size / MIB} MiB at ${time}`).toBe(
+          Math.floor(time),
+        )
+        expect(landsBefore(index, movie.bytes, exact.cursor, time)).toBe(Math.floor(time))
+        // A caller that holds the file is given the same cursor, the cap being on the reads needed.
+        const ahead = seek(index, movie.bytes, time, { held: everything(movie.bytes) })
+        expect(ahead.cursor).toEqual(exact.cursor)
+      }
+      expect(widest, `${size / MIB} MiB clusters`).toBeLessThanOrEqual(most)
+    }
+  })
+
+  it('lands right when a stretch of 9 or 20 MiB with no cluster in it lies ahead of the guesses, in reads that grow to 4 MiB and no more', () => {
+    for (const [stretch, most] of [
+      [9 * MIB, BOUND_STRETCH],
+      [20 * MIB, BOUND_STRETCH_20],
+    ] as const) {
+      // A Tags element between clusters that no SeekHead names: 20 clusters of 100 KB, the stretch of Tags, 20 more clusters.
+      const blocks = upTo(40).map((k) => rawCluster(k, 99_000))
+      const file = matroskaFile([
+        info({ scale: 1_000_000, duration: 40_000 }),
+        tracksElement([trackEntry(VP9)]),
+        ...blocks.slice(0, 20),
+        element(ID.Tags, new Uint8Array(stretch)),
+        ...blocks.slice(20),
+      ])
+      const { bytes } = file
+      const index = indexOf(bytes)
+      const ranges = upTo(40).map((k) => {
+        const part = 2 + k + (k < 20 ? 0 : 1)
+        return { start: must(file.offsets[part]), end: file.offsets[part + 1] ?? bytes.length }
+      })
+      let widest = 0
+      for (const time of [0.5, 5.5, 10.9, 19.5, 20.2, 24.9, 31, 39.5, 100]) {
+        const exact = seek(index, bytes, time)
+        widest = Math.max(widest, exact.asks.length)
+        for (const ask of exact.asks) {
+          expect(ask.end - ask.start).toBeLessThanOrEqual(FIRST_FRAMES_BYTES)
+        }
+        const wanted = Math.min(Math.floor(time), 39)
+        expect(inCluster(ranges, exact.cursor.at), `${stretch / MIB} MiB at ${time}`).toBe(wanted)
+        expect(landsBefore(index, bytes, exact.cursor, time)).toBe(wanted)
+        expect(seek(index, bytes, time, { held: everything(bytes) }).cursor).toEqual(exact.cursor)
+      }
+      expect(widest, `${stretch / MIB} MiB`).toBeLessThanOrEqual(most)
     }
   })
 

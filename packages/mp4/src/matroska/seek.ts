@@ -44,7 +44,8 @@ import type { MatroskaCursor } from './spans.ts'
 // byte: each guess reads 256 KiB and takes the first cluster in it, whose Timestamp
 // says which half the time is in; a guess that finds none (a cluster is longer than
 // a read, as a cluster of a recording at an ordinary bitrate is) goes on reading
-// forward, a read at a time, until it finds one or reaches the end of the range. When
+// forward, each read twice the one before up to 4 MiB, until it finds one or reaches
+// the end of the range. When
 // what is left is no more than a read, the last cluster at or before the time is
 // read from, and the clusters in that read are the candidates: the latest of them
 // that holds a keyframe at or before the time is where reading starts. When none
@@ -559,9 +560,9 @@ class Seeking {
    * The last cluster at or before the time that the search bisects to (null when
    * no guess finds one): the range [first cluster, Segment's end) is halved by the
    * byte, and each guess reads `SEARCH_READ` bytes and takes the first cluster in
-   * them. A guess that finds none goes on reading forward, a read at a time, until
-   * it finds one or reaches the end of the range (a cluster is longer than a read, or
-   * the guess is in a stretch that has none). A cluster at or before the time
+   * them. A guess that finds none goes on reading forward, each read twice the one
+   * before (up to `FIRST_FRAMES_BYTES`), until it finds one or reaches the end of the
+   * range (a cluster is longer than a read, or the guess is in a stretch that has none). A cluster at or before the time
    * becomes the best so far, and where the range starts; one after, or none, is
    * where it ends, at the guess. It stops when what is left is no more than a read,
    * which the gap halving each time brings about.
@@ -573,11 +574,20 @@ class Seeking {
     let best: { start: number; place: ClusterPlace } | null = null
     while (hi - lo > SEARCH_READ) {
       const guess = lo + Math.floor((hi - lo) / 2)
-      // Each read after the first starts a header's length (`HEADER_READ`, which bounds a cluster's first elements) before the end of the one before, so that a cluster whose header lies across that end is seen whole.
+      // The first read is `SEARCH_READ`; each one after it is twice the one before, up to `FIRST_FRAMES_BYTES`, so that a cluster (or a stretch with none) of S bytes is crossed in about log2(S / SEARCH_READ) reads. It starts a header's length (`HEADER_READ`, which bounds a cluster's first elements) before the end of the one before, so that a cluster whose header lies across that end is seen whole.
       let found: { start: number; place: ClusterPlace } | null = null
-      for (let from = guess; found === null && from < hi; from += SEARCH_READ - HEADER_READ) {
-        const bytes = this.take({ start: from, end: Math.min(from + SEARCH_READ, segment.end) })
-        found = findCluster({ start: from, bytes }, from, segment.end)
+      let from = guess
+      let size = SEARCH_READ
+      while (found === null && from < hi) {
+        const end = Math.min(from + size, segment.end)
+        found = findCluster(
+          { start: from, bytes: this.take({ start: from, end }) },
+          from,
+          segment.end,
+        )
+        if (end >= segment.end) break
+        from = end - HEADER_READ
+        size = Math.min(2 * size, FIRST_FRAMES_BYTES)
       }
       if (found !== null && found.start < hi && this.early(found.place.timestamp, below)) {
         best = found
