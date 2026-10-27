@@ -6,6 +6,7 @@ import {
   binary,
   blockGroup,
   cluster,
+  cues,
   ebmlHeader,
   element,
   elementSized,
@@ -14,6 +15,7 @@ import {
   info,
   int,
   matroskaFile,
+  matroskaMovie,
   seekEntry,
   seekHead,
   segment,
@@ -616,5 +618,124 @@ describe('the cluster builder (§10.4)', () => {
   it('refuses a Timestamp that no file holds', () => {
     expect(() => cluster(-1, [])).toThrow(RangeError)
     expect(() => cluster(1.5, [])).toThrow(RangeError)
+  })
+})
+
+describe('the Cues builder (§10.4)', () => {
+  it('writes a CuePoint as the time and then the track, the Cluster and the block it is at', () => {
+    // CueTime 5000 is B3 82 13 88 (4 bytes); the CueTrackPositions are the track (F7 81 02, 3 bytes), the Cluster (F1 82 12 34, 4) and the block (F0 81 04, 3), 10 bytes in all, so 12 with their header; the CuePoint's 16 bytes are 18 with theirs.
+    expect(bytes(cues([{ time: 5000, track: 2, cluster: 0x1234, relative: 4 }]))).toEqual([
+      ...[0x1c, 0x53, 0xbb, 0x6b, 0x80 | 18],
+      ...[0xbb, 0x80 | 16],
+      ...[0xb3, 0x82, 0x13, 0x88],
+      ...[0xb7, 0x80 | 10],
+      ...[0xf7, 0x81, 0x02],
+      ...[0xf1, 0x82, 0x12, 0x34],
+      ...[0xf0, 0x81, 0x04],
+    ])
+  })
+
+  it('writes track 1 unless it is given another, and no block position unless it is given one', () => {
+    expect(bytes(cues([{ time: 0, cluster: 7 }]))).toEqual([
+      ...[0x1c, 0x53, 0xbb, 0x6b, 0x80 | 13],
+      ...[0xbb, 0x80 | 11],
+      ...[0xb3, 0x81, 0x00],
+      ...[0xb7, 0x80 | 6],
+      ...[0xf7, 0x81, 0x01],
+      ...[0xf1, 0x81, 0x07],
+    ])
+    // No points is an empty Cues element.
+    expect(bytes(cues([]))).toEqual([0x1c, 0x53, 0xbb, 0x6b, 0x80])
+  })
+
+  it("writes the Cluster's position in the width asked for, so that the element is as long whatever it is", () => {
+    const near = cues([{ time: 1, cluster: 3 }], { positionWidth: 8 })
+    const far = cues([{ time: 1, cluster: 2 ** 40 }], { positionWidth: 8 })
+    expect(near.length).toBe(far.length)
+    expect(bytes(near.subarray(near.length - 10))).toEqual([0xf1, 0x88, 0, 0, 0, 0, 0, 0, 0, 3])
+    expect(() => cues([{ time: 1, cluster: 256 }], { positionWidth: 1 })).toThrow(RangeError)
+  })
+
+  it('writes the CRC-32 first, over everything that follows it, little-endian', () => {
+    const plain = cues([
+      { time: 5000, cluster: 9 },
+      { time: 6000, cluster: 99 },
+    ])
+    const summed = cues(
+      [
+        { time: 5000, cluster: 9 },
+        { time: 6000, cluster: 99 },
+      ],
+      { crc: true },
+    )
+    // The body after the Cues' header (5 bytes, one of them the size).
+    const body = plain.subarray(5)
+    const sum = crc32(body)
+    expect(bytes(summed.subarray(0, 5))).toEqual([0x1c, 0x53, 0xbb, 0x6b, 0x80 | (6 + body.length)])
+    expect(bytes(summed.subarray(5, 7))).toEqual([0xbf, 0x84])
+    expect(bytes(summed.subarray(7, 11))).toEqual([
+      sum & 0xff,
+      (sum >>> 8) & 0xff,
+      (sum >>> 16) & 0xff,
+      sum >>> 24,
+    ])
+    expect(bytes(summed.subarray(11))).toEqual(bytes(body))
+  })
+
+  it('refuses a time or a position that no file holds', () => {
+    expect(() => cues([{ time: -1, cluster: 0 }])).toThrow(RangeError)
+    expect(() => cues([{ time: 0, cluster: 1.5 }])).toThrow(RangeError)
+  })
+
+  it("lets a movie point its Cues at its Clusters, counted from the Segment's data, 8 bytes wide, and names them in the SeekHead", () => {
+    const track = { number: 1, type: 1, codecId: 'V_VP9' }
+    const made = matroskaMovie({
+      scale: 1_000_000,
+      seek: true,
+      tracks: [track],
+      clusters: [
+        { timestamp: 0, frames: [{ track: 1, time: 0, keyframe: true }] },
+        { timestamp: 1000, frames: [{ track: 1, time: 1000, keyframe: true }] },
+      ],
+      cuePoints: (at) => [
+        { time: 0, cluster: at[0] ?? -1, relative: 4 },
+        { time: 1000, cluster: at[1] ?? -1, relative: 4 },
+      ],
+    })
+    const at = made.cues ?? -1
+    expect(at).toBe(made.clusters[1]?.end)
+    const second = (made.clusters[1]?.start ?? 0) - made.segmentData
+    // The second point's Cluster position is its last-but-one field: F1 88 and the 8 bytes, then F0 81 04.
+    const end = at + (made.bytes.length - at)
+    expect(bytes(made.bytes.subarray(end - 13, end))).toEqual([
+      ...[0xf1, 0x88],
+      ...[0, 0, 0, 0, 0, 0, second >> 8, second & 0xff],
+      ...[0xf0, 0x81, 0x04],
+    ])
+    // The SeekHead names the Cues where they are.
+    const seeks = bytes(made.bytes.subarray(made.segmentData, made.segmentData + 100))
+    const cuesPosition = at - made.segmentData
+    expect(seeks.join(',')).toContain(
+      [
+        0x53,
+        0xab,
+        0x84,
+        0x1c,
+        0x53,
+        0xbb,
+        0x6b,
+        0x53,
+        0xac,
+        0x88,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        cuesPosition >> 8,
+        cuesPosition & 0xff,
+      ].join(','),
+    )
   })
 })

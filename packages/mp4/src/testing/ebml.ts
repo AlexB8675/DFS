@@ -558,6 +558,63 @@ function crc32(bytes: Uint8Array): number {
   return (crc ^ 0xffffffff) >>> 0
 }
 
+/** A CRC-32 element: the checksum of `body` as ffmpeg writes it, little-endian, to stand first in the element that holds `body`. */
+function crcElement(body: Uint8Array): Uint8Array {
+  const sum = crc32(body)
+  return element(ID.CRC32, [sum & 0xff, (sum >>> 8) & 0xff, (sum >>> 16) & 0xff, sum >>> 24])
+}
+
+/**
+ * One CuePoint: when a keyframe is, on which track, where the Cluster that holds
+ * it starts (counted from the Segment's data, as a CueClusterPosition is) and,
+ * when given, where its block is inside that Cluster (counted from the Cluster's
+ * data, as a CueRelativePosition is).
+ */
+export interface CueSpec {
+  /** In ticks. */
+  time: number
+  /** The TrackNumber; 1 unless given. */
+  track?: number
+  cluster: number
+  relative?: number
+}
+
+/**
+ * A Cues element of the points given, each a CuePoint of one CueTrackPositions,
+ * written as ffmpeg writes it: the CueTime, then the track, the Cluster's position
+ * and the block's. With `crc` the CRC-32 comes first, as for a Cluster. The
+ * Cluster's position is in the fewest bytes that hold it, unless `positionWidth`
+ * says how many: a writer that comes back to fill it in pads it, so that the
+ * element is as long whatever the positions are, which a layout needs to know them.
+ */
+export function cues(
+  points: CueSpec[],
+  { crc = false, positionWidth }: { crc?: boolean; positionWidth?: number } = {},
+): Uint8Array {
+  const body = concat(
+    ...points.map((point) => {
+      if (positionWidth !== undefined && point.cluster >= 2 ** (8 * positionWidth)) {
+        throw new RangeError(`${point.cluster} doesn't fit in ${positionWidth} bytes.`)
+      }
+      const position =
+        positionWidth === undefined
+          ? uint(ID.CueClusterPosition, point.cluster)
+          : element(ID.CueClusterPosition, bigEndian(BigInt(point.cluster), positionWidth))
+      return element(
+        ID.CuePoint,
+        uint(ID.CueTime, point.time),
+        element(
+          ID.CueTrackPositions,
+          uint(ID.CueTrack, point.track ?? 1),
+          position,
+          ...(point.relative === undefined ? [] : [uint(ID.CueRelativePosition, point.relative)]),
+        ),
+      )
+    }),
+  )
+  return crc ? element(ID.Cues, crcElement(body), body) : element(ID.Cues, body)
+}
+
 /**
  * A Cluster: the Timestamp (in ticks, in the fewest bytes that hold it) and then
  * the children, which are blocks and whatever else a test wants in the cluster.
@@ -572,13 +629,7 @@ export function cluster(
   { unknown = false, crc = false }: { unknown?: boolean; crc?: boolean } = {},
 ): Uint8Array {
   const body = concat(uint(ID.Timestamp, timestamp), ...children)
-  const sum = crc32(body)
-  const data = crc
-    ? concat(
-        element(ID.CRC32, [sum & 0xff, (sum >>> 8) & 0xff, (sum >>> 16) & 0xff, sum >>> 24]),
-        body,
-      )
-    : body
+  const data = crc ? concat(crcElement(body), body) : body
   return unknown ? elementSized(ID.Cluster, unknownSize(), data) : element(ID.Cluster, data)
 }
 
@@ -622,6 +673,14 @@ export interface MovieSpec {
   seek?: boolean
   /** A Cues element after the last Cluster. */
   cues?: boolean
+  /**
+   * A Cues element after the last Cluster, of the points that this gives in place of
+   * the stub that `cues` writes: it is called with the position of each Cluster
+   * counted from the Segment's data (what a CueClusterPosition holds), so that a
+   * test can point a cue at a Cluster, or beside it. The positions are written 8
+   * bytes wide, so that the element is as long whatever they are.
+   */
+  cuePoints?: (clusters: number[]) => CueSpec[]
 }
 
 /** A built movie: the file, and where its parts are. */
@@ -681,7 +740,15 @@ export function matroskaMovie(spec: MovieSpec): Movie {
     )
   }
   let cuesAt: number | null = null
-  if (spec.cues === true) {
+  const points = spec.cuePoints
+  if (points !== undefined) {
+    cuesAt = parts.length
+    parts.push((at) =>
+      cues(points(spec.clusters.map((_, index) => at[clustersAt + index] ?? 0)), {
+        positionWidth: 8,
+      }),
+    )
+  } else if (spec.cues === true) {
     cuesAt = parts.length
     parts.push(element(ID.Cues, element(ID.CuePoint, uint(ID.CueTime, 0))))
   }

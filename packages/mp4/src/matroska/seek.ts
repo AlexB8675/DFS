@@ -1,0 +1,546 @@
+import { Mp4Error } from '../errors.ts'
+import { heldBytes } from '../source.ts'
+import type { ByteRange, Chunk, Step } from '../source.ts'
+import { findCluster, readClusters } from './clusters.ts'
+import type { ClusterPlace, RawFrame } from './clusters.ts'
+import { children, readHeader, readUint } from './ebml.ts'
+import type { Element } from './ebml.ts'
+import { covers } from './head.ts'
+import { ID, TOP_LEVEL } from './ids.ts'
+import { CUES_LIMIT, HEADER_READ, MAX_SEEK_READS, SEARCH_READ, TAIL_BYTES } from './limits.ts'
+import type { MatroskaIndex } from './read.ts'
+import { matroskaStart } from './spans.ts'
+import type { MatroskaCursor } from './spans.ts'
+
+// Seeking in a Matroska or WebM file (DESIGN.md §10.4, D45): given a time, where
+// to start reading so that the picture starts at a keyframe at or before it, which
+// is the cursor that `matroskaFrames` plays from. Like the index and the head it is
+// a function of the parts of the file the caller holds, and gives either the cursor
+// or the next range of the file that it needs, which the caller reads, adds as a
+// chunk and asks again with; each call goes through the seek again from its start,
+// so that it keeps no state of its own.
+//
+// By the Cues when the file has them. The Cues are the file's index of its
+// keyframes: a point is a time and where the cluster is, and often the block in it.
+// They are read once, whole, from where the index says (the head met them before
+// the first Cluster, or only a SeekHead names the place, and then the header is read
+// first, since the entry may be stale), or else from the last megabyte of the Segment,
+// where writers put them, as the Cues element that ends where the Segment does or
+// where another of its own elements starts. A point is trusted no further than the
+// bytes it names: its cluster must be there, and the picture's first keyframe from
+// the block (or the cluster) must be presented no later than the time, else the
+// point before it is used, for a writer may date a cue by its cluster and not by the
+// keyframe in it.
+//
+// By a search of the clusters when it has none (a recording that was cut off, one
+// written as it was shot, Cues too long to read). The Segment is bisected by the
+// byte: each guess reads 256 KiB and takes the first cluster in it, whose Timestamp
+// says which half the time is in. When what is left is no more than a read, the
+// last cluster at or before the time is read from, and the clusters in that read are
+// the candidates: the latest of them that holds a keyframe at or before the time is
+// where reading starts. When none does, the search is made again for a cluster
+// before the first of them. A file with no such cluster is read from its first.
+//
+// Every read is counted as the head's and the index's are (`MAX_SEEK_READS`): for
+// each range the seek needs that it has not needed already, whether it finds it held
+// or asks for it, so that the count (and with it the cursor) is the same however
+// much a caller has read ahead. A seek that would need another stops at the first
+// cluster, which is always at or before the time. Every window the seek reads is a
+// fixed one, from a place the walk has found to a number of bytes it chooses
+// (`HEADER_READ`, `SEARCH_READ`, the whole Cues, the last `TAIL_BYTES`), cut at the
+// Segment's end, and every decision is made from those bytes and no others.
+
+/** One point of the Cues for a track: a keyframe's time in ticks, where the cluster that holds it starts in the file, and where its block is counted from the cluster's data (null when the point has no CueRelativePosition). */
+export interface CuePoint {
+  time: number
+  cluster: number
+  relative: number | null
+}
+
+/** The bytes of a Cues element's ID. */
+const CUES_ID = [0x1c, 0x53, 0xbb, 0x6b]
+
+/** The elements that a cluster's frames are in. */
+const BLOCKS: ReadonlySet<number> = new Set<number>([ID.SimpleBlock, ID.BlockGroup])
+
+/** The CueTrack, CueClusterPosition and CueRelativePosition of a CueTrackPositions of `track`; undefined for another track's or one with no position. */
+function positionsOf(
+  bytes: Uint8Array,
+  positions: Element,
+  track: number,
+): { cluster: number; relative: number | null } | undefined {
+  let which: number | undefined
+  let cluster: number | undefined
+  let relative: number | undefined
+  for (const field of children(bytes, positions)) {
+    if (field.id === ID.CueTrack) which ??= readUint(bytes, field)
+    else if (field.id === ID.CueClusterPosition) cluster ??= readUint(bytes, field)
+    else if (field.id === ID.CueRelativePosition) relative ??= readUint(bytes, field)
+  }
+  return which === track && cluster !== undefined
+    ? { cluster, relative: relative ?? null }
+    : undefined
+}
+
+/**
+ * The points of a Cues element for the picture's `track`, in order of time (those
+ * of one time as they came). `cues` is the element in `bytes`, which hold it
+ * whole, and `base` is where `bytes` start in the file; the positions are counted
+ * from `segmentData`, where the Segment's data starts, and come out as offsets in
+ * the file. A CuePoint with no CueTime, none of its CueTrackPositions for the track
+ * or no CueClusterPosition in that one is left out, and so is a position at or past
+ * `segmentEnd` (there is no cluster there). Children that do not walk (one that
+ * claims more than its parent has, or a number wider than a number is) are a
+ * damaged file, the sentence of which says where the Cues are.
+ */
+export function readCues(
+  bytes: Uint8Array,
+  cues: Element,
+  base: number,
+  segmentData: number,
+  track: number,
+  segmentEnd = Infinity,
+): CuePoint[] {
+  const found: CuePoint[] = []
+  try {
+    for (const point of children(bytes, cues)) {
+      if (point.id !== ID.CuePoint) continue
+      let time: number | undefined
+      let place: { cluster: number; relative: number | null } | undefined
+      for (const field of children(bytes, point)) {
+        if (field.id === ID.CueTime) time ??= readUint(bytes, field)
+        else if (field.id === ID.CueTrackPositions) place ??= positionsOf(bytes, field, track)
+      }
+      if (time === undefined || place === undefined) continue
+      const cluster = segmentData + place.cluster
+      if (!Number.isSafeInteger(cluster) || cluster >= segmentEnd) continue
+      found.push({ time, cluster, relative: place.relative })
+    }
+  } catch (error) {
+    if (!(error instanceof Mp4Error)) throw error
+    throw new Mp4Error(
+      error.reason,
+      `The Cues element at offset ${base + cues.start} can't be read: ${error.message}`,
+    )
+  }
+  return found.sort((a, b) => a.time - b.time)
+}
+
+/** The seek lacks bytes: thrown from where it finds that out, and caught by `matroskaSeek`, so that the walk reads straight on. It never leaves this module. */
+class Need extends Error {
+  readonly range: ByteRange
+
+  constructor(range: ByteRange) {
+    super(`The seek needs the bytes from ${range.start} to ${range.end}.`)
+    this.range = range
+  }
+}
+
+/** The seek has needed `MAX_SEEK_READS` reads and needs another: it stops. It never leaves this module. */
+class Capped extends Error {
+  constructor() {
+    super(`The seek has needed ${MAX_SEEK_READS} reads, which is the most that one takes.`)
+  }
+}
+
+/** Where a seek goes: where reading starts, and the cluster that offset is inside, if the seek has read its header. */
+interface Landing {
+  at: number
+  cluster: ClusterPlace | null
+}
+
+/** The header of the element at `at` in `bytes`, or null when it is not whole there or is no header at all. */
+function headerAt(bytes: Uint8Array, at = 0): Element | null {
+  try {
+    return readHeader(bytes, at, bytes.length)
+  } catch (error) {
+    if (error instanceof Mp4Error) return null
+    throw error
+  }
+}
+
+/** The header of the Cues element at `at` in `bytes` when it is one of a known size (it may reach past the bytes), else null. */
+function cuesHeader(bytes: Uint8Array, at = 0): Element | null {
+  const el = headerAt(bytes, at)
+  return el !== null && el.id === ID.Cues && el.sized ? el : null
+}
+
+/** One seek, from the beginning. */
+class Seeking {
+  private reads = 0
+  /** The ranges the seek has needed so far. */
+  private readonly covered: ByteRange[] = []
+  private readonly index: MatroskaIndex
+  private readonly seconds: number
+  private readonly chunks: readonly Chunk[]
+  /** The picture's CodecDelay in seconds, which RFC 9559 takes off every timestamp. The index's offset is that and the shift of the decode times, which presents nothing earlier. */
+  private readonly delay: number
+
+  constructor(index: MatroskaIndex, seconds: number, chunks: readonly Chunk[]) {
+    this.index = index
+    this.seconds = seconds
+    this.chunks = chunks
+    const { timing, read, header } = index.video
+    this.delay = -timing.offsetSeconds - read.shift / header.timescale
+  }
+
+  /**
+   * The bytes of `range`, which the seek needs. It counts as a read when the seek
+   * has not needed those bytes already (the one that would be past the cap stops
+   * the seek, whether the caller holds them or not), and what the caller does not
+   * hold is asked for.
+   */
+  private take(range: ByteRange): Uint8Array {
+    if (!covers(this.covered, range.start, range.end)) {
+      if (this.reads >= MAX_SEEK_READS) throw new Capped()
+      this.reads += 1
+      this.covered.push(range)
+    }
+    const bytes = heldBytes(this.chunks, range.start, range.end)
+    if (bytes === null) throw new Need(range)
+    return bytes
+  }
+
+  /** A time in ticks, in seconds on the playback timeline. */
+  private timeOf(ticks: number): number {
+    return (ticks * this.index.timestampScale) / 1e9 - this.delay
+  }
+
+  /** Where reading starts for the time. */
+  landing(): Landing {
+    const points = this.cuePoints()
+    if (points !== null && points.length > 0) {
+      const landed = this.byCues(points)
+      if (landed !== null) return landed
+    }
+    return this.bySearch()
+  }
+
+  // The Cues.
+
+  /** The picture's points of the file's Cues, or null when it has none that can be used (a search is then to be made). */
+  private cuePoints(): CuePoint[] | null {
+    const { cues } = this.index
+    if (cues !== null) {
+      const here = this.cuesAt(cues)
+      if (here === 'unusable') return null
+      if (here !== 'absent') return here
+    }
+    return this.cuesInTail()
+  }
+
+  /**
+   * The points of the Cues where the index says they are: 'absent' when no Cues
+   * element is there (an entry of a SeekHead may be stale), and 'unusable' when
+   * there is one that is too long to be read (`CUES_LIMIT`) or whose children do
+   * not walk.
+   */
+  private cuesAt(cues: { start: number; end: number | null }): CuePoint[] | 'absent' | 'unusable' {
+    const { segment } = this.index
+    let bytes: Uint8Array
+    if (cues.end !== null) {
+      if (cues.end - cues.start > CUES_LIMIT) return 'unusable'
+      bytes = this.take({ start: cues.start, end: cues.end })
+    } else {
+      const window = this.take({
+        start: cues.start,
+        end: Math.min(cues.start + HEADER_READ, segment.end),
+      })
+      const el = cuesHeader(window)
+      if (el === null || cues.start + el.end > segment.end) return 'absent'
+      if (el.end > CUES_LIMIT) return 'unusable'
+      bytes =
+        el.end <= window.length
+          ? window.subarray(0, el.end)
+          : this.take({ start: cues.start, end: cues.start + el.end })
+    }
+    const el = cuesHeader(bytes)
+    if (el?.end !== bytes.length) return 'absent'
+    try {
+      return readCues(
+        bytes,
+        el,
+        cues.start,
+        segment.data,
+        this.index.video.read.number,
+        segment.end,
+      )
+    } catch (error) {
+      if (error instanceof Mp4Error) return 'unusable'
+      throw error
+    }
+  }
+
+  /**
+   * The points of the Cues in the last `TAIL_BYTES` of the Segment (not before the
+   * first Cluster), where writers put them: the first Cues element of a known size
+   * that lies whole there, ends where the Segment does or exactly where an element
+   * of the Segment's own starts, and whose children walk. Null when there is none.
+   */
+  private cuesInTail(): CuePoint[] | null {
+    const { segment, firstCluster } = this.index
+    const start = Math.max(segment.end - TAIL_BYTES, firstCluster)
+    const bytes = this.take({ start, end: segment.end })
+    for (
+      let at = bytes.indexOf(CUES_ID[0] ?? 0);
+      at !== -1;
+      at = bytes.indexOf(CUES_ID[0] ?? 0, at + 1)
+    ) {
+      if (!CUES_ID.every((byte, offset) => bytes[at + offset] === byte)) continue
+      const el = cuesHeader(bytes, at)
+      if (el === null || el.end > bytes.length) continue
+      if (el.end < bytes.length && !TOP_LEVEL.has(headerAt(bytes, el.end)?.id ?? 0)) continue
+      try {
+        return readCues(bytes, el, start, segment.data, this.index.video.read.number, segment.end)
+      } catch (error) {
+        // A candidate whose children do not walk is not Cues: it is the bytes of something else.
+        if (!(error instanceof Mp4Error)) throw error
+      }
+    }
+    return null
+  }
+
+  /**
+   * Where the points lead for the time: the last point at or before it, else the
+   * first, and the one before it while the point's keyframe lies later than the time.
+   * Null when a point holds no cluster, where a search is to be made.
+   */
+  private byCues(points: readonly CuePoint[]): Landing | null {
+    let at = -1
+    for (const [one, point] of points.entries()) {
+      if (this.timeOf(point.time) <= this.seconds) at = one
+    }
+    const before = at === -1
+    if (before) at = 0
+    for (;;) {
+      const point = points[at]
+      if (point === undefined) return null
+      const landed = this.onCue(point, before, at > 0)
+      if (landed !== 'lies') return landed
+      at -= 1
+    }
+  }
+
+  /**
+   * Where a point leads. Its cluster is read (its header, the first `HEADER_READ`
+   * bytes) and must be at the point's position. The cursor is at the block the
+   * point names when that is a block of the cluster, else at the cluster, which
+   * `readClusters` enters; for a time before the first point it is at the cluster
+   * (the start of the file, as a start has it). The picture's first keyframe from
+   * there is looked for in the header's bytes and then in `SEARCH_READ` bytes from
+   * the cursor, and 'lies' says it is presented after the time while there is a
+   * point before this one (`back`); a keyframe that the bytes do not show leaves
+   * the point as it is.
+   */
+  private onCue(point: CuePoint, before: boolean, back: boolean): Landing | 'lies' | null {
+    const { segment } = this.index
+    const header = {
+      start: point.cluster,
+      bytes: this.take({
+        start: point.cluster,
+        end: Math.min(point.cluster + HEADER_READ, segment.end),
+      }),
+    }
+    const found = findCluster(header, point.cluster, segment.end)
+    const el = headerAt(header.bytes)
+    if (found?.start !== point.cluster || el === null) return null
+
+    const own: Landing = { at: point.cluster, cluster: null }
+    if (before) return own
+    const named = point.relative === null ? null : point.cluster + el.data + point.relative
+    const landings: { landing: Landing; named: boolean }[] = []
+    if (named !== null && named < found.place.end) {
+      landings.push({ landing: { at: named, cluster: found.place }, named: true })
+    }
+    landings.push({ landing: own, named: false })
+
+    for (const { landing, named: byName } of landings) {
+      const seen = this.keyframeFrom(landing, byName, header)
+      if (!seen.block) continue
+      if (seen.key !== null && back && this.timeOf(seen.key.pts) > this.seconds) return 'lies'
+      return landing
+    }
+    return own
+  }
+
+  /**
+   * The picture's first keyframe from the landing, as playing from it finds it, in
+   * the bytes of the cluster's header when they hold the landing and have one, else
+   * in `SEARCH_READ` bytes from it. `block` is false when the landing was named by
+   * a point and is not at a block of its cluster.
+   */
+  private keyframeFrom(
+    landing: Landing,
+    named: boolean,
+    header: Chunk,
+  ): { block: boolean; key: RawFrame | null } {
+    const { segment, video } = this.index
+    const from = (bytes: Uint8Array): { block: boolean; key: RawFrame | null } => {
+      if (named && landing.cluster !== null) {
+        const el = headerAt(bytes)
+        if (
+          el !== null &&
+          !(BLOCKS.has(el.id) && el.sized && landing.at + el.end <= landing.cluster.end)
+        ) {
+          return { block: false, key: null }
+        }
+      }
+      const read = readClusters(
+        { start: landing.at, bytes },
+        landing.at,
+        landing.cluster,
+        false,
+        segment.end,
+        [video.read],
+      )
+      return { block: true, key: read.frames.find((frame) => frame.keyframe) ?? null }
+    }
+
+    const headerEnd = header.start + header.bytes.length
+    if (landing.at >= header.start && landing.at < headerEnd) {
+      const seen = from(header.bytes.subarray(landing.at - header.start))
+      if (!seen.block || seen.key !== null) return seen
+    }
+    const whole = { start: landing.at, end: Math.min(landing.at + SEARCH_READ, segment.end) }
+    if (whole.end <= headerEnd && landing.at >= header.start) return { block: true, key: null }
+    return from(this.take(whole))
+  }
+
+  // The search.
+
+  /**
+   * Where reading starts, by a search of the clusters: the cluster before which the
+   * Segment is bisected down to a read, then the clusters in that read, of which the
+   * latest that holds a keyframe at or before the time. When none does, the search
+   * is made again for a cluster before the first of them, and so on; the first
+   * cluster is where it ends.
+   */
+  private bySearch(): Landing {
+    const { segment, firstCluster } = this.index
+    const first: Landing = { at: firstCluster, cluster: null }
+    let below = Infinity
+    for (let round = 0; round < MAX_SEEK_READS; round += 1) {
+      const best = this.bisect(below)
+      const lo = best?.start ?? firstCluster
+      const chunk = {
+        start: lo,
+        bytes: this.take({ start: lo, end: Math.min(lo + SEARCH_READ, segment.end) }),
+      }
+      const chosen = this.holding(chunk, below)
+      if (chosen !== null) return { at: chosen, cluster: null }
+      if (best === null) return first
+      below = best.place.timestamp
+    }
+    return first
+  }
+
+  /** Whether a cluster is one to land at as far as its time goes: before `below` ticks and at or before the time. */
+  private early(timestamp: number, below: number): boolean {
+    return timestamp < below && this.timeOf(timestamp) <= this.seconds
+  }
+
+  /**
+   * The last cluster at or before the time that the search bisects to (null when
+   * no guess finds one): the range [first cluster, Segment's end) is halved by the
+   * byte, and each guess reads `SEARCH_READ` bytes and takes the first cluster in
+   * them. One at or before the time becomes the best so far, and where the range
+   * starts; one after, or none, is where it ends. It stops when what is left is no
+   * more than a read, which the gap halving each time brings about.
+   */
+  private bisect(below: number): { start: number; place: ClusterPlace } | null {
+    const { segment, firstCluster } = this.index
+    let lo = firstCluster
+    let hi = segment.end
+    let best: { start: number; place: ClusterPlace } | null = null
+    while (hi - lo > SEARCH_READ) {
+      const guess = lo + Math.floor((hi - lo) / 2)
+      const bytes = this.take({ start: guess, end: Math.min(guess + SEARCH_READ, segment.end) })
+      const found = findCluster({ start: guess, bytes }, guess, segment.end)
+      if (found !== null && found.start < hi && this.early(found.place.timestamp, below)) {
+        best = found
+        lo = found.start
+      } else {
+        hi = guess
+      }
+    }
+    return best
+  }
+
+  /**
+   * The latest cluster in the read that is early enough and holds a picture
+   * keyframe, presented at or before the time, within the bytes of the read; null
+   * when there is none. A cluster is held to the frames from its start to the next
+   * cluster's (or its own end).
+   */
+  private holding(chunk: Chunk, below: number): number | null {
+    const { segment, video } = this.index
+    const starts: { start: number; place: ClusterPlace }[] = []
+    for (let from = chunk.start; ;) {
+      const found = findCluster(chunk, from, segment.end)
+      if (found === null) break
+      starts.push(found)
+      from = found.start + 1
+    }
+    const read = readClusters(chunk, chunk.start, null, false, segment.end, [video.read])
+
+    let chosen: number | null = null
+    for (const [one, cluster] of starts.entries()) {
+      if (!this.early(cluster.place.timestamp, below)) continue
+      const end = Math.min(
+        starts[one + 1]?.start ?? Infinity,
+        cluster.place.sized ? cluster.place.end : Infinity,
+      )
+      const key = read.frames.find(
+        (frame) => frame.keyframe && frame.offset >= cluster.start && frame.offset < end,
+      )
+      if (key !== undefined && this.timeOf(key.pts) <= this.seconds) chosen = cluster.start
+    }
+    return chosen
+  }
+}
+
+/**
+ * Where to start reading the file for the time `seconds`, on the playback timeline
+ * (a picture's CodecDelay is taken off the times of the file), for the sound with
+ * the id `sound` (one of `index.soundTracks`) or none: a cursor for `matroskaFrames`
+ * with fresh decode states, at a keyframe cluster of the picture at or before the
+ * time, or the next range of the file that the seek needs, which the caller reads,
+ * adds as a chunk and calls again with them all.
+ *
+ * - With Cues, the cursor is at the block of the last point at or before the time,
+ *   with its cluster read; without a block position, at the cluster. A point whose
+ *   keyframe is presented after the time gives way to the point before it. A time
+ *   before the first point is the start of its cluster; one past the last is the
+ *   last point's.
+ * - Without them, or with Cues too long to read (`CUES_LIMIT`), that do not walk, that have no point
+ *   of the picture or that lead to something that is no cluster, the cursor is at
+ *   the start of a cluster found by a search, with `cluster` null, for the first
+ *   cluster when there is none at or before the time.
+ * - A seek that has needed `MAX_SEEK_READS` reads stops at the first cluster.
+ *
+ * A sound that is not one of the index's, or a time that is no number, is a
+ * RangeError, the caller's miscount; a file's damage is never thrown from here.
+ */
+export function matroskaSeek(
+  index: MatroskaIndex,
+  seconds: number,
+  sound: number | null,
+  chunks: readonly Chunk[],
+): Step<MatroskaCursor> {
+  const start = matroskaStart(index, sound)
+  if (Number.isNaN(seconds)) throw new RangeError(`${seconds} is not a time.`)
+  try {
+    const landing = new Seeking(index, seconds, chunks).landing()
+    return {
+      done: {
+        ...start,
+        at: landing.at,
+        cluster: landing.cluster === null ? null : { ...landing.cluster },
+      },
+    }
+  } catch (error) {
+    if (error instanceof Need) return { need: error.range }
+    if (error instanceof Capped) return { done: start }
+    throw error
+  }
+}

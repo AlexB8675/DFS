@@ -17,3 +17,12 @@ export const FIRST_FRAMES_BYTES = 4 * 1024 * 1024
 
 /** What the index reads at the Segment's end to find the end of the last frame, when Info has no Duration: 1 MiB, and not before the first Cluster. */
 export const TAIL_BYTES = 1024 * 1024
+
+/** The most reads one seek takes: 48. A seek that has needed that many stops with the best keyframe cluster it has, or the first Cluster. */
+export const MAX_SEEK_READS = 48
+
+/** The most that a Cues element takes to be read: 32 MiB. A longer one is not read, and a seek searches the clusters instead. */
+export const CUES_LIMIT = 32 * 1024 * 1024
+
+/** One guess of a search for a cluster, and the bytes read from a cluster to see that it holds a keyframe: 256 KiB. */
+export const SEARCH_READ = 256 * 1024
