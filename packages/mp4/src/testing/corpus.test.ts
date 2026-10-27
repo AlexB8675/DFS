@@ -1,9 +1,58 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
-import { describe, expect, it } from 'vitest'
-import { corpusDir, isSynthetic, syntheticDir, uniqueTitles } from './corpus.ts'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { box, fourcc } from './build.ts'
+import { containerOf, corpusDir, isSynthetic, syntheticDir, uniqueTitles } from './corpus.ts'
+import { matroskaMovie } from './ebml.ts'
 
 // The corpus manifest's helpers (DESIGN.md §10.4): which files are the synthetic
-// ones, and the titles that the corpus test gives to files.
+// ones, which container a file is in, and the titles that the corpus test gives
+// to files.
+
+describe('containerOf', () => {
+  let folder: string
+  const write = (name: string, bytes: Uint8Array | string): string => {
+    const path = resolve(folder, name)
+    writeFileSync(path, bytes)
+    return path
+  }
+
+  beforeAll(() => {
+    folder = mkdtempSync(resolve(tmpdir(), 'dfs-mp4-container-'))
+  })
+
+  afterAll(() => {
+    rmSync(folder, { recursive: true, force: true })
+  })
+
+  it('is matroska for a built Matroska file, whatever its extension says', () => {
+    const file = matroskaMovie({
+      tracks: [{ number: 1, type: 1, codecId: 'V_VP9' }],
+      clusters: [{ timestamp: 0, frames: [{ track: 1, time: 0, keyframe: true }] }],
+    })
+    expect(containerOf(write('built.mkv', file.bytes))).toBe('matroska')
+    expect(containerOf(write('misnamed.mp4', file.bytes))).toBe('matroska')
+  })
+
+  it('is mp4 for a built MP4, which starts with a file type box', () => {
+    const file = box('ftyp', fourcc('isom'), [0, 0, 2, 0], fourcc('isom'))
+    expect(containerOf(write('built.mp4', file))).toBe('mp4')
+    expect(containerOf(write('misnamed.mkv', file))).toBe('mp4')
+  })
+
+  it('is null for a text file, an empty file and a file too short to say', () => {
+    expect(
+      containerOf(write('notes.txt', 'Not a video, but long enough to be looked at.')),
+    ).toBeNull()
+    expect(containerOf(write('empty.mp4', new Uint8Array(0)))).toBeNull()
+    expect(containerOf(write('short.mkv', Uint8Array.of(0x1a, 0x45, 0xdf)))).toBeNull()
+  })
+
+  it('reads the file where it is, and throws for one that is not there', () => {
+    expect(() => containerOf(resolve(folder, 'missing.mp4'))).toThrow()
+  })
+})
 
 describe('isSynthetic', () => {
   it('is true for a file in the synthetic folder, however the path is spelled', () => {

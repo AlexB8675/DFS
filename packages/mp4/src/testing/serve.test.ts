@@ -81,9 +81,53 @@ describe('startCorpusServer', () => {
         expect: 'plays',
         size: 1000,
         synthetic: false,
+        container: 'mp4',
       },
     ])
     expect(JSON.stringify(server.info)).not.toContain(folder.replaceAll('\\', '/'))
+  })
+
+  it('tells each file its container from its first bytes, and serves Matroska and WebM with their own types', async () => {
+    const mkv = resolve(folder, 'clip.mkv')
+    const webm = resolve(folder, 'clip.webm')
+    const mp4 = resolve(folder, 'real.mp4')
+    const text = resolve(folder, 'notes.txt')
+    // Matroska starts with EBML's magic number whatever it is named; an MP4 with a box of a type a file starts with.
+    writeFileSync(mkv, Uint8Array.of(0x1a, 0x45, 0xdf, 0xa3, 0x80, 1, 2, 3))
+    writeFileSync(webm, Uint8Array.of(0x1a, 0x45, 0xdf, 0xa3, 0x80, 4, 5, 6))
+    writeFileSync(mp4, Uint8Array.of(0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70, 1, 2, 3, 4, 5, 6, 7, 8))
+    // A file that is neither is for the MP4 suites to turn away, as they always did: it is not left out, nor called Matroska.
+    writeFileSync(text, 'This is not a video at all.')
+    const other = await startCorpusServer([
+      { path: mkv, expect: 'plays' },
+      { path: webm, expect: 'plays' },
+      { path: mp4, expect: 'plays' },
+      { path: text, expect: { refused: 'damaged' } },
+    ])
+    try {
+      expect(other.info.files.map((file) => file.container)).toEqual([
+        'matroska',
+        'matroska',
+        'mp4',
+        'mp4',
+      ])
+      const types: (string | null)[] = []
+      for (const file of other.info.files) {
+        const response = await fetch(`${other.info.url}/file/${file.id}`, {
+          headers: { Range: 'bytes=0-3' },
+        })
+        types.push(response.headers.get('Content-Type'))
+        await response.arrayBuffer()
+      }
+      expect(types).toEqual([
+        'video/x-matroska',
+        'video/webm',
+        'video/mp4',
+        'application/octet-stream',
+      ])
+    } finally {
+      await other.close()
+    }
   })
 
   it('makes the titles different when two files have the same folder name and file name', async () => {
@@ -230,6 +274,7 @@ describe('startCorpusServer', () => {
           expect: 'plays',
           size: 1000,
           synthetic: false,
+          container: 'mp4',
         },
       ])
       expect(warn).toHaveBeenCalledTimes(1)

@@ -1,12 +1,19 @@
-// Makes the synthetic half of the MP4 reader's test corpus with ffmpeg (DESIGN.md
-// §10.4, D45): small files from generated pictures and tones, each with one of
-// the box structures that real files come in or one of the codecs that a
-// browser's Media Source plays (and two that none does), so that the reader and
-// the writer can be checked against ffprobe, and the writer's output decoded by
-// ffmpeg, on files whose content is not anyone's. It writes them to
-// `corpus/synthetic/` and names them in `corpus/manifest.local.json` with what
-// the reader must do with each (merged with the entries already there, keyed by
-// path). A file that is already made is skipped, unless `--force`.
+// Makes the synthetic half of the MP4 and Matroska readers' test corpus with
+// ffmpeg (DESIGN.md §10.4, D45): small files from generated pictures and tones,
+// each with one of the box structures that real MP4 files come in, one of the
+// ways that a Matroska file is laid out, or one of the codecs that a browser's
+// Media Source plays (and some that none does), so that the readers and the
+// writer can be checked against ffprobe, and the writer's output decoded by
+// ffmpeg, on files whose content is not anyone's. A Matroska file ffmpeg can't
+// write (frames laced, or stripped of their headers, a Dolby Vision record,
+// clusters of unknown size) is derived from one that it wrote, by the rewriter in
+// `src/testing/remux.ts`. It writes them to `corpus/synthetic/` and names them in
+// `corpus/manifest.local.json` with what the reader must do with each (merged with
+// the entries already there, keyed by path). A file that is already made is
+// skipped, unless `--force`, which makes every file again, or it is derived from a
+// file that was made in this run (it would no longer come from it). ffmpeg's
+// encoders do not promise the same bytes twice, so to make one file again, delete
+// it, and the files derived from it are made again with it.
 //
 // Run with `pnpm --filter @dfs/mp4 corpus:make [--force]`; it needs `ffmpeg` and
 // `ffprobe` on the PATH.
@@ -17,6 +24,7 @@ import {
   existsSync,
   mkdirSync,
   openSync,
+  readFileSync,
   readSync,
   renameSync,
   rmSync,
@@ -28,7 +36,12 @@ import { child } from '../src/boxes.ts'
 import type { Box } from '../src/boxes.ts'
 import { frameTable } from '../src/frames.ts'
 import { locateMoov, moovIn } from '../src/locate.ts'
+import { readHeader } from '../src/matroska/ebml.ts'
+import { readHead } from '../src/matroska/head.ts'
+import { readTracks } from '../src/matroska/tracks.ts'
+import type { MatroskaTrack } from '../src/matroska/tracks.ts'
 import { readMovie } from '../src/movie.ts'
+import { framesIn, nextRead, openSource, startCursor } from '../src/source.ts'
 import {
   HEAD_BYTES,
   mergeEntries,
@@ -39,6 +52,9 @@ import {
   writeManifest,
 } from '../src/testing/corpus.ts'
 import type { ManifestEntry } from '../src/testing/corpus.ts'
+import type { Lacing } from '../src/testing/ebml.ts'
+import { layoutOf, remuxFile, withUnknownClustersFile } from '../src/testing/remux.ts'
+import type { Changes, Layout } from '../src/testing/remux.ts'
 
 /** Every file is this long, in seconds. */
 const SECONDS = 12
@@ -81,14 +97,19 @@ const VP9 = [
 ]
 const OPUS = ['-c:a', 'libopus', '-b:a', '96k']
 
-interface Spec {
+/**
+ * What a Matroska file's top level must be: a predicate over the Segment's children
+ * by name, in order, each run of the same said once (`layoutOf`), that gives what is
+ * wrong with the file, or null.
+ */
+type LayoutCheck = (layout: Layout) => string | null
+
+interface SpecBase {
   name: string
-  /** The boxes at the top of the file, in order (what it makes of the box structure, checked after it is made). */
-  layout: string
+  /** The boxes at the top of an MP4 file, in order, or for a Matroska file a check of its layout (what it makes of the structure, checked after it is made). */
+  layout: string | LayoutCheck
   /** ffprobe's codec name of each stream, in order. */
   streams: string[]
-  /** ffmpeg's arguments between the inputs' options and the output file. */
-  args: string[]
   expect: ManifestEntry['expect']
   codecs?: ManifestEntry['codecs']
   /** A change to the made file, in place and before it is checked: for what ffmpeg has no option to write. */
@@ -96,6 +117,22 @@ interface Spec {
   /** A check of the made file that ffprobe has no word for, throwing what is wrong. */
   verify?: (path: string) => void
 }
+
+/** A file ffmpeg writes. */
+interface MadeSpec extends SpecBase {
+  /** ffmpeg's arguments between the inputs' options and the output file. */
+  args: string[]
+}
+
+/** A file that is the rewrite of another spec's file, which comes before it in the list: ffmpeg has no option to write it. Its streams must be the source's too. */
+interface DerivedSpec extends SpecBase {
+  /** The name of the file it is made from, in the synthetic folder. */
+  from: string
+  /** Writes the file at `out` from the one at `source`. */
+  derive: (source: string, out: string) => void
+}
+
+type Spec = MadeSpec | DerivedSpec
 
 /** A sound entry as the made file has it: its type and version, its rate field in hertz, and where its boxes begin (after the fields of its version). */
 interface SoundEntry {
@@ -197,6 +234,271 @@ function objectTypeOf(path: string): { at: number; value: number } {
 /** MPEG-4 audio's objectTypeIndication, which ffmpeg writes for AAC, and MPEG-2 AAC's low complexity profile. */
 const OTI_MPEG4_AUDIO = 0x40
 const OTI_MPEG2_AAC_LC = 0x67
+
+/** The arguments that give the output the Matroska container, and WebM's. */
+const MATROSKA = ['-f', 'matroska']
+const WEBM = ['-f', 'webm']
+/** 8-bit HEVC, as fast as it goes, with a keyframe every 2 s. */
+const HEVC = [
+  '-c:v',
+  'libx265',
+  '-preset',
+  'veryfast',
+  '-pix_fmt',
+  'yuv420p',
+  '-x265-params',
+  'keyint=60:log-level=error',
+]
+/** A tick of a Matroska file's timestamps, which are in milliseconds, in seconds: how far apart a laced frame's time and the unlaced one's can be. */
+const LACED_TOLERANCE = 0.001
+
+/** Matroska's CodecIDs, which the rewriter finds the tracks to change by. */
+const AAC_ID = 'A_AAC'
+const AC3_ID = 'A_AC3'
+const MP3_ID = 'A_MPEG/L3'
+
+/** Every Matroska file has its Info and Tracks, and its Clusters after them. */
+function basics({ names }: Layout): string | null {
+  const info = names.indexOf('Info')
+  const tracks = names.indexOf('Tracks')
+  const cluster = names.indexOf('Cluster')
+  if (info < 0 || tracks < 0 || cluster < 0) return 'it lacks Info, Tracks or a Cluster'
+  if (tracks > cluster) return 'its Tracks come after a Cluster'
+  return null
+}
+
+/** Cues after the last Cluster, as ffmpeg writes them by default, in a Segment and Clusters that have their sizes. */
+const CUES_AFTER: LayoutCheck = (layout) => {
+  const { names, segmentSized, clustersSized } = layout
+  if (!segmentSized || !clustersSized) return 'its Segment or its Clusters have no size'
+  if (names.filter((name) => name === 'Cues').length !== 1) return 'it does not have one Cues'
+  if (names.lastIndexOf('Cues') < names.lastIndexOf('Cluster')) {
+    return 'its Cues are not after the last Cluster'
+  }
+  return basics(layout)
+}
+
+/** Cues before the first Cluster, as `-cues_to_front 1` writes them. */
+const CUES_FRONT: LayoutCheck = (layout) => {
+  const { names, segmentSized } = layout
+  if (!segmentSized) return 'its Segment has no size'
+  if (names.filter((name) => name === 'Cues').length !== 1) return 'it does not have one Cues'
+  if (names.indexOf('Cues') > names.indexOf('Cluster')) {
+    return 'its Cues are not before the first Cluster'
+  }
+  return basics(layout)
+}
+
+/** No Cues and a Segment of unknown size, as `-live 1` writes a file. */
+const LIVE: LayoutCheck = (layout) => {
+  if (layout.segmentSized) return 'its Segment has a size'
+  if (layout.names.includes('Cues')) return 'it has Cues'
+  return basics(layout)
+}
+
+/** What the rewriter makes: Info, Tracks and Clusters alone, in a Segment of known size. */
+const REBUILT: LayoutCheck = ({ names, segmentSized, clustersSized }) =>
+  names.join(' ') === 'Info Tracks Cluster' && segmentSized && clustersSized
+    ? null
+    : 'it is not a Segment of Info, Tracks and Clusters, all of known size'
+
+/** What the in-place rewrite makes of a live file: its Segment unknown still, no Cues, and every Cluster unknown. */
+const UNKNOWN: LayoutCheck = (layout) => {
+  if (layout.segmentSized || layout.clustersSized) return 'its Segment or its Clusters have a size'
+  if (layout.names.includes('Cues')) return 'it has Cues'
+  return basics(layout)
+}
+
+/** A layout as the log says it. */
+function describeLayout({ names, segmentSized, clustersSized }: Layout): string {
+  return [
+    names.join(' '),
+    ...(segmentSized ? [] : ['Segment of unknown size']),
+    ...(clustersSized ? [] : ['Clusters of unknown size']),
+  ].join('; ')
+}
+
+/** The tracks of a Matroska file, as the module reads its Tracks element (the head is the file's first megabyte, as the player reads it). */
+function matroskaTracksOf(path: string): MatroskaTrack[] {
+  const size = statSync(path).size
+  const bytes = readRange(path, 0, Math.min(HEAD_BYTES, size))
+  const head = readHead([{ start: 0, bytes }], size)
+  if (!('done' in head)) throw new Error(`The head of ${path} needs more than its first megabyte.`)
+  const { tracks } = head.done
+  const el = tracks.end <= bytes.length ? readHeader(bytes, tracks.start, tracks.end) : null
+  if (el === null) throw new Error(`The Tracks of ${path} are not in its first megabyte.`)
+  return readTracks(bytes, el).tracks
+}
+
+/** What `framesOfFile` collects of a track: each frame as the writer will be given it (its stored bytes behind the prefix that header stripping took), with its times in the track's ticks. */
+interface TrackFrames {
+  timescale: number
+  frames: Uint8Array[]
+  dts: number[]
+  pts: number[]
+  sync: number[]
+}
+
+/** The picture's and the played sound's frames of a Matroska file, read through `openSource` and `framesIn` as the player reads them, from the file held whole. */
+function framesOfFile(path: string): { video: number; frames: Map<number, TrackFrames> } {
+  const bytes = Uint8Array.from(readFileSync(path))
+  const chunk = { start: 0, bytes }
+  const opened = openSource([chunk], bytes.length)
+  if (!('done' in opened)) throw new Error(`${path} asks for more than it holds.`)
+  const index = opened.done
+  if (index.container !== 'matroska') throw new Error(`${path} is not a Matroska file.`)
+  let cursor = startCursor(index, index.sound?.header.id ?? null)
+  const frames = new Map<number, TrackFrames>()
+  // One call gives the file; a few more would be a reader that gives it in parts.
+  for (let turn = 0; ; turn += 1) {
+    const given = framesIn(index, cursor, chunk)
+    if (given.skipped.length > 0) {
+      throw new Error(`${path} has damage: ${JSON.stringify(given.skipped)}`)
+    }
+    for (const track of given.frames) {
+      const { table } = track
+      const one = frames.get(track.header.id) ?? {
+        timescale: table.timescale,
+        frames: [],
+        dts: [],
+        pts: [],
+        sync: [],
+      }
+      const prefix = track.prefix ?? new Uint8Array(0)
+      for (let i = 0; i < table.count; i += 1) {
+        const at = table.offsets[i] ?? 0
+        const stored = bytes.subarray(at, at + (table.sizes[i] ?? 0))
+        one.frames.push(Uint8Array.from([...prefix, ...stored]))
+        one.dts.push(table.dts[i] ?? 0)
+        one.pts.push((table.dts[i] ?? 0) + (table.cts[i] ?? 0))
+        one.sync.push(table.sync[i] ?? 0)
+      }
+      frames.set(track.header.id, one)
+    }
+    if (nextRead(index, given.cursor) === null) break
+    if (turn >= 100) throw new Error(`${path} does not end after ${turn} reads of the whole file.`)
+    cursor = given.cursor
+  }
+  return { video: index.video.header.id, frames }
+}
+
+/**
+ * A check that the file has the frames of another in the synthetic folder, which it
+ * is derived from: the same tracks, and for each the same number of frames, with
+ * the same bytes (what the file stores behind what header stripping took) and
+ * keyframes, at the same times. The picture's times are exact. The sound's are
+ * within `tolerance` seconds (0 is exact): a sound laced in the file is timed by
+ * the durations of its frames, and ffmpeg writes the timecodes of the unlaced one
+ * rounded to the millisecond, so they differ by up to a tick.
+ */
+function sameFramesAs(from: string, tolerance = 0): (path: string) => void {
+  return (path) => {
+    const wanted = framesOfFile(resolve(syntheticDir, from))
+    const got = framesOfFile(path)
+    const ids = (frames: Map<number, TrackFrames>): string => [...frames.keys()].join(', ')
+    if (ids(wanted.frames) !== ids(got.frames)) {
+      throw new Error(
+        `The tracks with frames are ${ids(got.frames)}, not ${from}'s ${ids(wanted.frames)}.`,
+      )
+    }
+    for (const [id, one] of wanted.frames) {
+      const two = got.frames.get(id)
+      if (two === undefined) throw new Error(`Track ${id} has no frames, and ${from}'s has.`)
+      if (two.timescale !== one.timescale || two.frames.length !== one.frames.length) {
+        throw new Error(
+          `Track ${id} has ${two.frames.length} frames in a timescale of ${two.timescale}, not ${from}'s ${one.frames.length} in ${one.timescale}.`,
+        )
+      }
+      const allowed = (id === wanted.video ? 0 : tolerance) * one.timescale + 1e-6
+      for (let i = 0; i < one.frames.length; i += 1) {
+        const a = one.frames[i] ?? new Uint8Array(0)
+        const b = two.frames[i] ?? new Uint8Array(0)
+        if (a.length !== b.length || a.some((byte, at) => byte !== b[at])) {
+          throw new Error(`Frame ${i} of track ${id} is not ${from}'s.`)
+        }
+        if (one.sync[i] !== two.sync[i]) {
+          throw new Error(`Frame ${i} of track ${id} differs from ${from}'s in its keyframe flag.`)
+        }
+        const dts = Math.abs((one.dts[i] ?? 0) - (two.dts[i] ?? 0))
+        const pts = Math.abs((one.pts[i] ?? 0) - (two.pts[i] ?? 0))
+        if (dts > allowed || pts > allowed) {
+          throw new Error(
+            `Frame ${i} of track ${id} is at ${two.dts[i]}/${two.pts[i]} (decode/presentation), ${from}'s at ${one.dts[i]}/${one.pts[i]}, in ticks of 1/${one.timescale} s: more than ${tolerance} s apart.`,
+          )
+        }
+      }
+    }
+  }
+}
+
+/** A check that runs each of the checks in turn. */
+function allOf(...checks: ((path: string) => void)[]): (path: string) => void {
+  return (path) => {
+    for (const check of checks) check(path)
+  }
+}
+
+/** The side data of ffprobe's Dolby Vision configuration record. */
+interface DoviSideData {
+  side_data_type?: string
+  dv_profile?: number
+  dv_level?: number
+  rpu_present_flag?: number
+  el_present_flag?: number
+  bl_present_flag?: number
+  dv_bl_signal_compatibility_id?: number
+}
+
+/** A check that ffprobe reads a Dolby Vision configuration record of this profile and compatibility (with level 6, an RPU and a base layer, and no enhancement layer) from the first picture. */
+function dolbyVisionIs(profile: number, compatibility: number): (path: string) => void {
+  return (path) => {
+    const out = run('ffprobe', [
+      '-v',
+      'error',
+      '-select_streams',
+      'v:0',
+      '-show_streams',
+      '-of',
+      'json',
+      path,
+    ])
+    const parsed = JSON.parse(out) as { streams: { side_data_list?: DoviSideData[] }[] }
+    const found = parsed.streams[0]?.side_data_list?.find(
+      (data) => data.side_data_type === 'DOVI configuration record',
+    )
+    if (found === undefined) throw new Error('ffprobe reads no Dolby Vision configuration record.')
+    const got = [
+      found.dv_profile,
+      found.dv_level,
+      found.rpu_present_flag,
+      found.el_present_flag,
+      found.bl_present_flag,
+      found.dv_bl_signal_compatibility_id,
+    ]
+    const wanted = [profile, 6, 1, 0, 1, compatibility]
+    if (got.join(',') !== wanted.join(',')) {
+      throw new Error(
+        `ffprobe reads the Dolby Vision record (profile, level, rpu, el, bl, compatibility) ${got.join(', ')}, not ${wanted.join(', ')}.`,
+      )
+    }
+  }
+}
+
+/** A rewrite of the file by the rewriter, with these changes. */
+function remuxed(changes: Changes): (source: string, out: string) => void {
+  return (source, out) => {
+    remuxFile(source, out, changes)
+  }
+}
+
+/** The frames of the tracks with this CodecID laced `count` to a block. */
+function laced(
+  codec: string,
+  count: number,
+  lacing: Lacing,
+): (source: string, out: string) => void {
+  return remuxed({ lace: { codec, count, lacing } })
+}
 
 const SPECS: Spec[] = [
   {
@@ -681,6 +983,341 @@ const SPECS: Spec[] = [
     args: [...picture('1280x720'), ...tone(440), ...H264, '-c:a', 'pcm_s16le', '-f', 'mp4'],
     expect: { refused: 'unsupported-codec' },
   },
+  // ---------------------------------------------------------------------------
+  // Matroska and WebM. The files ffmpeg writes come first; the derived ones, which
+  // the rewriter makes from them, come last.
+  {
+    // Matroska as ffmpeg writes it: the SeekHead, Info, Tracks and Tags first, the Clusters, and the Cues after the last of them.
+    name: 'h264-aac.mkv',
+    layout: CUES_AFTER,
+    streams: ['h264', 'aac'],
+    args: [...picture('1280x720'), ...tone(440), ...H264, ...AAC, ...MATROSKA],
+    expect: 'plays',
+    codecs: { video: 'avc1.64', audio: 'mp4a.40.2' },
+  },
+  {
+    // AC-3 in Matroska (`A_AC3`, with no CodecPrivate: the `dac3` is made from the first frame).
+    name: 'h264-ac3.mkv',
+    layout: CUES_AFTER,
+    streams: ['h264', 'ac3'],
+    args: [...picture('1280x720'), ...tone(440), ...H264, '-c:a', 'ac3', ...MATROSKA],
+    expect: 'plays',
+    codecs: { audio: 'ac-3' },
+  },
+  {
+    // HEVC (`V_MPEGH/ISO/HEVC` with an `hvcC` for its CodecPrivate) and AC-3, 8 bits.
+    name: 'hevc-ac3.mkv',
+    layout: CUES_AFTER,
+    streams: ['hevc', 'ac3'],
+    args: [...picture('1280x720'), ...tone(440), ...HEVC, '-c:a', 'ac3', ...MATROSKA],
+    expect: 'plays',
+  },
+  {
+    // E-AC-3 in Matroska (`A_EAC3`, the `dec3` made from the first frame).
+    name: 'hevc-eac3.mkv',
+    layout: CUES_AFTER,
+    streams: ['hevc', 'eac3'],
+    args: [...picture('1280x720'), ...tone(440), ...HEVC, '-c:a', 'eac3', ...MATROSKA],
+    expect: 'plays',
+    codecs: { audio: 'ec-3' },
+  },
+  {
+    // AV1 (`V_AV1` with an `av1C`) and Opus (`A_OPUS`, an OpusHead and a CodecDelay).
+    name: 'av1-opus.mkv',
+    layout: CUES_AFTER,
+    streams: ['av1', 'opus'],
+    args: [
+      ...picture('1280x720'),
+      ...tone(440),
+      '-c:v',
+      'libsvtav1',
+      '-preset',
+      '10',
+      '-g',
+      '60',
+      '-pix_fmt',
+      'yuv420p',
+      ...OPUS,
+      ...MATROSKA,
+    ],
+    expect: 'plays',
+    codecs: { video: 'av01.0.', audio: 'opus' },
+  },
+  {
+    // VP9 and Opus in WebM, which has no CodecPrivate for its picture: the `vpcC` is made from the first keyframe.
+    name: 'vp9-opus.webm',
+    layout: CUES_AFTER,
+    streams: ['vp9', 'opus'],
+    args: [...picture('1280x720'), ...tone(440), ...VP9, '-pix_fmt', 'yuv420p', ...OPUS, ...WEBM],
+    expect: 'plays',
+    codecs: { video: 'vp09.00.', audio: 'opus' },
+  },
+  {
+    // VP9 profile 2, 10 bits, in HDR's colour (PQ, BT.2020), as the MP4 above has it; the Colour element of the track says so.
+    name: 'vp9-10bit-pq.webm',
+    layout: CUES_AFTER,
+    streams: ['vp9', 'opus'],
+    args: [
+      ...picture('1280x720'),
+      ...tone(440),
+      ...VP9,
+      '-profile:v',
+      '2',
+      '-pix_fmt',
+      'yuv420p10le',
+      '-vf',
+      'setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc',
+      '-color_primaries',
+      'bt2020',
+      '-color_trc',
+      'smpte2084',
+      '-colorspace',
+      'bt2020nc',
+      ...OPUS,
+      ...WEBM,
+    ],
+    expect: 'plays',
+    codecs: { video: 'vp09.02.' },
+    verify: (path) => {
+      const colour = matroskaTracksOf(path).find((track) => track.kind === 'video')?.video?.colour
+      if (colour?.primaries !== 9 || colour.transfer !== 16 || colour.matrix !== 9) {
+        throw new Error(
+          `The Colour element says ${colour?.primaries}, ${colour?.transfer} and ${colour?.matrix}, not 9, 16 and 9 (BT.2020, PQ, BT.2020 non-constant luminance).`,
+        )
+      }
+    },
+  },
+  {
+    // FLAC in Matroska (`A_FLAC`, whose CodecPrivate is `fLaC` and the STREAMINFO block).
+    name: 'h264-flac.mkv',
+    layout: CUES_AFTER,
+    streams: ['h264', 'flac'],
+    args: [...picture('1280x720'), ...tone(440), ...H264, '-c:a', 'flac', ...MATROSKA],
+    expect: 'plays',
+    codecs: { audio: 'flac' },
+  },
+  {
+    // MP3 in Matroska (`A_MPEG/L3`), which the init segment gives the type `mp4a` and an `esds` of MPEG-1 audio.
+    name: 'h264-mp3.mkv',
+    layout: CUES_AFTER,
+    streams: ['h264', 'mp3'],
+    args: [...picture('1280x720'), ...tone(440), ...H264, '-c:a', 'libmp3lame', ...MATROSKA],
+    expect: 'plays',
+    codecs: { audio: 'mp4a.6B' },
+  },
+  {
+    // Apple Lossless in Matroska (`A_ALAC`, whose CodecPrivate is the magic cookie).
+    name: 'h264-alac.mkv',
+    layout: CUES_AFTER,
+    streams: ['h264', 'alac'],
+    args: [...picture('1280x720'), ...tone(440), ...H264, '-c:a', 'alac', ...MATROSKA],
+    expect: 'plays',
+    codecs: { audio: 'alac' },
+  },
+  {
+    // One picture and three sounds (440, 660 and 880 Hz), the second flagged default and the others not: the sound that plays is
+    // the second, and the others are there to choose. `verify` reads the flags from the file's own tracks.
+    name: 'three-sounds.mkv',
+    layout: CUES_AFTER,
+    streams: ['h264', 'aac', 'aac', 'aac'],
+    args: [
+      ...picture('1280x720'),
+      ...tone(440),
+      ...tone(660),
+      ...tone(880),
+      '-map',
+      '0:v',
+      '-map',
+      '1:a',
+      '-map',
+      '2:a',
+      '-map',
+      '3:a',
+      ...H264,
+      ...AAC,
+      '-disposition:a:0',
+      '0',
+      '-disposition:a:1',
+      'default',
+      '-disposition:a:2',
+      '0',
+      ...MATROSKA,
+    ],
+    expect: 'plays',
+    verify: (path) => {
+      const defaults = matroskaTracksOf(path)
+        .filter((track) => track.kind === 'audio')
+        .map((track) => track.default)
+      if (defaults.join(', ') !== 'false, true, false') {
+        throw new Error(
+          `The sounds' FlagDefault are ${defaults.join(', ')}, not false, true, false.`,
+        )
+      }
+    },
+  },
+  {
+    // Written as a recording that is still being written: a Segment of unknown size (the Clusters have their sizes), no Duration and no Cues.
+    name: 'h264-aac-live.mkv',
+    layout: LIVE,
+    streams: ['h264', 'aac'],
+    args: [...picture('1280x720'), ...tone(440), ...H264, ...AAC, '-live', '1', ...MATROSKA],
+    expect: 'plays',
+  },
+  {
+    // The Cues in front of the Clusters, after the Tags, as `-cues_to_front 1` (or mkvmerge's default) puts them.
+    name: 'h264-aac-cuesfront.mkv',
+    layout: CUES_FRONT,
+    streams: ['h264', 'aac'],
+    args: [
+      ...picture('1280x720'),
+      ...tone(440),
+      ...H264,
+      ...AAC,
+      '-cues_to_front',
+      '1',
+      ...MATROSKA,
+    ],
+    expect: 'plays',
+  },
+  {
+    // A picture turned a quarter, as the MP4 above: the track's Projection has a ProjectionPoseRoll of 90 degrees, and the picture is still 1280x720.
+    name: 'portrait-h264.mkv',
+    layout: CUES_AFTER,
+    streams: ['h264', 'aac'],
+    args: [
+      '-noautorotate',
+      '-display_rotation',
+      '90',
+      ...picture('1280x720'),
+      ...tone(440),
+      ...H264,
+      ...AAC,
+      ...MATROSKA,
+    ],
+    expect: 'plays',
+    verify: (path) => {
+      const roll = matroskaTracksOf(path).find((track) => track.kind === 'video')?.video
+        ?.rollDegrees
+      if (roll !== 90) throw new Error(`The picture's ProjectionPoseRoll is ${roll}, not 90.`)
+    },
+  },
+  {
+    // DTS (`A_DTS`), which no browser's Media Source takes: the reader must refuse it.
+    name: 'h264-dts.mkv',
+    layout: CUES_AFTER,
+    streams: ['h264', 'dts'],
+    args: [
+      ...picture('1280x720'),
+      ...tone(440),
+      ...H264,
+      '-c:a',
+      'dca',
+      '-strict',
+      '-2',
+      ...MATROSKA,
+    ],
+    expect: { refused: 'unsupported-codec' },
+  },
+  {
+    // VP8 and Vorbis in WebM (`V_VP8`, `A_VORBIS`), which the repackager has no sample entries for: the reader must refuse them.
+    name: 'vp8-vorbis.webm',
+    layout: CUES_AFTER,
+    streams: ['vp8', 'vorbis'],
+    args: [
+      ...picture('1280x720'),
+      ...tone(440),
+      '-c:v',
+      'libvpx',
+      '-deadline',
+      'realtime',
+      '-cpu-used',
+      '8',
+      '-b:v',
+      '1M',
+      '-g',
+      '60',
+      '-pix_fmt',
+      'yuv420p',
+      '-c:a',
+      'libvorbis',
+      ...WEBM,
+    ],
+    expect: { refused: 'unsupported-codec' },
+  },
+  {
+    // The AAC frames laced 4 to a block, in Xiph's lacing.
+    name: 'h264-aac-xiph.mkv',
+    from: 'h264-aac.mkv',
+    derive: laced(AAC_ID, 4, 'xiph'),
+    layout: REBUILT,
+    streams: ['h264', 'aac'],
+    expect: 'plays',
+    codecs: { video: 'avc1.64', audio: 'mp4a.40.2' },
+    verify: sameFramesAs('h264-aac.mkv', LACED_TOLERANCE),
+  },
+  {
+    // The AC-3 frames, which are all of one size, laced 3 to a block in fixed-size lacing.
+    name: 'h264-ac3-fixed.mkv',
+    from: 'h264-ac3.mkv',
+    derive: laced(AC3_ID, 3, 'fixed'),
+    layout: REBUILT,
+    streams: ['h264', 'ac3'],
+    expect: 'plays',
+    codecs: { audio: 'ac-3' },
+    verify: sameFramesAs('h264-ac3.mkv', LACED_TOLERANCE),
+  },
+  {
+    // The MP3 frames laced 4 to a block in EBML lacing.
+    name: 'h264-mp3-ebml.mkv',
+    from: 'h264-mp3.mkv',
+    derive: laced(MP3_ID, 4, 'ebml'),
+    layout: REBUILT,
+    streams: ['h264', 'mp3'],
+    expect: 'plays',
+    codecs: { audio: 'mp4a.6B' },
+    verify: sameFramesAs('h264-mp3.mkv', LACED_TOLERANCE),
+  },
+  {
+    // `0B 77`, AC-3's sync word, taken off the start of every frame, with a ContentEncoding of header stripping (ContentCompAlgo 3) that says so.
+    name: 'h264-ac3-stripped.mkv',
+    from: 'h264-ac3.mkv',
+    derive: remuxed({ strip: { codec: AC3_ID, prefix: Uint8Array.of(0x0b, 0x77) } }),
+    layout: REBUILT,
+    streams: ['h264', 'ac3'],
+    expect: 'plays',
+    codecs: { audio: 'ac-3' },
+    verify: sameFramesAs('h264-ac3.mkv'),
+  },
+  {
+    // The live file with the size of every Cluster written over as the unknown size, in place and in the same width.
+    name: 'h264-aac-unknown.mkv',
+    from: 'h264-aac-live.mkv',
+    derive: withUnknownClustersFile,
+    layout: UNKNOWN,
+    streams: ['h264', 'aac'],
+    expect: 'plays',
+    verify: sameFramesAs('h264-aac-live.mkv'),
+  },
+  {
+    // Dolby Vision profile 8.1 (compatible with HDR10): a BlockAdditionMapping `dvcC` on the picture.
+    name: 'hevc-dv8.mkv',
+    from: 'hevc-ac3.mkv',
+    derive: remuxed({ dolbyVision: { profile: 8, compatibility: 1 } }),
+    layout: REBUILT,
+    streams: ['hevc', 'ac3'],
+    expect: 'plays',
+    verify: allOf(sameFramesAs('hevc-ac3.mkv'), dolbyVisionIs(8, 1)),
+  },
+  {
+    // Dolby Vision profile 5 (compatible with nothing): a `dvcC` of profile 5, compatibility 0.
+    name: 'hevc-dv5.mkv',
+    from: 'hevc-ac3.mkv',
+    derive: remuxed({ dolbyVision: { profile: 5, compatibility: 0 } }),
+    layout: REBUILT,
+    streams: ['hevc', 'ac3'],
+    expect: 'plays',
+    verify: allOf(sameFramesAs('hevc-ac3.mkv'), dolbyVisionIs(5, 0)),
+  },
 ]
 
 /** The types of the boxes at the top of a file, in order. */
@@ -739,28 +1376,61 @@ function streamsOf(path: string): string[] {
   return parsed.streams.map((stream) => stream.codec_name ?? 'unknown')
 }
 
+/** Checks the layout of a made file against its spec's, and gives it as the log says it. */
+function checkLayout(spec: Spec, partial: string): string {
+  if (typeof spec.layout === 'string') {
+    const layout = topLevelTypes(partial)
+    if (layout !== spec.layout) {
+      throw new Error(`${spec.name} has the boxes '${layout}', not '${spec.layout}'.`)
+    }
+    return layout
+  }
+  const layout = layoutOf(Uint8Array.from(readFileSync(partial)))
+  const problem = spec.layout(layout)
+  if (problem !== null) {
+    throw new Error(`${spec.name} has the layout '${describeLayout(layout)}', and ${problem}.`)
+  }
+  return describeLayout(layout)
+}
+
 async function main(): Promise<void> {
   const force = process.argv.includes('--force')
   mkdirSync(syntheticDir, { recursive: true })
   const entries: ManifestEntry[] = []
+  const names = new Set<string>()
+  // The files made in this run: a file derived from one of them is made again, for it came from a file that is gone.
+  const made = new Set<string>()
   for (const spec of SPECS) {
+    // A derived file is made after the file it comes from, which the list must have in front of it.
+    if ('from' in spec && !names.has(spec.from)) {
+      throw new Error(`${spec.name} is derived from ${spec.from}, which is not made before it.`)
+    }
+    names.add(spec.name)
     const path = resolve(syntheticDir, spec.name)
-    if (existsSync(path) && !force) {
+    if (existsSync(path) && !force && !('from' in spec && made.has(spec.from))) {
       console.log(`${spec.name}: already made`)
     } else {
       const partial = `${path}.partial`
       rmSync(partial, { force: true })
-      // `-t` is an output option, and is after the codecs so that it applies to the one output.
-      run('ffmpeg', [
-        '-y',
-        '-hide_banner',
-        '-v',
-        'error',
-        ...spec.args,
-        '-t',
-        String(SECONDS),
-        partial,
-      ])
+      let source: string | null = null
+      if ('from' in spec) {
+        source = resolve(syntheticDir, spec.from)
+        if (!existsSync(source))
+          throw new Error(`${spec.name} is derived from ${source}, which is not there.`)
+        spec.derive(source, partial)
+      } else {
+        // `-t` is an output option, and is after the codecs so that it applies to the one output.
+        run('ffmpeg', [
+          '-y',
+          '-hide_banner',
+          '-v',
+          'error',
+          ...spec.args,
+          '-t',
+          String(SECONDS),
+          partial,
+        ])
+      }
       spec.patch?.(partial)
       // It is checked before it has its name, so that a file with the name is always one that was.
       const started = streamsOf(partial)
@@ -769,12 +1439,13 @@ async function main(): Promise<void> {
           `${spec.name} has the streams ${started.join(', ')}, not ${spec.streams.join(', ')}.`,
         )
       }
-      const layout = topLevelTypes(partial)
-      if (layout !== spec.layout) {
-        throw new Error(`${spec.name} has the boxes '${layout}', not '${spec.layout}'.`)
+      if (source !== null && streamsOf(source).join(',') !== started.join(',')) {
+        throw new Error(`${spec.name} has the streams ${started.join(', ')}, not its source's.`)
       }
+      const layout = checkLayout(spec, partial)
       spec.verify?.(partial)
       renameSync(partial, path)
+      made.add(spec.name)
       console.log(`${spec.name}: made (${layout}; ${started.join(', ')})`)
     }
     entries.push({

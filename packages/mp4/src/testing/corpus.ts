@@ -14,6 +14,8 @@ import type { Mp4Refusal } from '../errors.ts'
 import { locateMoov, moovIn } from '../locate.ts'
 import { readMovie } from '../movie.ts'
 import type { Movie } from '../movie.ts'
+import { sniff } from '../source.ts'
+import type { Container } from '../source.ts'
 
 /** The package's `corpus` folder, which `.gitignore` keeps out of the repository. */
 export const corpusDir = fileURLToPath(new URL('../../corpus/', import.meta.url))
@@ -146,6 +148,17 @@ export function readRange(path: string, position: number, length: number): Uint8
 
 /** How much of a file's start is read to find its index (§10.4): the same 1 MiB that the player will fetch. */
 export const HEAD_BYTES = 1024 * 1024
+
+/**
+ * The container a file is in, from its first bytes read where it is (`sniff`'s
+ * 4 for Matroska, 8 for an MP4's first box; 16 are read): null for a file that is
+ * neither, such as a text file, an empty one, or an MP4 that starts with a box
+ * that `sniff` doesn't know. It throws what reading the file throws, for one that
+ * isn't there.
+ */
+export function containerOf(path: string): Container | null {
+  return sniff(readRange(path, 0, 16))
+}
 
 /**
  * A file's movie, read in place as the player will read it: the first 1 MiB to

@@ -4,6 +4,7 @@
 // libraries.
 
 import type { Mp4Refusal } from '../errors.ts'
+import type { Container } from '../source.ts'
 
 /** One corpus file as a browser knows it: served at `${url}/file/${id}`, and named by its title (the folder's name and the file's, as `Final/a.mp4`, different for every file), as paths never reach the browser. */
 export interface CorpusFile {
@@ -13,6 +14,8 @@ export interface CorpusFile {
   size: number
   /** Whether `corpus:make` made it, as against one of the user's videos, which are read in place. */
   synthetic: boolean
+  /** Matroska when the file starts with EBML's magic number, else an MP4: a file that is neither is for the MP4 suites to turn away, as they always did, and is not called Matroska. */
+  container: Container
 }
 
 /** The Range server over the corpus: where it is, and the files of the manifest that are there. */

@@ -17,7 +17,8 @@ import type { AddressInfo } from 'node:net'
 import { extname } from 'node:path'
 import { pipeline } from 'node:stream'
 import type { TestProject } from 'vitest/node'
-import { isSynthetic, loadManifest, uniqueTitles } from './corpus.ts'
+import type { Container } from '../source.ts'
+import { containerOf, isSynthetic, loadManifest, uniqueTitles } from './corpus.ts'
 import type { ManifestEntry } from './corpus.ts'
 import type { CorpusInfo } from './provided.ts'
 
@@ -63,6 +64,8 @@ const TYPES: Readonly<Record<string, string>> = {
   '.mp4': 'video/mp4',
   '.m4v': 'video/mp4',
   '.mov': 'video/quicktime',
+  '.mkv': 'video/x-matroska',
+  '.webm': 'video/webm',
 }
 
 /**
@@ -165,13 +168,18 @@ export interface CorpusServer {
  * allows any, as the test page's isn't known when this starts). Only those files
  * can be reached, and only by id. An entry whose file is gone from the disk (or
  * can't be looked at) is left out, with one warning for all of them, and the ids
- * are the places in the list of those that are left.
+ * are the places in the list of those that are left. Each file is told its
+ * container from its first bytes, read where it is: Matroska or MP4, so that the
+ * suites for one don't play the files of the other.
  */
 export async function startCorpusServer(entries: readonly ManifestEntry[]): Promise<CorpusServer> {
-  const present: { entry: ManifestEntry; size: number }[] = []
+  const present: { entry: ManifestEntry; size: number; container: Container }[] = []
   for (const entry of entries) {
     try {
-      present.push({ entry, size: statSync(entry.path).size })
+      // Matroska is told by its first bytes, read where the file is. Anything else is given to the MP4 suites, which turn away
+      // what is not an MP4 as they did before there was another container: a file that `sniff` cannot name is not Matroska.
+      const container = containerOf(entry.path) === 'matroska' ? 'matroska' : 'mp4'
+      present.push({ entry, size: statSync(entry.path).size, container })
     } catch {
       // Gone, or not to be read: not a file to serve, and not a reason for the suites not to start.
     }
@@ -202,12 +210,13 @@ export async function startCorpusServer(entries: readonly ManifestEntry[]): Prom
   return {
     info: {
       url: `http://127.0.0.1:${port}/${token}`,
-      files: present.map(({ entry, size }, id) => ({
+      files: present.map(({ entry, size, container }, id) => ({
         id,
         name: titles[id] ?? '',
         expect: entry.expect,
         size,
         synthetic: isSynthetic(entry.path),
+        container,
       })),
     },
     close: () =>

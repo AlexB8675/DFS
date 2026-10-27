@@ -459,7 +459,11 @@ async function withPlayer(
 }
 
 const corpus = inject('corpus')
-const files = filesToPlay(corpus.files, inject('playAll'))
+// The MP4 files only: a Matroska file is for the Matroska suite.
+const files = filesToPlay(
+  corpus.files.filter((file) => file.container === 'mp4'),
+  inject('playAll'),
+)
 
 if (files.length === 0) {
   it('has files to play', (ctx) => {

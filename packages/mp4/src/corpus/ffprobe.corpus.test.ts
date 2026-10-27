@@ -4,7 +4,14 @@ import { resolve } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import { chooseTracks, fragment, initSegment, Mp4Error, presentationSeconds } from '../index.ts'
 import type { FrameTable, Mp4Refusal, PlayTrack } from '../index.ts'
-import { isSynthetic, loadManifest, readIndex, readRange, uniqueTitles } from '../testing/corpus.ts'
+import {
+  containerOf,
+  isSynthetic,
+  loadManifest,
+  readIndex,
+  readRange,
+  uniqueTitles,
+} from '../testing/corpus.ts'
 import type { ManifestEntry } from '../testing/corpus.ts'
 import { configProblems, writtenEntry } from '../testing/entries.ts'
 import {
@@ -41,7 +48,8 @@ import type { ProbePacket, ProbeStream } from '../testing/ffprobe.ts'
 /** A file this large (500 MB) is compared by windows and not whole. */
 const WHOLE_FILE_LIMIT = 500 * 1024 * 1024
 
-const entries = loadManifest()
+// This suite takes the MP4 files: a Matroska file is for the Matroska suite. A file that is neither is left here, to be turned away as it always was.
+const entries = loadManifest().filter((entry) => containerOf(entry.path) !== 'matroska')
 
 // What the run compared, said once at the end.
 const totals = { files: 0, refused: 0, windowed: 0, frames: 0, written: 0, noStart: 0 }
