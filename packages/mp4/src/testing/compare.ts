@@ -8,9 +8,13 @@ import { presentationSeconds } from '../timing.ts'
 import type { TrackTiming } from '../timing.ts'
 import type { ProbeStream } from './ffprobe.ts'
 
-/** A description of a difference that is too long for a line is cut. */
+/** A description of a difference that is too long for a line is cut. A value JSON has no text for (undefined, which a time ffprobe has none of is) is said as `String` says it. */
 export function shown(value: unknown): string {
-  const text = typeof value === 'string' ? value : JSON.stringify(value)
+  // JSON.stringify gives undefined for undefined, a function or a symbol, though its type says a string.
+  const text =
+    typeof value === 'string'
+      ? value
+      : ((JSON.stringify(value) as string | undefined) ?? String(value))
   return text.length > 200 ? `${text.slice(0, 200)}...` : text
 }
 

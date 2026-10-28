@@ -30,6 +30,16 @@ describe('Differences', () => {
     ])
   })
 
+  it('says a value that is undefined (a time that ffprobe has none of) as undefined, and does not throw on it', () => {
+    const found = new Differences()
+    found.noteNear('pts', 3, 1, undefined, 0.001)
+    found.note('size', 4, undefined, 12)
+    expect(found.report('sound')).toEqual([
+      'sound: pts differs in 1 frames, first at frame 3: ours 1, ffprobe undefined',
+      'sound: size differs in 1 frames, first at frame 4: ours undefined, ffprobe 12',
+    ])
+  })
+
   it('says nothing when nothing differs', () => {
     expect(new Differences().report('picture')).toEqual([])
   })
