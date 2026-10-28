@@ -679,7 +679,7 @@ const DOLBY_VISION_TYPES = new Set([0x64766343, 0x64767643, 0x64767743])
  * The entry that a Dolby Vision picture must have, built here and not taken from
  * ffmpeg (its MP4 muxer writes a `dvcC` only with `-strict unofficial`, and writes
  * no `dvh1` untold): the `hvcC` that is the CodecPrivate of the same pictures without
- * the record (the file `hevc-ac3.mkv` that the Dolby Vision files were made from)
+ * the record (the file `hevc-aac.mkv` that the Dolby Vision files were made from)
  * and the `dvcC` that holds the record the file's BlockAdditionMapping has,
  * which must be the one `corpus:make` wrote. A profile 5 picture or one with no
  * compatible base layer is `dvh1`; a compatible one is the `hvc1` that plays without
@@ -699,11 +699,11 @@ function dolbyVisionEntry(path: string, track: MatroskaTrack): SampleEntry {
   ) {
     throw new Error(`${path} holds a Dolby Vision record other than ${profile}.${compatibility}.`)
   }
-  const source = resolve(path, '..', 'hevc-ac3.mkv')
+  const source = resolve(path, '..', 'hevc-aac.mkv')
   const codecPrivate = tracksOf(source, statSync(source).size).find(
     (one) => one.kind === 'video',
   )?.codecPrivate
-  if (codecPrivate == null) throw new Error('hevc-ac3.mkv has no CodecPrivate for its picture.')
+  if (codecPrivate == null) throw new Error('hevc-aac.mkv has no CodecPrivate for its picture.')
   const base = box('hvcC', codecPrivate)
   const type = compatibility !== 0 && profile !== 5 ? 'hvc1' : 'dvh1'
   return {

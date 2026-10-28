@@ -1005,6 +1005,15 @@ const SPECS: Spec[] = [
     codecs: { audio: 'ac-3' },
   },
   {
+    // HEVC (`V_MPEGH/ISO/HEVC` with an `hvcC` for its CodecPrivate) and AAC, 8 bits: the one HEVC file whose sound a browser takes, so that HEVC from Matroska is played, and the file the Dolby Vision ones are made from.
+    name: 'hevc-aac.mkv',
+    layout: CUES_AFTER,
+    streams: ['hevc', 'aac'],
+    args: [...picture('1280x720'), ...tone(440), ...HEVC, ...AAC, ...MATROSKA],
+    expect: 'plays',
+    codecs: { video: 'hvc1.1.', audio: 'mp4a.40.2' },
+  },
+  {
     // HEVC (`V_MPEGH/ISO/HEVC` with an `hvcC` for its CodecPrivate) and AC-3, 8 bits.
     name: 'hevc-ac3.mkv',
     layout: CUES_AFTER,
@@ -1301,22 +1310,22 @@ const SPECS: Spec[] = [
   {
     // Dolby Vision profile 8.1 (compatible with HDR10): a BlockAdditionMapping `dvcC` on the picture.
     name: 'hevc-dv8.mkv',
-    from: 'hevc-ac3.mkv',
+    from: 'hevc-aac.mkv',
     derive: remuxed({ dolbyVision: { profile: 8, compatibility: 1 } }),
     layout: REBUILT,
-    streams: ['hevc', 'ac3'],
+    streams: ['hevc', 'aac'],
     expect: 'plays',
-    verify: allOf(sameFramesAs('hevc-ac3.mkv'), dolbyVisionIs(8, 1)),
+    verify: allOf(sameFramesAs('hevc-aac.mkv'), dolbyVisionIs(8, 1)),
   },
   {
     // Dolby Vision profile 5 (compatible with nothing): a `dvcC` of profile 5, compatibility 0.
     name: 'hevc-dv5.mkv',
-    from: 'hevc-ac3.mkv',
+    from: 'hevc-aac.mkv',
     derive: remuxed({ dolbyVision: { profile: 5, compatibility: 0 } }),
     layout: REBUILT,
-    streams: ['hevc', 'ac3'],
+    streams: ['hevc', 'aac'],
     expect: 'plays',
-    verify: allOf(sameFramesAs('hevc-ac3.mkv'), dolbyVisionIs(5, 0)),
+    verify: allOf(sameFramesAs('hevc-aac.mkv'), dolbyVisionIs(5, 0)),
   },
 ]
 
