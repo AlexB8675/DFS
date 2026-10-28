@@ -15,8 +15,9 @@ import {
   trackEntry,
   tracksElement,
 } from '../testing/ebml.ts'
-import type { Movie, MovieFrame, MovieSpec, TrackSpec } from '../testing/ebml.ts'
+import type { Movie, MovieCluster, MovieFrame, MovieSpec, TrackSpec } from '../testing/ebml.ts'
 import type { RawFrame } from './clusters.ts'
+import { readHeader } from './ebml.ts'
 import { ac3Config } from './frameheaders.ts'
 import { ID } from './ids.ts'
 import { HEADER_READ, MAX_INDEX_READS } from './limits.ts'
@@ -55,13 +56,21 @@ interface Opened {
  * reader asks for, until it is done. Every ask is held to the rules on the way:
  * it lies inside the file, it is never a range the reader holds, and a reader that
  * goes on asking is stopped. `asks` is filled even when the file is refused, so
- * that a test can count them.
+ * that a test can count them. A caller that has read ranges ahead holds them from
+ * the start (`ahead`).
  */
 function open(
   bytes: Uint8Array,
-  { head = HEAD, asks = [] }: { head?: number; asks?: ByteRange[] } = {},
+  {
+    head = HEAD,
+    asks = [],
+    ahead = [],
+  }: { head?: number; asks?: ByteRange[]; ahead?: ByteRange[] } = {},
 ): Opened {
-  const chunks: Chunk[] = [{ start: 0, bytes: bytes.subarray(0, Math.min(head, bytes.length)) }]
+  const chunks: Chunk[] = [
+    { start: 0, bytes: bytes.subarray(0, Math.min(head, bytes.length)) },
+    ...ahead.map(({ start, end }) => ({ start, bytes: bytes.subarray(start, end) })),
+  ]
   for (let turn = 0; turn < TURNS; turn += 1) {
     const step = readMatroska(chunks, bytes.length)
     if ('done' in step) return { index: step.done, asks, chunks }
@@ -844,6 +853,8 @@ describe('the duration, when Info has none', () => {
     expect(asks).toEqual([{ start: file.bytes.length - MIB, end: file.bytes.length }])
     // The picture's last frame is presented at 2067 and lasts 33.333333 ticks, which is 2100 when rounded; the sound's last, 2060 and 20 ticks, is 2080.
     expect(index.durationSeconds).toBe(2.1)
+    // The index says where the last cluster is: the third, whose Timestamp is 2000.
+    expect(index.lastCluster).toEqual({ start: file.clusters[2]?.start, timestamp: 2000 })
   })
 
   it("takes the BlockDuration of the last frame when it has one, and a frame's length from its track's frames when it has none", () => {
@@ -888,6 +899,7 @@ describe('the duration, when Info has none', () => {
     const { index, asks } = open(file.bytes)
     expect(asks).toEqual([])
     expect(index.durationSeconds).toBe(1.066)
+    expect(index.lastCluster).toEqual({ start: file.clusters[1]?.start, timestamp: 1000 })
   })
 
   it('is the same index when the caller has read the whole file ahead', () => {
@@ -917,7 +929,7 @@ describe('the duration, when Info has none', () => {
     expect(index.durationSeconds).toBe(1.066)
   })
 
-  it('is null when the tail holds no cluster, as when the last one is larger than the tail', () => {
+  it('reads back from the end when the last cluster is larger than the tail, and takes its end', () => {
     const file = movie({
       duration: undefined,
       tracks: [VP9, opus(2)],
@@ -927,8 +939,15 @@ describe('the duration, when Info has none', () => {
       ],
     })
     const { index, asks } = open(file.bytes)
-    expect(asks).toEqual([{ start: file.bytes.length - MIB, end: file.bytes.length }])
-    expect(index.durationSeconds).toBeNull()
+    const end = file.bytes.length
+    // The last cluster starts a little before 2 MiB from the end: the second megabyte back is the second read, and the window after it (4 MiB from the end) is held by the head.
+    expect(asks).toEqual([
+      { start: end - MIB, end },
+      { start: end - 2 * MIB, end: end - MIB },
+    ])
+    expect(index.lastCluster).toEqual({ start: file.clusters[1]?.start, timestamp: 1000 })
+    // The picture's frame is presented at 1000 and lasts 33.333333 ticks, 33 when rounded.
+    expect(index.durationSeconds).toBe(1.033)
   })
 
   it('does not look before the first Cluster', () => {
@@ -944,6 +963,236 @@ describe('the duration, when Info has none', () => {
     expect(file.bytes.length - MIB).toBeLessThan(first)
     expect(asks).toEqual([{ start: first, end: file.bytes.length }])
     expect(index.durationSeconds).toBe(0.133)
+  })
+})
+
+describe('the duration, read back from the end when Info has none (§10.4)', () => {
+  /** Ten clusters of one picture, a second apart. Each holds a keyframe, a frame, a padding frame of `pad` bytes (the last cluster's, of `lastPad` when given) and three more frames, the last presented 167 ms into the cluster, so a cluster is a little over `pad` bytes. */
+  function tenClusters(pad: number, unknown: boolean, lastPad = pad): MovieCluster[] {
+    return Array.from({ length: 10 }, (_, at) => {
+      const time = at * 1000
+      return {
+        timestamp: time,
+        unknown,
+        frames: [
+          frame(1, time, { keyframe: true, data: key() }),
+          frame(1, time + 33),
+          frame(1, time + 67, { size: at === 9 ? lastPad : pad }),
+          frame(1, time + 100),
+          frame(1, time + 133),
+          frame(1, time + 167),
+        ],
+      }
+    })
+  }
+
+  /** A recording whose Info has no Duration and which has no Cues, as one that was cut off leaves it. */
+  function recording(pad: number, unknown: boolean, lastPad = pad): Movie {
+    return movie({
+      duration: undefined,
+      tracks: [VP9],
+      clusters: tenClusters(pad, unknown, lastPad),
+    })
+  }
+
+  /** The windows of a search back from `end`, as many as `count`: a megabyte, then the megabyte before it, then the 2, 4 and 8 before those, each ending where the one before began. */
+  function windows(end: number, count: number): ByteRange[] {
+    return Array.from({ length: count }, (_, at) =>
+      at === 0
+        ? { start: end - MIB, end }
+        : { start: end - 2 ** at * MIB, end: end - 2 ** (at - 1) * MIB },
+    )
+  }
+
+  /** A file from `from` on, in ranges of a megabyte that touch: what a caller that has read it ahead holds. */
+  function chunked(bytes: Uint8Array, from = 0): ByteRange[] {
+    const out: ByteRange[] = []
+    for (let at = from; at < bytes.length; at += MIB) {
+      out.push({ start: at, end: Math.min(at + MIB, bytes.length) })
+    }
+    return out
+  }
+
+  // The last cluster is the tenth, whose Timestamp is 9000. Its frames are at 9000, 9033, 9067 (the padding), 9100, 9133 and 9167, and a frame lasts 33.333333 ticks of a millisecond (33 when rounded), so a whole file ends at 9200. A cut inside the last frame (a block of 14 bytes) leaves 9133, which ends at 9166; one inside the padding leaves 9033, which ends at 9066.
+  // The windows needed are of what lies from the last cluster's start (a little over its padding) to the end: the first megabyte, the next, then 2, 4 and 8 more, so that 2 MiB and a little needs 3 windows and 5 MiB and a little needs 4; half of each (a cut inside the padding) needs 2 and 3.
+  const layouts: {
+    name: string
+    unknown: boolean
+    cut: (last: ByteRange) => number
+    seconds: number
+    windows: Record<number, number>
+  }[] = [
+    {
+      name: 'a whole file',
+      unknown: false,
+      cut: (last) => last.end,
+      seconds: 9.2,
+      windows: { 2: 3, 5: 4 },
+    },
+    {
+      name: 'a file cut off inside its last frame',
+      unknown: false,
+      cut: (last) => last.end - 5,
+      seconds: 9.166,
+      windows: { 2: 3, 5: 4 },
+    },
+    {
+      name: 'a file cut off inside its last cluster, in the padding',
+      unknown: false,
+      cut: (last) => last.start + Math.floor((last.end - last.start) / 2),
+      seconds: 9.066,
+      windows: { 2: 2, 5: 3 },
+    },
+    {
+      name: 'a whole file of clusters of unknown size',
+      unknown: true,
+      cut: (last) => last.end,
+      seconds: 9.2,
+      windows: { 2: 3, 5: 4 },
+    },
+    {
+      name: 'a file of clusters of unknown size cut off inside the last, in the padding',
+      unknown: true,
+      cut: (last) => last.start + Math.floor((last.end - last.start) / 2),
+      seconds: 9.066,
+      windows: { 2: 2, 5: 3 },
+    },
+  ]
+
+  describe.each([2, 5])('with clusters of %i MiB', (mib) => {
+    it.each(layouts)(
+      'finds the last cluster and the end of its last whole frame in $name',
+      (layout) => {
+        const file = recording(mib * MIB, layout.unknown)
+        const last = file.clusters[9]
+        if (last === undefined) throw new Error('expected ten clusters')
+        const bytes = file.bytes.subarray(0, layout.cut(last))
+        const count = layout.windows[mib] ?? NaN
+        const { index, asks } = open(bytes)
+        expect(index.durationSeconds).toBe(layout.seconds)
+        expect(index.lastCluster).toEqual({ start: last.start, timestamp: 9000 })
+        // Nothing is asked for but the windows, and each is a read.
+        expect(asks).toEqual(windows(bytes.length, count))
+        expect(index.reads).toBe(count)
+        expect(index.reads).toBeLessThanOrEqual(MAX_INDEX_READS)
+      },
+    )
+  })
+
+  it('finds a last cluster whose header lies across the boundary of two windows, for the search is of the whole tail and not of the new window', () => {
+    // The last cluster is made to start 6 bytes before the megabyte that ends the file: its ID and the first 2 bytes of its size are in the second window, and the rest of its header, with the Timestamp, is in the first.
+    const sized = recording(MIB, false)
+    const measured = sized.clusters[9]
+    if (measured === undefined) throw new Error('expected ten clusters')
+    const padding = MIB + (MIB + 6) - (measured.end - measured.start)
+    const file = recording(MIB, false, padding)
+    const last = file.clusters[9]
+    expect(file.bytes.length - (last?.start ?? NaN)).toBe(MIB + 6)
+    const { index, asks } = open(file.bytes)
+    expect(asks).toEqual(windows(file.bytes.length, 2))
+    expect(index.lastCluster).toEqual({ start: last?.start, timestamp: 9000 })
+    expect(index.durationSeconds).toBe(9.2)
+  })
+
+  it('names the last cluster but gives no duration when the file ends right after its Timestamp, for the end is taken from the frames of the last cluster only', () => {
+    // The ruling takes the end from the last start's frames, and this cluster has none: the cluster before it, which holds frames, is not looked at once this one is found. (A cut a byte earlier, inside the Timestamp, leaves no cluster there, and the cluster before gives the end.)
+    const file = recording(8, false)
+    const last = file.clusters[9]
+    const header = readHeader(file.bytes, last?.start ?? NaN, file.bytes.length)
+    const stamp = readHeader(file.bytes, header?.data ?? NaN, file.bytes.length)
+    const bytes = file.bytes.subarray(0, stamp?.end)
+    const { index, asks } = open(bytes)
+    expect(asks).toEqual([])
+    expect(index.lastCluster).toEqual({ start: last?.start, timestamp: 9000 })
+    expect(index.durationSeconds).toBeNull()
+  })
+
+  it('is the same index, with the same reads, when the caller has read the file ahead or part of it', () => {
+    const file = recording(5 * MIB, false)
+    const exact = open(file.bytes)
+    const all = open(file.bytes, { ahead: chunked(file.bytes) })
+    expect(all.asks).toEqual([])
+    expect(plain(all.index)).toEqual(plain(exact.index))
+    expect(all.index.reads).toBe(4)
+    // The last 3 MiB, 1 MiB at a time: the window of 2 MiB before them is held in part, and is asked for whole.
+    const part = open(file.bytes, { ahead: chunked(file.bytes, file.bytes.length - 3 * MIB) })
+    expect(plain(part.index)).toEqual(plain(exact.index))
+    expect(part.asks).toEqual(windows(file.bytes.length, 4).slice(2))
+  })
+
+  it('asks for nothing at the end when Info has a Duration, and names no last cluster', () => {
+    const file = movie({
+      tracks: [VP9],
+      clusters: [
+        { timestamp: 0, frames: start().filter((one) => one.track === 1) },
+        { timestamp: 1000, frames: [frame(1, 1000, { keyframe: true, size: 3 * MIB })] },
+      ],
+    })
+    const { index, asks } = open(file.bytes)
+    expect(asks).toEqual([])
+    expect(index.reads).toBe(0)
+    expect(index.durationSeconds).toBe(4.021)
+    expect(index.lastCluster).toBeNull()
+  })
+
+  describe("within the open's reads", () => {
+    /** Two clusters: a small one, and a last of `pad` bytes and a little more, behind Tags that take `headReads` reads of the head to pass (the first lies past the head's megabyte, and each of the others is further than one header read from the one before). The last frame is presented at 1100, which ends at 1133. */
+    function behindTags(headReads: number, pad: number): Movie {
+      return movie({
+        duration: undefined,
+        tracks: [VP9],
+        tags: [1.25 * MIB, ...Array.from({ length: headReads - 2 }, () => 100 * 1024)],
+        clusters: [
+          { timestamp: 0, frames: start().filter((one) => one.track === 1) },
+          {
+            timestamp: 1000,
+            frames: [
+              frame(1, 1000, { keyframe: true, data: key() }),
+              frame(1, 1033),
+              frame(1, 1067, { size: pad }),
+              frame(1, 1100),
+            ],
+          },
+        ],
+      })
+    }
+
+    it('takes the 12th read for the last window it can, and finds the cluster that lies in the window after it', () => {
+      // A last cluster of 16 MiB and a little: the windows of 1, 1, 2, 4 and 8 MiB reach its padding (5 reads), and the window after them, of the 16 MiB before, is cut to start at the first Cluster, where the head's own read of the header already holds it (no read). The head took 7.
+      const file = behindTags(7, 16 * MIB)
+      const { index, asks } = open(file.bytes)
+      expect(asks).toHaveLength(MAX_INDEX_READS)
+      expect(asks.slice(7)).toEqual(windows(file.bytes.length, 5))
+      expect(index.reads).toBe(MAX_INDEX_READS)
+      expect(index.durationSeconds).toBe(1.133)
+      expect(index.lastCluster).toEqual({ start: file.clusters[1]?.start, timestamp: 1000 })
+    })
+
+    it('stops without a duration, and opens, when the next window would be the 13th read', () => {
+      // The same file behind one more read of the head: the window of 8 MiB is the 13th, and is not asked for.
+      const file = behindTags(8, 16 * MIB)
+      const { index, asks } = open(file.bytes)
+      expect(asks).toHaveLength(MAX_INDEX_READS)
+      expect(asks.slice(8)).toEqual(windows(file.bytes.length, 4))
+      expect(index.reads).toBe(MAX_INDEX_READS)
+      expect(index.durationSeconds).toBeNull()
+      expect(index.lastCluster).toBeNull()
+      expect(index.video.codec).toBe('vp09.00.20.08.01.02.02.02.00')
+      // A caller that has read it all ahead is given the same index.
+      const all = open(file.bytes, { ahead: chunked(file.bytes) })
+      expect(plain(all.index)).toEqual(plain(index))
+    })
+
+    it('opens a file whose last cluster is 64 MiB and a little, with no duration, when the head left too few reads', () => {
+      // The windows of 1, 1, 2, 4, 8 and 16 MiB are the 7th to the 12th read; the cluster is in the window of 32 MiB after them.
+      const file = behindTags(6, 64 * MIB)
+      const { index, asks } = open(file.bytes)
+      expect(asks).toHaveLength(MAX_INDEX_READS)
+      expect(asks.slice(6)).toEqual(windows(file.bytes.length, 6))
+      expect(index.durationSeconds).toBeNull()
+      expect(index.lastCluster).toBeNull()
+      expect(index.reads).toBe(MAX_INDEX_READS)
+    })
   })
 })
 

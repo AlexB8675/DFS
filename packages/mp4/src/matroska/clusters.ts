@@ -106,8 +106,9 @@ function checkWithin(chunk: Chunk, at: number): void {
  * entered is a damaged file, one whose first elements claim to reach more than
  * `HEADER_READ` bytes from its start among them. A cluster of unknown size ends at the Segment's end,
  * and a sized one at its own, which `clamp` cuts to the Segment's end where it runs
- * past it, as a file cut short does: a search for a cluster takes no such cluster,
- * for it has nothing but the header to go by.
+ * past it, as a file cut short does: a search for a cluster takes no such cluster
+ * unless it is told to (`findCluster`'s `cutShort`), for it has nothing but the
+ * header to go by.
  */
 function enterCluster(
   chunk: Chunk,
@@ -178,11 +179,12 @@ type Scan = { start: number; place: ClusterPlace } | { cut: number } | null
 /**
  * Looks for a cluster in the chunk from offset `from` of the file, by its ID: a
  * candidate is a cluster when its header reads, it ends within the Segment (or is of
- * unknown size) and a Timestamp is among its first children and reads. A
- * candidate that the chunk ends too soon to tell about is reported (`cut`) when
- * more of the Segment may come, and is passed otherwise.
+ * unknown size, or, with `cutShort`, is sized and runs past the Segment's end, which
+ * then ends it) and a Timestamp is among its first children and reads. A candidate
+ * that the chunk ends too soon to tell about is reported (`cut`) when more of the
+ * Segment may come, and is passed otherwise.
  */
-function scan(chunk: Chunk, from: number, segmentEnd: number): Scan {
+function scan(chunk: Chunk, from: number, segmentEnd: number, cutShort: boolean): Scan {
   const base = chunk.start
   const bytes = chunk.bytes
   const limit = Math.min(base + bytes.length, segmentEnd)
@@ -196,7 +198,7 @@ function scan(chunk: Chunk, from: number, segmentEnd: number): Scan {
     if (CLUSTER_ID.every((byte, index) => bytes[at + index] === byte)) {
       try {
         const el = readHeader(bytes, at, limit - base)
-        const entered = el === null ? null : enterCluster(chunk, el, limit, segmentEnd, false)
+        const entered = el === null ? null : enterCluster(chunk, el, limit, segmentEnd, cutShort)
         if (entered !== null) return { start: base + at, place: entered.place }
         if (more) return { cut: base + at }
       } catch (error) {
@@ -214,14 +216,21 @@ function scan(chunk: Chunk, from: number, segmentEnd: number): Scan {
  * unknown or ends within the Segment (`segmentEnd`), and a Timestamp is among its
  * first 3 children and reads, all within the chunk. Null when there is none: the
  * bytes of an ID in the payload of a frame are no cluster for lacking the rest.
+ *
+ * With `cutShort` a sized cluster whose size runs past the Segment's end is taken
+ * too, with its end at the Segment's: the last cluster of a file that was cut off
+ * is one, and the search for the file's end looks for it. Every other search leaves
+ * it out (the frame walk's resync, a seek's), for it has nothing but the header to
+ * go by.
  */
 export function findCluster(
   chunk: Chunk,
   from: number,
   segmentEnd: number,
+  cutShort = false,
 ): { start: number; place: ClusterPlace } | null {
   checkWithin(chunk, from)
-  const found = scan(chunk, from, segmentEnd)
+  const found = scan(chunk, from, segmentEnd, cutShort)
   return found !== null && 'place' in found ? found : null
 }
 
@@ -341,7 +350,7 @@ export function readClusters(
    */
   const resync = (damage: number, from: number): void => {
     place = null
-    const found = scan(chunk, from, segmentEnd)
+    const found = scan(chunk, from, segmentEnd, false)
     if (found !== null && 'place' in found) {
       if (found.start > damage) skipped.push({ start: damage, end: found.start })
       pos = found.start

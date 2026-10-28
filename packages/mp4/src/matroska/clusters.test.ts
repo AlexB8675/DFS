@@ -855,6 +855,29 @@ describe('findCluster (§10.4)', () => {
     expect(() => findCluster(file.chunk, BASE - 1, file.end)).toThrow(RangeError)
     expect(() => findCluster(file.chunk, file.end + 1, file.end)).toThrow(RangeError)
   })
+
+  it("takes a sized cluster that the Segment's end cuts short only when asked, with its end at the Segment's", () => {
+    // The Segment ends 3 bytes short of where the cluster's size says it does: a file that a writer's crash cut off.
+    const file = laid(cluster(1000, [key(1, 0, 1), key(1, 33, 2)]))
+    const cut = file.end - 3
+    expect(findCluster(file.chunk, BASE, cut)).toBeNull()
+    expect(findCluster(file.chunk, BASE, cut, false)).toBeNull()
+    expect(findCluster(file.chunk, BASE, cut, true)).toEqual({
+      start: BASE,
+      place: { timestamp: 1000, end: cut, sized: true },
+    })
+    // A cluster that the Segment doesn't cut short is the same either way.
+    expect(findCluster(file.chunk, BASE, file.end, true)).toEqual(
+      findCluster(file.chunk, BASE, file.end),
+    )
+  })
+
+  it('takes no cut-short cluster whose Timestamp the Segment cuts off', () => {
+    // The Segment ends in the Timestamp, which is 2 bytes wide: the header and the first 3 bytes of it are all that remain.
+    const file = laid(cluster(1000, [key(1, 0, 1)]))
+    expect(findCluster(slice(file, BASE, BASE + 8), BASE, BASE + 8, true)).toBeNull()
+    expect(findCluster(slice(file, BASE, BASE + 9), BASE, BASE + 9, true)).not.toBeNull()
+  })
 })
 
 // Reading a file in pieces: each call is given a chunk of the file from where the
