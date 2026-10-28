@@ -103,9 +103,9 @@ export interface MatroskaIndex {
   firstCluster: number
   /** The Cues as the head has them: where they start, and where they end when the walk met them before the first Cluster (else null: only a SeekHead said where they are, and nothing has read there). Null when no SeekHead names them. A seek looks further. */
   cues: { start: number; end: number | null } | null
-  /** The file's duration in seconds: Info's (a Duration of 0 is none, as a recording that is still being written leaves it), else the end of the last whole frame of the last Cluster, found by reading back from the Segment's end (`readLastEnd`), on the file's own timeline as Info's is (no track's offset is applied); null when neither is found, as when the reads that opening a file is allowed run out first. */
+  /** The file's duration in seconds: Info's (a Duration of 0 is none, as a recording that is still being written leaves it), else the end of the last whole frame in the Clusters read back from the Segment's end (`readLastEnd`; the Cluster before, when the last is cut off before its first frame), on the file's own timeline as Info's is (no track's offset is applied); null when neither is found, as when the reads that opening a file is allowed run out first. */
   durationSeconds: number | null
-  /** The last Cluster, where the search from the Segment's end found it: the offset of its header, and its Timestamp in ticks of the file's TimestampScale, as `ClusterPlace.timestamp` is. Null when Info has a Duration (the end is not searched for then), when the search found no Cluster, and when it stopped for want of reads. The far end of the file's timeline, for a seek to measure from. */
+  /** The last Cluster, where the search from the Segment's end found it (a Cluster that the file cuts off included, even before its first frame): the offset of its header, and its Timestamp in ticks of the file's TimestampScale, as `ClusterPlace.timestamp` is. Null when Info has a Duration (the end is not searched for then) and when the search found no Cluster, as when it stopped for want of reads before it reached one. The far end of the file's timeline, for a seek to measure from. */
   lastCluster: { start: number; timestamp: number } | null
   /** How many reads, after the first chunk, opening the file needed: the head's own and the open's, each counted for the bytes that no earlier read of the open had, however a caller answered them (the count that `MAX_INDEX_READS` caps). */
   reads: number
@@ -386,7 +386,7 @@ function readFirstFrames(
   }
 }
 
-/** What the search from the Segment's end finds: the last Cluster, and the end of its last whole frame in ticks (null when it holds none). */
+/** What the search from the Segment's end finds: the last Cluster, and the end of the last whole frame in the tail it read in ticks (null when that holds none). */
 interface LastEnd {
   cluster: { start: number; timestamp: number }
   end: number | null
@@ -402,43 +402,54 @@ interface LastEnd {
  * starts before the first Cluster, and each is a read of the open's, charged as
  * the others are.
  *
- * After each window the whole tail read so far is searched for its last Cluster
+ * After each window the whole tail read so far is searched for its Clusters
  * (`findCluster`, and not only the new window: a header can lie across the
- * boundary of two), a sized Cluster that the Segment's end cuts short included,
- * and the search ends with the first window after which there is one. Its frames,
- * to the Segment's end, give the end; a block that the end cuts short gives none.
+ * boundary of two), a sized Cluster that the Segment's end cuts short included.
+ * The last of them is the one that is named. The frames are read from the first
+ * of them, through every Cluster to the Segment's end, and the end is the latest
+ * that any whole frame reaches: a block that the end cuts short gives none, and
+ * when the last Cluster is cut off before its first frame the one before it gives
+ * the end. When the tail holds no whole frame yet the search goes back another
+ * window, and ends only when the windows reach the first Cluster.
  *
  * A file with no duration is still a file, so the search never refuses it: when
- * the open has no read left for the next window it stops and finds nothing, and
- * the file opens with no duration.
+ * the open has no read left for the next window it stops, and the file opens
+ * with the last Cluster it found, if any, and no duration.
  */
 function readLastEnd(open: Open, tracks: readonly { read: MatroskaRead }[]): Step<LastEnd | null> {
   const { chunks, head, reads } = open
   const end = head.segment.end
+  let last: LastEnd['cluster'] | null = null
+  const stopped = (): Step<LastEnd | null> => ({
+    done: last === null ? null : { cluster: last, end: null },
+  })
   for (let from = end; from > head.firstCluster;) {
     const window = {
       start: Math.max(from - (from === end ? TAIL_BYTES : end - from), head.firstCluster),
       end: from,
     }
-    if (!reads.canCharge(window)) return { done: null }
+    if (!reads.canCharge(window)) return stopped()
     reads.charge(window)
     // The windows before this one are held, so the tail is held exactly when this window is.
     const bytes = heldBytes(chunks, window.start, end)
     if (bytes === null) return { need: window }
     from = window.start
     const tail = { start: from, bytes }
-    let last: LastEnd['cluster'] | null = null
+    let first: number | null = null
+    let latest: LastEnd['cluster'] | null = null
     for (let at = from; ;) {
       const found = findCluster(tail, at, end, true)
       if (found === null) break
-      last = { start: found.start, timestamp: found.place.timestamp }
+      first ??= found.start
+      latest = { start: found.start, timestamp: found.place.timestamp }
       at = found.start + 1
     }
-    if (last === null) continue
+    if (first === null || latest === null) continue
+    last = latest
 
     const { frames } = readClusters(
       tail,
-      last.start,
+      first,
       null,
       false,
       end,
@@ -450,9 +461,9 @@ function readLastEnd(open: Open, tracks: readonly { read: MatroskaRead }[]): Ste
       const reach = frame.pts + Math.round(frame.duration ?? lengths.get(frame.track) ?? 1)
       if (lastEnd === null || reach > lastEnd) lastEnd = reach
     }
-    return { done: { cluster: last, end: lastEnd } }
+    if (lastEnd !== null) return { done: { cluster: latest, end: lastEnd } }
   }
-  return { done: null }
+  return stopped()
 }
 
 /**
@@ -464,7 +475,7 @@ function readLastEnd(open: Open, tracks: readonly { read: MatroskaRead }[]): Ste
  * - The picture is the first enabled picture track; a track that can't be read or can't be played, a keyframe that is not in the first 4 MiB of clusters, or an entry or names that can't be made is `Mp4Error`, said after "The picture track can't be played: " (a file with no picture is `no-picture`). Its entry is made from the first keyframe when the codec leaves its configuration to the frame (VP9 with a CodecPrivate that lacks it).
  * - The sounds are every enabled sound track, the one flagged default first (D45), each an offer: the names it plays by, or the refusal that says, after "The sound track can't be played: ", why it can't. The first plays when it can; the others are there to choose. A sound that is made from its first frame (AC-3, E-AC-3) is `damaged` when the first 4 MiB of clusters hold none.
  * - Each track has the shift of its decode times and the offset of its timestamps: a picture that reorders is decoded before it is presented, so its first decode time is before 0 by as many frames as its depth.
- * - The duration is Info's, else the end of the last whole frame of the last Cluster, found by reading back from the Segment's end (the last megabyte, then as much again before it, and so on, doubling) for as long as the open has reads left; null when it has none. `lastCluster` is where that search found the Cluster (null when Info has the duration).
+ * - The duration is Info's, else the end of the last whole frame, found by reading back from the Segment's end (the last megabyte, then as much again before it, and so on, doubling) for as long as the open has reads left, and from the Cluster before the last when the last is cut off before its first frame; null when it has none. `lastCluster` is where that search found the last Cluster (null when Info has the duration).
  *
  * A file that is not a Matroska or WebM one of a version this reader knows, or whose open would need more than `MAX_INDEX_READS` reads after the head, is `damaged`.
  */
