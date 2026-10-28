@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
-import { chooseTracks, fragment, initSegment, Mp4Error, presentationSeconds } from '../index.ts'
+import { chooseTracks, fragment, initSegment, Mp4Error } from '../index.ts'
 import type { FrameTable, Mp4Refusal, PlayTrack } from '../index.ts'
 import {
   containerOf,
@@ -13,6 +13,7 @@ import {
   uniqueTitles,
 } from '../testing/corpus.ts'
 import type { ManifestEntry } from '../testing/corpus.ts'
+import { Differences, firstShown, rotationIn, rotationOf, turn } from '../testing/compare.ts'
 import { configProblems, writtenEntry } from '../testing/entries.ts'
 import {
   decodes,
@@ -53,55 +54,6 @@ const entries = loadManifest().filter((entry) => containerOf(entry.path) !== 'ma
 
 // What the run compared, said once at the end.
 const totals = { files: 0, refused: 0, windowed: 0, frames: 0, written: 0, noStart: 0 }
-
-/** A description of a difference that is too long for a line is cut. */
-function shown(value: unknown): string {
-  const text = typeof value === 'string' ? value : JSON.stringify(value)
-  return text.length > 200 ? `${text.slice(0, 200)}...` : text
-}
-
-interface Difference {
-  count: number
-  frame: number
-  ours: unknown
-  theirs: unknown
-}
-
-/** The differences between a track's frames and the packets ffprobe lists, per field: how many, and the first. */
-class Differences {
-  readonly byField = new Map<string, Difference>()
-
-  note(field: string, frame: number, ours: unknown, theirs: unknown): void {
-    if (ours === theirs) return
-    this.record(field, frame, ours, theirs)
-  }
-
-  /** The same for numbers that are the same when they are within `tolerance`. */
-  noteNear(
-    field: string,
-    frame: number,
-    ours: number,
-    theirs: number | undefined,
-    tolerance: number,
-  ): void {
-    if (theirs !== undefined && Math.abs(ours - theirs) <= tolerance) return
-    this.record(field, frame, ours, theirs)
-  }
-
-  private record(field: string, frame: number, ours: unknown, theirs: unknown): void {
-    const seen = this.byField.get(field)
-    if (seen) seen.count += 1
-    else this.byField.set(field, { count: 1, frame, ours, theirs })
-  }
-
-  /** One line for each field that differs, naming the first frame that does. */
-  report(label: string): string[] {
-    return [...this.byField].map(
-      ([field, { count, frame, ours, theirs }]) =>
-        `${label}: ${field} differs in ${count} frames, first at frame ${frame}: ours ${shown(ours)}, ffprobe ${shown(theirs)}`,
-    )
-  }
-}
 
 /** The size that ffprobe lists for frame `i`. */
 type PacketSize = (i: number) => number | undefined
@@ -233,45 +185,6 @@ function windowsOf(durationSeconds: number): string {
   const middle = Math.floor(durationSeconds / 2)
   const end = Math.max(0, Math.floor(durationSeconds) - 10)
   return `%+#600,${middle}%+#300,${end}%+#300`
-}
-
-/**
- * The first moment at which a track shows anything, in seconds of the movie
- * with the edit list applied. A SourceBuffer's timeline starts at 0: a frame that
- * ends by then is dropped and one that crosses it is cut, which is how FFmpeg
- * trims an encoder's priming (an AAC sound's first 1024 samples, an Opus
- * sound's pre-skip) when it reports where a stream starts. So this is the least
- * presentation time among the frames that end after 0, and not before 0.
- */
-function firstShown(track: PlayTrack): number {
-  const { table, timing } = track
-  let first = Infinity
-  for (let i = 0; i < table.count; i += 1) {
-    const begins = presentationSeconds(table, timing, i)
-    const ends = begins + (table.durations[i] ?? 0) / table.timescale
-    if (ends > 1e-9) first = Math.min(first, begins)
-  }
-  return Math.max(first, 0)
-}
-
-/** The display rotation a `tkhd` matrix says, in degrees counter-clockwise, as FFmpeg's `av_display_rotation_get` reads it. */
-function rotationOf(matrix: Uint8Array): number {
-  const view = new DataView(matrix.buffer, matrix.byteOffset, matrix.byteLength)
-  const m = Array.from({ length: 9 }, (_, k) => view.getInt32(k * 4))
-  const across = Math.hypot(m[0] ?? 0, m[3] ?? 0)
-  const down = Math.hypot(m[1] ?? 0, m[4] ?? 0)
-  if (across === 0 || down === 0) return 0
-  return -Math.atan2((m[1] ?? 0) / down, (m[0] ?? 0) / across) * (180 / Math.PI)
-}
-
-function rotationIn(stream: ProbeStream): number {
-  const matrix = stream.side_data_list?.find((data) => data.side_data_type === 'Display Matrix')
-  return matrix?.rotation ?? 0
-}
-
-/** The difference of two angles, in degrees, from -180 to 180. */
-function turn(a: number, b: number): number {
-  return ((((a - b) % 360) + 540) % 360) - 180
 }
 
 const AVC_PROFILES: Record<string, number> = {

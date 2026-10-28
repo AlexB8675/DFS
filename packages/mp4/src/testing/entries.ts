@@ -86,7 +86,7 @@ function insideOf(entry: SampleEntry, picture: boolean): Box {
 }
 
 /** Each configuration box that an entry holds, by type: whole, header included. A sound's is directly in the entry or, in QuickTime's, inside its `wave` box. */
-function configBoxes(entry: SampleEntry, picture: boolean): Map<string, Uint8Array> {
+export function configBoxes(entry: SampleEntry, picture: boolean): Map<string, Uint8Array> {
   const inside = insideOf(entry, picture)
   const wrapper = picture ? null : child(entry.bytes, inside, 'wave')
   const found = new Map<string, Uint8Array>()

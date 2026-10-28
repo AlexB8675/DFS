@@ -1,10 +1,15 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { syntheticDir } from './corpus.ts'
 import {
   decodeProblem,
   iamfPacketSize,
+  probePacketsOf,
+  remuxEntry,
+  remuxPackets,
   runForComplaint,
   runToFile,
   streamStart,
@@ -12,7 +17,9 @@ import {
 
 // The corpus suite's helpers for ffprobe and ffmpeg (DESIGN.md §10.4): what they
 // do when the program isn't there, when ffprobe can't say where a stream starts,
-// and what counts as a file that ffmpeg has decoded.
+// what counts as a file that ffmpeg has decoded, and ffmpeg's own remux of a
+// stream to MP4, which the Matroska reader's decode times and configuration boxes
+// are compared with.
 
 describe('runToFile', () => {
   it('rejects, once and with a sentence, when the program cannot be run', async () => {
@@ -136,5 +143,104 @@ describe('iamfPacketSize', () => {
     expect(iamfPacketSize(new Uint8Array(0))).toBeNull()
     // The fields take more than the OBU says it holds.
     expect(iamfPacketSize(Uint8Array.of(0x32, 1, 0x00, 0x00))).toBeNull()
+  })
+})
+
+// The remux runs on a synthetic file (the corpus folder is git-ignored, and the
+// user's own videos are never remuxed), and is skipped where ffmpeg or the file
+// is not there.
+const ffmpegThere = spawnSync('ffmpeg', ['-version']).status === 0
+const mkv = (name: string): string => resolve(syntheticDir, name)
+const remuxable = ffmpegThere && existsSync(mkv('h264-aac.mkv')) && existsSync(mkv('hevc-ac3.mkv'))
+
+/** The folders that a remux makes in the temporary folder, which are gone when it has read its output. */
+function remuxFolders(): string[] {
+  return readdirSync(tmpdir()).filter((name) => name.startsWith('dfs-mp4-remux-'))
+}
+
+describe.skipIf(!remuxable)('remuxPackets and remuxEntry', () => {
+  it("lists the packets of a stream as ffmpeg's remux to MP4 times them: decode times from before 0, in seconds, and the keyframes", async () => {
+    const packets = await remuxPackets(mkv('h264-aac.mkv'), 0)
+    // 12 s of a picture at 30 frames a second.
+    expect(packets.length).toBe(360)
+    expect(packets[0]?.flags).toContain('K')
+    // The picture has B-frames: the remux starts its decode before its first presentation, by two frames of 1/30 s.
+    expect(Number(packets[0]?.dts_time)).toBeCloseTo(-0.067, 3)
+    expect(Number(packets[0]?.pts_time)).toBe(0)
+    expect(Number(packets[1]?.dts_time)).toBeCloseTo(-0.034, 3)
+    // Decode times rise.
+    for (let i = 1; i < packets.length; i += 1) {
+      expect(Number(packets[i]?.dts_time)).toBeGreaterThan(Number(packets[i - 1]?.dts_time))
+    }
+  })
+
+  it('lists the packets of a sound too, by the index of its stream in the file', async () => {
+    const packets = await remuxPackets(mkv('h264-aac.mkv'), 1)
+    expect(packets.length).toBeGreaterThan(500)
+    expect(packets.every((packet) => packet.flags?.includes('K'))).toBe(true)
+  })
+
+  it("reads the sample entry of the remuxed stream with the module's MP4 reader: its type and its configuration box", async () => {
+    const picture = await remuxEntry(mkv('h264-aac.mkv'), 0)
+    expect(picture.type).toBe('avc1')
+    expect(new TextDecoder('latin1').decode(picture.bytes)).toContain('avcC')
+    const sound = await remuxEntry(mkv('h264-aac.mkv'), 1)
+    expect(sound.type).toBe('mp4a')
+    expect(new TextDecoder('latin1').decode(sound.bytes)).toContain('esds')
+  })
+
+  it('tags HEVC as hvc1, which Safari takes, and not as the hev1 that ffmpeg writes untold', async () => {
+    expect((await remuxEntry(mkv('hevc-ac3.mkv'), 0)).type).toBe('hvc1')
+  })
+
+  it('gives the same entry the second time, from its cache', async () => {
+    const first = await remuxEntry(mkv('h264-aac.mkv'), 1)
+    const again = await remuxEntry(mkv('h264-aac.mkv'), 1)
+    expect(again.type).toBe(first.type)
+    expect(Array.from(again.bytes)).toEqual(Array.from(first.bytes))
+    expect(again.stsdVersion).toBe(first.stsdVersion)
+  })
+
+  it('removes its folder from the temporary folder when ffmpeg cannot remux the stream', async () => {
+    const before = remuxFolders()
+    // VP8 has no tag in MP4: ffmpeg turns the stream away.
+    if (existsSync(mkv('vp8-vorbis.webm'))) {
+      await expect(remuxPackets(mkv('vp8-vorbis.webm'), 0)).rejects.toThrow(/could not remux/)
+    }
+    expect(remuxFolders()).toEqual(before)
+  })
+
+  it('refuses a file that is not a synthetic one, whatever else is true of it: a video of the user is never remuxed', async () => {
+    const elsewhere = resolve(tmpdir(), 'dfs-no-such-recording.mkv')
+    await expect(remuxPackets(elsewhere, 0)).rejects.toThrow(/synthetic/)
+    await expect(remuxEntry(elsewhere, 0)).rejects.toThrow(/synthetic/)
+  })
+
+  it('rejects, with a sentence, for a stream that the file does not have', async () => {
+    await expect(remuxPackets(mkv('h264-aac.mkv'), 99)).rejects.toThrow(/no stream 99/)
+    await expect(remuxEntry(mkv('h264-aac.mkv'), 99)).rejects.toThrow(/no stream 99/)
+  })
+})
+
+describe.skipIf(!remuxable)('probePacketsOf', () => {
+  it('lists the packets of the stream with this index in the file, with their times in seconds', async () => {
+    const sound = await probePacketsOf(mkv('h264-aac.mkv'), 1)
+    expect(sound.length).toBeGreaterThan(500)
+    expect(sound.every((packet) => packet.flags?.includes('K'))).toBe(true)
+    // A Matroska file's AAC has its CodecDelay taken off every time: the first packet is before 0.
+    expect(Number(sound[0]?.pts_time)).toBeCloseTo(-0.021, 3)
+    const picture = await probePacketsOf(mkv('h264-aac.mkv'), 0)
+    expect(picture.length).toBe(360)
+    expect(Number(picture[1]?.pts_time)).toBeCloseTo(0.1, 6)
+    // The position is the block's body: a number in the file.
+    expect(Number(picture[0]?.pos)).toBeGreaterThan(0)
+  })
+
+  it('selects by the index in the file and not by the kind of stream: the third sound is the fourth stream', async () => {
+    if (!existsSync(mkv('three-sounds.mkv'))) return
+    const third = await probePacketsOf(mkv('three-sounds.mkv'), 3)
+    const second = await probePacketsOf(mkv('three-sounds.mkv'), 2)
+    expect(third.length).toBeGreaterThan(0)
+    expect(third[0]?.pos).not.toBe(second[0]?.pos)
   })
 })

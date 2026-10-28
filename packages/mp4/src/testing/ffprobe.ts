@@ -3,7 +3,10 @@
 // compared with. Its output is cached in the corpus folder, keyed by the file's
 // path, size and modification time and by the arguments, because a large video
 // takes minutes to list and does not change. ffmpeg decodes what the writer
-// writes, to prove that its init segments are whole. Tests and scripts only.
+// writes, to prove that its init segments are whole, and remuxes a stream of a
+// synthetic Matroska file to MP4, whose packets and sample entry the Matroska
+// reader's decode times and configuration boxes are compared with. Tests and
+// scripts only.
 
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
@@ -11,21 +14,27 @@ import {
   closeSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   readFileSync,
   renameSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
-import { cacheDir, manifestKey } from './corpus.ts'
+import type { SampleEntry } from '../movie.ts'
+import { cacheDir, isSynthetic, manifestKey, readIndex } from './corpus.ts'
 
-/** One packet of `-show_entries packet=pos,size,dts,pts,flags`, as ffprobe's JSON has it: sizes and positions are strings, times are numbers in the stream's time base. */
+/** One packet of `-show_entries packet=pos,size,dts,pts,flags`, as ffprobe's JSON has it: sizes and positions are strings, times are numbers in the stream's time base. `dts_time` and `pts_time` are the same times in seconds, as text, when they were asked for. */
 export interface ProbePacket {
   pos?: string
   size?: string
   dts?: number
   pts?: number
+  dts_time?: string
+  pts_time?: string
   flags?: string
 }
 
@@ -283,6 +292,23 @@ export async function probePackets(
 }
 
 /**
+ * The packets of the stream with this index in the file (not the first of its
+ * kind: a file may have several sounds, and the one that plays need not be the
+ * first), as the demuxer lists them with no edit list to apply, which is the case
+ * of a Matroska file: `pos` is where the packet's bytes are (a block's body, for
+ * Matroska), and the times are in the stream's ticks and in seconds.
+ */
+export async function probePacketsOf(path: string, stream: number): Promise<ProbePacket[]> {
+  const out = (await probe(path, [
+    '-select_streams',
+    String(stream),
+    '-show_entries',
+    'packet=pos,size,dts,pts,dts_time,pts_time,flags',
+  ])) as { packets?: ProbePacket[] }
+  return out.packets ?? []
+}
+
+/**
  * The first `count` packets of the first picture or sound with the edit list
  * applied, as ffprobe reads it by default: `pts` is then in the edited timeline
  * (in the stream's ticks), where the raw ones are not. The interval is the first
@@ -305,4 +331,102 @@ export async function probeEditedPackets(
     'packet=pos,size,dts,pts,flags',
   ])) as { packets?: ProbePacket[] }
   return (out.packets ?? []).slice(0, count)
+}
+
+/** What a remux is cached as: its packets, and its sample entry with the bytes in base64. */
+interface Remuxed {
+  packets: ProbePacket[]
+  entry: { type: string; bytes: string; stsdVersion: number }
+}
+
+/**
+ * ffmpeg's remux of one stream of a file to MP4 (`-map 0:<stream> -c copy`, with
+ * `-tag:v hvc1` for HEVC, which ffmpeg otherwise writes as `hev1`): its packets,
+ * read by ffprobe with the edit list applied, as the MP4 suite reads them, and its
+ * one sample entry, read by the module's MP4 reader. The MP4 goes in a folder of
+ * its own in the temporary folder and is removed once it is read; what is read is
+ * kept in the corpus folder's cache, keyed by the file's path, size and
+ * modification time and by the stream. Only for a file that is not anyone's own: a
+ * remux is a copy of a video's content, and the user's videos are read where they
+ * are.
+ */
+async function remuxed(path: string, stream: number): Promise<Remuxed> {
+  if (!isSynthetic(path)) {
+    throw new Error(
+      `${path} is not a synthetic file, and only those are remuxed: a remux is a copy of a video's content, and the user's videos are read where they are.`,
+    )
+  }
+  mkdirSync(cacheDir, { recursive: true })
+  const stat = statSync(path)
+  const key = createHash('sha256')
+    .update(JSON.stringify([manifestKey(path), stat.size, stat.mtimeMs, 'remux', stream]))
+    .digest('hex')
+    .slice(0, 40)
+  const cached = resolve(cacheDir, `${key}.remux.json`)
+  if (!existsSync(cached)) {
+    const found = (await probeStreams(path))[stream]
+    if (!found) throw new Error(`${path} has no stream ${stream}.`)
+    const folder = mkdtempSync(resolve(tmpdir(), 'dfs-mp4-remux-'))
+    try {
+      const out = resolve(folder, 'remux.mp4')
+      const result = await runForComplaint('ffmpeg', [
+        '-v',
+        'error',
+        '-i',
+        path,
+        '-map',
+        `0:${stream}`,
+        '-c',
+        'copy',
+        ...(found.codec_name === 'hevc' ? ['-tag:v', 'hvc1'] : []),
+        '-f',
+        'mp4',
+        out,
+      ])
+      if (result.code !== 0) {
+        throw new Error(
+          `ffmpeg could not remux stream ${stream} of ${path} (${result.code}): ${result.complaint}`,
+        )
+      }
+      const packets =
+        (
+          (await probe(
+            out,
+            ['-show_entries', 'packet=pos,size,dts,pts,dts_time,pts_time,flags'],
+            false,
+          )) as { packets?: ProbePacket[] }
+        ).packets ?? []
+      const entry = readIndex(out, statSync(out).size).tracks[0]?.entries[0]
+      if (!entry) throw new Error(`The remux of stream ${stream} of ${path} has no sample entry.`)
+      const partial = `${cached}.${process.pid}.partial`
+      const kept: Remuxed = {
+        packets,
+        entry: {
+          type: entry.type,
+          bytes: Buffer.from(entry.bytes).toString('base64'),
+          stsdVersion: entry.stsdVersion,
+        },
+      }
+      writeFileSync(partial, JSON.stringify(kept))
+      renameSync(partial, cached)
+    } finally {
+      rmSync(folder, { recursive: true, force: true })
+    }
+  }
+  return JSON.parse(readFileSync(cached, 'utf8')) as Remuxed
+}
+
+/** The packets of stream `stream` (its index in the file) as ffmpeg's remux of it to MP4 lists them, edit list applied: dts and pts as ffprobe prints them, and in seconds (`dts_time`, `pts_time`). */
+export async function remuxPackets(path: string, stream: number): Promise<ProbePacket[]> {
+  return (await remuxed(path, stream)).packets
+}
+
+/** The sample entry that ffmpeg's remux of stream `stream` to MP4 writes, as the module's MP4 reader gives it. */
+export async function remuxEntry(path: string, stream: number): Promise<SampleEntry> {
+  const { entry } = await remuxed(path, stream)
+  return {
+    type: entry.type,
+    bytes: new Uint8Array(Buffer.from(entry.bytes, 'base64')),
+    stsdVersion: entry.stsdVersion,
+  }
 }
