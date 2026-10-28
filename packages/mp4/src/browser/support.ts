@@ -23,9 +23,13 @@ type Takes = Record<Engine, boolean>
  * audio, and MPEG-2 AAC, which is named `mp4a.40.N` and written as MPEG-4 audio,
  * as Chrome takes nothing else) and `mp4a.6B` (MP3, which Firefox takes as `mp3`
  * and Chrome doesn't take in MP4). AC-3, E-AC-3 and ALAC are taken by neither of
- * them: Safari plays them. A family that isn't here is a codec the suite has
- * never seen a browser answer for, and the suite fails on it until the table
- * says.
+ * them: Safari plays them. So are Dolby Vision's own entries, the ones a picture
+ * with no compatible base layer has (`dvh1` and `dvhe` for HEVC, `dav1` for AV1):
+ * Chrome and Firefox decline them, so such a file goes to Open in… and is not
+ * played with wrong colours; a profile 8 picture with a compatible base layer is
+ * named by its base codec (`hvc1`, `av01`) and plays as that. A family that isn't
+ * here is a codec the suite has never seen a browser answer for, and the suite
+ * fails on it until the table says.
  */
 export const SUPPORT: Readonly<Record<string, Takes>> = {
   avc1: { chromium: true, firefox: true },
@@ -43,6 +47,9 @@ export const SUPPORT: Readonly<Record<string, Takes>> = {
   'ac-3': { chromium: false, firefox: false },
   'ec-3': { chromium: false, firefox: false },
   alac: { chromium: false, firefox: false },
+  dvh1: { chromium: false, firefox: false },
+  dvhe: { chromium: false, firefox: false },
+  dav1: { chromium: false, firefox: false },
 }
 
 /**

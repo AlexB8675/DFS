@@ -50,6 +50,10 @@ const ROWS: {
   { family: 'ac-3', names: ['ac-3'], chromium: false, firefox: false },
   { family: 'ec-3', names: ['ec-3'], chromium: false, firefox: false },
   { family: 'alac', names: ['alac'], chromium: false, firefox: false },
+  // Dolby Vision as its own entry (profile 5, or no compatible base layer): neither browser takes it (the probe of 2026-10-25).
+  { family: 'dvh1', names: ['dvh1.05.06'], chromium: false, firefox: false },
+  { family: 'dvhe', names: ['dvhe.04.06'], chromium: false, firefox: false },
+  { family: 'dav1', names: ['dav1.10.06'], chromium: false, firefox: false },
 ]
 
 describe('familyOf', () => {
@@ -119,7 +123,7 @@ describe('expectedSupport', () => {
     ['mp4v.20.9', 'chromium'],
     ['mp4v.20.9', 'firefox'],
     ['vp08.00.20.08', 'chromium'],
-    ['dvh1.08.06', 'firefox'],
+    ['dvav.08.06', 'firefox'],
     ['avc2.64001f', 'chromium'],
     ['mp4a.A5', 'chromium'],
     ['mp4a.66', 'firefox'],
@@ -162,6 +166,22 @@ describe('supportVerdict', () => {
     expect(
       supportVerdict(track('mp4a.6B', 'mp3', 'mp4a.40.34'), 'chromium', 'Chrome', null),
     ).toEqual({ outcome: 'skip', reason: "Chrome's Media Source doesn't take mp4a.6B" })
+  })
+
+  it('skips a Dolby Vision entry on both browsers, which take none of dvh1, dvhe and dav1', () => {
+    for (const name of ['dvh1.05.06', 'dvhe.04.06', 'dav1.10.06']) {
+      expect(supportVerdict(track(name), 'chromium', 'Chrome', null)).toEqual({
+        outcome: 'skip',
+        reason: `Chrome's Media Source doesn't take ${name}`,
+      })
+      expect(supportVerdict(track(name), 'firefox', 'Firefox', null)).toEqual({
+        outcome: 'skip',
+        reason: `Firefox's Media Source doesn't take ${name}`,
+      })
+      expect(supportVerdict(track(name), 'chromium', 'Chrome', name)).toMatchObject({
+        outcome: 'fail',
+      })
+    }
   })
 
   it('fails a browser that takes what the table says it does not, naming every name asked', () => {
