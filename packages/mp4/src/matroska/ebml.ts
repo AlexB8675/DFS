@@ -170,6 +170,57 @@ export function children(bytes: Uint8Array, parent: Element): Element[] {
 }
 
 /**
+ * The elements directly inside `parent`, as `children` gives them (with the
+ * CRC-32 and the Void left out, and the same damage: a header cut short by
+ * `parent`, an element of unknown size or one that runs past `parent` is a
+ * damaged file), but one header at a time as they are met, with no array of them
+ * built, and bounded by count: it takes at most `most` headers, a CRC-32 and a
+ * Void counted (it reads theirs all the same), and the one after them is a
+ * damaged file too. So children of a few bytes each cost no more than `most` of
+ * them, wherever the walk is made again from its start. What is met before
+ * damage has been given by then; a caller that wants it keeps it.
+ */
+export function* walkChildren(
+  bytes: Uint8Array,
+  parent: Element,
+  most: number,
+): Generator<Element> {
+  checkRange(bytes, parent.data, parent.end)
+  let at = parent.data
+  let met = 0
+  while (at < parent.end) {
+    const el = readHeader(bytes, at, parent.end)
+    if (el === null) {
+      throw new Mp4Error(
+        'damaged',
+        `An element header at offset ${at} is cut short: ${parent.end - at} bytes are left in its parent.`,
+      )
+    }
+    if (!el.sized) {
+      throw new Mp4Error(
+        'damaged',
+        `The element at offset ${at} has an unknown size, which only a Segment or a Cluster may have.`,
+      )
+    }
+    if (el.end > parent.end) {
+      throw new Mp4Error(
+        'damaged',
+        `The element at offset ${at} claims ${el.end - el.data} bytes, but ${parent.end - el.data} are left in its parent.`,
+      )
+    }
+    met += 1
+    if (met > most) {
+      throw new Mp4Error(
+        'damaged',
+        `The element at offset ${parent.start} has more than ${most} children, which are the most that are read.`,
+      )
+    }
+    at = el.end
+    if (el.id !== ID.CRC32 && el.id !== ID.Void) yield el
+  }
+}
+
+/**
  * An unsigned integer of 0 to 8 bytes, big-endian; 0 bytes is 0. Above
  * 2^53 - 1, which a number no longer holds exactly, or wider than 8 bytes, it is
  * a damaged file.

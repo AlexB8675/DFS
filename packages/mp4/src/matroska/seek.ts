@@ -3,7 +3,7 @@ import { heldBytes } from '../source.ts'
 import type { ByteRange, Chunk, Step } from '../source.ts'
 import { findCluster, readClusters } from './clusters.ts'
 import type { ClusterPlace, ClusterRead } from './clusters.ts'
-import { readHeader, readUint } from './ebml.ts'
+import { readHeader, readUint, walkChildren } from './ebml.ts'
 import type { Element } from './ebml.ts'
 import { covers } from './head.ts'
 import { ID, TOP_LEVEL } from './ids.ts'
@@ -103,51 +103,6 @@ const CUES_ID = [0x1c, 0x53, 0xbb, 0x6b]
 /** The elements that a cluster's frames are in. */
 const BLOCKS: ReadonlySet<number> = new Set<number>([ID.SimpleBlock, ID.BlockGroup])
 
-/**
- * The elements directly inside `parent` (whole in `bytes`), one header at a time
- * as they are met, and with the CRC-32 and the Void left out, as `children` gives
- * them, with the same damage: a header cut short by `parent`, an element of
- * unknown size or one that runs past `parent` is a damaged file. Unlike
- * `children` it builds no array of them, and it takes at most `most` headers,
- * a CRC-32 and a Void counted (it reads theirs all the same): the one after
- * them is a damaged file too, so that children of a few bytes each cost no more
- * than `most` of them, wherever the walk is made again from its start.
- */
-function* inside(bytes: Uint8Array, parent: Element, most: number): Generator<Element> {
-  let at = parent.data
-  let met = 0
-  while (at < parent.end) {
-    const el = readHeader(bytes, at, parent.end)
-    if (el === null) {
-      throw new Mp4Error(
-        'damaged',
-        `An element header at offset ${at} is cut short: ${parent.end - at} bytes are left in its parent.`,
-      )
-    }
-    if (!el.sized) {
-      throw new Mp4Error(
-        'damaged',
-        `The element at offset ${at} has an unknown size, which only a Segment or a Cluster may have.`,
-      )
-    }
-    if (el.end > parent.end) {
-      throw new Mp4Error(
-        'damaged',
-        `The element at offset ${at} claims ${el.end - el.data} bytes, but ${parent.end - el.data} are left in its parent.`,
-      )
-    }
-    met += 1
-    if (met > most) {
-      throw new Mp4Error(
-        'damaged',
-        `The element at offset ${parent.start} has more than ${most} children, which are the most that are read.`,
-      )
-    }
-    at = el.end
-    if (el.id !== ID.CRC32 && el.id !== ID.Void) yield el
-  }
-}
-
 /** The CueTrack, CueClusterPosition and CueRelativePosition of a CueTrackPositions of `track`; undefined for another track's or one with no position. */
 function positionsOf(
   bytes: Uint8Array,
@@ -157,7 +112,7 @@ function positionsOf(
   let which: number | undefined
   let cluster: number | undefined
   let relative: number | undefined
-  for (const field of inside(bytes, positions, MAX_CUE_FIELDS)) {
+  for (const field of walkChildren(bytes, positions, MAX_CUE_FIELDS)) {
     if (field.id === ID.CueTrack) which ??= readUint(bytes, field)
     else if (field.id === ID.CueClusterPosition) cluster ??= readUint(bytes, field)
     else if (field.id === ID.CueRelativePosition) relative ??= readUint(bytes, field)
@@ -194,11 +149,11 @@ export function readCues(
 ): CuePoint[] {
   const found: CuePoint[] = []
   try {
-    for (const point of inside(bytes, cues, MAX_CUE_POINTS)) {
+    for (const point of walkChildren(bytes, cues, MAX_CUE_POINTS)) {
       if (point.id !== ID.CuePoint) continue
       let time: number | undefined
       let place: { cluster: number; relative: number | null } | undefined
-      for (const field of inside(bytes, point, MAX_CUE_FIELDS)) {
+      for (const field of walkChildren(bytes, point, MAX_CUE_FIELDS)) {
         if (field.id === ID.CueTime) time ??= readUint(bytes, field)
         else if (field.id === ID.CueTrackPositions) place ??= positionsOf(bytes, field, track)
       }

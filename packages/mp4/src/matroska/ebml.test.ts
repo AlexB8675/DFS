@@ -11,6 +11,7 @@ import {
   readInt,
   readString,
   readUint,
+  walkChildren,
 } from './ebml.ts'
 import { ID, TOP_LEVEL } from './ids.ts'
 
@@ -254,6 +255,108 @@ describe('the children of a master (§10.4)', () => {
   it('refuses a parent that is not inside the bytes', () => {
     const bytes = Uint8Array.from([0xa0, 0x83, 0xe7, 0x81, 0x01])
     damaged(() => children(bytes, { id: 0xa0, start: 0, data: 2, end: 9, sized: true }))
+  })
+})
+
+describe('the bounded walk of the children of a master (§10.4)', () => {
+  /** What the walk gives, up to the damage that stops it. */
+  function walked(bytes: Uint8Array, parent: Element, most = 100): Element[] {
+    return Array.from(walkChildren(bytes, parent, most))
+  }
+
+  it('gives the elements that `children` gives, with the CRC-32 and the Void left out wherever they stand', () => {
+    const crc = element(ID.CRC32, [1, 2, 3, 4])
+    const voided = element(ID.Void, [0, 0])
+    const timestamp = uint(ID.Timestamp, 7)
+    const block = binary(ID.SimpleBlock, [0x81, 0, 0, 0x80, 1, 2])
+    for (const parts of [
+      [],
+      [crc, timestamp, voided, block],
+      [timestamp, voided],
+      [voided, crc, voided],
+      [timestamp, block, timestamp],
+    ]) {
+      const bytes = concat([9, 9], element(ID.Cluster, ...parts), [8])
+      const cluster = header(bytes, 2)
+      expect(walked(bytes, cluster)).toEqual(children(bytes, cluster))
+    }
+  })
+
+  it('refuses what `children` refuses, as a damaged file', () => {
+    const cases: Uint8Array[] = [
+      // A child that runs past its parent, a CRC-32 or a Void that does.
+      Uint8Array.from([0xa0, 0x83, 0xe7, 0x82, 0x01, 0x02, 0xff]),
+      Uint8Array.from([0xa0, 0x83, ID.CRC32, 0x82, 0x01, 0x02, 0xff]),
+      Uint8Array.from([0xa0, 0x83, ID.Void, 0x82, 0x01, 0x02, 0xff]),
+      // A header that the parent cuts short, and an ID with no size.
+      Uint8Array.from([0xa0, 0x81, 0x42, 0x86, 0x80]),
+      Uint8Array.from([0xa0, 0x81, 0xe7, 0x80]),
+      // A child of unknown size, and one damaged in its own header.
+      element(ID.Segment, elementSized(ID.Info, unknownSize(1), [1, 2])),
+      Uint8Array.from([0xa0, 0x82, 0xe7, 0x00]),
+    ]
+    for (const bytes of cases) {
+      const parent = header(bytes)
+      const expected = damaged(() => children(bytes, parent))
+      expect(damaged(() => walked(bytes, parent)).message).toBe(expected.message)
+    }
+    const bytes = Uint8Array.from([0xa0, 0x83, 0xe7, 0x81, 0x01])
+    damaged(() => walked(bytes, { id: 0xa0, start: 0, data: 2, end: 9, sized: true }))
+  })
+
+  it('takes `most` headers, and refuses the one after them as a damaged file that says where', () => {
+    const bytes = concat(
+      [7],
+      element(ID.BlockGroup, ...Array.from({ length: 5 }, () => uint(ID.Timestamp, 1))),
+    )
+    const parent = header(bytes, 1)
+    expect(walked(bytes, parent, 5)).toHaveLength(5)
+    expect(walked(bytes, parent, 6)).toHaveLength(5)
+    const error = damaged(() => walked(bytes, parent, 4))
+    expect(error.message).toContain('offset 1 has more than 4 children')
+    damaged(() => walked(bytes, parent, 0))
+    // An empty master has no headers to count.
+    const empty = element(ID.BlockGroup)
+    expect(walked(empty, header(empty), 0)).toEqual([])
+  })
+
+  it('counts a CRC-32 and a Void among the headers, though it gives neither', () => {
+    for (const id of [ID.CRC32, ID.Void]) {
+      const bytes = element(
+        ID.BlockGroup,
+        uint(ID.Timestamp, 1),
+        element(id, [0, 0]),
+        element(id, [0]),
+      )
+      const parent = header(bytes)
+      expect(walked(bytes, parent, 3).map((el) => el.id)).toEqual([ID.Timestamp])
+      damaged(() => walked(bytes, parent, 2))
+    }
+  })
+
+  it('gives the elements before damage before it throws, and reads no further than it is asked', () => {
+    // Two whole elements, then one that claims more than the parent holds.
+    const bytes = element(
+      ID.BlockGroup,
+      uint(ID.Timestamp, 1),
+      uint(ID.Timestamp, 2),
+      Uint8Array.from([0xe7, 0x85, 1]),
+    )
+    const parent = header(bytes)
+    const seen: Element[] = []
+    damaged(() => {
+      for (const el of walkChildren(bytes, parent, 100)) seen.push(el)
+    })
+    expect(seen).toHaveLength(2)
+    // Taken one at a time, the damage is not met until the walk goes on to it.
+    const walk = walkChildren(bytes, parent, 100)
+    expect(walk.next().done).toBe(false)
+    expect(walk.next().done).toBe(false)
+    damaged(() => walk.next())
+    // And a caller that stops after the first never meets it.
+    const lazily = walkChildren(bytes, parent, 100)
+    expect(lazily.next().value).toMatchObject({ id: ID.Timestamp })
+    lazily.return(undefined)
   })
 })
 

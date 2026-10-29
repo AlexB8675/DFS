@@ -16,7 +16,7 @@ import {
 import type { TrackSpec } from '../testing/ebml.ts'
 import { readHeader } from './ebml.ts'
 import { ID } from './ids.ts'
-import { MAX_TRACK_ENTRIES, TRACKS_LIMIT } from './limits.ts'
+import { MAX_ENTRY_CHILDREN, MAX_TRACK_ENTRIES, TRACKS_LIMIT } from './limits.ts'
 import { chooseMatroskaTracks, readTracks } from './tracks.ts'
 import type { MatroskaTrack } from './tracks.ts'
 
@@ -106,6 +106,17 @@ function refusalOf(track: MatroskaTrack): Mp4Error {
 /** An element that claims more bytes than its parent holds. */
 function overrun(id: number): Uint8Array {
   return elementSized(id, sizeBytes(100), [1, 2, 3])
+}
+
+/** `count` empty elements of a one-byte ID (an ID and a size of 0) as one run of bytes, written in a loop so that millions of them cost no array of parts. */
+function empties(count: number, id: number = ID.TrackEntry): Uint8Array {
+  expect(id).toBeLessThan(0x100)
+  const out = new Uint8Array(count * 2)
+  for (let at = 0; at < out.length; at += 2) {
+    out[at] = id
+    out[at + 1] = 0x80
+  }
+  return out
 }
 
 const NO_COLOUR = {
@@ -597,17 +608,6 @@ describe('reading the tracks of a Tracks element (§10.4)', () => {
   })
 
   describe('the bound on the walk of the Tracks element', () => {
-    /** `count` empty elements of a one-byte ID (an ID and a size of 0) as one run of bytes, written in a loop so that millions of them cost no array of parts. */
-    function empties(count: number, id: number = ID.TrackEntry): Uint8Array {
-      expect(id).toBeLessThan(0x100)
-      const out = new Uint8Array(count * 2)
-      for (let at = 0; at < out.length; at += 2) {
-        out[at] = id
-        out[at + 1] = 0x80
-      }
-      return out
-    }
-
     /** The ID of the CodecID, which is no TrackEntry, with a one-byte ID. */
     const OTHER = ID.CodecID
 
@@ -721,6 +721,150 @@ describe('reading the tracks of a Tracks element (§10.4)', () => {
         expect(numbers(tracks)).toEqual([1])
       }
     }, 120_000)
+  })
+
+  describe('the bound on the walks inside the entry of a track', () => {
+    /** An ID that nothing in the entry of a track reads, with a one-byte ID. */
+    const UNKNOWN = 0x80
+
+    /** The most children of a flood of a test: 16 MiB less what the rest of the Tracks element takes, at 2 bytes each. */
+    const FLOOD = (TRACKS_LIMIT - 4096) / 2
+
+    /** An entry for track `number` of the kind `type` (1 a picture, 2 a sound), with the CodecID and then the parts. */
+    function entryOf(number: number, type: number, ...parts: Uint8Array[]): Uint8Array {
+      return element(
+        ID.TrackEntry,
+        uint(ID.TrackNumber, number),
+        uint(ID.TrackType, type),
+        string(ID.CodecID, type === 1 ? 'V_VP9' : 'A_OPUS'),
+        ...parts,
+      )
+    }
+
+    /** A Video element of a size, with the parts after the size. */
+    function videoOf(...parts: Uint8Array[]): Uint8Array {
+      return element(ID.Video, uint(ID.PixelWidth, 320), uint(ID.PixelHeight, 240), ...parts)
+    }
+
+    /** What `readTracks` gives for a Tracks element of the entries, which holds the bytes whole. */
+    function readEntryBytes(...entries: Uint8Array[]): ReturnType<typeof readResult> {
+      const bytes = concat(new Uint8Array(PREFIX).fill(0xaa), tracksElement(entries))
+      const header = readHeader(bytes, PREFIX, bytes.length)
+      if (header === null) throw new Error('the Tracks header is not whole')
+      return readTracks(bytes, header)
+    }
+
+    const TOO_MANY = new RegExp(`more than ${MAX_ENTRY_CHILDREN} children`)
+
+    // Each flood is in a second picture, with a good picture before it and a sound after it: the file plays, and the damaged track is kept with its problem.
+    const floods: [string, () => Uint8Array][] = [
+      ['an entry', () => entryOf(2, 1, videoOf(), empties(FLOOD, UNKNOWN))],
+      ['a Video element', () => entryOf(2, 1, videoOf(empties(FLOOD, UNKNOWN)))],
+      [
+        'a Colour element',
+        () => entryOf(2, 1, videoOf(element(ID.Colour, empties(FLOOD, UNKNOWN)))),
+      ],
+    ]
+
+    it.each(floods)(
+      'keeps a track whose %s holds 16 MiB of tiny children with a problem, in well under a second, and the file plays',
+      (_name, flood) => {
+        const before = performance.now()
+        const { tracks, damage } = readEntryBytes(
+          trackEntry(picture(1)),
+          flood(),
+          trackEntry(sound(3)),
+        )
+        const took = performance.now() - before
+
+        expect(took).toBeLessThan(2000)
+        expect(numbers(tracks)).toEqual([1, 2, 3])
+        expect(damage).toBeNull()
+        expect(tracks[1]?.kind).toBe('video')
+        expect(tracks[1]?.problem).toMatch(TOO_MANY)
+        expect(tracks[1]?.refusal).toBeNull()
+        // The picture is the first one, whose track has no problem, and the sound after the damaged track is read.
+        const chosen = chooseMatroskaTracks(tracks, damage)
+        expect(chosen.video).toBe(tracks[0])
+        expect(chosen.video.problem).toBeNull()
+        expect(chosen.sounds).toEqual([tracks[2]])
+      },
+      120_000,
+    )
+
+    it('gives the first enabled picture its problem when it is the damaged one, which the picture refuses the file for', () => {
+      const { tracks, damage } = readEntryBytes(
+        entryOf(1, 1, videoOf(), empties(FLOOD, UNKNOWN)),
+        trackEntry(picture(2)),
+      )
+      const chosen = chooseMatroskaTracks(tracks, damage)
+      expect(chosen.video).toBe(tracks[0])
+      expect(chosen.video.number).toBe(1)
+      expect(chosen.video.problem).toMatch(TOO_MANY)
+    }, 120_000)
+
+    it('reads an element of MAX_ENTRY_CHILDREN children, and gives the track a problem for one of more, a CRC-32 and a Void counted', () => {
+      // A sound entry holds the TrackNumber, the TrackType and the CodecID, and then the rest.
+      const entryWith = (rest: number, id: number): MatroskaTrack => {
+        const { tracks } = readEntryBytes(entryOf(2, 2, empties(rest, id)))
+        expect(tracks).toHaveLength(1)
+        const [track] = tracks
+        if (track === undefined) throw new Error('expected a track')
+        return track
+      }
+      for (const id of [UNKNOWN, ID.Void, ID.CRC32]) {
+        expect(entryWith(MAX_ENTRY_CHILDREN - 3, id).problem).toBeNull()
+        expect(entryWith(MAX_ENTRY_CHILDREN - 2, id).problem).toMatch(TOO_MANY)
+      }
+      // The track is still told: its kind and number come from the children before the bound.
+      const track = entryWith(MAX_ENTRY_CHILDREN, UNKNOWN)
+      expect(track).toMatchObject({ number: 2, kind: 'audio', codecId: 'A_OPUS' })
+      expect(track.problem).toMatch(TOO_MANY)
+    })
+
+    // Every walk inside an entry is bounded, not only the three that hold 16 MiB above: each of these is an element of one more child than the bound.
+    const crowded = empties(MAX_ENTRY_CHILDREN + 1, UNKNOWN)
+    const encoding = (...parts: Uint8Array[]): Uint8Array =>
+      element(ID.ContentEncodings, element(ID.ContentEncoding, ...parts))
+    const sites: [string, Uint8Array][] = [
+      ['an entry', entryOf(2, 2, crowded)],
+      ['a Video element', entryOf(2, 1, videoOf(crowded))],
+      ['a Colour element', entryOf(2, 1, videoOf(element(ID.Colour, crowded)))],
+      ['a Projection element', entryOf(2, 1, videoOf(element(ID.Projection, crowded)))],
+      ['an Audio element', entryOf(2, 2, element(ID.Audio, crowded))],
+      [
+        'a BlockAdditionMapping',
+        entryOf(2, 1, videoOf(), element(ID.BlockAdditionMapping, crowded)),
+      ],
+      ['a ContentEncodings element', entryOf(2, 2, element(ID.ContentEncodings, crowded))],
+      ['a ContentEncoding', entryOf(2, 2, encoding(crowded))],
+      ['a ContentCompression', entryOf(2, 2, encoding(element(ID.ContentCompression, crowded)))],
+    ]
+    it.each(sites)(
+      'gives the track a problem when %s has more children than the bound',
+      (_name, entry) => {
+        const { tracks, damage } = readEntryBytes(trackEntry(picture(1)), entry)
+        expect(numbers(tracks)).toEqual([1, 2])
+        expect(damage).toBeNull()
+        expect(tracks[1]?.problem).toMatch(TOO_MANY)
+        expect(tracks[0]?.problem).toBeNull()
+      },
+    )
+
+    it('reads the same track as before from an entry whose elements are far below the bound', () => {
+      const track = only(
+        picture(1, {
+          video: { pixelWidth: 1920, pixelHeight: 1080, colour: { matrix: 9 }, rollDegrees: 90 },
+          blockAdditions: [{ type: 4, extraData: Uint8Array.of(1, 2) }],
+          encodings: [{ compression: { algo: 3, settings: Uint8Array.of(5) } }],
+        }),
+      )
+      expect(track.problem).toBeNull()
+      expect(track.video?.colour.matrix).toBe(9)
+      expect(track.video?.rollDegrees).toBe(90)
+      expect(track.blockAdditions).toHaveLength(1)
+      expect(track.stripped).toEqual(Uint8Array.of(5))
+    })
   })
 
   describe('what a track is wrapped in', () => {

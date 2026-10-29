@@ -15,6 +15,9 @@ export const TRACKS_LIMIT = 16 * 1024 * 1024
 /** The most elements that the walk of a Tracks element takes (a TrackEntry or any other, a CRC-32 or a Void not counted): 1024, where a file has a few dozen tracks at most. The elements after them are ignored, and the file is not refused for them. */
 export const MAX_TRACK_ENTRIES = 1024
 
+/** The most children that the walk of an element inside a track's entry takes (the entry itself, its Video, Audio, Colour, Projection, BlockAdditionMapping and ContentEncodings and what they hold; a CRC-32 and a Void counted): 1024, where an entry has about 30 children, a Video 20 and the rest a handful. An element with more is damaged, and with it the track, which is kept with its problem and never refuses the file. */
+export const MAX_ENTRY_CHILDREN = 1024
+
 /** The most that the index reads, from the first Cluster, to find the first frames: 4 MiB, 1 MiB at a time, stopping as soon as it has them. */
 export const FIRST_FRAMES_BYTES = 4 * 1024 * 1024
 

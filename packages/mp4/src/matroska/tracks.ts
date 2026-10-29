@@ -1,8 +1,8 @@
 import { Mp4Error } from '../errors.ts'
-import { children, readBytes, readFloat, readHeader, readString, readUint } from './ebml.ts'
+import { readBytes, readFloat, readString, readUint, walkChildren } from './ebml.ts'
 import type { Element } from './ebml.ts'
 import { ID } from './ids.ts'
-import { MAX_TRACK_ENTRIES } from './limits.ts'
+import { MAX_ENTRY_CHILDREN, MAX_TRACK_ENTRIES } from './limits.ts'
 
 // The tracks of a Matroska or WebM file (DESIGN.md §10.4, D45): what its Tracks
 // element says of each track, and which of them play. Like `readMovie` for an
@@ -121,57 +121,34 @@ function first(found: readonly Element[], id: number): Element | undefined {
  * is told by its TrackType and its flag, which come early in an entry, so
  * damage after them is no reason to lose them; the same goes for the entries of
  * a Tracks element, of which a damaged one is no reason to lose those before it.
- * The walk is lazy, one header at a time, and it takes no more than `most`
- * elements (the CRC-32 and the Void that it leaves out are not counted): it
- * stops at the first one past them, which is no damage but the end of what is
- * read, so that elements of a few bytes each cost no more than those it keeps.
+ * The walk is the bounded one of `walkChildren`, a header at a time. `headers`
+ * is the most it meets (a CRC-32 and a Void counted): the one after them is
+ * damage, as it is in an entry. `kept` is the most elements it keeps (the CRC-32
+ * and the Void that it leaves out are not counted): it stops at the first one
+ * past them, which is no damage but the end of what is read, so that elements of
+ * a few bytes each cost no more than those it keeps.
  */
 function leading(
   bytes: Uint8Array,
   parent: Element,
-  most = Infinity,
+  { kept = Infinity, headers = Infinity }: { kept?: number; headers?: number } = {},
 ): { found: Element[]; damage: Mp4Error | null } {
   const found: Element[] = []
-  let at = parent.data
-  while (at < parent.end) {
-    let el: Element | null
-    try {
-      el = readHeader(bytes, at, parent.end)
-    } catch (error) {
-      if (error instanceof Mp4Error) return { found, damage: error }
-      throw error
-    }
-    if (el === null) {
-      return {
-        found,
-        damage: damaged(
-          `An element header at offset ${at} is cut short: ${parent.end - at} bytes are left in its parent.`,
-        ),
-      }
-    }
-    if (!el.sized) {
-      return {
-        found,
-        damage: damaged(
-          `The element at offset ${at} has an unknown size, which only a Segment or a Cluster may have.`,
-        ),
-      }
-    }
-    if (el.end > parent.end) {
-      return {
-        found,
-        damage: damaged(
-          `The element at offset ${at} claims ${el.end - el.data} bytes, but ${parent.end - el.data} are left in its parent.`,
-        ),
-      }
-    }
-    if (el.id !== ID.CRC32 && el.id !== ID.Void) {
-      if (found.length >= most) return { found, damage: null }
+  try {
+    for (const el of walkChildren(bytes, parent, headers)) {
+      if (found.length >= kept) break
       found.push(el)
     }
-    at = el.end
+  } catch (error) {
+    if (error instanceof Mp4Error) return { found, damage: error }
+    throw error
   }
   return { found, damage: null }
+}
+
+/** The children of an element inside the entry of a track, which are no more than `MAX_ENTRY_CHILDREN` (a CRC-32 and a Void counted) or the element is damaged, and so is its track. */
+function inEntry(bytes: Uint8Array, parent: Element): Element[] {
+  return Array.from(walkChildren(bytes, parent, MAX_ENTRY_CHILDREN))
 }
 
 /** Which of Colour's fields each element is. */
@@ -204,7 +181,7 @@ function blankColour(): MatroskaColour {
 
 function readColour(bytes: Uint8Array, el: Element): MatroskaColour {
   const colour = blankColour()
-  for (const child of children(bytes, el)) {
+  for (const child of inEntry(bytes, el)) {
     const field = COLOUR_FIELDS.get(child.id)
     if (field !== undefined) colour[field] ??= readUint(bytes, child)
   }
@@ -213,7 +190,7 @@ function readColour(bytes: Uint8Array, el: Element): MatroskaColour {
 
 /** The ProjectionPoseRoll of a Projection, or null when it has none. */
 function readRoll(bytes: Uint8Array, el: Element): number | null {
-  const roll = first(children(bytes, el), ID.ProjectionPoseRoll)
+  const roll = first(inEntry(bytes, el), ID.ProjectionPoseRoll)
   return roll === undefined ? null : readFloat(bytes, roll)
 }
 
@@ -226,7 +203,7 @@ function readVideo(bytes: Uint8Array, el: Element): MatroskaVideo {
   let displayUnit: number | undefined
   let colour: MatroskaColour | undefined
   let rollDegrees: number | null = null
-  for (const child of children(bytes, el)) {
+  for (const child of inEntry(bytes, el)) {
     if (child.id === ID.PixelWidth) pixelWidth ??= readUint(bytes, child)
     else if (child.id === ID.PixelHeight) pixelHeight ??= readUint(bytes, child)
     else if (child.id === ID.DisplayWidth) displayWidth ??= readUint(bytes, child)
@@ -266,7 +243,7 @@ function readAudio(bytes: Uint8Array, el: Element): MatroskaAudio {
   let outputSamplingFrequency: number | null = null
   let channels: number | undefined
   let bitDepth: number | null = null
-  for (const child of children(bytes, el)) {
+  for (const child of inEntry(bytes, el)) {
     if (child.id === ID.SamplingFrequency) samplingFrequency ??= readFloat(bytes, child)
     else if (child.id === ID.OutputSamplingFrequency) {
       outputSamplingFrequency ??= readFloat(bytes, child)
@@ -285,7 +262,7 @@ function readAudio(bytes: Uint8Array, el: Element): MatroskaAudio {
 function readAddition(bytes: Uint8Array, el: Element): { type: number; extraData: Uint8Array } {
   let type: number | undefined
   let extraData: Uint8Array | undefined
-  for (const child of children(bytes, el)) {
+  for (const child of inEntry(bytes, el)) {
     if (child.id === ID.BlockAddIDType) type ??= readUint(bytes, child)
     else if (child.id === ID.BlockAddIDExtraData) extraData ??= readBytes(bytes, child)
   }
@@ -313,7 +290,7 @@ function readEncodings(
     refusal: new Mp4Error('unsupported-codec', message),
   })
 
-  const [only, ...more] = children(bytes, el).filter((child) => child.id === ID.ContentEncoding)
+  const [only, ...more] = inEntry(bytes, el).filter((child) => child.id === ID.ContentEncoding)
   if (only === undefined) return { stripped: new Uint8Array(0), refusal: null }
   if (more.length > 0) {
     return refuse(
@@ -328,7 +305,7 @@ function readEncodings(
   let settings: Uint8Array | undefined
   let compressed = false
   const seen = new Set<number>()
-  for (const child of children(bytes, only)) {
+  for (const child of inEntry(bytes, only)) {
     if (seen.has(child.id)) continue
     seen.add(child.id)
     if (child.id === ID.ContentEncodingScope) scope = readUint(bytes, child)
@@ -336,7 +313,7 @@ function readEncodings(
     else if (child.id === ID.ContentEncryption) encrypted = true
     else if (child.id === ID.ContentCompression) {
       compressed = true
-      for (const field of children(bytes, child)) {
+      for (const field of inEntry(bytes, child)) {
         if (field.id === ID.ContentCompAlgo) algo ??= readUint(bytes, field)
         else if (field.id === ID.ContentCompSettings) settings ??= readBytes(bytes, field)
       }
@@ -381,7 +358,11 @@ function readEncodings(
  * One track, or what could be read of it, with `problem` set to the reason when
  * the entry could not be read. Only an `Mp4Error` is the file's fault: anything
  * else is a bug here and is not hidden. A track that was read whole is then held
- * to what the player can undo: a refusal is for a track with no problem.
+ * to what the player can undo: a refusal is for a track with no problem. Every
+ * walk inside the entry is bounded by count (`MAX_ENTRY_CHILDREN`, a CRC-32 and
+ * a Void counted): an element with more children is damage like a header that
+ * runs past its parent, so that the track is kept with its problem and one entry
+ * of tiny children costs no more than the bound.
  */
 function readEntry(bytes: Uint8Array, entry: Element): MatroskaTrack {
   const track: MatroskaTrack = {
@@ -404,7 +385,7 @@ function readEntry(bytes: Uint8Array, entry: Element): MatroskaTrack {
     problem: null,
   }
   try {
-    const { found, damage } = leading(bytes, entry)
+    const { found, damage } = leading(bytes, entry, { headers: MAX_ENTRY_CHILDREN })
 
     // What the track is, and whether it counts, before anything that can fail.
     const typeEl = first(found, ID.TrackType)
@@ -514,7 +495,7 @@ export function readTracks(
       `The Tracks element at offset ${tracks.start} claims ${tracks.end - tracks.data} bytes, but ${Math.max(bytes.length - tracks.data, 0)} are held.`,
     )
   }
-  const { found, damage } = leading(bytes, tracks, MAX_TRACK_ENTRIES)
+  const { found, damage } = leading(bytes, tracks, { kept: MAX_TRACK_ENTRIES })
   return {
     tracks: found
       .filter((child) => child.id === ID.TrackEntry)

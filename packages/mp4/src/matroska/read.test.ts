@@ -1485,6 +1485,48 @@ describe('the Tracks element', () => {
     expect(index.video.header.id).toBe(1)
     expect(index.soundTracks.map((track) => track.header.id)).toEqual([2])
   }, 120_000)
+
+  describe('when the entry of a track holds 16 MiB of empty elements (MAX_ENTRY_CHILDREN)', () => {
+    // 8 million elements of the ID 0x80 and a size of 0 each (every byte is 0x80), as the last children of one entry.
+    const flood = new Uint8Array(16 * MIB - 8192).fill(0x80)
+    const blocks = start().map((one) =>
+      simpleBlock({
+        track: one.track,
+        timecode: one.time,
+        frames: [one.data ?? new Uint8Array(8)],
+        keyframe: one.keyframe,
+      }),
+    )
+    const fileOf = (tracks: Uint8Array[]): Uint8Array =>
+      matroskaFile([info({ duration: 4021 }), tracksElement(tracks), cluster(0, blocks)]).bytes
+
+    it('opens the file and offers the sound of that entry as one that does not play, when another track is the picture', () => {
+      const bytes = fileOf([
+        trackEntry(VP9),
+        trackEntry({ ...opus(2), extra: [flood] }),
+        trackEntry(opus(3)),
+      ])
+      const before = performance.now()
+      const { index } = open(bytes)
+      const took = performance.now() - before
+
+      expect(took).toBeLessThan(2000)
+      expect(index.video.header.id).toBe(1)
+      expect(index.sounds).toHaveLength(2)
+      const flooded = turnedAway(index.sounds[0])
+      expect(flooded.reason).toBe('damaged')
+      expect(flooded.message.startsWith(SOUND_SENTENCE)).toBe(true)
+      expect(flooded.message).toContain('more than 1024 children')
+      expect(playable(index.sounds[1]).id).toBe(3)
+    }, 120_000)
+
+    it('refuses the file as having a picture that cannot be read, when the entry is the first picture', () => {
+      const bytes = fileOf([trackEntry({ ...VP9, extra: [flood] }), trackEntry(opus(2))])
+      const error = refused('damaged', () => open(bytes))
+      expect(error.message.startsWith(PICTURE_SENTENCE)).toBe(true)
+      expect(error.message).toContain('more than 1024 children')
+    }, 120_000)
+  })
 })
 
 describe('the Cues', () => {
