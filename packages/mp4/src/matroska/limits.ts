@@ -18,7 +18,7 @@ export const FIRST_FRAMES_BYTES = 4 * 1024 * 1024
 /** The first window of the search back from the Segment's end for the end of the last frame, when Info has no Duration: 1 MiB, and the windows after it double (as much again before what is read, within the open's reads), and none starts before the first Cluster. */
 export const TAIL_BYTES = 1024 * 1024
 
-/** The most reads one seek takes: 48. A seek that has needed that many stops with the best keyframe cluster it has, or the first Cluster. */
+/** The most reads one seek takes: 48. A seek that has needed that many and needs another stops at the first Cluster, which is at or before any time. */
 export const MAX_SEEK_READS = 48
 
 /** The most that a Cues element takes to be read: 32 MiB. A longer one is not read, and a seek searches the clusters instead. */

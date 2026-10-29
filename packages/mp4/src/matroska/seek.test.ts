@@ -28,6 +28,8 @@ import type {
   MovieSpec,
   TrackSpec,
 } from '../testing/ebml.ts'
+import { virtualFile } from '../testing/virtual.ts'
+import type { VirtualFile } from '../testing/virtual.ts'
 import { children, readHeader } from './ebml.ts'
 import { ID } from './ids.ts'
 import {
@@ -1388,5 +1390,180 @@ describe('seeking in files of big clusters and big keyframes (§10.4)', () => {
       // None of the asks is for the block, which is more than is read whole.
       for (const ask of sought.asks) expect(ask.end - ask.start).toBeLessThanOrEqual(SEARCH_READ)
     }
+  })
+})
+
+describe('seeking in a file whose last cluster is cut off (§10.4)', () => {
+  it('lands in the cluster before it for a time past the end, and in the same clusters as for a file that is whole for the times before', () => {
+    // Info has no Duration, so the open names the last cluster, which the file ends in, 20 bytes after it starts (inside its keyframe block).
+    const whole = movieOf(seconds(20, { pad: 99_000 }), { duration: undefined })
+    const last = must(whole.clusters[19])
+    const bytes = whole.bytes.subarray(0, last.start + 20)
+    const index = indexOf(bytes)
+    expect(index.lastCluster).toEqual({ start: last.start, timestamp: 19_000 })
+    for (const [time, expected] of [
+      [0.5, 0],
+      [9.9, 9],
+      [18.9, 18],
+      [19.5, 18],
+      [500, 18],
+    ] as const) {
+      const exact = seek(index, bytes, time)
+      expect(exact.asks.length).toBeLessThanOrEqual(MAX_SEEK_READS)
+      expect(inCluster(whole.clusters, exact.cursor.at), `at ${time}`).toBe(expected)
+      const ahead = seek(index, bytes, time, { held: everything(bytes) })
+      expect(ahead.cursor).toEqual(exact.cursor)
+    }
+  })
+})
+
+describe('seeking a large file with no Cues, by time (§10.4)', () => {
+  // A file of gigabytes that is never built (`virtualFile`): a small real head, then clusters of 2 s each that begin with a picture keyframe, whose bytes are written when the seek asks for them. The index is the head's, with the Segment ending where the virtual file does.
+  const MIB = 1024 * 1024
+  const GIB = 1024 * MIB
+  /** Where the time of the clusters is a cluster's index times this, in seconds. */
+  const EACH = 2
+  /** The targets, as shares of the file's length in time: eight for the file of the most care, and four of them (the hardest for the search: near the start, where it has no time to go by, and near the end) for the others, so that the matrix runs in a few seconds. */
+  const SHARES = [0.03, 0.17, 0.33, 0.5, 0.61, 0.77, 0.9, 0.99]
+  const FEW = [0.03, 0.33, 0.61, 0.99]
+  /** The most reads for a seek when the file says the time of its end, and when it does not. */
+  const MOST_TIMED = 24
+  const MOST_UNTIMED = 36
+  const MOST_UNEVEN = 30
+
+  const head = matroskaFile(
+    [
+      info({ scale: 1_000_000 }),
+      tracksElement([trackEntry(VP9)]),
+      cluster(0, [simpleBlock({ track: 1, timecode: 0, keyframe: true, frames: [vp9Key(1)] })]),
+    ],
+    { unknown: true },
+  )
+  const opened = indexOf(head.bytes)
+  const headBytes = head.bytes.subarray(0, opened.firstCluster)
+
+  /** What the file says of its end: the last cluster, or only the duration, or nothing (the open found neither). */
+  type Ends = 'cluster' | 'duration' | 'none'
+
+  /** The virtual file of the clusters (cluster k is at k * EACH s), and the index of it. */
+  function large(
+    sizes: readonly number[],
+    ends: Ends,
+  ): { file: VirtualFile; index: MatroskaIndex } {
+    const file = virtualFile(
+      headBytes,
+      sizes.map((size, k) => ({ size, timestamp: 1000 * EACH * k })),
+    )
+    const lastAt = file.starts[sizes.length - 1] ?? 0
+    const index: MatroskaIndex = {
+      ...opened,
+      segment: { data: opened.segment.data, end: file.total },
+      durationSeconds: ends === 'none' ? null : EACH * sizes.length,
+      lastCluster:
+        ends === 'cluster' ? { start: lastAt, timestamp: 1000 * EACH * (sizes.length - 1) } : null,
+    }
+    return { file, index }
+  }
+
+  /** A driven seek of the virtual file: nothing is held to start with, so the asks are the reads the seek counts. */
+  function seekIn(index: MatroskaIndex, file: VirtualFile, time: number): Sought {
+    const chunks: Chunk[] = []
+    const asks: ByteRange[] = []
+    for (let turn = 0; turn < TURNS; turn += 1) {
+      const step = matroskaSeek(index, time, null, chunks)
+      if ('done' in step) return { cursor: step.done, asks }
+      const { start, end } = step.need
+      expect(Number.isSafeInteger(start) && start >= index.segment.data && start < end).toBe(true)
+      expect(end).toBeLessThanOrEqual(index.segment.end)
+      expect(heldBytes(chunks, start, end)).toBeNull()
+      asks.push(step.need)
+      chunks.push({ start, bytes: file.bytes(step.need) })
+    }
+    throw new Error('the seek went on asking')
+  }
+
+  /** Seeks to each share of the file's time and checks the landing: the latest cluster at or before the time. Gives the most asks of the seeks. */
+  function seekAll(
+    sizes: readonly number[],
+    ends: Ends,
+    what: string,
+    most: number,
+    shares: readonly number[] = FEW,
+  ): number {
+    const { file, index } = large(sizes, ends)
+    const length = EACH * sizes.length
+    let widest = 0
+    for (const share of shares) {
+      const time = share * length
+      const expected = Math.min(Math.floor(time / EACH), sizes.length - 1)
+      const { cursor, asks } = seekIn(index, file, time)
+      widest = Math.max(widest, asks.length)
+      expect(cursor.at, `${what} at ${share}: ${asks.length} reads`).toBe(file.starts[expected])
+      expect(cursor.searching).toBe(false)
+      expect(cursor.cluster).toBeNull()
+      expect(asks.length, `${what} at ${share}`).toBeLessThanOrEqual(most)
+    }
+    return widest
+  }
+
+  /** The sizes of `count` clusters of `size` bytes each. */
+  function even(gigabytes: number, size: number): number[] {
+    return Array.from({ length: Math.floor((gigabytes * GIB) / size) }, () => size)
+  }
+
+  it('plays from a landing in a virtual file: the keyframes of its clusters are keyframes at the times given', () => {
+    const sizes = Array.from({ length: 8 }, () => MIB)
+    const { file, index } = large(sizes, 'cluster')
+    const bytes = file.bytes({ start: 0, end: file.total })
+    for (const [time, expected] of [
+      [0.5, 0],
+      [7.9, 3],
+      [100, 7],
+    ] as const) {
+      const { cursor } = seekIn(index, file, time)
+      expect(cursor.at).toBe(file.starts[expected])
+      expect(landsBefore(index, bytes, cursor, time)).toBe(EACH * expected)
+    }
+  })
+
+  for (const gigabytes of [4, 8, 16]) {
+    for (const mib of [2.4, 5, 10]) {
+      const size = Math.round(mib * MIB)
+      // The file of 16 GB and 5 MiB clusters is sought at all eight targets.
+      const shares = gigabytes === 16 && mib === 5 ? SHARES : FEW
+
+      it(`lands at the latest cluster at or before the time in at most ${MOST_TIMED} reads, in ${gigabytes} GB of clusters of ${mib} MiB, with the last cluster known`, () => {
+        const sizes = even(gigabytes, size)
+        seekAll(sizes, 'cluster', `${gigabytes} GB, ${mib} MiB`, MOST_TIMED, shares)
+      })
+
+      it(`lands at the same cluster in at most ${MOST_UNTIMED} reads when the file says nothing of its end, in ${gigabytes} GB of clusters of ${mib} MiB`, () => {
+        const sizes = even(gigabytes, size)
+        seekAll(sizes, 'none', `${gigabytes} GB, ${mib} MiB, no end`, MOST_UNTIMED, shares)
+      })
+    }
+  }
+
+  it('lands at the same cluster in as few reads when only the duration says where the end is in time', () => {
+    for (const mib of [2.4, 5, 10]) {
+      const sizes = even(8, Math.round(mib * MIB))
+      seekAll(sizes, 'duration', `8 GB, ${mib} MiB, duration`, MOST_TIMED)
+    }
+  })
+
+  it(`lands at the same cluster in at most ${MOST_UNEVEN} reads when the clusters differ in size and the time is not in proportion to the bytes`, () => {
+    // 900 clusters of 1 to 1.5 MiB, then 700 of 3 to 6 MiB, from a sequence that is fixed: 2 s a cluster whatever the size.
+    let state = 12345
+    const next = (): number => {
+      state = (Math.imul(state, 1103515245) + 12345) >>> 0
+      return state / 2 ** 32
+    }
+    const sizes = [
+      ...Array.from({ length: 900 }, () => Math.round((1 + 0.5 * next()) * MIB)),
+      ...Array.from({ length: 700 }, () => Math.round((3 + 3 * next()) * MIB)),
+    ]
+    expect(sizes.reduce((sum, size) => sum + size, 0)).toBeGreaterThan(3 * GIB)
+    seekAll(sizes, 'cluster', 'uneven clusters', MOST_UNEVEN, SHARES)
+    seekAll(sizes, 'none', 'uneven clusters, no end', MOST_UNTIMED, FEW)
   })
 })
