@@ -1,4 +1,4 @@
-// The bounds of the player's store and downloader (DESIGN.md §10.4, §4.7): how
+// The bounds of the player's store and downloader (DESIGN.md §10.4; the iron-clad spec §4.7): how
 // much a play keeps and where, how it retries a failed read, and what it reports
 // while it downloads. Each is named as the plan names it, and the later steps of
 // the store add theirs here.
