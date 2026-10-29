@@ -36,6 +36,8 @@ import {
   CUES_LIMIT,
   FIRST_FRAMES_BYTES,
   HEADER_READ,
+  MAX_CUE_FIELDS,
+  MAX_CUE_POINTS,
   MAX_SEEK_READS,
   SEARCH_READ,
   TAIL_BYTES,
@@ -1054,6 +1056,200 @@ describe('finding the Cues (§10.4)', () => {
       expect(cursor.at, name).toBe(must(built.clusters[20]))
       expect(landsBefore(index, bytes, cursor, 20.5), name).toBe(20)
     }
+  })
+})
+
+describe('the bounds on the walk of the Cues (§10.4)', () => {
+  /** `count` empty elements of a one-byte ID (an ID and a size of 0) as one run of bytes, written in a loop so that millions of them cost no array of parts. */
+  function empties(count: number, id: number): Uint8Array {
+    expect(id).toBeLessThan(0x100)
+    const out = new Uint8Array(count * 2)
+    for (let at = 0; at < out.length; at += 2) {
+      out[at] = id
+      out[at + 1] = 0x80
+    }
+    return out
+  }
+
+  /** An ID that no CuePoint, CueTrackPositions or Cues holds, with a one-byte ID. */
+  const OTHER = ID.Channels
+
+  /** A CuePoint of one CueTrackPositions for track 1, with `more` after the position. */
+  function point(time: number, cluster: number, ...more: Uint8Array[]): Uint8Array {
+    return element(
+      ID.CuePoint,
+      uint(ID.CueTime, time),
+      element(
+        ID.CueTrackPositions,
+        uint(ID.CueTrack, 1),
+        uint(ID.CueClusterPosition, cluster),
+        ...more,
+      ),
+    )
+  }
+
+  /** What `readCues` gives for a Cues element of the bytes given, with a Segment whose data starts at 0. */
+  function readCuesOf(bytes: Uint8Array): ReturnType<typeof readCues> {
+    return readCues(bytes, must(readHeader(bytes, 0, bytes.length)), 0, 0, 1)
+  }
+
+  /** What `readCues` gives for a Cues element that holds the body. */
+  function readBody(...body: Uint8Array[]): ReturnType<typeof readCues> {
+    return readCuesOf(element(ID.Cues, ...body))
+  }
+
+  /** Cues of the points given (written at a fixed width, so that the Cues are as long wherever the clusters are) with the run of bytes `flood` after the points. */
+  function flooded(points: CueSpec[], flood: Uint8Array): Uint8Array {
+    const real = cues(points, { positionWidth: 8 })
+    return element(ID.Cues, real.subarray(must(readHeader(real, 0, real.length)).data), flood)
+  }
+
+  it('reads Cues of MAX_CUE_POINTS children, and refuses those of one more as a damaged file, naming where they are', () => {
+    expect(readBody(point(5, 9), empties(MAX_CUE_POINTS - 1, ID.CuePoint))).toEqual([
+      { time: 5, cluster: 9, relative: null },
+    ])
+    const error = damagedBy(() => readBody(point(5, 9), empties(MAX_CUE_POINTS, ID.CuePoint)))
+    expect(error.message).toContain('The Cues element at offset')
+    // Children of another ID count as well, and so do a Void and a CRC-32, whose headers the walk reads all the same.
+    for (const id of [OTHER, ID.Void, ID.CRC32]) {
+      damagedBy(() => readBody(point(5, 9), empties(MAX_CUE_POINTS, id)))
+    }
+  })
+
+  it('never cuts the points short: Cues of more children than the bound give none of their points', () => {
+    const points = upTo(40).map((k) => ({ time: 1000 * k, cluster: 100 + k }))
+    expect(readCuesOf(flooded(points, empties(MAX_CUE_POINTS - 40, ID.CuePoint)))).toHaveLength(40)
+    damagedBy(() => readCuesOf(flooded(points, empties(MAX_CUE_POINTS - 39, ID.CuePoint))))
+  })
+
+  it('reads a CuePoint, and a CueTrackPositions, of MAX_CUE_FIELDS children, and refuses one of more as a damaged file', () => {
+    const place = [{ time: 5, cluster: 9, relative: null }]
+    // A CuePoint holds the CueTime and the CueTrackPositions, and then the rest.
+    const crowded = (rest: number): Uint8Array =>
+      element(
+        ID.CuePoint,
+        uint(ID.CueTime, 5),
+        element(ID.CueTrackPositions, uint(ID.CueTrack, 1), uint(ID.CueClusterPosition, 9)),
+        empties(rest, OTHER),
+      )
+    expect(readBody(crowded(MAX_CUE_FIELDS - 2))).toEqual(place)
+    damagedBy(() => readBody(crowded(MAX_CUE_FIELDS - 1)))
+
+    // A CueTrackPositions holds the CueTrack and the CueClusterPosition, and then the rest.
+    expect(readBody(point(5, 9, empties(MAX_CUE_FIELDS - 2, OTHER)))).toEqual(place)
+    damagedBy(() => readBody(point(5, 9, empties(MAX_CUE_FIELDS - 1, OTHER))))
+  })
+
+  it('refuses 32 MiB of children of a few bytes each, wherever they stand, in well under a second', () => {
+    const most = (CUES_LIMIT - 1024) / 2
+    const shapes: Record<string, Uint8Array> = {
+      'empty CuePoints': empties(most, ID.CuePoint),
+      'Void elements': empties(most, ID.Void),
+      'fields of one CuePoint': element(ID.CuePoint, empties(most, OTHER)),
+      'fields of one CueTrackPositions': element(
+        ID.CuePoint,
+        uint(ID.CueTime, 5),
+        element(ID.CueTrackPositions, empties(most - 8, OTHER)),
+      ),
+    }
+    for (const [name, body] of Object.entries(shapes)) {
+      const bytes = element(ID.Cues, body)
+      const before = performance.now()
+      damagedBy(() => readCuesOf(bytes))
+      expect(performance.now() - before, name).toBeLessThan(1000)
+    }
+  }, 120_000)
+
+  describe('seeking in a file whose Cues are too many to walk', () => {
+    const blocks = upTo(40).map((k) => rawCluster(k, 99_000))
+
+    /** Where the Cues go: after the clusters, named by the SeekHead, or before them, where the index knows their size. */
+    const layouts: [string, (make: (starts: number[]) => Uint8Array) => Layout][] = [
+      ['after the clusters, named by the SeekHead,', (make) => ({ back: make, seek: 'back' })],
+      ['before the clusters', (make) => ({ front: make })],
+    ]
+
+    it.each(layouts)(
+      'searches the clusters, and trusts none of the points, when the Cues %s hold more than MAX_CUE_POINTS children',
+      (_name, layout) => {
+        // A point for every cluster, at its block, as ffmpeg writes them: if they were used, the seek would land at the block.
+        const built = assemble(
+          blocks,
+          layout((starts) =>
+            flooded(
+              upTo(40).map((k) => ({
+                time: 1000 * k,
+                cluster: must(starts[k]),
+                relative: stampLength(k),
+              })),
+              empties(MAX_CUE_POINTS, ID.CuePoint),
+            ),
+          ),
+        )
+        const bytes = built.file.bytes
+        const index = indexOf(bytes)
+        const { cursor, asks } = seek(index, bytes, 20.5)
+        expect(asks.length).toBeLessThanOrEqual(MAX_SEEK_READS)
+        // The search lands in the cluster the time is in, at its start: the points are not used, and not cut short, which would land far too early.
+        expect(cursor.cluster).toBeNull()
+        expect(cursor.at).toBe(must(built.clusters[20]))
+        expect(landsBefore(index, bytes, cursor, 20.5)).toBe(20)
+      },
+    )
+
+    it.each(layouts)(
+      'searches the clusters in a few seconds when the Cues %s are 32 MiB of empty CuePoints',
+      (_name, layout) => {
+        const huge = element(ID.Cues, empties((CUES_LIMIT - 1024) / 2, ID.CuePoint))
+        const built = assemble(
+          blocks,
+          layout(() => huge),
+        )
+        const bytes = built.file.bytes
+        const index = indexOf(bytes)
+
+        const before = performance.now()
+        const { cursor, asks } = seek(index, bytes, 20.5)
+        const took = performance.now() - before
+
+        expect(took).toBeLessThan(3000)
+        expect(asks.length).toBeLessThanOrEqual(MAX_SEEK_READS)
+        expect(cursor.cluster).toBeNull()
+        expect(cursor.at).toBe(must(built.clusters[20]))
+        expect(landsBefore(index, bytes, cursor, 20.5)).toBe(20)
+      },
+      120_000,
+    )
+
+    it('passes over Cues in the last megabyte that hold a CuePoint of more than MAX_CUE_FIELDS children, as it does Cues that do not walk', () => {
+      // The Cues stand last and no SeekHead names them, so that the seek finds them in the tail: a point for every cluster, then one CuePoint of fields.
+      const lands = (fields: number) => {
+        const built = assemble(blocks, {
+          back: (starts) =>
+            flooded(
+              upTo(40).map((k) => ({
+                time: 1000 * k,
+                cluster: must(starts[k]),
+                relative: stampLength(k),
+              })),
+              element(ID.CuePoint, uint(ID.CueTime, 1), empties(fields, OTHER)),
+            ),
+        })
+        const bytes = built.file.bytes
+        const index = indexOf(bytes)
+        return { ...seek(index, bytes, 20.5), built }
+      }
+
+      // With a CueTime and 63 fields the CuePoint is whole: the points are used, and the seek lands at the block of the cluster's point.
+      const used = lands(MAX_CUE_FIELDS - 1)
+      expect(used.cursor.cluster).not.toBeNull()
+      expect(used.cursor.at).toBeGreaterThan(must(used.built.clusters[20]))
+
+      // With one more the Cues are damaged: the candidate is passed over, there are no others, and the search lands at the cluster's start.
+      const passed = lands(MAX_CUE_FIELDS)
+      expect(passed.cursor.cluster).toBeNull()
+      expect(passed.cursor.at).toBe(must(passed.built.clusters[20]))
+    })
   })
 })
 

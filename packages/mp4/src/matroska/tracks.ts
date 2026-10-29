@@ -2,6 +2,7 @@ import { Mp4Error } from '../errors.ts'
 import { children, readBytes, readFloat, readHeader, readString, readUint } from './ebml.ts'
 import type { Element } from './ebml.ts'
 import { ID } from './ids.ts'
+import { MAX_TRACK_ENTRIES } from './limits.ts'
 
 // The tracks of a Matroska or WebM file (DESIGN.md §10.4, D45): what its Tracks
 // element says of each track, and which of them play. Like `readMovie` for an
@@ -120,10 +121,15 @@ function first(found: readonly Element[], id: number): Element | undefined {
  * is told by its TrackType and its flag, which come early in an entry, so
  * damage after them is no reason to lose them; the same goes for the entries of
  * a Tracks element, of which a damaged one is no reason to lose those before it.
+ * The walk is lazy, one header at a time, and it takes no more than `most`
+ * elements (the CRC-32 and the Void that it leaves out are not counted): it
+ * stops at the first one past them, which is no damage but the end of what is
+ * read, so that elements of a few bytes each cost no more than those it keeps.
  */
 function leading(
   bytes: Uint8Array,
   parent: Element,
+  most = Infinity,
 ): { found: Element[]; damage: Mp4Error | null } {
   const found: Element[] = []
   let at = parent.data
@@ -159,7 +165,10 @@ function leading(
         ),
       }
     }
-    if (el.id !== ID.CRC32 && el.id !== ID.Void) found.push(el)
+    if (el.id !== ID.CRC32 && el.id !== ID.Void) {
+      if (found.length >= most) return { found, damage: null }
+      found.push(el)
+    }
     at = el.end
   }
   return { found, damage: null }
@@ -484,7 +493,12 @@ function readEntry(bytes: Uint8Array, entry: Element): MatroskaTrack {
  * movie.ts does for an MP4. Only a Tracks element that is no element to walk (it
  * has no size, or claims more than `bytes` holds) is refused, as
  * `Mp4Error('damaged')`. Two tracks of the same number are both kept as they are
- * read.
+ * read. The walk takes `MAX_TRACK_ENTRIES` elements and no more, a TrackEntry or
+ * any other (a CRC-32 and a Void are not counted), one header at a time: the
+ * elements past them are ignored, with no damage and no refusal, so that a file
+ * keeps the tracks it shows before them and a flood of elements of a few bytes
+ * each costs no more than the first of them (D45). A file whose picture lies past
+ * them is a file with no picture to play.
  */
 export function readTracks(
   bytes: Uint8Array,
@@ -500,7 +514,7 @@ export function readTracks(
       `The Tracks element at offset ${tracks.start} claims ${tracks.end - tracks.data} bytes, but ${Math.max(bytes.length - tracks.data, 0)} are held.`,
     )
   }
-  const { found, damage } = leading(bytes, tracks)
+  const { found, damage } = leading(bytes, tracks, MAX_TRACK_ENTRIES)
   return {
     tracks: found
       .filter((child) => child.id === ID.TrackEntry)

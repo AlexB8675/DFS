@@ -16,6 +16,7 @@ import {
 import type { TrackSpec } from '../testing/ebml.ts'
 import { readHeader } from './ebml.ts'
 import { ID } from './ids.ts'
+import { MAX_TRACK_ENTRIES, TRACKS_LIMIT } from './limits.ts'
 import { chooseMatroskaTracks, readTracks } from './tracks.ts'
 import type { MatroskaTrack } from './tracks.ts'
 
@@ -593,6 +594,133 @@ describe('reading the tracks of a Tracks element (§10.4)', () => {
       refused(() => chooseMatroskaTracks(tracks, damage), 'no-picture')
       refused(() => chooseMatroskaTracks(tracks), 'no-picture')
     })
+  })
+
+  describe('the bound on the walk of the Tracks element', () => {
+    /** `count` empty elements of a one-byte ID (an ID and a size of 0) as one run of bytes, written in a loop so that millions of them cost no array of parts. */
+    function empties(count: number, id: number = ID.TrackEntry): Uint8Array {
+      expect(id).toBeLessThan(0x100)
+      const out = new Uint8Array(count * 2)
+      for (let at = 0; at < out.length; at += 2) {
+        out[at] = id
+        out[at + 1] = 0x80
+      }
+      return out
+    }
+
+    /** The ID of the CodecID, which is no TrackEntry, with a one-byte ID. */
+    const OTHER = ID.CodecID
+
+    it('reads the entries up to MAX_TRACK_ENTRIES and ignores the rest, without refusing the file', () => {
+      const { tracks, damage } = readResult([
+        trackEntry(picture(1)),
+        empties(1100),
+        trackEntry(sound(2)),
+      ])
+      // The picture, then 1023 empty entries that have a problem each: the sound is the 1102nd element.
+      expect(tracks).toHaveLength(MAX_TRACK_ENTRIES)
+      expect(tracks[0]?.number).toBe(1)
+      expect(tracks.slice(1).every((track) => track.problem !== null)).toBe(true)
+      expect(numbers(tracks)).not.toContain(2)
+      expect(damage).toBeNull()
+
+      // The file plays: the picture was read, and there is no sound among the entries that were.
+      const chosen = chooseMatroskaTracks(tracks, damage)
+      expect(chosen.video).toBe(tracks[0])
+      expect(chosen.sounds).toEqual([])
+    })
+
+    it('keeps the element that is the MAX_TRACK_ENTRIESth and leaves out the one after it', () => {
+      const upTo = readResult([
+        trackEntry(picture(1)),
+        empties(MAX_TRACK_ENTRIES - 2),
+        trackEntry(sound(2)),
+      ])
+      expect(upTo.tracks).toHaveLength(MAX_TRACK_ENTRIES)
+      expect(upTo.tracks.at(-1)?.number).toBe(2)
+      expect(upTo.damage).toBeNull()
+
+      const past = readResult([
+        trackEntry(picture(1)),
+        empties(MAX_TRACK_ENTRIES - 1),
+        trackEntry(sound(2)),
+      ])
+      expect(past.tracks).toHaveLength(MAX_TRACK_ENTRIES)
+      expect(past.tracks.at(-1)?.number).toBe(0)
+      expect(past.damage).toBeNull()
+    })
+
+    it('counts the elements that are no TrackEntry, so that a flood of another ID stops too', () => {
+      const { tracks } = readResult([
+        trackEntry(picture(1)),
+        empties(MAX_TRACK_ENTRIES, OTHER),
+        trackEntry(sound(2)),
+      ])
+      // Elements that are no entry are no tracks: the sound is past the bound and is not read.
+      expect(numbers(tracks)).toEqual([1])
+
+      // Fewer of them leave room for the sound.
+      const room = readResult([
+        trackEntry(picture(1)),
+        empties(MAX_TRACK_ENTRIES - 2, OTHER),
+        trackEntry(sound(2)),
+      ])
+      expect(numbers(room.tracks)).toEqual([1, 2])
+    })
+
+    it('does not count a CRC-32 or a Void, which are no element of the file', () => {
+      const { tracks, damage } = readResult([
+        empties(MAX_TRACK_ENTRIES + 10, ID.Void),
+        trackEntry(picture(1)),
+        empties(MAX_TRACK_ENTRIES + 10, ID.CRC32),
+        trackEntry(sound(2)),
+      ])
+      expect(numbers(tracks)).toEqual([1, 2])
+      expect(damage).toBeNull()
+    })
+
+    it('refuses a file whose picture is past the bound as having no picture, like any file that shows none', () => {
+      const { tracks, damage } = readResult([
+        trackEntry(sound(1)),
+        empties(MAX_TRACK_ENTRIES),
+        trackEntry(picture(2)),
+      ])
+      expect(damage).toBeNull()
+      refused(() => chooseMatroskaTracks(tracks, damage), 'no-picture')
+    })
+
+    it('walks a Tracks element of 16 MiB of empty entries after a picture in well under a second, and reads the picture', () => {
+      const body = empties((TRACKS_LIMIT - 1024) / 2)
+      const entries = [trackEntry(picture(1)), body]
+      const bytes = concat(new Uint8Array(PREFIX).fill(0xaa), tracksElement(entries))
+      const header = readHeader(bytes, PREFIX, bytes.length)
+      if (header === null) throw new Error('the Tracks header is not whole')
+
+      const before = performance.now()
+      const { tracks, damage } = readTracks(bytes, header)
+      const took = performance.now() - before
+
+      expect(took).toBeLessThan(2000)
+      expect(tracks).toHaveLength(MAX_TRACK_ENTRIES)
+      expect(tracks[0]?.number).toBe(1)
+      expect(damage).toBeNull()
+      expect(chooseMatroskaTracks(tracks, damage).video).toBe(tracks[0])
+    }, 120_000)
+
+    it('walks 16 MiB of other elements, and of Void, in well under a second', () => {
+      for (const id of [OTHER, ID.Void]) {
+        const bytes = concat(
+          new Uint8Array(PREFIX).fill(0xaa),
+          tracksElement([trackEntry(picture(1)), empties((TRACKS_LIMIT - 1024) / 2, id)]),
+        )
+        const header = readHeader(bytes, PREFIX, bytes.length)
+        if (header === null) throw new Error('the Tracks header is not whole')
+        const before = performance.now()
+        const { tracks } = readTracks(bytes, header)
+        expect(performance.now() - before).toBeLessThan(2000)
+        expect(numbers(tracks)).toEqual([1])
+      }
+    }, 120_000)
   })
 
   describe('what a track is wrapped in', () => {

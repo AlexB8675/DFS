@@ -1455,6 +1455,36 @@ describe('the Tracks element', () => {
     expect(asks.every((ask) => ask.start >= file.tracks.end)).toBe(true)
     expect(error.message).toContain('Tracks')
   })
+
+  it('is read for the entries up to MAX_TRACK_ENTRIES when it holds 16 MiB of empty ones after the picture and a sound, and the file opens at once', () => {
+    // 8 million entries of an ID and a size of 0 each, built in a loop, as the Tracks element's last child.
+    const empties = new Uint8Array(16 * MIB - 4096)
+    for (let at = 0; at < empties.length; at += 2) {
+      empties[at] = ID.TrackEntry
+      empties[at + 1] = 0x80
+    }
+    const blocks = start().map((one) =>
+      simpleBlock({
+        track: one.track,
+        timecode: one.time,
+        frames: [one.data ?? new Uint8Array(8)],
+        keyframe: one.keyframe,
+      }),
+    )
+    const file = matroskaFile([
+      info({ duration: 4021 }),
+      tracksElement([trackEntry(VP9), trackEntry(opus(2)), empties]),
+      cluster(0, blocks),
+    ])
+
+    const before = performance.now()
+    const { index } = open(file.bytes)
+    const took = performance.now() - before
+
+    expect(took).toBeLessThan(2000)
+    expect(index.video.header.id).toBe(1)
+    expect(index.soundTracks.map((track) => track.header.id)).toEqual([2])
+  }, 120_000)
 })
 
 describe('the Cues', () => {

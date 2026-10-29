@@ -12,6 +12,9 @@ export const MAX_INDEX_READS = 12
 /** The most that a Tracks element takes: 16 MiB. A larger one is damaged, and is not read. */
 export const TRACKS_LIMIT = 16 * 1024 * 1024
 
+/** The most elements that the walk of a Tracks element takes (a TrackEntry or any other, a CRC-32 or a Void not counted): 1024, where a file has a few dozen tracks at most. The elements after them are ignored, and the file is not refused for them. */
+export const MAX_TRACK_ENTRIES = 1024
+
 /** The most that the index reads, from the first Cluster, to find the first frames: 4 MiB, 1 MiB at a time, stopping as soon as it has them. */
 export const FIRST_FRAMES_BYTES = 4 * 1024 * 1024
 
@@ -23,6 +26,12 @@ export const MAX_SEEK_READS = 48
 
 /** The most that a Cues element takes to be read: 32 MiB. A longer one is not read, and a seek searches the clusters instead. */
 export const CUES_LIMIT = 32 * 1024 * 1024
+
+/** The most children that the walk of a Cues element takes: 2^20, where the Cues of a ten-hour film have about a hundred thousand points. Cues with more are damaged, and a seek searches the clusters instead; their points are never cut short, for a seek by points that stop early would land far too early. */
+export const MAX_CUE_POINTS = 2 ** 20
+
+/** The most children that the walk of a CuePoint, or of a CueTrackPositions, takes: 64, where a real one has a handful. One with more is damaged, as the Cues that hold it are. */
+export const MAX_CUE_FIELDS = 64
 
 /** One guess of a search for a cluster, and the bytes read from a cluster to see that it holds a keyframe: 256 KiB. */
 export const SEARCH_READ = 256 * 1024
