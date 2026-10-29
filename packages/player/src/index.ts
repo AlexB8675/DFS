@@ -3,5 +3,7 @@
 // they are built.
 
 export * from './blocks.ts'
+export * from './errors.ts'
 export * from './limits.ts'
 export * from './ranges.ts'
+export * from './seal.ts'
