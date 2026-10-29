@@ -1,0 +1,6 @@
+{
+  "extends": "../../tsconfig.node.json",
+  // The worker entry is checked with the browser's files: it needs the WebWorker lib, which Node's project must not have.
+  "include": ["src", "*.ts"],
+  "exclude": ["src/browser", "src/worker.ts"]
+}

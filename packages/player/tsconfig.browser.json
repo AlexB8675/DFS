@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // WebWorker is for the worker entry (`FileSystemSyncAccessHandle` is only there); skipLibCheck lets it sit beside DOM.
+    "lib": ["ES2024", "DOM", "DOM.Iterable", "WebWorker"],
+    "types": []
+  },
+  "include": ["src/browser", "src/worker.ts"]
+}

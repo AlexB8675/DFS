@@ -1,0 +1,26 @@
+{
+  "name": "@dfs/player",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./worker": "./src/worker.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.node.json && tsc -p tsconfig.browser.json",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:browser": "vitest run --config vitest.browser.config.ts"
+  },
+  "dependencies": {
+    "@dfs/mp4": "workspace:*",
+    "@dfs/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.1",
+    "@vitest/browser-playwright": "^5.0.3",
+    "playwright": "^1.64.1",
+    "vitest": "^5.0.3"
+  }
+}
