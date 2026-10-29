@@ -42,26 +42,30 @@ import type { MatroskaCursor } from './spans.ts'
 // before any time, unless the point's own cluster is it.
 //
 // By a search of the clusters when it has none (a recording that was cut off, one
-// written as it was shot, Cues too long to read). The Segment is narrowed by guesses:
-// each reads forward from an offset and takes the first cluster in the read, whose
-// Timestamp says which side of it the time is. The first read of a guess is 256 KiB
-// and then as long as the read that last found a cluster (the clusters of one file
-// are alike), and a guess that finds none (a cluster is longer than a read, as a
-// cluster of a recording at an ordinary bitrate is) goes on reading forward, each
-// read twice the one before up to 4 MiB, until it finds one or reaches the end of the
-// range. A guess is made by time where the file says the time of its end (the last
-// cluster, which the open found when Info has no Duration, else the duration), on the
-// line between the two clusters that bound the range, and by the byte, in the middle,
-// where it cannot and at least every second guess, so that a file of any shape costs
-// no more than twice a bisection's guesses. When what is left is no more than about
-// two clusters (twice the longest distance from a guess to the cluster it found, at
-// least a read and at most 4 MiB), it is read at once, from the last cluster at or
-// before the time to where no cluster starts, and the clusters in that read are the
-// candidates: the latest of them that holds a keyframe at or before the time is where
-// reading starts. When none does, the search is made again for a cluster before the
-// first of them. A file with no such cluster is read from its first. Cues too long to
-// read that run to the Segment's end are left out of the range, for no cluster is in
-// them.
+// written as it was shot, Cues too long to read). It starts at the file's first
+// cluster, whose header says when it is presented and, if its size was written, how
+// long it is; a time at or before it is the first cluster's, and the search ends
+// there. Else the Segment is narrowed by guesses: each reads forward from an offset
+// and takes the first cluster in the read, whose Timestamp says which side of it the
+// time is. The first read of a guess is as long as the first cluster, or the read
+// that last found a cluster (the clusters of one file are alike; 256 KiB at least),
+// and a guess that finds none (a cluster is longer than a read, as a cluster of a
+// recording at an ordinary bitrate is) goes on reading forward, each read twice the
+// one before up to 4 MiB, until it finds one or reaches the end of the range. No
+// guess is inside a cluster whose size is known, for none starts there. A guess is
+// made by time where the file says the time of its end (the last cluster, which the
+// open found when Info has no Duration, else the duration), on the line between the
+// two clusters that bound the range, and by the byte, in the middle, where it cannot
+// and at least every second guess, so that a file of any shape costs no more than
+// twice a bisection's guesses. When what is left is no more than about two clusters
+// (twice the longest distance from a guess to the cluster it found, or a cluster's
+// length, at least a read and at most 4 MiB), it is read at once, from the last
+// cluster at or before the time to where no cluster starts, and the clusters in that
+// read are the candidates: the latest of them that holds a keyframe at or before the
+// time is where reading starts. When none does, the search is made again for a
+// cluster before the first of them. A file with no such cluster is read from its
+// first. Cues too long to read that run to the Segment's end are left out of the
+// range, for no cluster is in them.
 //
 // A keyframe is looked for in the bytes read, and a picture block that the bytes
 // stop short of is read whole, from where they start to its end, in one more read
@@ -199,10 +203,11 @@ function cuesHeader(bytes: Uint8Array, at = 0): Element | null {
   return el !== null && el.id === ID.Cues && el.sized ? el : null
 }
 
-/** A cluster that bounds a search: where it starts, and when it is presented in seconds on the playback timeline; null when that is not known. */
+/** A cluster that bounds a search: where it starts, when it is presented in seconds on the playback timeline (null when that is not known), and where it ends when its size says (no cluster starts inside it; else null). */
 interface Anchor {
   at: number
   seconds: number | null
+  end: number | null
 }
 
 /** A picture keyframe that a seek has found: when it is presented in ticks, and where. */
@@ -569,18 +574,28 @@ class Seeking {
   // The search.
 
   /**
-   * Where reading starts, by a search of the clusters: the Segment is narrowed down
-   * to a stretch of a cluster or two (`bisect`), the stretch is read at once, and in
-   * it the latest cluster that holds a keyframe at or before the time is chosen
-   * (`holding`). When none does, the search is made again for a cluster before the
-   * first of them, and so on; the first cluster is where it ends.
+   * Where reading starts, by a search of the clusters. The first cluster's header is
+   * read (`firstPlace`): a time at or before the first cluster's is its. Else the
+   * Segment is narrowed down to a stretch of a cluster or two (`bisect`), the stretch
+   * is read at once, and in it the latest cluster that holds a keyframe at or before
+   * the time is chosen (`holding`). When none does, the search is made again for a
+   * cluster before the first of them, and so on; the first cluster is where it ends.
    */
   private bySearch(): Landing {
     const { segment, firstCluster } = this.index
     const first: Landing = { at: firstCluster, cluster: null }
+    // A time at or before the first cluster's is the first cluster's: no cluster comes before it.
+    const start = this.firstPlace()
+    if (start !== null && this.timeOf(start.timestamp) >= this.seconds) return first
+    // The clusters of a file are alike: how long the first is says how long a read to start a guess with is, and how long a cluster is.
+    if (start?.sized === true) {
+      const length = start.end - firstCluster
+      this.gap = Math.max(this.gap, length)
+      this.firstRead = Math.min(Math.max(length, SEARCH_READ), FIRST_FRAMES_BYTES)
+    }
     let below = Infinity
     for (let round = 0; round < MAX_SEEK_READS; round += 1) {
-      const { best, from, to } = this.bisect(below)
+      const { best, from, to } = this.bisect(below, start)
       // From the best cluster to a header's length past where no cluster starts any more, and at least as far as a keyframe is looked for (`SEARCH_READ`): one read, which `narrow` keeps within `FIRST_FRAMES_BYTES`.
       const end = Math.min(segment.end, Math.max(to + HEADER_READ, from + SEARCH_READ))
       const chunk = { start: from, bytes: this.take({ start: from, end }) }
@@ -590,6 +605,26 @@ class Seeking {
       below = best.timestamp
     }
     return first
+  }
+
+  /** The first cluster's place (its Timestamp, and where it ends), read from its header (the first `HEADER_READ` bytes of it, which the open's head usually holds). Null when the bytes there are no cluster's header, as in a damaged file. */
+  private firstPlace(): ClusterPlace | null {
+    const { segment, firstCluster } = this.index
+    const bytes = this.take({
+      start: firstCluster,
+      end: Math.min(firstCluster + HEADER_READ, segment.end),
+    })
+    const found = findCluster({ start: firstCluster, bytes }, firstCluster, segment.end)
+    return found?.start === firstCluster ? found.place : null
+  }
+
+  /** The anchor of the cluster at `at` whose place is `place`. */
+  private anchorAt(at: number, place: ClusterPlace): Anchor {
+    return {
+      at,
+      seconds: this.timeOf(place.timestamp),
+      end: place.sized ? place.end : null,
+    }
   }
 
   /** Whether a cluster is one to land at as far as its time goes: before `below` ticks and at or before the time. */
@@ -603,15 +638,20 @@ class Seeking {
   }
 
   /**
-   * The offset of the next guess in the range [`lo`, `hi`), and whether it is made
-   * by time. By time when both anchors say theirs and the time `aim` lies between
-   * them: the place on the line from one anchor to the other, no nearer to either
-   * end of the range than a read, since a guess reads forward from itself. By the
-   * byte, the middle of the range, when an anchor has no time, when the time lies
-   * outside them, when the range is too narrow to keep a read from both ends, and
-   * when the guess before was by time and did not at least halve the range (`was` is
-   * the range's width before it): the range halves at least every second guess, so
-   * that the search is logarithmic in the worst case.
+   * The offset of the next guess in the range that is left, from where the low
+   * anchor's cluster ends to `hi` (no cluster starts inside a cluster; one whose size
+   * is not known is taken to end with its first byte), and whether it is made by
+   * time. By time when both anchors say theirs and the time `aim` lies between them:
+   * the place on the line from one anchor to the other, no nearer to the end of the
+   * range than a read, since a guess reads forward from itself, and no nearer to its
+   * start than a read when the cluster there is of unknown size. By the byte, the
+   * middle of the range, when an anchor has no time, when the time lies outside them,
+   * when the range is too narrow to keep a read from both ends, and when the guess
+   * before was by time and did not at least halve the range (`was` is the range's
+   * width before it): the range halves at least every second guess, so that the
+   * search is logarithmic in the worst case. A range no wider than a stretch
+   * (`narrow`) after a cluster of known size is guessed at its start: the cluster
+   * there, if there is one, is the next, and says all that is left to find.
    */
   private guessAt(
     lo: Anchor,
@@ -620,18 +660,21 @@ class Seeking {
     aim: number,
     was: number | null,
   ): { at: number; byTime: boolean } {
-    const width = hi - lo.at
-    const middle = lo.at + Math.floor(width / 2)
+    const floor = lo.end ?? lo.at + 1
+    const width = hi - floor
+    const middle = floor + Math.floor(width / 2)
+    if (lo.end !== null && width <= this.narrow()) return { at: floor, byTime: false }
     if (was !== null && 2 * width > was) return { at: middle, byTime: false }
     if (lo.seconds === null || high.seconds === null) return { at: middle, byTime: false }
     if (!(lo.seconds <= aim && aim < high.seconds && lo.at < high.at)) {
       return { at: middle, byTime: false }
     }
     const margin = this.firstRead
-    if (width < 2 * margin) return { at: middle, byTime: false }
+    const near = lo.end === null ? floor + margin : floor
+    if (hi - margin < near) return { at: middle, byTime: false }
     const share = (aim - lo.seconds) / (high.seconds - lo.seconds)
     const at = lo.at + Math.floor((high.at - lo.at) * share)
-    return { at: Math.min(Math.max(at, lo.at + margin), hi - margin), byTime: true }
+    return { at: Math.min(Math.max(at, near), hi - margin), byTime: true }
   }
 
   /**
@@ -645,36 +688,49 @@ class Seeking {
    * which side of it the time is. A cluster at or before the time is the best so far
    * and moves the low anchor, its offset and its time; one after moves the high
    * anchor the same way, and with none found as well the range ends at the guess. The
-   * anchors are the first cluster (its time is known when a guess has found a cluster
-   * at or before the time) and the end: the file's last cluster when the open found it
-   * (`lastCluster`), else the Segment's end at the file's duration, else nothing. A
-   * guess is made by time between anchors that say theirs, else by the byte (`guessAt`).
+   * anchors are the first cluster (`start`, whose place the header gave, when the
+   * bytes there are a cluster's) and the end: the file's last cluster when the open
+   * found it (`lastCluster`), else the Segment's end at the file's duration, else
+   * nothing. A guess is made by time between anchors that say theirs, else by the
+   * byte (`guessAt`).
    *
    * A guess starts reading at the size of the read that last found a cluster (the
-   * first is `SEARCH_READ`), and each read after it is twice the one before, up to
-   * `FIRST_FRAMES_BYTES`, until a cluster is found or the range ends (a cluster is
-   * longer than a read, or the guess is in a stretch that has none). Clusters of one
-   * file are alike, so after the first guess most take one read. Each read after the
-   * first starts a header's length before the end of the one before, so that a cluster
-   * whose header lies across that end is seen whole. The search stops when the range
-   * is no wider than about two clusters (`narrow`).
+   * first is the first cluster's length, at least `SEARCH_READ`), and each read after
+   * it is twice the one before, up to `FIRST_FRAMES_BYTES`, until a cluster is found
+   * or the range ends (a cluster is longer than a read, or the guess is in a stretch
+   * that has none). Clusters of one file are alike, so most guesses take one read.
+   * Each read after the first starts a header's length before the end of the one
+   * before, so that a cluster whose header lies across that end is seen whole. The
+   * search stops when the range is no wider than about two clusters (`narrow`), or
+   * when no room is left after the cluster at the low anchor, whose size is known.
    */
-  private bisect(below: number): {
+  private bisect(
+    below: number,
+    start: ClusterPlace | null,
+  ): {
     best: { start: number; timestamp: number } | null
     from: number
     to: number
   } {
     const { segment, firstCluster, lastCluster, durationSeconds } = this.index
-    let lo: Anchor = { at: firstCluster, seconds: null }
+    let lo: Anchor =
+      start === null
+        ? { at: firstCluster, seconds: null, end: null }
+        : this.anchorAt(firstCluster, start)
     let hi = this.clusters
     let high: Anchor = {
       at: hi,
       seconds: durationSeconds === null ? null : durationSeconds - this.delay,
+      end: null,
     }
     let best: { start: number; timestamp: number } | null = null
     // No cluster starts after the last one: the range ends with it, and it is the best so far unless it is late.
     if (lastCluster !== null && lastCluster.start >= firstCluster && lastCluster.start < hi) {
-      const anchor = { at: lastCluster.start, seconds: this.timeOf(lastCluster.timestamp) }
+      const anchor = {
+        at: lastCluster.start,
+        seconds: this.timeOf(lastCluster.timestamp),
+        end: null,
+      }
       if (this.early(lastCluster.timestamp, below)) {
         best = lastCluster
         lo = anchor
@@ -688,8 +744,8 @@ class Seeking {
     // A later round looks for a cluster before the best of the round before (`below`).
     const aim = Math.min(this.seconds, this.timeOf(below))
     let was: number | null = null
-    while (hi - lo.at > this.narrow()) {
-      const width = hi - lo.at
+    while (hi > (lo.end ?? lo.at + 1) && hi - lo.at > this.narrow()) {
+      const width = hi - (lo.end ?? lo.at + 1)
       const { at: guess, byTime } = this.guessAt(lo, high, hi, aim, was)
       was = byTime ? width : null
       let found: { start: number; place: ClusterPlace } | null = null
@@ -705,7 +761,7 @@ class Seeking {
         size = Math.min(2 * size, FIRST_FRAMES_BYTES)
       }
       if (found !== null && found.start < hi) {
-        const anchor = { at: found.start, seconds: this.timeOf(found.place.timestamp) }
+        const anchor = this.anchorAt(found.start, found.place)
         if (this.early(found.place.timestamp, below)) {
           best = { start: found.start, timestamp: found.place.timestamp }
           lo = anchor
@@ -717,7 +773,8 @@ class Seeking {
         hi = guess
       }
     }
-    return { best, from: lo.at, to: hi }
+    // With no room left after the cluster at the low anchor, it is the only one to look at.
+    return { best, from: lo.at, to: hi > (lo.end ?? lo.at + 1) ? hi : lo.at + 1 }
   }
 
   /** What the read of `size` bytes from `guess`, which found the cluster at `start` (`place`), teaches about the file's clusters: how long a read to start with, and the longest distance from a guess to a cluster and from a cluster to the next (a cluster of unknown size says nothing of where the next starts). */

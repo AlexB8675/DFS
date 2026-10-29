@@ -1430,6 +1430,8 @@ describe('seeking a large file with no Cues, by time (§10.4)', () => {
   const MOST_TIMED = 24
   const MOST_UNTIMED = 36
   const MOST_UNEVEN = 30
+  /** The most reads for a seek near the start of a file: the first cluster's time is known at once, so the time is the first guess's. */
+  const MOST_NEAR_START = 6
 
   const head = matroskaFile(
     [
@@ -1445,22 +1447,25 @@ describe('seeking a large file with no Cues, by time (§10.4)', () => {
   /** What the file says of its end: the last cluster, or only the duration, or nothing (the open found neither). */
   type Ends = 'cluster' | 'duration' | 'none'
 
-  /** The virtual file of the clusters (cluster k is at k * EACH s), and the index of it. */
+  /** The virtual file of the clusters (cluster k is at `begin` + k * EACH s), and the index of it. */
   function large(
     sizes: readonly number[],
     ends: Ends,
+    begin = 0,
   ): { file: VirtualFile; index: MatroskaIndex } {
     const file = virtualFile(
       headBytes,
-      sizes.map((size, k) => ({ size, timestamp: 1000 * EACH * k })),
+      sizes.map((size, k) => ({ size, timestamp: 1000 * (begin + EACH * k) })),
     )
     const lastAt = file.starts[sizes.length - 1] ?? 0
     const index: MatroskaIndex = {
       ...opened,
       segment: { data: opened.segment.data, end: file.total },
-      durationSeconds: ends === 'none' ? null : EACH * sizes.length,
+      durationSeconds: ends === 'none' ? null : begin + EACH * sizes.length,
       lastCluster:
-        ends === 'cluster' ? { start: lastAt, timestamp: 1000 * EACH * (sizes.length - 1) } : null,
+        ends === 'cluster'
+          ? { start: lastAt, timestamp: 1000 * (begin + EACH * (sizes.length - 1)) }
+          : null,
     }
     return { file, index }
   }
@@ -1482,7 +1487,29 @@ describe('seeking a large file with no Cues, by time (§10.4)', () => {
     throw new Error('the seek went on asking')
   }
 
-  /** Seeks to each share of the file's time and checks the landing: the latest cluster at or before the time. Gives the most asks of the seeks. */
+  /** Seeks to each time (in seconds) and checks the landing: the latest cluster at or before the time. Gives the most asks of the seeks. */
+  function seekTimes(
+    sizes: readonly number[],
+    ends: Ends,
+    what: string,
+    most: number,
+    times: readonly number[],
+  ): number {
+    const { file, index } = large(sizes, ends)
+    let widest = 0
+    for (const time of times) {
+      const expected = Math.min(Math.floor(time / EACH), sizes.length - 1)
+      const { cursor, asks } = seekIn(index, file, time)
+      widest = Math.max(widest, asks.length)
+      expect(cursor.at, `${what} at ${time} s: ${asks.length} reads`).toBe(file.starts[expected])
+      expect(cursor.searching).toBe(false)
+      expect(cursor.cluster).toBeNull()
+      expect(asks.length, `${what} at ${time} s`).toBeLessThanOrEqual(most)
+    }
+    return widest
+  }
+
+  /** Seeks to each share of the file's time (see `seekTimes`). */
   function seekAll(
     sizes: readonly number[],
     ends: Ends,
@@ -1490,20 +1517,14 @@ describe('seeking a large file with no Cues, by time (§10.4)', () => {
     most: number,
     shares: readonly number[] = FEW,
   ): number {
-    const { file, index } = large(sizes, ends)
     const length = EACH * sizes.length
-    let widest = 0
-    for (const share of shares) {
-      const time = share * length
-      const expected = Math.min(Math.floor(time / EACH), sizes.length - 1)
-      const { cursor, asks } = seekIn(index, file, time)
-      widest = Math.max(widest, asks.length)
-      expect(cursor.at, `${what} at ${share}: ${asks.length} reads`).toBe(file.starts[expected])
-      expect(cursor.searching).toBe(false)
-      expect(cursor.cluster).toBeNull()
-      expect(asks.length, `${what} at ${share}`).toBeLessThanOrEqual(most)
-    }
-    return widest
+    return seekTimes(
+      sizes,
+      ends,
+      what,
+      most,
+      shares.map((share) => share * length),
+    )
   }
 
   /** The sizes of `count` clusters of `size` bytes each. */
@@ -1548,6 +1569,54 @@ describe('seeking a large file with no Cues, by time (§10.4)', () => {
     for (const mib of [2.4, 5, 10]) {
       const sizes = even(8, Math.round(mib * MIB))
       seekAll(sizes, 'duration', `8 GB, ${mib} MiB, duration`, MOST_TIMED)
+    }
+  })
+
+  it(`lands right in at most ${MOST_NEAR_START} reads for 0 s, 0.5 s and 1% of the file, in 16 GB of clusters of 5 and of 10 MiB, with the last cluster known`, () => {
+    for (const mib of [5, 10]) {
+      const sizes = even(16, Math.round(mib * MIB))
+      const percent = (EACH * sizes.length) / 100
+      seekTimes(sizes, 'cluster', `16 GB, ${mib} MiB`, MOST_NEAR_START, [0, 0.5, percent])
+    }
+  })
+
+  it("lands at the first cluster in two reads (the tail and the first cluster's header) for a time at or before it, and searches for a later time, when the first cluster is at 5 s", () => {
+    const begin = 5
+    const sizes = even(2, 3 * MIB)
+    for (const ends of ['cluster', 'duration', 'none'] as const) {
+      const { file, index } = large(sizes, ends, begin)
+      for (const time of [-1, 0, 3, 4.99, 5]) {
+        const { cursor, asks } = seekIn(index, file, time)
+        expect(cursor.at, `${ends} at ${time} s`).toBe(file.first)
+        expect(asks.length, `${ends} at ${time} s`).toBeLessThanOrEqual(2)
+      }
+      for (const [time, expected] of [
+        [5.5, 0],
+        [6.99, 0],
+        [7, 1],
+        [100, 47],
+        [1e6, sizes.length - 1],
+      ] as const) {
+        const { cursor, asks } = seekIn(index, file, time)
+        expect(cursor.at, `${ends} at ${time} s`).toBe(file.starts[expected])
+        expect(asks.length, `${ends} at ${time} s`).toBeLessThanOrEqual(MOST_NEAR_START * 2)
+      }
+    }
+  })
+
+  it("searches as before, from the first cluster, when the bytes at the first cluster are no cluster's header", () => {
+    // The index puts the first cluster 3 bytes into the real one, a damaged file's: its header reads as nothing, the first cluster has no time, and the search goes on by the byte until a guess finds a cluster.
+    const sizes = even(2, 3 * MIB)
+    const { file, index } = large(sizes, 'cluster')
+    const damaged: MatroskaIndex = { ...index, firstCluster: file.first + 3 }
+    for (const [time, expected] of [
+      [3, 1],
+      [100, 50],
+      [1e6, sizes.length - 1],
+    ] as const) {
+      const { cursor, asks } = seekIn(damaged, file, time)
+      expect(cursor.at, `at ${time} s`).toBe(file.starts[expected])
+      expect(asks.length, `at ${time} s`).toBeLessThanOrEqual(MAX_SEEK_READS)
     }
   })
 
