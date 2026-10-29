@@ -49,6 +49,15 @@ const EXAMPLES: TimelineEvent[] = [
   { type: 'retry', t: 950, attempt: 1, delayMs: 500, offset: 1_048_576 },
   { type: 'restart', t: 960, offset: 52_428_800, reason: 'seek' },
   { type: 'phase', t: 970, phase: 'buffering' },
+  { type: 'store', t: 972, backend: 'memory', capBytes: 268_435_456, reason: 'no-opfs' },
+  { type: 'storeFull', t: 974, on: true, storedBytes: 2_147_483_648 },
+  {
+    type: 'storeLevel',
+    t: 976,
+    storedBytes: 1_073_741_824,
+    aheadBytes: 536_870_912,
+    evictedBytes: 0,
+  },
   { type: 'dropped', t: 980, events: 0, invalid: 1 },
   { type: 'closed', t: 2000 },
 ]
@@ -75,6 +84,9 @@ const TYPES = [
   'retry',
   'restart',
   'phase',
+  'store',
+  'storeFull',
+  'storeLevel',
   'dropped',
   'closed',
 ]
@@ -106,6 +118,58 @@ describe('timeline events (§16)', () => {
     expect(
       timelineBatchSchema.safeParse(batch([{ ...error, message: 'x'.repeat(301) }])).success,
     ).toBe(false)
+  })
+
+  it('takes the store’s events, with a disk store’s null reason', () => {
+    const disk = { type: 'store', t: 5, backend: 'disk', capBytes: 2_147_483_648, reason: null }
+    expect(timelineBatchSchema.parse(batch([disk])).events).toEqual([disk])
+    // Every reason the player sends fits; the field is text, so a later one does too.
+    for (const reason of ['no-worker', 'no-opfs', 'refused', 'quota', 'disk-error']) {
+      expect(timelineEventSchema.safeParse({ ...disk, backend: 'memory', reason }).success).toBe(
+        true,
+      )
+    }
+    const full = { type: 'storeFull', t: 6, on: false, storedBytes: 0 }
+    expect(timelineEventSchema.parse(full)).toEqual(full)
+    const level = { type: 'storeLevel', t: 7, storedBytes: 9, aheadBytes: 5, evictedBytes: 3 }
+    expect(timelineEventSchema.parse(level)).toEqual(level)
+  })
+
+  it('refuses a store event with a wrong backend, a negative size or a reason over 40 characters', () => {
+    const store = { type: 'store', t: 5, backend: 'memory', capBytes: 1024, reason: 'quota' }
+    const full = { type: 'storeFull', t: 6, on: true, storedBytes: 1024 }
+    const level = { type: 'storeLevel', t: 7, storedBytes: 9, aheadBytes: 5, evictedBytes: 3 }
+    const accepted = (event: unknown) => timelineEventSchema.safeParse(event).success
+    expect(accepted(store)).toBe(true)
+    expect(accepted({ ...store, backend: 'cloud' })).toBe(false)
+    expect(accepted({ ...store, capBytes: -1 })).toBe(false)
+    expect(accepted({ ...store, capBytes: 1.5 })).toBe(false)
+    expect(accepted({ ...store, reason: 'x'.repeat(40) })).toBe(true)
+    expect(accepted({ ...store, reason: 'x'.repeat(41) })).toBe(false)
+    expect(accepted({ ...store, reason: 'half a pair \ud800' })).toBe(false)
+    expect(accepted({ ...store, reason: undefined })).toBe(false)
+    expect(accepted(full)).toBe(true)
+    expect(accepted({ ...full, on: 'yes' })).toBe(false)
+    expect(accepted({ ...full, storedBytes: -1 })).toBe(false)
+    expect(accepted(level)).toBe(true)
+    expect(accepted({ ...level, storedBytes: -1 })).toBe(false)
+    expect(accepted({ ...level, aheadBytes: -1 })).toBe(false)
+    expect(accepted({ ...level, evictedBytes: -1 })).toBe(false)
+  })
+
+  it('takes a batch that mixes the older events and the store’s', () => {
+    const events = [
+      { type: 'phase', t: 1, phase: 'opening' },
+      { type: 'store', t: 2, backend: 'disk', capBytes: 1_000_000, reason: null },
+      { type: 'storeLevel', t: 3, storedBytes: 4, aheadBytes: 4, evictedBytes: 0 },
+      { type: 'storeFull', t: 4, on: true, storedBytes: 1_000_000 },
+      { type: 'closed', t: 5 },
+    ]
+    const input = batch(events)
+    expect(timelineBatchSchema.parse(input)).toEqual(input)
+    // One bad event refuses the batch, as for any other type.
+    const bad = { type: 'store', t: 6, backend: 'cloud', capBytes: 0, reason: null }
+    expect(timelineBatchSchema.safeParse(batch([...events, bad])).success).toBe(false)
   })
 
   it('takes a batch whose version isn’t known yet', () => {

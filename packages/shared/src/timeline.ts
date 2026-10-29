@@ -199,6 +199,30 @@ export const timelineEventSchema = z.discriminatedUnion('type', [
     t: ms,
     phase: z.enum(['opening', 'buffering', 'ended', 'failed']),
   }),
+  // The player's store (§10.4) opened, or changed: the quota shrank it, or a
+  // disk error moved it to memory. `reason` is null for the disk store as
+  // asked, else why it isn't: `no-worker`, `no-opfs`, `refused`, `quota` or
+  // `disk-error`. Text, so a later reason doesn't need a new schema.
+  z.object({
+    type: z.literal('store'),
+    t: ms,
+    backend: z.enum(['disk', 'memory']),
+    capBytes: offset,
+    reason: text(40).nullable(),
+  }),
+  // The download paused because the store is full of data nearer the position
+  // (`on`), or resumed.
+  z.object({ type: z.literal('storeFull'), t: ms, on: z.boolean(), storedBytes: offset }),
+  // The store's level, every 5 s while a read is open. `aheadBytes` is what it
+  // holds from the position on without a gap; `evictedBytes` is the total
+  // evicted since the play opened.
+  z.object({
+    type: z.literal('storeLevel'),
+    t: ms,
+    storedBytes: offset,
+    aheadBytes: offset,
+    evictedBytes: offset,
+  }),
   // The page lost events to its size cap, or the schema refused some: either
   // may be 0.
   z.object({ type: z.literal('dropped'), t: ms, events: count, invalid: count }),

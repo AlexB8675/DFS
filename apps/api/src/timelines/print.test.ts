@@ -224,6 +224,26 @@ describe('printTimeline', () => {
     expect(text).toContain('message="Failed to fetch"')
   })
 
+  it('prints the store’s events one line each, with their fields', () => {
+    const text = printTimeline(
+      playOf([
+        { type: 'store', t: 100, backend: 'disk', capBytes: 2_147_483_648, reason: null },
+        { type: 'store', t: 4000, backend: 'memory', capBytes: 268_435_456, reason: 'disk-error' },
+        { type: 'storeFull', t: 5000, on: true, storedBytes: 2_147_483_648 },
+        { type: 'storeFull', t: 6500, on: false, storedBytes: 2_000_000_000 },
+        { type: 'storeLevel', t: 7000, storedBytes: 1048576, aheadBytes: 524288, evictedBytes: 0 },
+      ]),
+    )
+    const events = lines(text).filter((line) => line.startsWith('+'))
+    expect(events).toEqual([
+      '+0.100s store backend=disk capBytes=2147483648 reason=null',
+      '+4.000s store backend=memory capBytes=268435456 reason=disk-error',
+      '+5.000s storeFull on=true storedBytes=2147483648',
+      '+6.500s storeFull on=false storedBytes=2000000000',
+      '+7.000s storeLevel storedBytes=1048576 aheadBytes=524288 evictedBytes=0',
+    ])
+  })
+
   it('spells out control characters from outside, so a page can’t write to the terminal', () => {
     const text = printTimeline(
       playOf([{ type: 'error', t: 10, from: 'page', code: null, message: '\u001b[31mred\u009b' }]),
