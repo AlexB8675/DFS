@@ -13,7 +13,8 @@ import {
 import { findCluster, readClusters } from './clusters.ts'
 import type { ClusterPlace, ClusterRead, ClusterTrack, RawFrame } from './clusters.ts'
 import { frameSamples, sampleRate } from './frameheaders.ts'
-import { ID } from './ids.ts'
+import { ID, TOP_LEVEL } from './ids.ts'
+import { MAX_BLOCK } from './limits.ts'
 
 // The clusters are read from the bytes the builder writes, with a file that starts
 // at a nonzero offset so that no offset is right by luck, and every read that
@@ -287,7 +288,8 @@ describe('readClusters: unknown-size clusters (§10.4)', () => {
       cluster(2000, [key(1, 0, 3)], { unknown: true }),
     )
     const second = where(file, delta(1, 40, 2))
-    const first = readClusters(slice(file, BASE, second), BASE, null, false, file.end, BOTH)
+    // The first block is taken once the ID of the element after it is held (its 1 byte): a block in a cluster of unknown size is taken only when what follows it is known to be able to.
+    const first = readClusters(slice(file, BASE, second + 1), BASE, null, false, file.end, BOTH)
     expect(first.frames.map((frame) => frame.pts)).toEqual([1000])
     expect(first.next).toBe(second)
     expect(first.cluster).toEqual({ timestamp: 1000, end: file.end, sized: false })
@@ -300,10 +302,243 @@ describe('readClusters: unknown-size clusters (§10.4)', () => {
       cluster(2000, [key(1, 0, 3)], { unknown: true }),
     )
     const next = file.at[1] ?? 0
-    const read = readClusters(slice(file, BASE, next + 2), BASE, null, false, file.end, BOTH)
+    // The cluster's ID is held (4 bytes) and its size is not: the block before it is taken, and the header is waited for.
+    const read = readClusters(slice(file, BASE, next + 5), BASE, null, false, file.end, BOTH)
     expect(read.frames.map((frame) => frame.pts)).toEqual([1000])
     expect(read.next).toBe(next)
     expect(read.cluster).toEqual({ timestamp: 1000, end: file.end, sized: false })
+  })
+})
+
+describe('readClusters: what a cluster of unknown size bounds (§10.4)', () => {
+  const cues = element(ID.Cues, element(ID.CuePoint, uint(ID.CueTime, 0)))
+  /** The Segment ends far past what the tests hold, so that a claim is bounded by the cap and not by the Segment's end. */
+  const FAR = 4 * MAX_BLOCK
+
+  /** An element that claims `claim` bytes of data, of which only `inside` is there. */
+  function claiming(id: number, claim: number, ...inside: number[]): Uint8Array {
+    return elementSized(id, sizeBytes(claim, 8), inside)
+  }
+
+  /** Two clusters of unknown size, the first with `middle` after its first block, then Cues so that the last block has an element after it. */
+  function around(middle: Uint8Array): Laid {
+    return laid(
+      cluster(1000, [key(1, 0, 1), middle], { unknown: true }),
+      cluster(2000, [key(1, 0, 9)], { unknown: true }),
+      cues,
+    )
+  }
+  function readFar(file: Laid): ClusterRead {
+    return readClusters(file.chunk, BASE, null, false, file.end + FAR, BOTH)
+  }
+
+  const claims: [string, (claim: number) => Uint8Array][] = [
+    [
+      'a block of a track asked for',
+      (claim) => claiming(ID.SimpleBlock, claim, 0x81, 0, 0, 0x80, 7),
+    ],
+    [
+      'a block of a track not asked for',
+      (claim) => claiming(ID.SimpleBlock, claim, 0x83, 0, 0, 0x80, 7),
+    ],
+    ['a BlockGroup', (claim) => claiming(ID.BlockGroup, claim, 0xa1, 0x85, 0x81, 0, 0, 0x80, 7)],
+    ['an element that is not a block', (claim) => claiming(ID.Void, claim, 1, 2, 3)],
+  ]
+
+  it.each(claims)(
+    'takes %s that claims more than MAX_BLOCK as damage, skipped from the element',
+    (_name, make) => {
+      const bad = make(MAX_BLOCK + 1)
+      const file = around(bad)
+      const read = readFar(file)
+      expect(read.frames.map((frame) => frame.pts)).toEqual([1000, 2000])
+      expect(read.skipped).toEqual([{ start: where(file, bad), end: file.at[1] }])
+      expect(read).toMatchObject({ next: file.end, cluster: null, searching: false })
+    },
+  )
+
+  it.each(claims)('takes %s that claims MAX_BLOCK as no damage yet', (_name, make) => {
+    const file = around(make(MAX_BLOCK))
+    const read = readFar(file)
+    expect(read.skipped).toEqual([])
+    expect(read.frames.map((frame) => frame.pts)).toEqual([1000])
+  })
+
+  it('does not bound a block of a sized cluster, for the cluster does', () => {
+    const big = simpleBlock({
+      track: 1,
+      timecode: 0,
+      keyframe: true,
+      frames: [new Uint8Array(MAX_BLOCK + 1)],
+    })
+    const sized = laid(cluster(1000, [big]))
+    const read = readWhole(sized)
+    expect(read.skipped).toEqual([])
+    expect(read.frames.map((frame) => frame.size)).toEqual([MAX_BLOCK + 1])
+    // The same block in a cluster of unknown size is a claim no real block makes.
+    const unknown = laid(cluster(1000, [big], { unknown: true }))
+    expect(readWhole(unknown).frames).toEqual([])
+    // (The cluster's header is 12 bytes, and its Timestamp comes before the block.)
+    const blockAt = (unknown.at[0] ?? 0) + 12 + uint(ID.Timestamp, 1000).length
+    expect(readWhole(unknown).skipped).toEqual([{ start: blockAt, end: unknown.end }])
+  })
+
+  describe('what a block may be followed by', () => {
+    const second = (): Uint8Array => cluster(2000, [key(1, 0, 9)], { unknown: true })
+    const inCluster: [string, Uint8Array][] = [
+      ['another SimpleBlock', key(1, 40, 2)],
+      ['a BlockGroup', blockGroup({ track: 1, timecode: 40, frames: [[2]] })],
+      ['a Timestamp', uint(ID.Timestamp, 5)],
+      ['a Position', uint(ID.Position, 5)],
+      ['a PrevSize', uint(ID.PrevSize, 5)],
+      ['a Void', element(ID.Void, new Uint8Array(3))],
+      ['a CRC-32', element(ID.CRC32, [1, 2, 3, 4])],
+    ]
+
+    it.each(inCluster)('takes a block that %s follows', (_name, follower) => {
+      const file = laid(cluster(1000, [key(1, 0, 1), follower], { unknown: true }), second())
+      const read = readWhole(file)
+      expect(read.skipped).toEqual([])
+      expect(read.frames.map((frame) => frame.pts)).toContain(1000)
+      expect(read.frames.map((frame) => frame.pts)).toContain(2000)
+      expect(read.ended).toBe(true)
+    })
+
+    it.each([...TOP_LEVEL].filter((id) => id !== ID.Cluster))(
+      'takes a block that the top-level element %i follows',
+      (id) => {
+        const file = laid(
+          cluster(1000, [key(1, 0, 1)], { unknown: true }),
+          element(id, new Uint8Array(3)),
+          second(),
+        )
+        const read = readWhole(file)
+        expect(read.skipped).toEqual([])
+        expect(read.frames.map((frame) => frame.pts)).toEqual([1000, 2000])
+      },
+    )
+
+    const garbage: [string, Uint8Array][] = [
+      ['zeros', new Uint8Array(8)],
+      ['an element that no cluster holds', element(ID.TrackNumber, [1])],
+      ['an ID that nothing starts with', Uint8Array.of(0x11, 0x81, 0x01)],
+    ]
+
+    it.each(garbage)(
+      'skips a block of a track asked for that %s follow, from the block',
+      (_name, bytes) => {
+        const bad = key(1, 40, 2)
+        const next = second()
+        const file = laid(cluster(1000, [key(1, 0, 1), bad, bytes], { unknown: true }), next)
+        const read = readWhole(file)
+        expect(read.frames.map((frame) => frame.pts)).toEqual([1000, 2000])
+        expect(read.skipped).toEqual([{ start: where(file, bad), end: where(file, next) }])
+      },
+    )
+
+    it.each(garbage)(
+      'skips a block of a track not asked for that %s follow, from the block',
+      (_name, bytes) => {
+        const bad = delta(3, 40, 2)
+        const next = second()
+        const file = laid(cluster(1000, [key(1, 0, 1), bad, bytes], { unknown: true }), next)
+        const read = readWhole(file)
+        expect(read.frames.map((frame) => frame.pts)).toEqual([1000, 2000])
+        expect(read.skipped).toEqual([{ start: where(file, bad), end: where(file, next) }])
+      },
+    )
+
+    it.each([
+      ['asked for', 1],
+      ['not asked for', 3],
+    ])('waits for the bytes that tell what follows a block of a track %s', (_name, track) => {
+      const block = delta(track, 0, 1)
+      const file = laid(
+        cluster(1000, [block], { unknown: true }),
+        cluster(2000, [key(1, 0, 2)], { unknown: true }),
+      )
+      const next = file.at[1] ?? 0
+      const start = where(file, block)
+      const place = { timestamp: 1000, end: file.end, sized: false }
+      // The ID of a Cluster is 4 bytes: with fewer the block is not taken, and nothing is skipped.
+      for (const held of [0, 1, 3]) {
+        const read = readClusters(slice(file, BASE, next + held), BASE, null, false, file.end, BOTH)
+        expect(read.frames).toEqual([])
+        expect(read).toMatchObject({ next: start, cluster: place, skipped: [], searching: false })
+      }
+      const whole = readClusters(slice(file, BASE, next + 4), BASE, null, false, file.end, BOTH)
+      expect(whole.frames.map((frame) => frame.pts)).toEqual(track === 1 ? [1000] : [])
+      expect(whole).toMatchObject({ next, cluster: place, skipped: [] })
+    })
+
+    it('waits for the bytes of a block at the end of a chunk that does not hold the Segment to its end', () => {
+      const file = laid(cluster(1000, [key(1, 0, 1)], { unknown: true }))
+      const read = readClusters(file.chunk, BASE, null, false, file.end + 100, BOTH)
+      expect(read.frames).toEqual([])
+      expect(read.next).toBe(where(file, key(1, 0, 1)))
+    })
+
+    it('needs nothing after a block that ends where the Segment does', () => {
+      const file = laid(cluster(1000, [key(1, 0, 1), delta(3, 40, 2)], { unknown: true }))
+      const read = readWhole(file)
+      expect(read.frames.map((frame) => frame.pts)).toEqual([1000])
+      expect(read).toMatchObject({ next: file.end, skipped: [], ended: true })
+    })
+
+    it('skips a block that a header cut by the Segment end follows: nothing tells what it is', () => {
+      const block = key(1, 0, 1)
+      const file = laid(cluster(1000, [block], { unknown: true }), Uint8Array.of(0x1f, 0x43))
+      const read = readWhole(file)
+      expect(read.frames).toEqual([])
+      expect(read.skipped).toEqual([{ start: where(file, block), end: file.end }])
+      expect(read).toMatchObject({ next: file.end, ended: true })
+    })
+
+    it('asks nothing of what follows a block of a sized cluster', () => {
+      // The cluster bounds the block, so the bytes after it are another element or the cluster's end: the frame is given with only itself held, and damage after it is found where it starts.
+      const block = key(1, 0, 1)
+      const file = laid(cluster(1000, [block]))
+      const cut = readClusters(slice(file, BASE, file.end), BASE, null, false, file.end + 100, BOTH)
+      expect(cut.frames.map((frame) => frame.pts)).toEqual([1000])
+
+      const junk = new Uint8Array(8)
+      const withJunk = laid(cluster(1000, [block, junk]), cluster(2000, [key(1, 0, 3)]))
+      const read = readWhole(withJunk)
+      expect(read.frames.map((frame) => frame.pts)).toEqual([1000, 2000])
+      expect(read.skipped).toEqual([{ start: where(withJunk, junk), end: withJunk.at[1] }])
+    })
+  })
+
+  describe('what stands between clusters', () => {
+    it('takes an element that is not a Segment child as damage, whatever size it claims', () => {
+      const stray = claiming(ID.Timestamp, 1 << 30, 1, 2, 3)
+      const next = cluster(2000, [key(1, 0, 2)])
+      const file = laid(cluster(1000, [key(1, 0, 1)]), stray, next)
+      const read = readWhole(file)
+      expect(read.frames.map((frame) => frame.pts)).toEqual([1000, 2000])
+      expect(read.skipped).toEqual([{ start: where(file, stray), end: where(file, next) }])
+    })
+
+    it('passes over a Void and a CRC-32 between clusters by their size', () => {
+      const file = laid(
+        cluster(1000, [key(1, 0, 1)]),
+        element(ID.Void, new Uint8Array(30)),
+        element(ID.CRC32, [1, 2, 3, 4]),
+        cluster(2000, [key(1, 0, 2)]),
+      )
+      const read = readWhole(file)
+      expect(read.frames.map((frame) => frame.pts)).toEqual([1000, 2000])
+      expect(read.skipped).toEqual([])
+    })
+
+    it('does the same after a cluster of unknown size that an element of the Segment ended', () => {
+      const stray = claiming(ID.SimpleBlock, 1 << 30, 0x81, 0, 0, 0x80, 7)
+      const next = cluster(2000, [key(1, 0, 2)], { unknown: true })
+      const file = laid(cluster(1000, [key(1, 0, 1)], { unknown: true }), cues, stray, next)
+      const read = readWhole(file)
+      expect(read.frames.map((frame) => frame.pts)).toEqual([1000, 2000])
+      expect(read.skipped).toEqual([{ start: where(file, stray), end: where(file, next) }])
+    })
   })
 })
 
@@ -1052,19 +1287,17 @@ describe('readClusters in pieces (§10.4)', () => {
   it('skips damage the same way whatever the pieces', () => {
     const length = damaged.chunk.bytes.length
     const whole = drive(damaged, tracks, length, length)
+    // The bytes that are no element follow the last block of a cluster of unknown size, which nothing then tells to be a block: the damage starts at that block, whose frames are not given.
     expect(whole.frames.map((frame) => [frame.track, frame.pts])).toEqual([
       [1, 1000],
       [1, 2000],
       [1, 3000],
-      [2, 3000],
-      [2, 3020],
-      [2, 3040],
       [1, 4000],
     ])
     expect(whole.skipped).toEqual([
       { start: where(damaged, fake), end: where(damaged, afterFake) },
       { start: where(damaged, noStamp), end: where(damaged, afterNoStamp) },
-      { start: damaged.at[4], end: where(damaged, afterJunk) },
+      { start: where(damaged, lace(0)), end: where(damaged, afterJunk) },
       { start: where(damaged, overrun(2)), end: damaged.end },
     ])
     for (let size = 1; size <= length + 1; size += 1) {

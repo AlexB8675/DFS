@@ -3,11 +3,24 @@ import { Mp4Error } from '../errors.ts'
 import type { Mp4Refusal } from '../errors.ts'
 import type { FrameTable } from '../frames.ts'
 import type { ByteRange } from '../source.ts'
-import { matroskaMovie } from '../testing/ebml.ts'
+import {
+  cluster,
+  element,
+  elementSized,
+  info,
+  matroskaFile,
+  matroskaMovie,
+  simpleBlock,
+  sizeBytes,
+  trackEntry,
+  tracksElement,
+} from '../testing/ebml.ts'
 import type { Movie, MovieCluster, MovieFrame, MovieSpec, TrackSpec } from '../testing/ebml.ts'
 import { fragment, fragmentHead } from '../write.ts'
 import type { FragmentTrack } from '../write.ts'
 import { readHeader } from './ebml.ts'
+import { ID } from './ids.ts'
+import { MAX_BLOCK } from './limits.ts'
 import { readMatroska } from './read.ts'
 import type { MatroskaIndex } from './read.ts'
 import { matroskaFrames, matroskaStart } from './spans.ts'
@@ -912,6 +925,297 @@ describe('damage in the middle of a file (§10.4)', () => {
     expect(pictures.map((row) => row.sync)).toEqual([1, 0, 0, 1, 1])
     expect(result.cursor.pictureStarted).toBe(false)
     expect(result.cursor.ended).toBe(true)
+  })
+})
+
+describe('a damaged size inside a cluster of unknown size (§10.4)', () => {
+  // A file of 36 clusters, about 1.1 MB each, of the VP9 picture and the Opus sound: a keyframe and a sound frame, a big picture frame, and a last sound frame. The big frame of one cluster is damaged in four ways, as a bit flip or a bad write does it, and the walk is run as the engine runs it: a chunk of 1 MiB from where the cursor is, doubled while the cursor does not move. A cluster of unknown size is bounded by the Segment alone, so what the file claims must be bounded by the reader (DESIGN.md §10.4): the chunk the walk needs, the frames it gives and the skip it reports.
+  const MIB = 1024 * 1024
+  const COUNT = 36
+  const DAMAGED = 3
+  /** The data of the big frame: with the 4 bytes of the block's head its size is 0x10F004, which a 3-byte size writes as 30 F0 04. */
+  const BULK = 0x10f000
+  /** The same with a block of 0x11F000, written 31 F0 00. */
+  const BULK_OVER = 0x11f000 - 4
+
+  type Kind = 'key' | 'near' | 'big' | 'late'
+  interface Placed {
+    kind: Kind
+    track: number
+    cluster: number
+    /** Where the block starts (its ID), and where its frame does and how long that is. */
+    start: number
+    offset: number
+    size: number
+  }
+  interface Built {
+    bytes: Uint8Array
+    placed: Placed[]
+    clusterAt: number[]
+  }
+
+  /** A SimpleBlock written with a size of 8 bytes, as some writers do, so that a damaged size can claim any number. */
+  function wide(block: Uint8Array): Uint8Array {
+    const head = must(readHeader(block, 0, block.length))
+    return elementSized(
+      ID.SimpleBlock,
+      sizeBytes(head.end - head.data, 8),
+      block.subarray(head.data),
+    )
+  }
+
+  function build(
+    over: {
+      unknown?: boolean
+      bulk?: Record<number, number>
+      wide?: number[]
+      after?: Record<number, Uint8Array[]>
+    } = {},
+  ): Built {
+    const unknown = over.unknown ?? true
+    const parts: Uint8Array[] = [
+      info({ scale: 1_000_000, duration: COUNT * 1000 }),
+      tracksElement([trackEntry(VP9), trackEntry(OPUS)]),
+    ]
+    let position = parts.reduce((sum, part) => sum + part.length, 0)
+    const placed: Placed[] = []
+    const clusterAt: number[] = []
+    for (let k = 0; k < COUNT; k += 1) {
+      const bulk = over.bulk?.[k] ?? BULK
+      const big = simpleBlock({ track: 1, timecode: 500, frames: [tagged(0x40 + k, bulk)] })
+      const blocks: { kind: Kind; track: number; block: Uint8Array; size: number }[] = [
+        {
+          kind: 'key',
+          track: 1,
+          size: 8,
+          block: simpleBlock({ track: 1, timecode: 0, keyframe: true, frames: [vp9Key(k)] }),
+        },
+        {
+          kind: 'near',
+          track: 2,
+          size: 8,
+          block: simpleBlock({ track: 2, timecode: 0, keyframe: true, frames: [tagged(0x80 + k)] }),
+        },
+        { kind: 'big', track: 1, size: bulk, block: over.wide?.includes(k) ? wide(big) : big },
+        {
+          kind: 'late',
+          track: 2,
+          size: 8,
+          block: simpleBlock({
+            track: 2,
+            timecode: 750,
+            keyframe: true,
+            frames: [tagged(0xc0 + k)],
+          }),
+        },
+      ]
+      const bytes = cluster(
+        1000 * k,
+        blocks.map((one) => one.block),
+        { unknown },
+      )
+      clusterAt.push(position)
+      parts.push(bytes)
+      // The blocks end the cluster, so where they start is counted back from its end.
+      let at = position + bytes.length - blocks.reduce((sum, one) => sum + one.block.length, 0)
+      for (const one of blocks) {
+        const head = must(readHeader(one.block, 0, one.block.length))
+        placed.push({
+          kind: one.kind,
+          track: one.track,
+          cluster: k,
+          start: at,
+          offset: at + head.data + 4,
+          size: one.size,
+        })
+        at += one.block.length
+      }
+      position += bytes.length
+      for (const extra of over.after?.[k] ?? []) {
+        parts.push(extra)
+        position += extra.length
+      }
+    }
+    const file = matroskaFile(parts)
+    const base = file.segmentData
+    return {
+      bytes: file.bytes,
+      clusterAt: clusterAt.map((at) => at + base),
+      placed: placed.map((one) => ({ ...one, start: one.start + base, offset: one.offset + base })),
+    }
+  }
+
+  interface Walked {
+    rows: Map<number, Row[]>
+    skipped: ByteRange[]
+    maxChunk: number
+  }
+
+  /** The engine's loop over the whole file: 1 MiB from the cursor, doubled while the cursor does not move. The dts of a track must rise. */
+  function engine(bytes: Uint8Array): Walked {
+    const index = indexOf(bytes)
+    const rows = new Map<number, Row[]>()
+    const skipped: ByteRange[] = []
+    let maxChunk = 0
+    let cursor = matroskaStart(index, 2)
+    for (let calls = 0; !cursor.ended; calls += 1) {
+      if (calls > 10_000) throw new Error('the walk never ends')
+      let size = MIB
+      for (;;) {
+        const stop = Math.min(cursor.at + size, bytes.length)
+        maxChunk = Math.max(maxChunk, stop - cursor.at)
+        const result = matroskaFrames(index, cursor, {
+          start: cursor.at,
+          bytes: bytes.subarray(cursor.at, stop),
+        })
+        const moved =
+          result.cursor.at !== cursor.at ||
+          result.cursor.ended ||
+          result.frames.length > 0 ||
+          result.skipped.length > 0
+        if (moved) {
+          collect(rows, result.frames)
+          skipped.push(...result.skipped)
+          cursor = result.cursor
+          break
+        }
+        if (stop >= bytes.length) throw new Error(`the cursor stays at ${cursor.at} to the end`)
+        size *= 2
+      }
+    }
+    for (const list of rows.values()) {
+      for (const [at, row] of list.entries()) {
+        if (at > 0) expect(row.dts).toBeGreaterThan(must(list[at - 1]).dts)
+      }
+    }
+    return { rows, skipped, maxChunk }
+  }
+
+  /** The offsets of the frames of a track in the order they are given, which are the file's but for what a skip took. */
+  function offsetsOf(walked: Walked, track: number): number[] {
+    return (walked.rows.get(track) ?? []).map((row) => row.offset)
+  }
+
+  /** The frames the file has less the lost ones, by their offsets, of a track. */
+  function kept(built: Built, track: number, lost: (one: Placed) => boolean): number[] {
+    return built.placed.filter((one) => one.track === track && !lost(one)).map((one) => one.offset)
+  }
+
+  /** What a damaged block of cluster DAMAGED costs: the block and the one after it in its cluster, which the search for the next cluster passes over. */
+  const lostWithBlock = (one: Placed): boolean =>
+    one.cluster === DAMAGED && (one.kind === 'big' || one.kind === 'late')
+
+  function theBig(built: Built): Placed {
+    return must(built.placed.find((one) => one.cluster === DAMAGED && one.kind === 'big'))
+  }
+
+  /** The frames and the skip that the walk of a file damaged in the big block of cluster DAMAGED gives and reports: the block is lost, with the rest of its cluster, the skip starts at the block, and every cluster after it is read. */
+  function expectLostFromTheBlock(built: Built, walked: Walked): void {
+    const big = theBig(built)
+    expect
+      .soft(merged(walked.skipped))
+      .toEqual([{ start: big.start, end: must(built.clusterAt[DAMAGED + 1]) }])
+    expect.soft(offsetsOf(walked, 1)).toEqual(kept(built, 1, lostWithBlock))
+    expect.soft(offsetsOf(walked, 2)).toEqual(kept(built, 2, lostWithBlock))
+    for (const row of walked.rows.get(1) ?? []) expect.soft(row.size).toBeLessThanOrEqual(BULK_OVER)
+  }
+
+  /** The block's size written again to claim `claim` bytes of data (the size is 8 bytes wide), and the offset where that claim ends. */
+  function claiming(built: Built, claim: number): { bytes: Uint8Array; end: number } {
+    const bytes = Uint8Array.from(built.bytes)
+    const big = theBig(built)
+    bytes.set(sizeBytes(claim, 8), big.start + 1)
+    return { bytes, end: big.start + 9 + claim }
+  }
+
+  /** A flip of the width marker of the block's size (0x20 in its first byte), which then reads 4 bytes wide, its value taking the next byte, and its data starting a byte on. */
+  function flipped(built: Built): { bytes: Uint8Array; end: number } {
+    const bytes = Uint8Array.from(built.bytes)
+    const big = theBig(built)
+    if ((bytes[big.start + 1] ?? 0) < 0x30) throw new Error('the size is not 3 bytes wide')
+    bytes[big.start + 1] = (bytes[big.start + 1] ?? 0) ^ 0x20
+    const head = must(readHeader(bytes, big.start, bytes.length))
+    return { bytes, end: head.end }
+  }
+
+  const unknownFile = build({ wide: [DAMAGED] })
+
+  it('does not wait for a block that claims 16 MiB more than it holds: no big chunk, no garbage frame, a skip from the block', () => {
+    const damaged = claiming(unknownFile, 4 + BULK + 16 * MIB)
+    // The claim ends inside another frame's filling, in the file: nothing but the cap stops a reader there.
+    expect(damaged.end + 4).toBeLessThan(damaged.bytes.length)
+    expect(damaged.bytes[damaged.end]).toBe(0x11)
+
+    const walked = engine(damaged.bytes)
+    expect.soft(walked.maxChunk).toBeLessThanOrEqual(MAX_BLOCK + MIB)
+    expectLostFromTheBlock(unknownFile, walked)
+  })
+
+  it('does not give a garbage frame for a block that claims 8 MiB more than it holds', () => {
+    const damaged = claiming(unknownFile, 4 + BULK + 8 * MIB)
+    expect(damaged.end + 4).toBeLessThan(damaged.bytes.length)
+    expect(damaged.bytes[damaged.end]).toBe(0x11)
+
+    const walked = engine(damaged.bytes)
+    expect.soft(walked.maxChunk).toBeLessThanOrEqual(MAX_BLOCK + MIB)
+    expectLostFromTheBlock(unknownFile, walked)
+  })
+
+  it('skips from the block whose size a flipped bit made wider, so that it reads as the block of another track and claims 15 MiB', () => {
+    const built = build()
+    const damaged = flipped(built)
+    expect(damaged.end - theBig(built).start).toBeGreaterThan(14 * MIB)
+    expect(damaged.end - theBig(built).start).toBeLessThan(MAX_BLOCK)
+    expect(damaged.bytes[damaged.end]).toBe(0x11)
+
+    const walked = engine(damaged.bytes)
+    expect.soft(walked.maxChunk).toBeLessThanOrEqual(MAX_BLOCK + MIB)
+    expectLostFromTheBlock(built, walked)
+  })
+
+  it('skips from the block whose size a flipped bit made wider, so that it claims 31 MiB', () => {
+    const built = build({ bulk: { [DAMAGED]: BULK_OVER } })
+    const damaged = flipped(built)
+    expect(damaged.end - theBig(built).start).toBeGreaterThan(MAX_BLOCK)
+    expect(damaged.end + 4).toBeLessThan(damaged.bytes.length)
+
+    const walked = engine(damaged.bytes)
+    expect.soft(walked.maxChunk).toBeLessThanOrEqual(MAX_BLOCK + MIB)
+    expectLostFromTheBlock(built, walked)
+  })
+
+  it('skips from an element between clusters whose ID no Segment holds, whatever size it claims', () => {
+    // Cluster 3 is followed by Tags, which end a cluster of unknown size, and then by a block's ID with a size of 20 MiB.
+    const stray = elementSized(ID.SimpleBlock, sizeBytes(20 * MIB, 8), [0x81, 0, 0, 0x80, 7])
+    const built = build({ after: { [DAMAGED]: [element(ID.Tags, new Uint8Array(20)), stray] } })
+    const next = must(built.clusterAt[DAMAGED + 1])
+    const walked = engine(built.bytes)
+    expect.soft(walked.maxChunk).toBeLessThanOrEqual(MAX_BLOCK + MIB)
+    expect.soft(merged(walked.skipped)).toEqual([{ start: next - stray.length, end: next }])
+    // Nothing of a cluster was lost: every frame of the file is given.
+    expect.soft(offsetsOf(walked, 1)).toEqual(kept(built, 1, () => false))
+    expect.soft(offsetsOf(walked, 2)).toEqual(kept(built, 2, () => false))
+  })
+
+  describe('with the clusters sized, the same edits are read as they were', () => {
+    // The cluster bounds every claim, so these were skipped from the block before, and are now.
+    const sized = build({ unknown: false, wide: [DAMAGED] })
+    const plain = build({ unknown: false })
+
+    it.each([
+      ['16 MiB more', 16 * MIB],
+      ['8 MiB more', 8 * MIB],
+    ])('skips from the block that claims %s, reading on at the next cluster', (_name, more) => {
+      const damaged = claiming(sized, 4 + BULK + more)
+      const walked = engine(damaged.bytes)
+      expect(walked.maxChunk).toBeLessThanOrEqual(2 * MIB)
+      expectLostFromTheBlock(sized, walked)
+    })
+
+    it('skips from the block whose size a flipped bit made wider', () => {
+      const walked = engine(flipped(plain).bytes)
+      expectLostFromTheBlock(plain, walked)
+    })
   })
 })
 

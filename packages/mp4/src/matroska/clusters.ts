@@ -4,8 +4,8 @@ import { readBlockGroup, readSimpleBlock } from './blocks.ts'
 import type { BlockFrames } from './blocks.ts'
 import { readHeader, readUint } from './ebml.ts'
 import type { Element } from './ebml.ts'
-import { ID, TOP_LEVEL } from './ids.ts'
-import { HEADER_READ } from './limits.ts'
+import { AFTER_BLOCK, ID, TOP_LEVEL } from './ids.ts'
+import { HEADER_READ, MAX_BLOCK } from './limits.ts'
 
 // The clusters of a Matroska or WebM file (DESIGN.md §10.4, D45): the part of the
 // Segment that holds the frames. A Cluster has a Timestamp, in ticks, and blocks
@@ -21,7 +21,8 @@ import { HEADER_READ } from './limits.ts'
 // gives what one read of everything would. An element it has no use for is passed
 // over by its size and needn't be held: a block of a track nobody asked for (all
 // that is needed of it is its header and the track number that follows), or any
-// element that is not a block, and so `next` may be past the end of the chunk.
+// element that is not a block, and so `next` may be past the end of the chunk. (A
+// block in a cluster of unknown size is the exception, see below.)
 //
 // A file's damage is never thrown from here: a writer that was cut off, a block
 // that lies about its lacing or a stretch of garbage is skipped, to the next
@@ -29,6 +30,18 @@ import { HEADER_READ } from './limits.ts'
 // header reads, and a Timestamp is among its first children), since the bytes of
 // its ID can be anywhere, in the payload of a frame for one. When the chunk holds
 // no cluster after the damage the search goes on in the next call (`searching`).
+//
+// A cluster of unknown size is bounded by the Segment alone, so a size that damage
+// has made larger inside it would be waited for as a download, or passed over with
+// the frames it covers lost without a word, and a caller that holds one chunk from
+// the cursor can't skip a block it hasn't read. So the bound is kept here, in three
+// checks that a cluster of its own size never needs (it bounds every claim): an
+// element of such a cluster that claims more than `MAX_BLOCK` is damaged; a block
+// is taken only when the bytes where it claims to end start an element that can
+// follow it (or are the Segment's end), the bytes of a block of a track nobody
+// asked for included, which are then held whole; and between clusters an element
+// that no Segment holds is damaged and is not passed over by its size. A damage
+// is skipped from the element, or the block, that shows it.
 
 /** One frame of a track asked for, as the file has it: a range of the file, and when it is. */
 export interface RawFrame {
@@ -82,6 +95,9 @@ export interface ClusterRead {
 /** The bytes of a Cluster's ID, and how many they are. */
 const CLUSTER_ID = [0x1f, 0x43, 0xb6, 0x75]
 const ID_WIDTH = CLUSTER_ID.length
+
+/** How many bytes after a block in a cluster of unknown size a caller holds for the block to be taken: the longest ID, which tells whether what follows can follow a block. */
+export const FOLLOW_BYTES = 4
 
 /** A Cluster's Timestamp is among its first children, not counting a CRC-32 or a Void (ffmpeg writes the CRC-32 first and then the Timestamp). */
 const TIMESTAMP_WITHIN = 3
@@ -255,6 +271,23 @@ function peekTrack(bytes: Uint8Array, el: Element, held: number): number | null 
   return null
 }
 
+/**
+ * Whether the element that starts at `at` of `bytes` (read no further than `stop`) is
+ * one that can follow a block in a cluster of unknown size (`AFTER_BLOCK`), from its
+ * ID alone: null when the ID is not all held. An ID wider than 4 bytes, a first byte
+ * below 0x10, is none that any element has.
+ */
+function canFollow(bytes: Uint8Array, at: number, stop: number): boolean | null {
+  const first = bytes[at]
+  if (first === undefined || at >= stop) return null
+  if (first < 0x10) return false
+  const width = Math.clz32(first) - 23
+  if (at + width > stop) return null
+  let id = 0
+  for (let i = at; i < at + width; i += 1) id = id * 256 + (bytes[i] ?? 0)
+  return AFTER_BLOCK.has(id)
+}
+
 /** The vint at `at` of `bytes`, read no further than `stop`: null when it isn't all there. A first byte of 0 is a number wider than 8 bytes. */
 function trackAt(bytes: Uint8Array, at: number, stop: number): number | null {
   const first = bytes[at]
@@ -318,6 +351,17 @@ function timed(
  * or null when `at` is between clusters, at an element of the Segment's own. While
  * `searching`, `at` is where to start looking for a cluster, after damage. The
  * Segment ends at `segmentEnd`. An `at` that is not in the chunk is a RangeError.
+ *
+ * What a file claims is bounded here, for the caller can't bound it: it holds one
+ * chunk from the cursor and has no way to skip a block. A sized cluster bounds every
+ * size inside it. In a cluster of unknown size (only the Segment bounds it) an
+ * element whose data claims more than `MAX_BLOCK` is damaged, and a block, of a track
+ * asked for or not, is taken only when the bytes where it claims to end are held
+ * and start an element that can follow it (`AFTER_BLOCK`), or it ends at the
+ * Segment's end; until they are held the call stops before the block, as it does for
+ * one that is cut. Between clusters an element that is not the Segment's own (nor a
+ * Void or a CRC-32) is damaged. All of these are skipped from the element, as a
+ * damage is.
  */
 export function readClusters(
   chunk: Chunk,
@@ -380,8 +424,12 @@ export function readClusters(
       }
       if (el.id !== ID.Cluster) {
         // The rest of the Segment's own elements (Cues, Tags and the others) are
-        // passed over by their size, which needn't be held.
+        // passed over by their size, which needn't be held. An element that is not
+        // one of them is no element of the Segment, and its size is not to be trusted.
         if (!el.sized) throw damaged(`The element at offset ${pos} has an unknown size.`)
+        if (!TOP_LEVEL.has(el.id) && el.id !== ID.Void && el.id !== ID.CRC32) {
+          throw damaged(`The element at offset ${pos} is none that a Segment holds.`)
+        }
         pos = Math.min(base + el.end, segmentEnd)
         return true
       }
@@ -412,6 +460,13 @@ export function readClusters(
         `The element at offset ${pos} runs past the end of its cluster, at ${place.end}.`,
       )
     }
+    // Nothing but the Segment bounds an element of a cluster of unknown size, so the
+    // size of one is bounded here (`MAX_BLOCK`).
+    if (!place.sized && el.end - el.data > MAX_BLOCK) {
+      throw damaged(
+        `The element at offset ${pos} in a cluster of unknown size claims ${el.end - el.data} bytes, more than the ${MAX_BLOCK} that one may.`,
+      )
+    }
     if (el.id !== ID.SimpleBlock && el.id !== ID.BlockGroup) {
       pos = end
       return true
@@ -421,6 +476,24 @@ export function readClusters(
     // held, but a block of one asked for, or whose track the held bytes don't tell,
     // is read, and so must be whole.
     const track = peekTrack(bytes, el, held - base)
+    // In a cluster of unknown size a block is taken, or passed over, only where the
+    // bytes at its end are held and start an element that can follow it, so that a
+    // size that damage has made wrong is found at the block and not by what it
+    // covers; so a block of a track nobody asked for is held to its end, then.
+    if (!place.sized && end !== place.end) {
+      const follows = canFollow(bytes, end - base, limit - base)
+      if (follows === null) {
+        if (complete) {
+          throw damaged(`The Segment ends in the middle of the element after the block at ${pos}.`)
+        }
+        return false
+      }
+      if (!follows) {
+        throw damaged(
+          `The block at offset ${pos} is not followed by an element that can follow it.`,
+        )
+      }
+    }
     if (track !== null && !wanted.has(track)) {
       pos = end
       return true

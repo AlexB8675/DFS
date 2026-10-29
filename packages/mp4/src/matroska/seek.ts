@@ -1,7 +1,7 @@
 import { Mp4Error } from '../errors.ts'
 import { heldBytes } from '../source.ts'
 import type { ByteRange, Chunk, Step } from '../source.ts'
-import { findCluster, readClusters } from './clusters.ts'
+import { FOLLOW_BYTES, findCluster, readClusters } from './clusters.ts'
 import type { ClusterPlace, ClusterRead } from './clusters.ts'
 import { readHeader, readUint, walkChildren } from './ebml.ts'
 import type { Element } from './ebml.ts'
@@ -254,15 +254,18 @@ function blockHead(bytes: Uint8Array, el: Element): BlockHead | null {
 
 /**
  * The block that a `readClusters` over `bytes` (starting at `base` in the file)
- * stopped at because the bytes end before it does: its end is read from its header.
- * Null when the read went to the end of the bytes, or stopped at something else
- * (the header of an element is cut by the bytes' end too, and says nothing).
+ * stopped at because the bytes end before it does, or, in a cluster of unknown size,
+ * before the ID of the element after it (`FOLLOW_BYTES` of them): its end is read
+ * from its header. Null when the read went to the end of the bytes, or stopped at
+ * something else (the header of an element is cut by the bytes' end too, and says
+ * nothing).
  */
 function cutOf(read: ClusterRead, bytes: Uint8Array, base: number): Cut | null {
   const at = read.next - base
   if (read.cluster === null || read.searching || at < 0 || at >= bytes.length) return null
   const el = headerAt(bytes, at)
-  if (el === null || !el.sized || !BLOCKS.has(el.id) || el.end <= bytes.length) return null
+  const after = read.cluster.sized ? 0 : FOLLOW_BYTES
+  if (el === null || !el.sized || !BLOCKS.has(el.id) || el.end + after <= bytes.length) return null
   return {
     at: read.next,
     end: base + el.end,
@@ -561,13 +564,15 @@ class Seeking {
    */
   private wholeBlock(landing: Landing, cut: Cut): Key | null {
     const { segment, video } = this.index
-    if (cut.end > segment.end || cut.end - landing.at > FIRST_FRAMES_BYTES) {
+    // A block of a cluster of unknown size is taken only with the ID of what follows it, which is read with it.
+    const end = Math.min(cut.end + (cut.place.sized ? 0 : FOLLOW_BYTES), segment.end)
+    if (cut.end > segment.end || end - landing.at > FIRST_FRAMES_BYTES) {
       const { head } = cut
       return head !== null && head.track === video.read.number && head.keyframe
         ? { pts: cut.place.timestamp + head.timecode, offset: cut.at }
         : null
     }
-    const bytes = this.take({ start: landing.at, end: cut.end })
+    const bytes = this.take({ start: landing.at, end })
     const read = readClusters(
       { start: landing.at, bytes },
       landing.at,

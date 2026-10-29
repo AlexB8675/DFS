@@ -36,5 +36,8 @@ export const MAX_CUE_POINTS = 2 ** 20
 /** The most children that the walk of a CuePoint, or of a CueTrackPositions, takes: 64, where a real one has a handful. One with more is damaged, as the Cues that hold it are. */
 export const MAX_CUE_FIELDS = 64
 
+/** The most that an element inside a cluster of unknown size may claim for its data: 16 MiB, where the biggest frame of a real file is a few megabytes. Nothing but the Segment bounds such a cluster, so a size that damage has made larger would be waited for as a download, or passed over as frames lost without a word; an element that claims more is damaged, and reading resyncs from it. */
+export const MAX_BLOCK = 16 * 1024 * 1024
+
 /** One guess of a search for a cluster, and the bytes read from a cluster to see that it holds a keyframe: 256 KiB. */
 export const SEARCH_READ = 256 * 1024

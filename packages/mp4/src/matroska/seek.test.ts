@@ -1537,6 +1537,35 @@ describe('seeking in files of big clusters and big keyframes (§10.4)', () => {
     expect(landsBefore(opened, file.bytes, late.cursor, 5.9)).toBe(5.8)
   })
 
+  it('confirms a keyframe of 600 KiB in clusters of unknown size, which is read whole with the bytes that tell what follows it', () => {
+    // A block in a cluster of unknown size is taken only when the ID of the element after it is held, so the read of the block whole goes up to it, and its few bytes more.
+    const key = 600 * 1024
+    const unknown = movieOf(seconds(20, { key, unknown: true }))
+    const index = indexOf(unknown.bytes)
+    for (const time of [0.5, 7.5, 12, 19.9]) {
+      const { cursor, asks } = seek(index, unknown.bytes, time)
+      expect(asks.length).toBeLessThanOrEqual(MAX_SEEK_READS)
+      expect(inCluster(unknown.clusters, cursor.at)).toBe(Math.floor(time))
+      expect(landsBefore(index, unknown.bytes, cursor, time)).toBe(Math.floor(time))
+      const ahead = seek(index, unknown.bytes, time, { held: everything(unknown.bytes) })
+      expect(ahead.cursor).toEqual(cursor)
+    }
+  })
+
+  it('confirms a keyframe whose block ends a few bytes short of the end of a read, in clusters of unknown size', () => {
+    // The read of SEARCH_READ bytes from a cluster ends 0 to 3 bytes after the block, where the ID of the element that follows it is not all held: the block is read whole with those bytes, as one that the read stops inside is.
+    const found: number[] = []
+    for (let key = SEARCH_READ - 40; key < SEARCH_READ; key += 1) {
+      const unknown = movieOf(seconds(20, { key, unknown: true }))
+      const index = indexOf(unknown.bytes)
+      for (const time of [3.5, 7.5, 12.5]) {
+        const { cursor } = seek(index, unknown.bytes, time)
+        if (inCluster(unknown.clusters, cursor.at) !== Math.floor(time)) found.push(key)
+      }
+    }
+    expect(found).toEqual([])
+  })
+
   it('confirms a keyframe of 5 MiB, which is over what is read whole, by the header of its block', () => {
     const key = 5 * MIB
     expect(key).toBeGreaterThan(FIRST_FRAMES_BYTES)

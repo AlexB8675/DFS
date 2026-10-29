@@ -91,6 +91,9 @@ export const ID = {
   Timestamp: 0xe7,
   SimpleBlock: 0xa3,
   BlockGroup: 0xa0,
+  // A Cluster's Position and PrevSize, which a writer may put among its children and the reader passes over.
+  Position: 0xa7,
+  PrevSize: 0xab,
   Block: 0xa1,
   BlockDuration: 0x9b,
   ReferenceBlock: 0xfb,
@@ -120,4 +123,23 @@ export const TOP_LEVEL: ReadonlySet<number> = new Set<number>([
   ID.Tags,
   ID.Chapters,
   ID.Attachments,
+])
+
+/**
+ * The IDs of the elements that can follow a block inside a Cluster of unknown size:
+ * another block, the Cluster's other children that the reader knows (a writer may put
+ * its Timestamp, Position and PrevSize among the blocks), a Void or a CRC-32, and an
+ * element of the Segment's own, which ends the Cluster. The deprecated SilentTracks and
+ * EncryptedBlock are left out, for no writer puts either after a block and neither is
+ * a frame the reader could play.
+ */
+export const AFTER_BLOCK: ReadonlySet<number> = new Set<number>([
+  ID.SimpleBlock,
+  ID.BlockGroup,
+  ID.Timestamp,
+  ID.Position,
+  ID.PrevSize,
+  ID.Void,
+  ID.CRC32,
+  ...TOP_LEVEL,
 ])

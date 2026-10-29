@@ -293,9 +293,12 @@ function inRuns(
  * - When the chunk ends before the next element is whole, nothing is read and the
  *   cursor comes back at the same `at`: the caller reads a bigger chunk from `at` and
  *   calls again, and the engine doubles its read until the cursor moves. The size
- *   that a block claims is not bounded here: a block of a track asked for must be
- *   whole in the chunk, so a block that claims more than the file holds is waited for
- *   to the file's end, which is for the engine's read to cap.
+ *   that a block claims is bounded here, for the engine can't skip a block and a
+ *   claim that is waited for is a download: in a cluster of unknown size (a sized
+ *   cluster bounds its blocks) a block is at most `MAX_BLOCK`, and the bytes where it
+ *   ends must start an element that can follow it, else it is damage and is skipped
+ *   like any (`readClusters`). So in such a cluster the chunk that the engine needs
+ *   reaches no further than `MAX_BLOCK` and the bytes after it from the cursor.
  *
  * A time that a table can't hold, or a decode time before 0 after the track's shift (a
  * span of frames that the index was not made from), is `damaged`.

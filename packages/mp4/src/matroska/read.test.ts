@@ -547,6 +547,54 @@ describe('a first Cluster past the head', () => {
   })
 })
 
+describe('a first block that ends where the first read does, in a cluster of unknown size', () => {
+  // A block in a cluster of unknown size is taken once the ID of the element after it is held (1 to 4 bytes), so a read that ends at the block's end, or a few bytes after, does not hold it: the next read does, and the index is the one of a caller that holds the file.
+  it('is the index of a caller that holds the whole file, for a block that ends 8 bytes before the read to 8 after it', () => {
+    for (let delta = -8; delta <= 8; delta += 1) {
+      const build = (size: number): Movie =>
+        movie({
+          tracks: [VP9, opus(2)],
+          clusters: [
+            {
+              timestamp: 0,
+              unknown: true,
+              frames: [
+                frame(1, 0, { keyframe: true, data: key(size) }),
+                frame(2, 0, { keyframe: true }),
+                frame(1, 33),
+                frame(2, 20, { keyframe: true }),
+                frame(1, 67),
+                frame(2, 40, { keyframe: true }),
+                frame(1, 100),
+              ],
+            },
+            { timestamp: 1000, unknown: true, frames: [frame(1, 1000, { keyframe: true })] },
+          ],
+        })
+      // The first block ends at the end of the head when its frame is the rest of it after the cluster's header, its Timestamp and its own header (12, 3 and 8 bytes). (A file of this size writes the Segment's size in the same bytes as one of a megabyte less a thousand.)
+      const first = build(HEAD - 1000).clusters[0]?.start ?? NaN
+      const size = HEAD - first - 12 - 3 - 8 + delta
+      const file = build(size)
+      // The premise: the first block of the cluster (after its Timestamp) ends `delta` bytes from the head's end.
+      const cluster = readHeader(file.bytes, first, file.bytes.length)
+      const stamp = readHeader(file.bytes, cluster?.data ?? NaN, file.bytes.length)
+      const block = readHeader(file.bytes, stamp?.end ?? NaN, file.bytes.length)
+      expect(block?.end).toBe(HEAD + delta)
+      const opened = open(file.bytes)
+      expect(opened.asks.length).toBeLessThanOrEqual(MAX_INDEX_READS)
+      const ahead: Chunk[] = [{ start: 0, bytes: file.bytes.subarray(0, HEAD) }]
+      for (let at = HEAD; at < file.bytes.length; at += MIB) {
+        ahead.push({ start: at, bytes: file.bytes.subarray(at, at + MIB) })
+      }
+      const held = readMatroska(ahead, file.bytes.length)
+      if (!('done' in held)) throw new Error('expected the index')
+      expect(plain(opened.index), `a block ending ${delta} bytes from the head's end`).toEqual(
+        plain(held.done),
+      )
+    }
+  })
+})
+
 describe('a picture with large frames', () => {
   /** An H.264 picture of depth 2, as x264 writes B-frames, whose frames in decode order are presented at these times (ms). */
   const H264: TrackSpec = {
