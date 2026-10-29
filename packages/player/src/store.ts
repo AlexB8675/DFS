@@ -7,7 +7,10 @@
 // read from the moment its first byte is written. What the store holds is decided
 // when a call is made and only the sealing is awaited, so that two writes cannot
 // be given the same slot and a read cannot meet a change made after it started.
-// Evicting the blocks that are furthest from the playhead is added to the core next.
+// When no slot is free, the settled block that is furthest from where the engine
+// reads gives its slot to a block that is strictly nearer, and a frontier that is
+// full of blocks still further lets go of them to take a write near the position.
+// All of this happens inside `write`, where the outcome can say what was let go of.
 
 import type { ByteRange } from '@dfs/mp4'
 import { blockOf, blockSpan } from './blocks.ts'
@@ -38,9 +41,13 @@ export type StoreBackend = { kind: 'disk'; file: SlotFile; key: PlayKey } | { ki
 export interface WriteOutcome {
   /** Whether a block that the write completed (or one that still waits) found no free slot, so that the downloader should stop. */
   full: boolean
-  /** How many bytes the write evicted to make room. */
+  /** How many bytes `evicted` covers. */
   evictedBytes: number
-  /** The file ranges that the write evicted, in order. */
+  /**
+   * The file ranges that were let go of, in order: those that earlier writes made and
+   * could not report because they failed, then those that this write made to give
+   * a block a slot or to make room in the frontier.
+   */
   evicted: readonly ByteRange[]
 }
 
@@ -65,7 +72,7 @@ export interface PlayStore {
   write(offset: number, bytes: Uint8Array): Promise<WriteOutcome>
   /** The bytes of [start, end), or null when any of them is not held. */
   read(start: number, end: number): Promise<Uint8Array | null>
-  /** Where the engine reads: eviction measures from it, and never evicts its block. */
+  /** Where the engine reads: only records it. Writes measure eviction from it, and never evict its block. */
   setPosition(offset: number): void
   stats(): StoreStats
   /** Deletes everything; later calls reject with StoreError('closed'). */
@@ -75,7 +82,7 @@ export interface PlayStore {
 /** The size of a slot on disk: a whole block and what sealing adds to it. */
 const SLOT_BYTES = BLOCK_BYTES + SEAL_OVERHEAD
 
-/** A block that is still filling, or that is complete and has not yet found its slot. */
+/** A block that is still filling, or that is complete and has no slot: none was free for it, or the write of its slot failed. */
 interface FrontierBlock {
   /** The block's bytes, as long as the block is: the last block of a file is shorter than the others. */
   readonly bytes: Uint8Array<ArrayBuffer>
@@ -83,8 +90,6 @@ interface FrontierBlock {
   readonly have: RangeSet
   /** Whether a slot is chosen for it and its write to that slot has not finished. */
   pending: boolean
-  /** Whether it is complete and no slot was free for it. */
-  waiting: boolean
 }
 
 /** Whether a block's bytes are all present. */
@@ -109,6 +114,15 @@ function onFile<T>(action: string, call: () => T): T {
   } catch (error) {
     throw fileError(action, error)
   }
+}
+
+/** The answer of a block's write to its slot: null when it landed, or what it failed with. */
+type SlotWrite = Promise<{ error: unknown } | null>
+
+/** A frontier block that is to be given a slot, and the settled block whose slot it takes (null: a slot that is free). */
+interface Placement {
+  index: number
+  victim: number | null
 }
 
 /** A block of the file that a read needs from a slot on disk, taken from the file when the read was made. */
@@ -142,6 +156,8 @@ export class CoreStore implements PlayStore {
   /** The first slot that was never used: the slots from here to the end are free. */
   #unused = 0
   #evictedBytes = 0
+  /** The ranges that eviction let go of in writes that then failed: a write that fails cannot say what it evicted, so the next one that succeeds does. */
+  readonly #unreported: ByteRange[] = []
   #position = 0
   #closed = false
 
@@ -170,6 +186,11 @@ export class CoreStore implements PlayStore {
     if (this.#closed) throw new StoreError('closed', 'the store is closed')
   }
 
+  /** How many slots are free: those that were let go of and those that were never used. */
+  #freeSlots(): number {
+    return this.#freed.length + (this.#slotCount - this.#unused)
+  }
+
   /** A free slot, taking the one that was let go last before any that was never used, or null when every slot is taken. */
   #takeSlot(): number | null {
     const freed = this.#freed.pop()
@@ -181,10 +202,142 @@ export class CoreStore implements PlayStore {
     return null
   }
 
-  /** Whether a complete block is waiting in the frontier for a slot. */
+  /** Says how far a block is from the block that the engine reads, in blocks. The position may be the end of the file, where no block starts. */
+  #distances(): (index: number) => number {
+    const at = blockOf(this.#position)
+    return (index) => Math.abs(index - at)
+  }
+
+  /** The blocks of the frontier that are complete and have no slot chosen: those that wait, and those that a write has just completed. */
+  #complete(): number[] {
+    const indexes: number[] = []
+    for (const [index, block] of this.#frontier) {
+      if (!block.pending && isComplete(block)) indexes.push(index)
+    }
+    return indexes
+  }
+
+  /**
+   * Decides where the given complete blocks go, and changes nothing. A block takes a
+   * free slot while there is one, nearest to the position first (and, among blocks
+   * that are as near, the one ahead of the position, which is needed next). When
+   * none is free it takes the slot of the settled block that is furthest from the
+   * position, but only if that block is strictly further than it is (the one behind
+   * the position first, among blocks as far as one another). The block of the position
+   * is 0 away, which is never strictly further than another block, so it is never
+   * evicted; and a block whose slot write is still in flight is not settled yet, so it
+   * is never evicted either. Because the blocks come nearest first and the victims
+   * furthest first, a block that finds no victim is followed by blocks that find none.
+   */
+  #plan(candidates: readonly number[]): Placement[] {
+    const placements: Placement[] = []
+    const away = this.#distances()
+    const nearest = [...candidates].sort((a, b) => away(a) - away(b) || b - a)
+    let free = this.#freeSlots()
+    let settled: number[] | null = null
+    let taken = 0
+    for (const index of nearest) {
+      if (free > 0) {
+        free -= 1
+        placements.push({ index, victim: null })
+        continue
+      }
+      settled ??= [...this.#slotOf.keys()].sort((a, b) => away(b) - away(a) || a - b)
+      const victim = settled[taken]
+      if (victim !== undefined && away(victim) > away(index)) {
+        taken += 1
+        placements.push({ index, victim })
+      } else {
+        // This block and every one after it, which is no nearer, wait for the position to move or for a slot to be let go of.
+        break
+      }
+    }
+    return placements
+  }
+
+  /**
+   * Which blocks the frontier lets go of to take a write that adds `added.length`
+   * blocks to it, given that the plan for the blocks that wait is carried out first.
+   * On disk a block that is given a slot stays in the frontier until its write lands,
+   * and in memory it leaves at once. A block that can be let go of is not in flight,
+   * is not one the write fills or the plan places, and is strictly further from the
+   * position than every block the write adds: the furthest goes first, and the one
+   * behind the position among blocks as far as one another. A write that cannot be
+   * made to fit throws before anything is changed.
+   */
+  #planDrops(
+    touched: readonly number[],
+    added: readonly number[],
+    placements: readonly Placement[],
+    write: { offset: number; length: number },
+  ): number[] {
+    const leaving = this.#disk === null ? placements.length : 0
+    const over = this.#frontier.size - leaving + added.length - FRONTIER_BLOCKS
+    if (over <= 0) return []
+    const away = this.#distances()
+    const reach = Math.max(...added.map(away))
+    const kept = new Set([...touched, ...placements.map((placement) => placement.index)])
+    const droppable: number[] = []
+    for (const [index, block] of this.#frontier) {
+      if (!block.pending && !kept.has(index) && away(index) > reach) droppable.push(index)
+    }
+    if (droppable.length < over) {
+      throw new RangeError(
+        `a write of ${write.length} bytes at ${write.offset} would add ${added.length} blocks to the ${this.#frontier.size} that the frontier holds, past its ${FRONTIER_BLOCKS}`,
+      )
+    }
+    droppable.sort((a, b) => away(b) - away(a) || a - b)
+    return droppable.slice(0, over)
+  }
+
+  /** Lets go of a settled block, in the store and in `held`, and answers the slot it had. */
+  #evict(index: number, evicted: ByteRange[]): number {
+    const slot = this.#slotOf.get(index)
+    if (slot === undefined) throw new Error(`block ${index} is to be evicted and is in no slot`)
+    const span = blockSpan(index, this.fileSize)
+    this.#slotOf.delete(index)
+    this.#memory.delete(slot)
+    this.#held.remove(span)
+    this.#evictedBytes += span.end - span.start
+    evicted.push(span)
+    return slot
+  }
+
+  /** Lets go of the bytes that a block of the frontier holds, in the store and in `held`. */
+  #drop(index: number, evicted: ByteRange[]): void {
+    const block = this.#frontier.get(index)
+    if (block === undefined)
+      throw new Error(`block ${index} is to be let go of and is not in the frontier`)
+    const { start } = blockSpan(index, this.fileSize)
+    for (const run of block.have.ranges()) {
+      const range = { start: start + run.start, end: start + run.end }
+      this.#held.remove(range)
+      this.#evictedBytes += range.end - range.start
+      evicted.push(range)
+    }
+    this.#frontier.delete(index)
+  }
+
+  /** Carries out a plan: each block that is placed gets its slot, and the settled block that had it is evicted. The others stay in the frontier. */
+  #place(placements: readonly Placement[], evicted: ByteRange[], writes: SlotWrite[]): void {
+    for (const { index, victim } of placements) {
+      const block = this.#frontier.get(index)
+      if (block === undefined)
+        throw new Error(`block ${index} is to be placed and is not in the frontier`)
+      const slot = victim === null ? this.#takeSlot() : this.#evict(victim, evicted)
+      if (slot === null) throw new Error(`block ${index} was given a free slot and there is none`)
+      if (this.#disk === null) {
+        this.#settle(index, slot, block.bytes)
+      } else {
+        block.pending = true
+        writes.push(this.#sealToSlot(this.#disk, index, slot, block))
+      }
+    }
+  }
+
+  /** Whether a complete block waits in the frontier for a slot: one that found none, or one whose slot write failed. */
   #isFull(): boolean {
-    for (const block of this.#frontier.values()) if (block.waiting) return true
-    return false
+    return this.#complete().length > 0
   }
 
   /** The block's place in its slot: it leaves the frontier, and the memory backend keeps its bytes as they are. */
@@ -201,11 +354,18 @@ export class CoreStore implements PlayStore {
   }
 
   /**
-   * Takes the bytes into the frontier and gives each block that is complete a slot,
-   * all at the call; then waits for the sealing and the slot writes of the blocks
-   * on disk. A write that fails on the disk leaves its block in the frontier, held
-   * and readable, with its slot given back, and rejects: the same bytes written
-   * again complete the block.
+   * Makes the store what the write and the position ask of it, all at the call, and
+   * then waits for the sealing and the slot writes of the blocks on disk. First the
+   * blocks that wait are given the slots that the position now allows, then the
+   * bytes go into the frontier, then the blocks that are complete are given slots.
+   * A block that finds no slot waits, and the answer is `full`. Everything is decided
+   * before anything is changed, so that a write that is refused (`RangeError`) leaves
+   * the store as it was. A write of no bytes, at any offset up to the end of the file,
+   * only places the blocks that wait: it is how the downloader finds out, after the
+   * position has moved, whether the store has room again. A write that fails on the
+   * disk leaves its block in the frontier, held and readable and without a slot, which
+   * is given back, and rejects: the next write places the block again, and reports
+   * what this one evicted and could not report.
    */
   async write(offset: number, bytes: Uint8Array): Promise<WriteOutcome> {
     this.#assertOpen()
@@ -218,24 +378,28 @@ export class CoreStore implements PlayStore {
         `a write of ${bytes.length} bytes at ${offset} ends at ${end}, past the end of a file of ${this.fileSize} bytes`,
       )
     }
-    if (bytes.length === 0) return { full: this.#isFull(), evictedBytes: 0, evicted: [] }
 
     // The blocks that the bytes go to are those that are not in a slot already: a block in a slot has all its bytes.
     const touched: number[] = []
-    let added = 0
-    for (let index = blockOf(offset); index <= blockOf(end - 1); index += 1) {
-      if (this.#slotOf.has(index)) continue
-      touched.push(index)
-      if (!this.#frontier.has(index)) added += 1
+    const added: number[] = []
+    if (bytes.length > 0) {
+      for (let index = blockOf(offset); index <= blockOf(end - 1); index += 1) {
+        if (this.#slotOf.has(index)) continue
+        touched.push(index)
+        if (!this.#frontier.has(index)) added.push(index)
+      }
     }
-    // The bound is checked before anything changes, so that a write that is refused leaves the store as it was.
-    if (this.#frontier.size + added > FRONTIER_BLOCKS) {
-      throw new RangeError(
-        `a write of ${bytes.length} bytes at ${offset} would add ${added} blocks to the ${this.#frontier.size} that the frontier holds, past its ${FRONTIER_BLOCKS}`,
-      )
-    }
+    const placements = this.#plan(this.#complete())
+    const drops = this.#planDrops(touched, added, placements, { offset, length: bytes.length })
+
+    const evicted: ByteRange[] = []
+    const writes: SlotWrite[] = []
+    this.#place(placements, evicted, writes)
+    for (const index of drops) this.#drop(index, evicted)
 
     for (const index of touched) {
+      // In memory, a block that was waiting has just settled in a slot, and has all its bytes.
+      if (this.#slotOf.has(index)) continue
       const span = blockSpan(index, this.fileSize)
       let block = this.#frontier.get(index)
       if (block === undefined) {
@@ -243,7 +407,6 @@ export class CoreStore implements PlayStore {
           bytes: new Uint8Array(span.end - span.start),
           have: new RangeSet(),
           pending: false,
-          waiting: false,
         }
         this.#frontier.set(index, block)
       }
@@ -254,47 +417,36 @@ export class CoreStore implements PlayStore {
       this.#held.add({ start: from, end: to })
     }
 
-    // A block that is complete is given a slot now, one block at a time and in order, before anything is awaited. The blocks
-    // that get one are those this write touched, and those that waited for one: a block that failed to reach its slot waits
-    // for the same bytes to be written again.
-    const reached = new Set(touched)
-    const writes: Promise<{ error: unknown } | null>[] = []
-    for (const index of [...this.#frontier.keys()].sort((a, b) => a - b)) {
-      const block = this.#frontier.get(index)
-      if (block === undefined || block.pending || !isComplete(block)) continue
-      if (!reached.has(index) && !block.waiting) continue
-      const slot = this.#takeSlot()
-      if (slot === null) {
-        block.waiting = true
-        continue
-      }
-      block.waiting = false
-      if (this.#disk === null) {
-        this.#settle(index, slot, block.bytes)
-      } else {
-        block.pending = true
-        writes.push(this.#sealToSlot(this.#disk, index, slot, block))
-      }
-    }
+    // Each block that the bytes completed is given a slot now, before anything is awaited, nearest to the position first.
+    this.#place(this.#plan(this.#complete()), evicted, writes)
 
     // Each write of a slot answers for itself, so that when this call settles every block has either landed or gone back to the frontier.
     const failure = (await Promise.all(writes)).find(
       (result): result is { error: unknown } => result !== null,
     )
-    if (failure !== undefined) throw failure.error
-    return { full: this.#isFull(), evictedBytes: 0, evicted: [] }
+    if (failure !== undefined) {
+      this.#unreported.push(...evicted)
+      throw failure.error
+    }
+    // What a write that failed evicted is reported when this one resolves, and not when it began, so that a write that fails meanwhile is not lost.
+    const reported = [...this.#unreported.splice(0), ...evicted]
+    return {
+      full: this.#isFull(),
+      evictedBytes: reported.reduce((sum, range) => sum + range.end - range.start, 0),
+      evicted: reported,
+    }
   }
 
   /**
    * Seals a complete block and writes it to its slot, and answers what it failed
-   * with (and gives its slot back, and lets the block be tried again) or null.
+   * with (and gives its slot back, and makes the block wait to be placed again) or null.
    */
   async #sealToSlot(
     disk: { file: SlotFile; key: PlayKey },
     index: number,
     slot: number,
     block: FrontierBlock,
-  ): Promise<{ error: unknown } | null> {
+  ): SlotWrite {
     try {
       // The bytes are copied by the seal at this call, so a later write to the block cannot change what this one seals.
       const sealed = await sealBlock(disk.key, index, block.bytes)
@@ -311,6 +463,7 @@ export class CoreStore implements PlayStore {
       })
     } catch (error) {
       if (!this.#closed) {
+        // The block is complete and has no slot, so every later write tries to place it again, as it does for a block that found none.
         block.pending = false
         this.#freed.push(slot)
       }
@@ -408,6 +561,7 @@ export class CoreStore implements PlayStore {
     this.#slotOf.clear()
     this.#memory.clear()
     this.#frontier.clear()
+    this.#unreported.length = 0
     if (this.#disk !== null) {
       try {
         this.#disk.file.close()
