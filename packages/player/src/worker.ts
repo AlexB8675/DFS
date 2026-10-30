@@ -2,10 +2,14 @@
 // file calls `serveStoreInWorker`, and the page opens its stores with `WorkerStore`.
 // It is checked with the browser's files, because it needs the worker's own scope.
 
+import { opfsDirectory, playLock } from './opfs.ts'
+import { serveStore } from './serve.ts'
+
 /**
- * Serves the store of a play on the worker's own scope. The private file system and the
- * lock of a play are not wired yet, so it cannot serve and says so, and does not pretend.
+ * Serves the store of a play on the worker's own scope, on the browser's private file
+ * system and under the play's Web Lock. It must run in a dedicated worker: a page has
+ * no synchronous access to a file, and says so (`no-opfs`) when the page opens a play.
  */
 export function serveStoreInWorker(): void {
-  throw new Error('the store worker is not wired to the private file system yet')
+  serveStore(self, opfsDirectory, playLock)
 }
