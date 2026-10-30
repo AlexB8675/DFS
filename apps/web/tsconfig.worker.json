@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // The worker's own scope, as @dfs/player checks its worker entry: under the DOM lib `self` is a Window, which is not the Endpoint the store is served on.
+    "lib": ["ES2024", "WebWorker"],
+    "types": []
+  },
+  "include": ["src/features/player/store.worker.ts"]
+}

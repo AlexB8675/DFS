@@ -194,6 +194,9 @@ importers:
       '@codemirror/view':
         specifier: ^6.43.14
         version: 6.43.14
+      '@dfs/player':
+        specifier: workspace:*
+        version: link:../../packages/player
       '@dfs/shared':
         specifier: workspace:*
         version: link:../../packages/shared

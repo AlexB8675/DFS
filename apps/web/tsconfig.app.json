@@ -6,5 +6,7 @@
     "types": ["vite/client"],
     "paths": { "@/*": ["./src/*"] }
   },
-  "include": ["src"]
+  "include": ["src"],
+  // The store's worker file is checked on its own, with the worker's lib (tsconfig.worker.json).
+  "exclude": ["src/features/player/store.worker.ts"]
 }
