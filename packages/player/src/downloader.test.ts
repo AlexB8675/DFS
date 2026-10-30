@@ -345,6 +345,11 @@ class Pipe {
   end(): void {
     this.#held.controller?.close()
   }
+
+  /** Breaks the body, as a connection that drops does. */
+  fail(): void {
+    this.#held.controller?.error(new Error('the connection dropped'))
+  }
 }
 
 type Answer = Response | Pipe
@@ -403,6 +408,27 @@ function refusal(status: number, retryAfter?: string): Response {
 /** A pipe for the range a call asked for. */
 function pipeFor(call: StubCall, total: number): Pipe {
   return new Pipe(total, call.from, call.to ?? total - 1, call.signal)
+}
+
+/** How a promise ended, kept as it comes. */
+interface Outcome {
+  state: 'pending' | 'held' | 'rejected'
+  reason: unknown
+}
+
+/** Follows a promise from the moment it is made, so that a rejection is never left unhandled. */
+function track(promise: Promise<unknown>): Outcome {
+  const outcome: Outcome = { state: 'pending', reason: undefined }
+  promise.then(
+    () => {
+      outcome.state = 'held'
+    },
+    (reason: unknown) => {
+      outcome.state = 'rejected'
+      outcome.reason = reason
+    },
+  )
+  return outcome
 }
 
 describe('Downloader: reading to the end', () => {
@@ -1973,39 +1999,102 @@ describe('Downloader: a seek', () => {
 
   /**
    * 50 seeks to seeded random places, 5 ms apart, on a server that is slow enough for the
-   * reads to overlap; then the position stops and the download is waited for. Answers what
-   * the tests below look at.
+   * reads to overlap; then the position stops and the download is waited for. With
+   * `fetchBytes` the engine also asks for that many bytes at each target with `fetchNow`
+   * before it moves the position there, and calls the request off, with its signal, at the
+   * next seek: the reads of a call that is aborted while it waits must all be over by the time
+   * `abort` returns. Answers what the tests below look at.
    */
-  async function storm(size: number): Promise<{
+  async function storm(
+    size: number,
+    fetchBytes = 0,
+  ): Promise<{
     rig: Rig
     store: SpyStore
     position: number
+    /** The most onward reads that were open at once. */
     mostOpen: number
+    /** How many calls were aborted while they waited, with a read of their own that the abort ended. */
+    calledOff: number
+    /** The last call, which is not aborted. */
+    last: { range: ByteRange; outcome: Outcome; ids: number[] } | null
   }> {
     const server = await serve({ size, chunkDelayMs: 2 })
     const store = memoryStore(size, 32 * MIB)
     const open = new Set<number>()
+    const priority = new Set<number>()
+    // Set while `fetchNow` is called: the requests it sends, it sends within the call.
+    let asking = false
     let mostOpen = 0
     const rig = build({
       url: server.url,
       store,
       onEvent: (event) => {
-        if (event.type === 'request') open.add(event.id)
+        if (event.type === 'request') {
+          open.add(event.id)
+          if (asking) priority.add(event.id)
+        }
         if (event.type === 'requestEnd') open.delete(event.id)
-        mostOpen = Math.max(mostOpen, open.size)
+        let onward = 0
+        for (const id of open) if (!priority.has(id)) onward += 1
+        mostOpen = Math.max(mostOpen, onward)
       },
     })
     const next = generator(2024)
     rig.downloader.start()
     let position = 0
+    let calledOff = 0
+    let previous: {
+      range: ByteRange
+      controller: AbortController
+      outcome: Outcome
+      ids: number[]
+    } | null = null
     for (let seek = 0; seek < 50; seek += 1) {
       position = Math.floor(next() * size)
+      if (fetchBytes > 0) {
+        if (previous !== null) {
+          const waiting = previous.outcome.state === 'pending'
+          previous.controller.abort(new Error('the engine moved on'))
+          if (waiting && previous.ids.length > 0) {
+            calledOff += 1
+            for (const id of previous.ids) expect(open.has(id)).toBe(false)
+          }
+        }
+        const range = { start: position, end: Math.min(position + fetchBytes, size) }
+        const controller = new AbortController()
+        const before = rig.events.length
+        asking = true
+        const outcome = track(rig.downloader.fetchNow(range, controller.signal))
+        asking = false
+        const ids = ofType(rig.events.slice(before), 'request').map((request) => request.id)
+        previous = { range, controller, outcome, ids }
+      }
       rig.downloader.setPosition(position)
       await sleep(5)
     }
     // The position stops: everything from it to the end comes.
     await until(() => rig.downloader.state() === 'done', 20_000)
-    return { rig, store, position, mostOpen }
+    const last =
+      previous === null
+        ? null
+        : { range: previous.range, outcome: previous.outcome, ids: previous.ids }
+    return { rig, store, position, mostOpen, calledOff, last }
+  }
+
+  /** The reads that the last call opened for itself are there, and every one of them ended clean: it needed no retry. */
+  async function expectOwnReadsClean(
+    rig: Rig,
+    last: { range: ByteRange; outcome: Outcome; ids: number[] } | null,
+  ): Promise<void> {
+    expect(last).not.toBeNull()
+    if (last === null) return
+    // The last target is far from the reads of the storm: the call opens a read of its own, or two.
+    expect(last.ids.length).toBeGreaterThan(0)
+    const ended = (): EventOf<'requestEnd'>[] =>
+      ofType(rig.events, 'requestEnd').filter((end) => last.ids.includes(end.id))
+    await until(() => ended().length === last.ids.length)
+    expect(ended().map((end) => end.outcome)).toEqual(last.ids.map(() => 'done'))
   }
 
   it('keeps two onward reads in a storm of seeks over a file the frontier can hold, and loses and brings nothing twice', async () => {
@@ -2040,6 +2129,44 @@ describe('Downloader: a seek', () => {
     expect(ofType(rig.events, 'retry').length).toBeGreaterThanOrEqual(
       ofType(rig.events, 'error').length,
     )
+    expect(store.held().heldFrom(position)).toBe(size - position)
+    await expectHeldBytesRight(store)
+  }, 30_000)
+
+  it('calls off the read of each target the engine leaves in a storm of seeks that ask for a range at each, and answers the last target with no retry', async () => {
+    const size = 8 * MIB
+    const { rig, store, position, mostOpen, calledOff, last } = await storm(size, 512 * 1024 + 1)
+
+    expect(mostOpen).toBeLessThanOrEqual(2)
+    // The storm did call reads off.
+    expect(calledOff).toBeGreaterThan(10)
+    expect(last).not.toBeNull()
+    await until(() => last?.outcome.state !== 'pending')
+    expect(last?.outcome.state).toBe('held')
+    expect(ofType(rig.events, 'retry')).toEqual([])
+    expect(ofType(rig.events, 'error')).toEqual([])
+    await expectOwnReadsClean(rig, last)
+    if (last !== null) expect(await firstMismatch(store, last.range)).toBe(-1)
+    expect(store.held().heldFrom(position)).toBe(size - position)
+    await expectHeldBytesRight(store)
+    expect(store.evictions).toEqual([])
+  }, 30_000)
+
+  it('does the same in a storm of seeks over a file with more blocks than the frontier holds: the last target is answered with no retry of its own', async () => {
+    const size = 16 * MIB
+    const { rig, store, position, mostOpen, calledOff, last } = await storm(size, 512 * 1024 + 1)
+
+    expect(mostOpen).toBeLessThanOrEqual(2)
+    expect(calledOff).toBeGreaterThan(10)
+    expect(last).not.toBeNull()
+    await until(() => last?.outcome.state !== 'pending')
+    expect(last?.outcome.state).toBe('held')
+    // A read far from the position can still be refused a write by the frontier, and its retry is told with the offset of the position's first gap (see the test above). The last target's own reads are not: they end clean, and the call needs no retry.
+    for (const error of ofType(rig.events, 'error')) {
+      expect(error.message).toContain('The store refused a write')
+    }
+    await expectOwnReadsClean(rig, last)
+    if (last !== null) expect(await firstMismatch(store, last.range)).toBe(-1)
     expect(store.held().heldFrom(position)).toBe(size - position)
     await expectHeldBytesRight(store)
   }, 30_000)
@@ -2437,6 +2564,472 @@ describe('Downloader: fetchNow', () => {
     stub.pipes[0]?.push(100, 600)
     await waiting
     expect(stub.calls).toHaveLength(1)
+  })
+})
+
+describe('Downloader: calling off a priority read', () => {
+  const KIB = 1024
+  const size = 32 * MIB
+
+  /** A downloader on a stub whose every read is a pipe that the test feeds; it has not started. */
+  function stubbed(
+    options: {
+      store?: SpyStore
+      answer?: (call: StubCall) => Answer
+      now?: () => number
+    } = {},
+  ): { rig: Rig; stub: Stub; store: SpyStore } {
+    const store = options.store ?? memoryStore(size)
+    const stub = stubNetwork(options.answer ?? ((call) => pipeFor(call, size)))
+    const rig = build({
+      url: 'http://stub.invalid/file',
+      store,
+      fetch: stub.fetch,
+      ...(options.now === undefined ? {} : { now: options.now }),
+    })
+    return { rig, stub, store }
+  }
+
+  const targets = [4, 8, 12, 16, 20].map((block) => ({
+    start: block * MIB,
+    end: block * MIB + 200 * KIB,
+  }))
+
+  it('leaves only the read of the last target open when each call is aborted by the next, and answers it with no retry', async () => {
+    const { rig, stub } = stubbed()
+    const reasons = targets.map((_range, index) => new Error(`target ${index} was left`))
+    const controllers = targets.map(() => new AbortController())
+    const outcomes: Outcome[] = []
+    for (const [index, range] of targets.entries()) {
+      // The engine calls the last one off as it asks for the next.
+      controllers[index - 1]?.abort(reasons[index - 1])
+      outcomes.push(track(rig.downloader.fetchNow(range, controllers[index]?.signal)))
+      await until(() => stub.calls.length === index + 1)
+    }
+    await settle()
+
+    expect(ofType(rig.events, 'request').map((request) => request.from)).toEqual(
+      targets.map((range) => range.start),
+    )
+    expect(ofType(rig.events, 'requestEnd')).toEqual(
+      [1, 2, 3, 4].map((id) => ({
+        type: 'requestEnd',
+        id,
+        bytes: 0,
+        outcome: 'aborted',
+        message: null,
+      })),
+    )
+    expect(stub.calls.map((call) => call.signal.aborted)).toEqual([true, true, true, true, false])
+    expect(outcomes.map((outcome) => outcome.state)).toEqual([
+      'rejected',
+      'rejected',
+      'rejected',
+      'rejected',
+      'pending',
+    ])
+    // Each is rejected with the reason of its own signal.
+    reasons.slice(0, 4).forEach((reason, index) => {
+      expect(outcomes[index]?.reason).toBe(reason)
+    })
+
+    const last = targets[4]
+    if (last === undefined) throw new Error('five targets')
+    stub.pipes[4]?.push(last.start, last.end)
+    stub.pipes[4]?.end()
+    await until(() => outcomes[4]?.state === 'held')
+    await until(() => ofType(rig.events, 'requestEnd').length === 5)
+    expect(ofType(rig.events, 'requestEnd')[4]).toMatchObject({ id: 5, outcome: 'done' })
+    expect(ofType(rig.events, 'retry')).toEqual([])
+    expect(ofType(rig.events, 'error')).toEqual([])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('calls off every read that a call asked for in the same turn as the next, and answers the last', async () => {
+    const { rig, stub } = stubbed()
+    const controllers = targets.map(() => new AbortController())
+    const outcomes: Outcome[] = []
+    for (const [index, range] of targets.entries()) {
+      controllers[index - 1]?.abort(new Error('left'))
+      outcomes.push(track(rig.downloader.fetchNow(range, controllers[index]?.signal)))
+    }
+    await until(() => stub.calls.some((call) => !call.signal.aborted))
+    await settle()
+
+    // Every request that was made is called off but the last target's.
+    expect(stub.calls.filter((call) => !call.signal.aborted).map((call) => call.from)).toEqual([
+      20 * MIB,
+    ])
+    expect(ofType(rig.events, 'request')).toHaveLength(5)
+    expect(ofType(rig.events, 'requestEnd').map((end) => end.outcome)).toEqual([
+      'aborted',
+      'aborted',
+      'aborted',
+      'aborted',
+    ])
+    expect(ofType(rig.events, 'firstByte').every((event) => event.id === 5)).toBe(true)
+    expect(outcomes.filter((outcome) => outcome.state === 'rejected')).toHaveLength(4)
+    const index = stub.calls.findIndex((call) => !call.signal.aborted)
+    stub.pipes[index]?.push(20 * MIB, 20 * MIB + 200 * KIB)
+    await until(() => outcomes[4]?.state === 'held')
+    expect(ofType(rig.events, 'retry')).toEqual([])
+  })
+
+  it('leaves the onward read alone when a priority read is called off', async () => {
+    const { rig, stub, store } = stubbed()
+    rig.downloader.start()
+    await until(() => stub.pipes.length === 1)
+    const controller = new AbortController()
+    const reason = new Error('the engine moved on')
+    const outcome = track(
+      rig.downloader.fetchNow({ start: 20 * MIB, end: 20 * MIB + 200 * KIB }, controller.signal),
+    )
+    await until(() => stub.pipes.length === 2)
+
+    controller.abort(reason)
+    await settle()
+
+    expect(outcome).toEqual({ state: 'rejected', reason })
+    expect(stub.calls.map((call) => call.signal.aborted)).toEqual([false, true])
+    expect(ofType(rig.events, 'requestEnd')).toEqual([
+      { type: 'requestEnd', id: 2, bytes: 0, outcome: 'aborted', message: null },
+    ])
+    expect(rig.downloader.state()).toBe('reading')
+    // The onward read goes on: a piece is written.
+    stub.pipes[0]?.push(0, 100 * KIB)
+    await until(() => store.held().has({ start: 0, end: 100 * KIB }))
+  })
+
+  it('keeps a read that another call still waits on, and answers that call', async () => {
+    const { rig, stub, store } = stubbed()
+    const controller = new AbortController()
+    const reason = new Error('the first call was left')
+    const first = track(
+      rig.downloader.fetchNow({ start: 5 * MIB, end: 5 * MIB + 300 * KIB }, controller.signal),
+    )
+    await until(() => stub.pipes.length === 1)
+    // The second range begins where the read will be: it opens nothing of its own, and counts on that read.
+    const second = track(
+      rig.downloader.fetchNow({ start: 5 * MIB + 100 * KIB, end: 5 * MIB + 200 * KIB }),
+    )
+    await settle()
+    expect(stub.calls).toHaveLength(1)
+
+    controller.abort(reason)
+    await settle()
+
+    expect(first).toEqual({ state: 'rejected', reason })
+    expect(second.state).toBe('pending')
+    expect(stub.calls[0]?.signal.aborted).toBe(false)
+    expect(ofType(rig.events, 'requestEnd')).toEqual([])
+    stub.pipes[0]?.push(5 * MIB, 5 * MIB + 300 * KIB)
+    await until(() => second.state === 'held')
+    expect(await firstMismatch(store, { start: 5 * MIB, end: 5 * MIB + 300 * KIB })).toBe(-1)
+    expect(stub.calls).toHaveLength(1)
+  })
+
+  it.each([
+    ['the first call, then the second', 0],
+    ['the second call, then the first', 1],
+  ])(
+    'calls the read off when the last of the calls that wait on it is aborted: %s',
+    async (_order, firstToAbort) => {
+      const { rig, stub } = stubbed()
+      const controllers = [new AbortController(), new AbortController()]
+      const reasons = [new Error('the first was left'), new Error('the second was left')]
+      const outcomes = [
+        track(
+          rig.downloader.fetchNow(
+            { start: 5 * MIB, end: 5 * MIB + 300 * KIB },
+            controllers[0]?.signal,
+          ),
+        ),
+        track(
+          rig.downloader.fetchNow(
+            { start: 5 * MIB + 100 * KIB, end: 5 * MIB + 200 * KIB },
+            controllers[1]?.signal,
+          ),
+        ),
+      ]
+      await until(() => stub.pipes.length === 1)
+      await settle()
+      expect(stub.calls).toHaveLength(1)
+
+      const early = firstToAbort
+      const late = 1 - firstToAbort
+      controllers[early]?.abort(reasons[early])
+      await settle()
+      expect(stub.calls[0]?.signal.aborted).toBe(false)
+      expect(ofType(rig.events, 'requestEnd')).toEqual([])
+
+      controllers[late]?.abort(reasons[late])
+      await settle()
+      expect(stub.calls[0]?.signal.aborted).toBe(true)
+      expect(ofType(rig.events, 'requestEnd')).toEqual([
+        { type: 'requestEnd', id: 1, bytes: 0, outcome: 'aborted', message: null },
+      ])
+      expect(outcomes[0]?.reason).toBe(reasons[0])
+      expect(outcomes[1]?.reason).toBe(reasons[1])
+      expect(ofType(rig.events, 'retry')).toEqual([])
+      expect(vi.getTimerCount()).toBe(0)
+    },
+  )
+
+  it('calls off every read that was made for a call, one for each part of its range that was not held', async () => {
+    const store = memoryStore(size)
+    // 100 KiB to 300 KiB of the range is held: the call reads the 100 KiB before it and the 200 KiB after it.
+    await store.write(5 * MIB + 100 * KIB, bytesOf(5 * MIB + 100 * KIB, 5 * MIB + 300 * KIB))
+    const { rig, stub } = stubbed({ store })
+    const controller = new AbortController()
+    const reason = new Error('left')
+    const outcome = track(
+      rig.downloader.fetchNow({ start: 5 * MIB, end: 5 * MIB + 500 * KIB }, controller.signal),
+    )
+    await until(() => stub.pipes.length === 2)
+    expect(stub.calls.map((call) => [call.from, call.to])).toEqual([
+      [5 * MIB, 5 * MIB + 100 * KIB - 1],
+      [5 * MIB + 300 * KIB, 5 * MIB + 500 * KIB - 1],
+    ])
+
+    controller.abort(reason)
+    await settle()
+
+    expect(outcome).toEqual({ state: 'rejected', reason })
+    expect(stub.calls.map((call) => call.signal.aborted)).toEqual([true, true])
+    expect(ofType(rig.events, 'requestEnd')).toEqual([
+      { type: 'requestEnd', id: 1, bytes: 0, outcome: 'aborted', message: null },
+      { type: 'requestEnd', id: 2, bytes: 0, outcome: 'aborted', message: null },
+    ])
+  })
+
+  it('calls off a read that has gone quiet and the read that was opened beside it for the same bytes, when the last call that waits for them is aborted', async () => {
+    const { rig, stub } = stubbed({ now: () => Date.now() })
+    const range = { start: 5 * MIB, end: 5 * MIB + 200 * KIB }
+    const first = new AbortController()
+    const second = new AbortController()
+    const reasons = [new Error('the first was left'), new Error('the second was left')]
+    const outcomes = [
+      track(rig.downloader.fetchNow(range, first.signal)),
+      // The first call's read covers where this one begins, so it opens none: a look is set for when that read will have been quiet for STALL_COVER_MS.
+      track(rig.downloader.fetchNow(range, second.signal)),
+    ]
+    await until(() => stub.pipes.length === 1)
+    await settle()
+    expect(stub.calls).toHaveLength(1)
+
+    // The read says nothing: the second call gets a read of its own for the same bytes.
+    await vi.advanceTimersByTimeAsync(STALL_COVER_MS + 2)
+    await until(() => stub.pipes.length === 2)
+    expect(stub.calls.map((call) => [call.from, call.to])).toEqual([
+      [5 * MIB, 5 * MIB + 200 * KIB - 1],
+      [5 * MIB, 5 * MIB + 200 * KIB - 1],
+    ])
+
+    // Each call needs the bytes of both reads, so the first to go leaves both open.
+    first.abort(reasons[0])
+    await settle()
+    expect(stub.calls.map((call) => call.signal.aborted)).toEqual([false, false])
+    expect(ofType(rig.events, 'requestEnd')).toEqual([])
+
+    second.abort(reasons[1])
+    await settle()
+    expect(stub.calls.map((call) => call.signal.aborted)).toEqual([true, true])
+    expect(ofType(rig.events, 'requestEnd').map((end) => [end.id, end.outcome])).toEqual([
+      [1, 'aborted'],
+      [2, 'aborted'],
+    ])
+    expect(outcomes[0]?.reason).toBe(reasons[0])
+    expect(outcomes[1]?.reason).toBe(reasons[1])
+    expect(ofType(rig.events, 'retry')).toEqual([])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('hands a read that is kept to the call that still waits, so that its failure is that call’s to retry, after that call’s pause', async () => {
+    const { rig, stub, store } = stubbed()
+    const controller = new AbortController()
+    const first = track(
+      rig.downloader.fetchNow({ start: 5 * MIB, end: 5 * MIB + 300 * KIB }, controller.signal),
+    )
+    await until(() => stub.pipes.length === 1)
+    const second = track(
+      rig.downloader.fetchNow({ start: 5 * MIB + 100 * KIB, end: 5 * MIB + 200 * KIB }),
+    )
+    await settle()
+    stub.pipes[0]?.push(5 * MIB, 5 * MIB + 50 * KIB)
+    await until(() => store.held().has({ start: 5 * MIB, end: 5 * MIB + 50 * KIB }))
+    controller.abort(new Error('left'))
+    await settle()
+    expect(first.state).toBe('rejected')
+
+    // The read that was kept breaks: the call that is left pauses before it tries again.
+    stub.pipes[0]?.fail()
+    await until(() => ofType(rig.events, 'retry').length === 1)
+    expect(ofType(rig.events, 'retry')).toEqual([
+      { type: 'retry', attempt: 1, delayMs: RETRY_BASE_MS, offset: 5 * MIB + 100 * KIB },
+    ])
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS - 1)
+    await settle()
+    expect(stub.calls).toHaveLength(1)
+
+    await vi.advanceTimersByTimeAsync(1)
+    await until(() => stub.pipes.length === 2)
+    expect(stub.calls[1]).toMatchObject({ from: 5 * MIB + 100 * KIB, to: 5 * MIB + 200 * KIB - 1 })
+    stub.pipes[1]?.push(5 * MIB + 100 * KIB, 5 * MIB + 200 * KIB)
+    await until(() => second.state === 'held')
+    expect(
+      await firstMismatch(store, { start: 5 * MIB + 100 * KIB, end: 5 * MIB + 200 * KIB }),
+    ).toBe(-1)
+  })
+
+  it('does not keep a read for a wait that only watches: whenHeld opens no read and is no reason to keep one', async () => {
+    const { rig, stub } = stubbed()
+    const controller = new AbortController()
+    const range = { start: 5 * MIB, end: 5 * MIB + 200 * KIB }
+    const priority = track(rig.downloader.fetchNow(range, controller.signal))
+    await until(() => stub.pipes.length === 1)
+    const watching = track(rig.downloader.whenHeld(range))
+    await settle()
+
+    controller.abort(new Error('left'))
+    await settle()
+
+    expect(priority.state).toBe('rejected')
+    expect(watching.state).toBe('pending')
+    expect(stub.calls[0]?.signal.aborted).toBe(true)
+  })
+
+  it('ends the wait of a call that is aborted in a pause: no read is opened when the pause would have ended', async () => {
+    const { rig, stub } = stubbed({
+      answer: (call) => (call.index === 0 ? refusal(503) : pipeFor(call, size)),
+    })
+    const controller = new AbortController()
+    const reason = new Error('left')
+    const outcome = track(
+      rig.downloader.fetchNow({ start: 5 * MIB, end: 5 * MIB + 200 * KIB }, controller.signal),
+    )
+    await until(() => ofType(rig.events, 'retry').length === 1)
+    expect(vi.getTimerCount()).toBe(1)
+    expect(rig.connectivity.listeners()).toBe(2)
+
+    controller.abort(reason)
+    await settle()
+
+    expect(outcome).toEqual({ state: 'rejected', reason })
+    expect(vi.getTimerCount()).toBe(0)
+    expect(rig.connectivity.listeners()).toBe(0)
+    await vi.advanceTimersByTimeAsync(RETRY_MAX_MS)
+    await settle()
+    expect(stub.calls).toHaveLength(1)
+  })
+
+  it('does not leave the downloader without a read when the priority read it was counting on is called off', async () => {
+    const { rig, stub } = stubbed()
+    const controller = new AbortController()
+    // The priority read at the start of the file is what the onward read counts on when the download starts.
+    const outcome = track(rig.downloader.fetchNow({ start: 0, end: 100 * KIB }, controller.signal))
+    rig.downloader.start()
+    await until(() => stub.pipes.length === 1)
+    expect(stub.calls[0]).toMatchObject({ from: 0, to: 100 * KIB - 1 })
+    expect(rig.downloader.state()).toBe('reading')
+
+    controller.abort(new Error('left'))
+    await until(() => stub.pipes.length === 2)
+
+    expect(outcome.state).toBe('rejected')
+    expect(stub.calls[1]).toMatchObject({ from: 0, to: null })
+    expect(rig.downloader.state()).toBe('reading')
+    expect(ofType(rig.events, 'restart')).toEqual([])
+  })
+
+  it('rejects at once with the reason of a signal that has aborted already, and opens no read', async () => {
+    const { rig, stub } = stubbed()
+    const aborted = AbortSignal.abort(new Error('already'))
+
+    await expect(
+      rig.downloader.fetchNow({ start: 5 * MIB, end: 5 * MIB + 100 }, aborted),
+    ).rejects.toBe(aborted.reason)
+    await expect(rig.downloader.read({ start: 5 * MIB, end: 5 * MIB + 100 }, aborted)).rejects.toBe(
+      aborted.reason,
+    )
+
+    await settle()
+    expect(stub.calls).toEqual([])
+    expect(ofType(rig.events, 'request')).toEqual([])
+  })
+
+  it('lets go of the signal of a call that was answered, and an abort after that changes nothing', async () => {
+    const { rig, stub, store } = stubbed()
+    const controller = new AbortController()
+    const removed = vi.spyOn(controller.signal, 'removeEventListener')
+    const outcome = track(
+      rig.downloader.fetchNow({ start: 5 * MIB, end: 5 * MIB + 100 }, controller.signal),
+    )
+    await until(() => stub.pipes.length === 1)
+    stub.pipes[0]?.push(5 * MIB, 5 * MIB + 100)
+    stub.pipes[0]?.end()
+    await until(() => outcome.state === 'held')
+    await until(() => ofType(rig.events, 'requestEnd').length === 1)
+    expect(removed).toHaveBeenCalledWith('abort', expect.any(Function))
+    const ends = ofType(rig.events, 'requestEnd')
+
+    controller.abort(new Error('too late'))
+    await settle()
+
+    expect(outcome.state).toBe('held')
+    expect(ofType(rig.events, 'requestEnd')).toEqual(ends)
+    expect(await firstMismatch(store, { start: 5 * MIB, end: 5 * MIB + 100 })).toBe(-1)
+  })
+
+  it('calls a read off when the engine aborts the read that waits for it', async () => {
+    const { rig, stub } = stubbed()
+    const controller = new AbortController()
+    const reason = new Error('the engine moved on')
+    const outcome = track(
+      rig.downloader.read({ start: 5 * MIB, end: 5 * MIB + 200 * KIB }, controller.signal),
+    )
+    await until(() => stub.pipes.length === 1)
+
+    controller.abort(reason)
+    await settle()
+
+    expect(outcome).toEqual({ state: 'rejected', reason })
+    expect(stub.calls[0]?.signal.aborted).toBe(true)
+    expect(ofType(rig.events, 'requestEnd')).toEqual([
+      { type: 'requestEnd', id: 1, bytes: 0, outcome: 'aborted', message: null },
+    ])
+  })
+
+  it('rejects a read with the reason of its signal when that aborts while the store reads the bytes', async () => {
+    const store = memoryStore(size)
+    await store.write(0, bytesOf(0, MIB))
+    const { rig } = stubbed({ store })
+    let release: (bytes: Uint8Array) => void = () => undefined
+    vi.spyOn(store, 'read').mockReturnValue(
+      new Promise<Uint8Array>((resolve) => {
+        release = resolve
+      }),
+    )
+    const controller = new AbortController()
+    const reason = new Error('the engine moved on')
+    const outcome = track(rig.downloader.read({ start: 0, end: 100 }, controller.signal))
+    await settle()
+    expect(outcome.state).toBe('pending')
+
+    controller.abort(reason)
+    release(bytesOf(0, 100))
+    await settle()
+
+    expect(outcome).toEqual({ state: 'rejected', reason })
+  })
+
+  it('reads as before with a signal that never aborts', async () => {
+    const store = memoryStore(size)
+    await store.write(0, bytesOf(0, MIB))
+    const { rig } = stubbed({ store })
+
+    const bytes = await rig.downloader.read({ start: 100, end: 1100 }, new AbortController().signal)
+
+    expect(Buffer.compare(bytes, bytesOf(100, 1100))).toBe(0)
   })
 })
 

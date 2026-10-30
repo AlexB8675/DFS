@@ -11,6 +11,13 @@
 // timeline event, with its reason. `openDownload` makes one and hands it the head read of the
 // play, which is its first onward read.
 //
+// A seek leaves behind the priority reads that the engine made for places it has moved on from,
+// and on a slow link they would share the bandwidth with the one that matters. A call of
+// `fetchNow` or `read` can therefore be given a signal: when it aborts, the call rejects with
+// its reason and the reads made for it are called off, each unless another call that has not
+// been aborted still waits for what that read brings. The onward reads are never called off by
+// a signal.
+//
 // A read that goes quiet without an error (a black-holed path, a tunnel, a NAT that dropped its
 // mapping) gives up on its own, in `read.ts`, after `READ_IDLE_MS`, and is tried again from its
 // next byte like any read that fails. Meanwhile the engine is not made to wait for it: a read that
@@ -168,8 +175,8 @@ interface ActiveRead {
   readonly from: number
   /** The last byte the read asks for, included; null when it runs to the end of the file. */
   readonly to: number | null
-  /** Who waits for it, when it is a priority read. */
-  readonly waiter: Waiter | null
+  /** Who waits for it, when it is a priority read: the call it was opened for, or the one that took it over when that call was aborted and another still waits for what it brings. Its failure is that call's to retry. */
+  waiter: Waiter | null
   /** Whether the rate has counted the read's bytes as they came (the head's were, before the downloader had them). */
   readonly metered: boolean
   /** The bytes that the read has received, written or not. */
@@ -433,12 +440,17 @@ export class Downloader {
    * the whole range is held, by whichever read brings it; rejects with the `ReadError` if the
    * play fails, and with a `StoreError` of kind `closed` if the downloader closes first. A
    * priority read that fails is tried again after a pause of its own, as the onward reads are.
+   *
+   * If `signal` aborts first the call rejects with its reason, as `whenHeld` does, and the
+   * reads made for it are called off (`requestEnd` aborted), each unless another call that
+   * has not been aborted still waits for bytes that it has yet to bring: it goes on then, and
+   * is that call's. The onward reads are never called off by a signal.
    */
-  fetchNow(range: ByteRange): Promise<void> {
-    return this.#wait(range, true)
+  fetchNow(range: ByteRange, signal?: AbortSignal): Promise<void> {
+    return this.#wait(range, true, signal)
   }
 
-  /** Resolves when `range` is held, and opens no read; rejects as `fetchNow` does, and with the reason of `signal` if that aborts. */
+  /** Resolves when `range` is held, and opens no read; rejects as `fetchNow` does, and with the reason of `signal` if that aborts. A wait that opens no read keeps none open either. */
   whenHeld(range: ByteRange, signal?: AbortSignal): Promise<void> {
     return this.#wait(range, false, signal)
   }
@@ -449,12 +461,15 @@ export class Downloader {
    * from the store. When the store says it is not held (it was let go of in between) the
    * range is asked for again; after READ_ROUNDS rounds of that the read is given up with a
    * failure that a later try may mend (the engine reads near the position, where nothing is
-   * let go of, so this only guards against a loop).
+   * let go of, so this only guards against a loop). `signal` is that of `fetchNow`, and it
+   * ends the read too when it aborts while the store reads the bytes: the call rejects with
+   * its reason and not with bytes that nobody wants.
    */
-  async read(range: ByteRange): Promise<Uint8Array> {
+  async read(range: ByteRange, signal?: AbortSignal): Promise<Uint8Array> {
     for (let round = 1; round <= READ_ROUNDS; round += 1) {
-      await this.fetchNow(range)
+      await this.fetchNow(range, signal)
       const bytes = await this.#store.read(range.start, range.end)
+      signal?.throwIfAborted()
       if (bytes !== null) return bytes
     }
     throw new ReadError(
@@ -1112,7 +1127,7 @@ export class Downloader {
       }
       if (signal !== undefined) {
         const onAbort = (): void => {
-          this.#refuse(waiter, signal.reason)
+          this.#abandon(waiter, signal.reason)
         }
         signal.addEventListener('abort', onAbort, { once: true })
         waiter.unlisten = () => {
@@ -1200,5 +1215,42 @@ export class Downloader {
   #refuse(waiter: Waiter, reason: unknown): void {
     this.#release(waiter)
     waiter.reject(reason)
+  }
+
+  /**
+   * Whether `waiter` waits for bytes that `read` has yet to bring: a part of its range that
+   * is not held lies between the read's next byte and its last. Only `fetchNow` waits count:
+   * `whenHeld` opens no read, and so does not ask for one to be kept.
+   */
+  #needs(waiter: Waiter, read: ActiveRead): boolean {
+    if (!waiter.priority) return false
+    const start = Math.max(waiter.range.start, read.at)
+    const end = Math.min(waiter.range.end, read.to === null ? this.#store.fileSize : read.to + 1)
+    return start < end && this.#store.held().firstGap(start, end) !== null
+  }
+
+  /**
+   * A wait is called off by its signal: it is refused with the signal's reason, and the
+   * priority reads that it needed are called off unless another wait needs them too. A read
+   * that is kept and was the aborted call's passes to a call that waits for it, which has
+   * its failures and their pauses from then on. Once a read is called off the choice of what
+   * to read is made again: the onward read may have counted on it (a download that started
+   * while the read covered the first gap has none of its own).
+   */
+  #abandon(waiter: Waiter, reason: unknown): void {
+    const reads = [...this.#reads].filter(
+      (read) => read.kind === 'priority' && (read.waiter === waiter || this.#needs(waiter, read)),
+    )
+    this.#refuse(waiter, reason)
+    let calledOff = false
+    for (const read of reads) {
+      const keeper = [...this.#waiters].find((other) => this.#needs(other, read))
+      if (keeper === undefined) {
+        if (this.#end(read, 'aborted', null)) calledOff = true
+      } else if (read.waiter === waiter) {
+        read.waiter = keeper
+      }
+    }
+    if (calledOff) this.#reconsider()
   }
 }
