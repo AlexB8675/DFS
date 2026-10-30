@@ -8,3 +8,18 @@ export * from './limits.ts'
 export * from './ranges.ts'
 export * from './seal.ts'
 export * from './store.ts'
+export type {
+  Endpoint,
+  EndpointEventType,
+  ErrorReply,
+  OkReply,
+  OpenDirectory,
+  PlayDirectory,
+  PlayLock,
+  StoreReply,
+  StoreRequest,
+  WireError,
+  WireErrorKind,
+} from './protocol.ts'
+export { serveStore } from './serve.ts'
+export { WorkerStore } from './worker-store.ts'
