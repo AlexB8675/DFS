@@ -10,6 +10,10 @@
 // When no slot is free, the settled block that is furthest from where the engine
 // reads gives its slot to a block that is strictly nearer, and a frontier that is
 // full of blocks still further lets go of them to take a write near the position.
+// A block that waits for a slot and is strictly further than the first byte that is
+// not held at or after the position is let go of too: it can only be placed once a
+// settled block is further than it, which cannot happen while the gap nearer the
+// position is being filled, and it is the data furthest from where the engine reads.
 // All of this happens inside `write`, where the outcome can say what was let go of.
 
 import type { ByteRange } from '@dfs/mp4'
@@ -262,27 +266,61 @@ export class CoreStore implements PlayStore {
   }
 
   /**
+   * Which of the blocks that wait for a slot the write lets go of, given that the plan
+   * for them is carried out first: those that are strictly further from the position
+   * than the block of the first byte, at or after the position, that is not held. That
+   * byte is looked for in what is held once the plan has taken the slots of the settled
+   * blocks it chooses, and when there is none (every byte from the position to the end
+   * of the file is held) nothing is let go of. A block that the plan places is not one
+   * that waits, and a block that the write fills is not let go of, since the write would
+   * only have to make it again. The block of the position may be the end of the file,
+   * where no block starts, so the distance is counted from the block `blockOf` says.
+   */
+  #planWaiting(touched: readonly number[], placements: readonly Placement[]): number[] {
+    const placed = new Set(placements.map((placement) => placement.index))
+    const filled = new Set(touched)
+    const waiting = this.#complete().filter((index) => !placed.has(index) && !filled.has(index))
+    if (waiting.length === 0) return []
+    let held = this.#held
+    for (const { victim } of placements) {
+      if (victim === null) continue
+      if (held === this.#held) held = this.held()
+      held.remove(blockSpan(victim, this.fileSize))
+    }
+    const gap = held.firstGap(this.#position, this.fileSize)
+    if (gap === null) return []
+    const away = this.#distances()
+    const nearest = away(blockOf(gap.start))
+    return waiting.filter((index) => away(index) > nearest)
+  }
+
+  /**
    * Which blocks the frontier lets go of to take a write that adds `added.length`
-   * blocks to it, given that the plan for the blocks that wait is carried out first.
-   * On disk a block that is given a slot stays in the frontier until its write lands,
-   * and in memory it leaves at once. A block that can be let go of is not in flight,
-   * is not one the write fills or the plan places, and is strictly further from the
-   * position than every block the write adds: the furthest goes first, and the one
-   * behind the position among blocks as far as one another. A write that cannot be
-   * made to fit throws before anything is changed.
+   * blocks to it, given that the plan for the blocks that wait is carried out first,
+   * and that the blocks `waiting` names are let go of. On disk a block that is given a
+   * slot stays in the frontier until its write lands, and in memory it leaves at once.
+   * A block that can be let go of is not in flight, is not one the write fills or the
+   * plan places, and is strictly further from the position than every block the write
+   * adds: the furthest goes first, and the one behind the position among blocks as far
+   * as one another. A write that cannot be made to fit throws before anything is changed.
    */
   #planDrops(
     touched: readonly number[],
     added: readonly number[],
     placements: readonly Placement[],
+    waiting: readonly number[],
     write: { offset: number; length: number },
   ): number[] {
     const leaving = this.#disk === null ? placements.length : 0
-    const over = this.#frontier.size - leaving + added.length - FRONTIER_BLOCKS
+    const over = this.#frontier.size - leaving - waiting.length + added.length - FRONTIER_BLOCKS
     if (over <= 0) return []
     const away = this.#distances()
     const reach = Math.max(...added.map(away))
-    const kept = new Set([...touched, ...placements.map((placement) => placement.index)])
+    const kept = new Set([
+      ...touched,
+      ...placements.map((placement) => placement.index),
+      ...waiting,
+    ])
     const droppable: number[] = []
     for (const [index, block] of this.#frontier) {
       if (!block.pending && !kept.has(index) && away(index) > reach) droppable.push(index)
@@ -382,8 +420,9 @@ export class CoreStore implements PlayStore {
   /**
    * Makes the store what the write and the position ask of it, all at the call, and
    * then waits for the sealing and the slot writes of the blocks on disk. First the
-   * blocks that wait are given the slots that the position now allows, then the
-   * bytes go into the frontier, then the blocks that are complete are given slots.
+   * blocks that wait are given the slots that the position now allows, and those of
+   * them that are further from the position than the first gap is are let go of, then
+   * the bytes go into the frontier, then the blocks that are complete are given slots.
    * A block that finds no slot waits, and the answer is `full`. Everything is decided
    * before anything is changed, so that a write that is refused (`RangeError`) leaves
    * the store as it was. A write of no bytes, at any offset up to the end of the file,
@@ -416,11 +455,16 @@ export class CoreStore implements PlayStore {
       }
     }
     const placements = this.#plan(this.#complete())
-    const drops = this.#planDrops(touched, added, placements, { offset, length: bytes.length })
+    const waiting = this.#planWaiting(touched, placements)
+    const drops = this.#planDrops(touched, added, placements, waiting, {
+      offset,
+      length: bytes.length,
+    })
 
     const evicted: ByteRange[] = []
     const writes: SlotWrite[] = []
     this.#place(placements, evicted, writes)
+    for (const index of waiting) this.#drop(index, evicted)
     for (const index of drops) this.#drop(index, evicted)
 
     for (const index of touched) {

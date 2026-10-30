@@ -316,6 +316,8 @@ export class Downloader {
   #levels: ReturnType<typeof setInterval> | null = null
   /** The check of a full store: one at a time, and `again` when the position moved during it. */
   #check: { running: boolean; again: boolean } = { running: false, again: false }
+  /** Where the onward reads would go on if the store had room: the first gap at or after the position when it filled. A read that opens anywhere else, once there is room, is a seek. */
+  #stoppedAt = 0
 
   constructor(options: DownloaderOptions) {
     this.#url = options.url
@@ -379,7 +381,9 @@ export class Downloader {
   /**
    * Says where the play is. The store is given the position first, in every state, and a
    * position that is not in the file is a `RangeError` that changes nothing. A full store
-   * is checked for room, since the position is what makes room. Otherwise the choice of
+   * is checked for room, since the position is what makes room: it frees a slot for the
+   * block that waits, or, when the first gap is nearer than that block, lets go of it, so
+   * that a seek out of the data that fills the store opens a read where it lands. Otherwise the choice of
    * what to read is made again: an onward read that is behind the position yields; if the
    * first gap at or after the position is not where a read is reading, a read opens there
    * (a seek: the third onward read gives up the one farthest from the position); nothing
@@ -764,12 +768,14 @@ export class Downloader {
    * wait, and the download is done. Answers whether the read goes on.
    */
   #onFull(read: ActiveRead): boolean {
-    if (this.#nextGap() === null) {
+    const gap = this.#nextGap()
+    if (gap === null) {
       if (read.kind === 'priority') return true
       this.#finished(read)
       return false
     }
     if (this.#state !== 'full') {
+      this.#stoppedAt = gap.start
       for (const open of [...this.#reads]) {
         if (open.kind === 'onward') this.#end(open, 'aborted', null)
       }
@@ -785,8 +791,13 @@ export class Downloader {
 
   /**
    * Asks whether the store has room again, now that the position moved: a write of no bytes
-   * places the blocks that wait under the new position, and answers whether any still does.
-   * One check is made at a time; a move during it makes one more, at the position then.
+   * places the blocks that wait under the new position (and lets go of those that are
+   * further from it than the first gap), and answers whether any still does. One check is
+   * made at a time; a move during it makes one more, at the position then. When there is
+   * room the read opens at the first gap, and it is a seek, and says so, unless that is
+   * where the onward reads stopped. The restart is sent here and not by the read that opens,
+   * since the engine reads at a seek as it moves the position: its read has opened by now and
+   * covers the gap, and the onward read that follows it begins where that one ends.
    */
   #checkRoom(): void {
     if (this.#check.running) {
@@ -812,8 +823,10 @@ export class Downloader {
         if (this.#closed || this.#state !== 'full') return
         // Room, or nothing left to read: blocks may wait still, but a download with nothing to read is not full, it is done.
         if (!outcome.full || this.#nextGap() === null) {
+          const seekTo = this.#seekTarget()
           this.#emit({ type: 'storeFull', on: false, storedBytes: this.#store.stats().storedBytes })
           this.#setState('waiting')
+          if (seekTo !== null) this.#emit({ type: 'restart', offset: seekTo, reason: 'seek' })
           this.#reconsider()
           return
         }
@@ -822,6 +835,21 @@ export class Downloader {
     } finally {
       this.#check.running = false
     }
+  }
+
+  /**
+   * Where the read that the next gap calls for begins, when that is anywhere but where the
+   * onward reads stopped when the store filled; null when it is that place, or one that is
+   * reached from it through data that is held (a priority read brought the gap in between),
+   * which is the download going on, and when there is no gap.
+   */
+  #seekTarget(): number | null {
+    const gap = this.#nextGap()
+    if (gap === null) return null
+    const leaves =
+      gap.start < this.#stoppedAt ||
+      this.#store.held().firstGap(this.#stoppedAt, gap.start) !== null
+    return leaves ? gap.start : null
   }
 
   /** Whether the position moved while the check was made. A method, so that the flag is read as it stands and not as the check set it. */
