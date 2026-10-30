@@ -9,6 +9,8 @@ export { openPlayStore } from './open.ts'
 export type { OpenPlayStoreOptions, StorageEstimator, StoreWorker } from './open.ts'
 export { PLAYS_DIRECTORY, cleanLeftovers, lockName, opfsDirectory, playLock } from './opfs.ts'
 export * from './ranges.ts'
+export { ReadError, openRead } from './read.ts'
+export type { OpenReadOptions, RangeRead } from './read.ts'
 export * from './seal.ts'
 export * from './store.ts'
 export type {
