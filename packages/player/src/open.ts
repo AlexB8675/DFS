@@ -11,7 +11,8 @@
 // or that comes after the play closed (`closed`) is rejected. A worker that is alive but does
 // not answer is a worker that is gone: its requests have deadlines (`STORE_OPEN_MS`,
 // `STORE_CALL_MS`), and so has the browser's estimate (`ESTIMATE_MS`), so that nothing a play
-// waits for can hold it for ever.
+// waits for can hold it for ever. A page that slept does not take the worker for hung: a
+// deadline that fires late gets a grace (`WAKE_GRACE_MS`) for the answers waiting to be handled.
 
 import type { TimelineEventInput } from '@dfs/shared'
 import { StoreError } from './errors.ts'
@@ -46,6 +47,8 @@ export interface OpenPlayStoreOptions {
   estimate?: StorageEstimator
   /** Where the `store` events go: the timeline's recorder, which stamps their time. */
   onEvent: (event: TimelineEventInput) => void
+  /** The clock, in milliseconds, by which a deadline of the worker that fires late is told from one that fires on time (a page that slept); the wall clock, which counts the time a machine slept, when it is missing. */
+  now?: () => number
 }
 
 /** The store as the play uses it: on disk through its worker, or in memory. */
@@ -174,7 +177,7 @@ function memoryChoice(fileSize: number, reason: string): Choice {
  * otherwise the disk. A worker that did not open is ended.
  */
 async function choose(options: OpenPlayStoreOptions): Promise<Choice> {
-  const { playId, fileSize, makeWorker, estimate } = options
+  const { playId, fileSize, makeWorker, estimate, now } = options
   if (makeWorker === null) return memoryChoice(fileSize, 'no-worker')
   const capBytes = await diskCapBytes(estimate)
   if (capBytes < DISK_FLOOR_BYTES) return memoryChoice(fileSize, 'quota')
@@ -186,7 +189,12 @@ async function choose(options: OpenPlayStoreOptions): Promise<Choice> {
     return memoryChoice(fileSize, 'no-worker')
   }
   try {
-    const store = await WorkerStore.open(worker, { playId, fileSize, capBytes })
+    const store = await WorkerStore.open(worker, {
+      playId,
+      fileSize,
+      capBytes,
+      ...(now === undefined ? {} : { now }),
+    })
     return { current: { kind: 'disk', store, worker }, reason: null }
   } catch (error) {
     endWorker(worker)

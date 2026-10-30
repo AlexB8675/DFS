@@ -3,7 +3,13 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { StoreError } from './errors.ts'
 import type { StoreErrorKind } from './errors.ts'
-import { BLOCK_BYTES, STORE_CALL_MS, STORE_OPEN_MS } from './limits.ts'
+import {
+  BLOCK_BYTES,
+  LATE_TIMER_MS,
+  STORE_CALL_MS,
+  STORE_OPEN_MS,
+  WAKE_GRACE_MS,
+} from './limits.ts'
 import { parseReply, parseRequest } from './protocol.ts'
 import type { Endpoint, OpenDirectory, PlayLock, StoreReply, StoreRequest } from './protocol.ts'
 import { SEAL_OVERHEAD, newPlayKey } from './seal.ts'
@@ -176,9 +182,13 @@ class Script {
     this.#server.postMessage(value)
   }
 
-  /** Opens a store on this server, answering the open request with the given cap. */
-  async open(capBytes = 4 * MIB): Promise<WorkerStore> {
-    const opening = WorkerStore.open(this.client, { ...OPTIONS, capBytes })
+  /** Opens a store on this server, answering the open request with the given cap, and judging its deadlines by the clock given (the real one when there is none). */
+  async open(capBytes = 4 * MIB, now?: () => number): Promise<WorkerStore> {
+    const opening = WorkerStore.open(this.client, {
+      ...OPTIONS,
+      capBytes,
+      ...(now === undefined ? {} : { now }),
+    })
     const request = await this.request(0, 'open')
     this.send({ id: request.id, ok: true, type: 'open', capBytes, stats: stats({ capBytes }) })
     return opening
@@ -1232,5 +1242,207 @@ describe('a worker that does not answer', () => {
     expect(closing.state).toBe('resolved')
     expect(vi.getTimerCount()).toBe(0)
     await expectStoreError(store.read(0, 4), 'closed')
+  })
+})
+
+// A page that was asleep, frozen or throttled fires its timers late, with the worker's answers
+// still waiting to be handled: a deadline that fires more than `LATE_TIMER_MS` after it was due,
+// by the clock, is given `WAKE_GRACE_MS` more, once, and only then is the worker dead
+// (DESIGN.md §10.4). The clock is the test's own, which it moves by hand, and so are the timers.
+describe('a page that stood still while it waited', () => {
+  interface Watched {
+    state: 'pending' | 'resolved' | 'rejected'
+    error: unknown
+  }
+
+  function watch(promise: Promise<unknown>): Watched {
+    const watched: Watched = { state: 'pending', error: null }
+    promise.then(
+      () => {
+        watched.state = 'resolved'
+      },
+      (error: unknown) => {
+        watched.state = 'rejected'
+        watched.error = error
+      },
+    )
+    return watched
+  }
+
+  /** A clock that the test moves, in milliseconds. */
+  function handClock(): { now: () => number; to: (ms: number) => void } {
+    let at = 0
+    return {
+      now: () => at,
+      to: (ms) => {
+        at = ms
+      },
+    }
+  }
+
+  /** The id of the request at `index` of what the script was sent, which is one that is answered. */
+  function idAt(script: Script, index: number): number {
+    const request = script.seen[index]
+    if (request === undefined || request.type === 'position') {
+      throw new Error(`request ${index} is not one that is answered`)
+    }
+    return request.id
+  }
+
+  it('fails at once a deadline that fires exactly LATE_TIMER_MS late, which is not late enough', async () => {
+    const clock = handClock()
+    const script = new Script()
+    const store = await script.open(4 * MIB, clock.now)
+    fakeTimers()
+    const reading = watch(store.read(0, 4))
+    await until(() => script.seen.length === 2)
+
+    clock.to(STORE_CALL_MS + LATE_TIMER_MS)
+    await vi.advanceTimersByTimeAsync(STORE_CALL_MS)
+    expect(reading.state).toBe('rejected')
+    expect((reading.error as StoreError).kind).toBe('disk')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('fails at once a deadline that fires on time, and not before', async () => {
+    const clock = handClock()
+    const script = new Script()
+    const store = await script.open(4 * MIB, clock.now)
+    fakeTimers()
+    const reading = watch(store.read(0, 4))
+    await until(() => script.seen.length === 2)
+
+    clock.to(STORE_CALL_MS)
+    await vi.advanceTimersByTimeAsync(STORE_CALL_MS - 1)
+    expect(reading.state).toBe('pending')
+    await vi.advanceTimersByTimeAsync(1)
+    expect(reading.state).toBe('rejected')
+  })
+
+  it('gives a deadline that fires more than LATE_TIMER_MS late a grace, and takes the answer that comes in it', async () => {
+    const clock = handClock()
+    const script = new Script()
+    const store = await script.open(4 * MIB, clock.now)
+    fakeTimers()
+    const reading = watch(store.read(0, 4))
+    await until(() => script.seen.length === 2)
+
+    // The page slept: its timer fires late by the clock, and nothing has been handled yet.
+    clock.to(STORE_CALL_MS + LATE_TIMER_MS + 1)
+    await vi.advanceTimersByTimeAsync(STORE_CALL_MS)
+    expect(reading.state).toBe('pending')
+    expect(vi.getTimerCount()).toBe(1)
+
+    // The answer that was waiting is handled just after.
+    script.send({ id: idAt(script, 1), ok: true, type: 'read', bytes: new Uint8Array([7]) })
+    await until(() => reading.state !== 'pending')
+    expect(reading.state).toBe('resolved')
+    expect(vi.getTimerCount()).toBe(0)
+
+    // The worker is alive: it goes on, and past the grace the store is as it was.
+    await vi.advanceTimersByTimeAsync(2 * WAKE_GRACE_MS)
+    const again = watch(store.read(0, 4))
+    await until(() => script.seen.length === 3)
+    script.send({ id: idAt(script, 2), ok: true, type: 'read', bytes: null })
+    await until(() => again.state !== 'pending')
+    expect(again.state).toBe('resolved')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('fails the worker when the grace is over, once, even if the page stood still again', async () => {
+    const clock = handClock()
+    const script = new Script()
+    const store = await script.open(4 * MIB, clock.now)
+    fakeTimers()
+    const reading = watch(store.read(0, 4))
+    await until(() => script.seen.length === 2)
+    const sent = script.seen.length
+
+    clock.to(STORE_CALL_MS + LATE_TIMER_MS + 1)
+    await vi.advanceTimersByTimeAsync(STORE_CALL_MS)
+    expect(reading.state).toBe('pending')
+
+    await vi.advanceTimersByTimeAsync(WAKE_GRACE_MS - 1)
+    expect(reading.state).toBe('pending')
+    // Asleep once more: the grace is not given a second time.
+    clock.to(10 * STORE_CALL_MS)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(reading.state).toBe('rejected')
+    expect(reading.error).toBeInstanceOf(StoreError)
+    expect((reading.error as StoreError).kind).toBe('disk')
+    expect((reading.error as StoreError).message).toContain('15 s')
+    expect(vi.getTimerCount()).toBe(0)
+
+    await expectStoreError(store.read(0, 4), 'disk')
+    await expectStoreError(store.write(0, new Uint8Array(4)), 'disk')
+    await sleep(20)
+    expect(script.seen.length).toBe(sent)
+  })
+
+  it('gives each late request its own grace, and fails them all when one grace is over', async () => {
+    const clock = handClock()
+    const script = new Script()
+    const store = await script.open(4 * MIB, clock.now)
+    fakeTimers()
+    const answered = watch(store.read(0, 4))
+    const unanswered = watch(store.write(0, new Uint8Array(4)))
+    await until(() => script.seen.length === 3)
+
+    clock.to(STORE_CALL_MS + LATE_TIMER_MS + 1)
+    await vi.advanceTimersByTimeAsync(STORE_CALL_MS)
+    expect(vi.getTimerCount()).toBe(2)
+    script.send({ id: idAt(script, 1), ok: true, type: 'read', bytes: null })
+    await until(() => answered.state !== 'pending')
+    expect(answered.state).toBe('resolved')
+    expect(unanswered.state).toBe('pending')
+    expect(vi.getTimerCount()).toBe(1)
+
+    await vi.advanceTimersByTimeAsync(WAKE_GRACE_MS)
+    expect(unanswered.state).toBe('rejected')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('gives the open the same grace', async () => {
+    const clock = handClock()
+    fakeTimers()
+    const script = new Script()
+    const opening = watch(WorkerStore.open(script.client, { ...OPTIONS, now: clock.now }))
+    await until(() => script.seen.length === 1)
+
+    clock.to(STORE_OPEN_MS + LATE_TIMER_MS + 1)
+    await vi.advanceTimersByTimeAsync(STORE_OPEN_MS)
+    expect(opening.state).toBe('pending')
+    script.send({ id: idAt(script, 0), ok: true, type: 'open', capBytes: 4 * MIB, stats: stats() })
+    await until(() => opening.state !== 'pending')
+    expect(opening.state).toBe('resolved')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('fails the open when its grace is over', async () => {
+    const clock = handClock()
+    fakeTimers()
+    const script = new Script()
+    const opening = watch(WorkerStore.open(script.client, { ...OPTIONS, now: clock.now }))
+    await until(() => script.seen.length === 1)
+
+    clock.to(STORE_OPEN_MS + LATE_TIMER_MS + 1)
+    await vi.advanceTimersByTimeAsync(STORE_OPEN_MS + WAKE_GRACE_MS - 1)
+    expect(opening.state).toBe('pending')
+    await vi.advanceTimersByTimeAsync(1)
+    expect(opening.state).toBe('rejected')
+    expect((opening.error as StoreError).kind).toBe('disk')
+  })
+
+  it('judges by the wall clock when it is not given one, which counts the time a machine slept', async () => {
+    fakeTimers()
+    const script = new Script()
+    const opening = watch(WorkerStore.open(script.client, OPTIONS))
+    await until(() => script.seen.length === 1)
+    // The system clock leaps over the sleep; the timers, faked, fire at their time.
+    vi.setSystemTime(Date.now() + STORE_OPEN_MS + LATE_TIMER_MS + 1)
+    await vi.advanceTimersByTimeAsync(STORE_OPEN_MS)
+    expect(opening.state).toBe('pending')
+    await vi.advanceTimersByTimeAsync(WAKE_GRACE_MS)
+    expect(opening.state).toBe('rejected')
   })
 })

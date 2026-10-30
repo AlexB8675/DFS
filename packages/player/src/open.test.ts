@@ -9,9 +9,11 @@ import {
   DISK_CAP_BYTES,
   DISK_FLOOR_BYTES,
   ESTIMATE_MS,
+  LATE_TIMER_MS,
   MEMORY_CAP_BYTES,
   STORE_CALL_MS,
   STORE_OPEN_MS,
+  WAKE_GRACE_MS,
 } from './limits.ts'
 import { openPlayStore } from './open.ts'
 import type { StoreWorker } from './open.ts'
@@ -1203,6 +1205,137 @@ describe('a worker that does not answer', () => {
     second.directory.file.failNextWrite('InvalidStateError')
     await moved.write(0, block(0))
     await until(() => second.workers[0]?.terminations === 1)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+})
+
+// A page that was asleep, frozen or throttled fires its timers late, with the worker's answers
+// still waiting to be handled: a deadline that fires more than `LATE_TIMER_MS` late by the clock
+// is given `WAKE_GRACE_MS` more, once, so that a laptop that is closed and opened does not cost
+// the play its disk store (DESIGN.md §10.4). The clock is the test's own, which it moves by hand.
+describe('a page that stood still while it waited', () => {
+  const NONE = { full: false, evictedBytes: 0, evicted: [] }
+
+  /** A clock that the test moves, in milliseconds. */
+  function handClock(): { now: () => number; to: (ms: number) => void } {
+    let at = 0
+    return {
+      now: () => at,
+      to: (ms) => {
+        at = ms
+      },
+    }
+  }
+
+  it('keeps the disk, and says nothing, when the worker answers in the grace after the page slept', async () => {
+    fakeTimers()
+    const clock = handClock()
+    const made = rig()
+    const store = await made.open({ fileSize: 4 * MIB, now: clock.now })
+    await store.write(0, block(0))
+    // The request reaches the worker 0.5 s after its deadline, as if the page had held it back.
+    slowdown(made.workers[0], STORE_CALL_MS + 500)
+    const writing = watch(store.write(MIB, block(1)))
+
+    // The page slept: the timer of the request fires late by the clock.
+    clock.to(STORE_CALL_MS + LATE_TIMER_MS + 1)
+    await vi.advanceTimersByTimeAsync(STORE_CALL_MS)
+    expect(writing.state).toBe('pending')
+    expect(store.backend).toBe('disk')
+    expect(made.events).toEqual([opened(DISK_CAP_BYTES)])
+
+    await vi.advanceTimersByTimeAsync(500)
+    await until(() => writing.state === 'settled')
+    expect(writing.value).toEqual(NONE)
+    expect(store.backend).toBe('disk')
+    expect(made.events).toEqual([opened(DISK_CAP_BYTES)])
+    expect(store.held().ranges()).toEqual([blocks(0, 2)])
+    expect(made.workers.map((worker) => worker.terminations)).toEqual([0])
+    expect(vi.getTimerCount()).toBe(0)
+    speedUp(made.workers[0])
+  })
+
+  it('moves to memory, with the reason disk-error, when the grace is over and the worker has not answered', async () => {
+    fakeTimers()
+    const clock = handClock()
+    const made = rig()
+    const store = await made.open({ fileSize: 4 * MIB, now: clock.now })
+    await store.write(0, block(0))
+    silence(made.workers[0])
+    const writing = watch(store.write(MIB, block(1)))
+
+    clock.to(STORE_CALL_MS + LATE_TIMER_MS + 1)
+    await vi.advanceTimersByTimeAsync(STORE_CALL_MS)
+    await vi.advanceTimersByTimeAsync(WAKE_GRACE_MS - 1)
+    expect(writing.state).toBe('pending')
+    expect(store.backend).toBe('disk')
+    expect(made.workers.map((worker) => worker.terminations)).toEqual([0])
+
+    await vi.advanceTimersByTimeAsync(1)
+    await until(() => writing.state === 'settled')
+    expect(writing.value).toEqual(NONE)
+    expect(store.backend).toBe('memory')
+    expect(made.events).toEqual([opened(DISK_CAP_BYTES), inMemory('disk-error')])
+    await until(() => made.workers[0]?.terminations === 1)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('moves to memory at once when the deadline fires on time by the clock', async () => {
+    fakeTimers()
+    const clock = handClock()
+    const made = rig()
+    const store = await made.open({ fileSize: 4 * MIB, now: clock.now })
+    silence(made.workers[0])
+    const writing = watch(store.write(0, block(0)))
+
+    // The clock has gone as far as the deadline and one second more: that is not late enough.
+    clock.to(STORE_CALL_MS + LATE_TIMER_MS)
+    await vi.advanceTimersByTimeAsync(STORE_CALL_MS)
+    await until(() => writing.state === 'settled')
+    expect(store.backend).toBe('memory')
+    expect(made.events).toEqual([opened(DISK_CAP_BYTES), inMemory('disk-error')])
+  })
+
+  it('opens the disk when the worker answers the open in the grace after the page slept', async () => {
+    fakeTimers()
+    const clock = handClock()
+    const made = rig()
+    const opening = watch(
+      made.open({ now: clock.now, makeWorker: slowed(made, STORE_OPEN_MS + 500) }),
+    )
+    await until(() => made.workers.length === 1)
+
+    clock.to(STORE_OPEN_MS + LATE_TIMER_MS + 1)
+    await vi.advanceTimersByTimeAsync(STORE_OPEN_MS)
+    expect(opening.state).toBe('pending')
+    expect(made.events).toEqual([])
+    await vi.advanceTimersByTimeAsync(500)
+    await until(() => opening.state === 'settled')
+    expect(opening.value?.backend).toBe('disk')
+    expect(made.events).toEqual([opened(DISK_CAP_BYTES)])
+    expect(made.workers.map((worker) => worker.terminations)).toEqual([0])
+    expect(vi.getTimerCount()).toBe(0)
+    speedUp(made.workers[0])
+  })
+
+  it('uses memory, with the reason refused, when the grace of the open is over', async () => {
+    fakeTimers()
+    const clock = handClock()
+    const made = rig()
+    const silent = unservedWorkers(made)
+    const opening = watch(made.open({ now: clock.now, makeWorker: silent.makeWorker }))
+    await until(() => silent.received() === 1)
+
+    clock.to(STORE_OPEN_MS + LATE_TIMER_MS + 1)
+    await vi.advanceTimersByTimeAsync(STORE_OPEN_MS + WAKE_GRACE_MS - 1)
+    expect(opening.state).toBe('pending')
+    expect(made.workers.map((worker) => worker.terminations)).toEqual([0])
+
+    await vi.advanceTimersByTimeAsync(1)
+    await until(() => opening.state === 'settled')
+    expect(opening.value?.backend).toBe('memory')
+    expect(made.events).toEqual([inMemory('refused')])
+    expect(made.workers.map((worker) => worker.terminations)).toEqual([1])
     expect(vi.getTimerCount()).toBe(0)
   })
 })

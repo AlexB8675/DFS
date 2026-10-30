@@ -5,7 +5,7 @@
 // from what the answers say, so that `held()` and `stats()` stay synchronous.
 
 import { StoreError } from './errors.ts'
-import { STORE_CALL_MS, STORE_OPEN_MS } from './limits.ts'
+import { LATE_TIMER_MS, STORE_CALL_MS, STORE_OPEN_MS, WAKE_GRACE_MS } from './limits.ts'
 import { dataOf, idOf, parseReply } from './protocol.ts'
 import type { Endpoint, StoreReply, StoreRequest, WireError } from './protocol.ts'
 import { RangeSet } from './ranges.ts'
@@ -66,10 +66,14 @@ function reasonOf(event: unknown): string {
  * The conversation with the worker: it numbers the requests, matches the answers, and fails
  * every call once the worker is gone. A worker that is alive but does not answer is gone
  * too: each request has a deadline, counted from when it is sent, and the first to expire
- * fails the channel as the death of the worker does.
+ * fails the channel as the death of the worker does. A deadline whose timer fires more than
+ * `LATE_TIMER_MS` after it was due, by the clock, fired in a page that was asleep, frozen or
+ * throttled, where the worker's answer may be waiting to be handled: that request is given
+ * `WAKE_GRACE_MS` more, once, and the expiry of the grace is the worker's death.
  */
 class Channel {
   readonly #endpoint: Endpoint
+  readonly #now: () => number
   readonly #waiting = new Map<number, Waiting>()
   #nextId = 1
   #dead: StoreError | null = null
@@ -97,8 +101,9 @@ class Channel {
     this.#fail(new StoreError('disk', 'the worker of the store sent a message that cannot be read'))
   }
 
-  constructor(endpoint: Endpoint) {
+  constructor(endpoint: Endpoint, now: () => number) {
     this.#endpoint = endpoint
+    this.#now = now
     endpoint.addEventListener('message', this.#onMessage)
     endpoint.addEventListener('error', this.#onError)
     endpoint.addEventListener('messageerror', this.#onMessageError)
@@ -132,6 +137,36 @@ class Channel {
   }
 
   /**
+   * Starts the deadline of the call `id`: it fails the channel when `ms` have passed, unless
+   * the timer fired late (the page stood still, so the worker was not given its time), in which
+   * case the call is given a grace, once, and the grace is watched in the same way. `deadlineMs`
+   * is the deadline the call was given, which the error says.
+   */
+  #watch(
+    id: number,
+    ms: number,
+    deadlineMs: number,
+    graced: boolean,
+  ): ReturnType<typeof setTimeout> {
+    const armedAt = this.#now()
+    return setTimeout(() => {
+      const waiting = this.#waiting.get(id)
+      if (waiting === undefined) return
+      if (!graced && this.#now() - armedAt > ms + LATE_TIMER_MS) {
+        waiting.timer = this.#watch(id, WAKE_GRACE_MS, deadlineMs, true)
+        return
+      }
+      const more = graced ? `, nor in the ${WAKE_GRACE_MS / 1000} s more that it was given` : ''
+      this.#fail(
+        new StoreError(
+          'disk',
+          `the worker of the store did not answer within ${deadlineMs / 1000} s${more}`,
+        ),
+      )
+    }, ms)
+  }
+
+  /**
    * Sends a request and waits for its answer, which is a value whether it succeeded or not.
    * It rejects only if the worker is gone, or does not answer in time: `STORE_OPEN_MS` for
    * the open, `STORE_CALL_MS` for the rest, counted from now, so that a request that waits
@@ -145,14 +180,7 @@ class Channel {
       try {
         const request = build(id)
         const deadlineMs = request.type === 'open' ? STORE_OPEN_MS : STORE_CALL_MS
-        const timer = setTimeout(() => {
-          this.#fail(
-            new StoreError(
-              'disk',
-              `the worker of the store did not answer within ${deadlineMs / 1000} s`,
-            ),
-          )
-        }, deadlineMs)
+        const timer = this.#watch(id, deadlineMs, deadlineMs, false)
         this.#waiting.set(id, { resolve, reject, timer })
         this.#endpoint.postMessage(request, transfer)
       } catch (error) {
@@ -214,13 +242,15 @@ export class WorkerStore implements PlayStore {
    * the play's lock, opens its file, and tries it, and it says why when it cannot: a
    * `StoreError` of kind `no-opfs`, `quota` or `refused`, or a `RangeError` for a size
    * that is not one. A worker that has not answered in `STORE_OPEN_MS` is a `StoreError` of
-   * kind `disk`. Once it has opened, the store is the page's to close.
+   * kind `disk`. The deadlines are judged late or on time by `now`, the wall clock when it is
+   * missing (a clock that counts the time a machine slept, which a monotonic one may not).
+   * Once it has opened, the store is the page's to close.
    */
   static async open(
     endpoint: Endpoint,
-    options: { playId: string; fileSize: number; capBytes: number },
+    options: { playId: string; fileSize: number; capBytes: number; now?: () => number },
   ): Promise<WorkerStore> {
-    const channel = new Channel(endpoint)
+    const channel = new Channel(endpoint, options.now ?? ((): number => Date.now()))
     try {
       const reply = await channel.ask((id) => ({
         id,

@@ -47,3 +47,9 @@ export const STORE_OPEN_MS = 30_000
 
 /** How long the browser's estimate of its room (`navigator.storage.estimate()`) is waited for: 5 s. An estimate that has not come by then is taken as one that failed, and the disk store has its full cap. */
 export const ESTIMATE_MS = 5_000
+
+/** How late a deadline's timer may fire before the page is taken to have stood still: 1 s past the deadline by the clock. A timer that fires later than that fired in a page that was asleep, frozen or throttled, where the worker's answer may be waiting to be handled, so the worker has not had its time. */
+export const LATE_TIMER_MS = 1_000
+
+/** The extra time given once to a request whose deadline fired late: 2 s, for the answers that were waiting to be handled when the page woke. An expiry that is not late, and the expiry of this grace, are the worker's death. */
+export const WAKE_GRACE_MS = 2_000

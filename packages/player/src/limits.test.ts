@@ -6,6 +6,7 @@ import {
   ESTIMATE_MS,
   FRONTIER_BLOCKS,
   HEAD_BYTES,
+  LATE_TIMER_MS,
   LEVEL_EVERY_MS,
   MEMORY_CAP_BYTES,
   QUOTA_SHARE,
@@ -15,6 +16,7 @@ import {
   RETRY_MAX_MS,
   STORE_CALL_MS,
   STORE_OPEN_MS,
+  WAKE_GRACE_MS,
 } from './limits.ts'
 
 // The store's and the downloader's bounds (DESIGN.md §10.4): each is a number the
@@ -56,6 +58,11 @@ describe('the store and the downloader limits', () => {
     expect(STORE_CALL_MS).toBe(15_000)
     expect(STORE_OPEN_MS).toBe(30_000)
     expect(ESTIMATE_MS).toBe(5_000)
+  })
+
+  it('takes a timer that fires 1 s late for a page that stood still, and gives its request 2 s more', () => {
+    expect(LATE_TIMER_MS).toBe(1_000)
+    expect(WAKE_GRACE_MS).toBe(2_000)
   })
 
   it('takes whole blocks as the floor of the disk store and the cap of the memory', () => {
