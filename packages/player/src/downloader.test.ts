@@ -2,8 +2,8 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import type { ByteRange } from '@dfs/mp4'
 import type { TimelineEventInput } from '@dfs/shared'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Downloader, pageConnectivity } from './downloader.ts'
-import type { Connectivity } from './downloader.ts'
+import { Downloader, RateMeter, pageConnectivity } from './downloader.ts'
+import type { Connectivity, HeadRead } from './downloader.ts'
 import { StoreError } from './errors.ts'
 import { BLOCK_BYTES, LEVEL_EVERY_MS, RETRY_BASE_MS, RETRY_MAX_MS } from './limits.ts'
 import { ReadError } from './read.ts'
@@ -252,6 +252,7 @@ function build(options: {
   fetch?: typeof fetch
   random?: () => number
   now?: () => number
+  head?: HeadRead
   onEvent?: (event: TimelineEventInput) => void
 }): Rig {
   const events: TimelineEventInput[] = []
@@ -267,6 +268,7 @@ function build(options: {
     // Half is the middle of the jitter: pauses are exactly the base and its doublings.
     random: options.random ?? (() => 0.5),
     ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.head === undefined ? {} : { head: options.head }),
     ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
   })
   downloaders.push(downloader)
@@ -1415,6 +1417,35 @@ describe('Downloader: close', () => {
     await settle()
     expect(stub.calls).toHaveLength(1)
     expect(rig.downloader.failure()).toBeNull()
+  })
+
+  it('lets go of a head read that was never taken over, when it closes first', async () => {
+    const size = 2 * MIB
+    const store = memoryStore(size)
+    const controller = new AbortController()
+    const rig = build({
+      url: 'http://stub.invalid/file',
+      store,
+      head: {
+        id: 4,
+        controller,
+        to: MIB - 1,
+        body: (async function* (): AsyncGenerator<Uint8Array> {
+          await Promise.resolve()
+          yield bytesOf(0, 10)
+        })(),
+        meter: new RateMeter(),
+      },
+    })
+
+    await rig.downloader.close()
+    rig.downloader.start()
+    await settle()
+
+    // The head is let go of, and nothing was read from it, nor sent of it.
+    expect(controller.signal.aborted).toBe(true)
+    expect(store.writes).toEqual([])
+    expect(rig.events).toEqual([])
   })
 
   it('aborts the read that is open, ends it on the timeline once, and is idempotent', async () => {

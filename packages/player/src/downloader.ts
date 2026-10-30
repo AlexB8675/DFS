@@ -8,7 +8,8 @@
 // the page"; it stops the onward reads, and says so, when the store is full of data nearer the
 // position; and the onward reads end only when every byte from the position to the end is
 // held, or when the server says that no try later can work. Everything that happens is a
-// timeline event, with its reason.
+// timeline event, with its reason. `openDownload` makes one and hands it the head read of the
+// play, which is its first onward read.
 //
 // The page's connection is reached through `globalThis` with runtime checks, and the timers
 // are the global ones, so the file needs no DOM types and runs in a page, a worker and Node
@@ -115,6 +116,25 @@ export interface DownloaderOptions {
   random?: () => number
   /** The clock, in milliseconds, which the rate is measured by; `performance.now` when it is missing. */
   now?: () => number
+  /** The play's head read, if `openDownload` opened it before the store: the first onward read, which `start` takes over. */
+  head?: HeadRead
+}
+
+/**
+ * The head read of a play, opened by `openDownload` before the store was: the downloader
+ * takes it over as its first onward read, and its own reads count on from its id.
+ */
+export interface HeadRead {
+  /** The id its `request` event was sent with. */
+  readonly id: number
+  /** Aborted when the downloader lets the read go. */
+  readonly controller: AbortController
+  /** The last byte it asked for, included. */
+  readonly to: number
+  /** What it brings: the pieces that came already first, then the rest as it comes, and a failure of the body after them. */
+  readonly body: AsyncIterable<Uint8Array>
+  /** Where its bytes were counted, as they came. */
+  readonly meter: RateMeter
 }
 
 /** How many onward reads are open at most: the one that follows the position, and one more that a seek opens while the first goes on ahead of it (the iron-clad spec §4.7). */
@@ -141,6 +161,8 @@ interface ActiveRead {
   readonly to: number | null
   /** Who waits for it, when it is a priority read. */
   readonly waiter: Waiter | null
+  /** Whether the rate has counted the read's bytes as they came (the head's were, before the downloader had them). */
+  readonly metered: boolean
   /** The bytes that the read has received, written or not. */
   received: number
   /** The file offset of the next byte to be written. */
@@ -224,7 +246,7 @@ export function retryDelayMs(error: unknown, attempt: number, random: () => numb
 }
 
 /** The bytes that the play's reads have received over the last RATE_WINDOW_MS, and when the first of them came. */
-class RateMeter {
+export class RateMeter {
   readonly #samples: { at: number; bytes: number }[] = []
   #first: number | null = null
 
@@ -267,7 +289,7 @@ export class Downloader {
   readonly #fetch: typeof fetch | undefined
   readonly #random: () => number
   readonly #now: () => number
-  readonly #meter = new RateMeter()
+  readonly #meter: RateMeter
 
   /** Before the start, nothing is read and nothing is wrong: the downloader waits. */
   #state: DownloaderState = 'waiting'
@@ -277,7 +299,9 @@ export class Downloader {
   #closing: Promise<void> | null = null
   /** Where the play is: the onward read begins at the first gap at or after it. */
   #position = 0
-  #nextId = 1
+  #nextId: number
+  /** The head read of the play, until `start` takes it over. */
+  #head: HeadRead | null
   /** The reads that are open. */
   readonly #reads = new Set<ActiveRead>()
   /** How many onward reads have failed in a row, which the next pause is long for. */
@@ -299,6 +323,9 @@ export class Downloader {
     this.#fetch = options.fetch
     this.#random = options.random ?? Math.random
     this.#now = options.now ?? (() => performance.now())
+    this.#head = options.head ?? null
+    this.#meter = options.head?.meter ?? new RateMeter()
+    this.#nextId = (options.head?.id ?? 0) + 1
   }
 
   state(): DownloaderState {
@@ -322,7 +349,29 @@ export class Downloader {
   start(): void {
     if (this.#closed || this.#started) return
     this.#started = true
-    this.#openNext()
+    const head = this.#head
+    this.#head = null
+    if (head === null) this.#openNext()
+    else this.#adopt(head)
+  }
+
+  /** Takes over the head read as the first onward read: its request and its first byte were sent when it was made, and its body is taken as the other reads' are. */
+  #adopt(head: HeadRead): void {
+    const read: ActiveRead = {
+      id: head.id,
+      kind: 'onward',
+      controller: head.controller,
+      from: 0,
+      to: head.to,
+      waiter: null,
+      metered: true,
+      received: 0,
+      at: 0,
+    }
+    this.#reads.add(read)
+    this.#startLevels()
+    this.#setState('reading')
+    void this.#consume(read, head.body)
   }
 
   /**
@@ -400,6 +449,8 @@ export class Downloader {
 
   async #shutDown(): Promise<void> {
     this.#closed = true
+    this.#head?.controller.abort()
+    this.#head = null
     for (const read of [...this.#reads]) this.#end(read, 'aborted', null)
     if (this.#pause !== null) this.#endPause(this.#pause)
     for (const waiter of [...this.#waiters]) this.#refuse(waiter, closedError())
@@ -551,6 +602,7 @@ export class Downloader {
       from,
       to,
       waiter,
+      metered: false,
       received: 0,
       at: from,
     }
@@ -591,6 +643,7 @@ export class Downloader {
    * store. It never rejects: whatever goes wrong is the downloader's to report.
    */
   async #pump(read: ActiveRead): Promise<void> {
+    let body: AsyncIterable<Uint8Array>
     try {
       const opened = await openRead({
         url: this.#url,
@@ -603,10 +656,21 @@ export class Downloader {
       if (!this.#isCurrent(read)) return
       // The answer's headers: its body is still to come.
       this.#emit({ type: 'firstByte', id: read.id })
-      for await (const piece of opened.body) {
+      body = opened.body
+    } catch (error) {
+      this.#readFailed(read, error)
+      return
+    }
+    await this.#consume(read, body)
+  }
+
+  /** The body of a read, taken a piece at a time until it is over. It never rejects. */
+  async #consume(read: ActiveRead, body: AsyncIterable<Uint8Array>): Promise<void> {
+    try {
+      for await (const piece of body) {
         if (!this.#isCurrent(read)) return
         read.received += piece.length
-        this.#meter.add(this.#now(), piece.length)
+        if (!read.metered) this.#meter.add(this.#now(), piece.length)
         // A read that has brought a whole block is a network that works: the pauses start again.
         if (read.received >= BLOCK_BYTES) this.#working(read)
         if (!(await this.#take(read, piece))) return
