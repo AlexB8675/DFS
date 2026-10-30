@@ -12,6 +12,7 @@ import type { Fault, RangeServer } from './testing/range-server.ts'
 const CHUNK = 64 * 1024
 const SIZE = 300_000
 const SEED = 3
+const MIB = 1024 * 1024
 
 const servers: RangeServer[] = []
 
@@ -237,6 +238,19 @@ describe('the ranges asked for', () => {
     expect(input).toBe('http://stub.test/file.bin')
     expect(new Headers(init?.headers).get('Range')).toBe('bytes=10-19')
     expect(init?.signal).toBe(controller.signal)
+  })
+
+  it('keeps the answer out of the browser’s HTTP cache, so no plaintext is left on the disk', async () => {
+    const fetchStub = stub(
+      () =>
+        new Response(new Uint8Array(10), {
+          status: 206,
+          headers: { 'Content-Range': 'bytes 0-9/100' },
+        }),
+    )
+    await stubbed(fetchStub, 0, 9)
+    const [, init] = fetchStub.mock.calls[0] ?? []
+    expect(init?.cache).toBe('no-store')
   })
 
   it('calls the fetch it is given as a plain function, not as a method of its options', async () => {
@@ -537,22 +551,214 @@ describe('an answer worth another try', () => {
 describe('the message of an error', () => {
   const SECRET = 'token=hunter2'
 
-  it('names the path of the URL and not its query', async () => {
+  it('names the bytes asked for and no part of the URL, its query and fragment included', async () => {
     const server = await serve({ faults: [{ kind: 'status', status: 404 }] })
     const error = await readFailure(read({ ...server, url: `${server.url}?${SECRET}#frag` }, 0))
-    expect(error.message).toContain('/file.bin')
+    expect(error.message).toContain('404')
+    expect(error.message).toContain('bytes 0-')
+    expect(error.message).not.toContain('file.bin')
+    expect(error.message).not.toContain('127.0.0.1')
     expect(error.message).not.toContain('hunter2')
     expect(error.message).not.toContain('?')
     expect(error.message).not.toContain('#')
   })
 
-  it('names the path of a relative URL too, and not its query', async () => {
-    const fetchStub = stub(() => new Response(null, { status: 503 }))
-    const error = await readFailure(
-      stubbed(fetchStub, 0, null, { url: `/api/files/abc/content?${SECRET}` }),
+  it('says what happened and the range, as a sentence', async () => {
+    const open = stubbed(
+      stub(() => new Response(null, { status: 404 })),
+      5 * MIB,
+      null,
     )
-    expect(error.message).toContain('/api/files/abc/content')
-    expect(error.message).not.toContain('hunter2')
+    expect((await readFailure(open)).message).toBe('The server answered 404 for bytes 5242880-.')
+    const bounded = stubbed(
+      stub(() => new Response(null, { status: 503 })),
+      0,
+      MIB - 1,
+    )
+    expect((await readFailure(bounded)).message).toBe(
+      'The server answered 503 for bytes 0-1048575.',
+    )
+  })
+
+  // A share link has its token in the path (`/api/s/:token/files/:id/content`), and a message
+  // reaches the timeline that the server keeps for 28 days: so no message names the URL.
+  describe('of a share link', () => {
+    const TOKEN = 'SECRETTOKEN123'
+    const SHARE_URL = `https://x.test/api/s/${TOKEN}/files/f1/content?play=1`
+    const NOT_BYTES = {
+      read: () => Promise.resolve({ done: false, value: 'not bytes' }),
+      cancel: () => Promise.resolve(),
+    }
+
+    /** One way for a read to fail, and the range it asked for. */
+    interface Failing {
+      from: number
+      to: number | null
+      fileSize?: number | null
+      /** The `fetch` that answers; made when the read is, since a body is read once. */
+      fetch: () => typeof fetch
+      /** Whether the read fails in its body, after it was opened. */
+      inBody?: boolean
+    }
+
+    const answer = (make: () => Response): (() => typeof fetch) => {
+      return () => stub(make)
+    }
+    /** A 206 whose body is made by `body`; a stream is made once per read. */
+    const partial = (
+      contentRange: string | undefined,
+      body: () => ConstructorParameters<typeof Response>[0],
+    ) =>
+      answer(
+        () =>
+          new Response(body(), {
+            status: 206,
+            headers: contentRange === undefined ? {} : { 'Content-Range': contentRange },
+          }),
+      )
+
+    const failures: [string, Failing][] = [
+      ...[400, 401, 403, 404, 410, 416, 418, 451].map((status): [string, Failing] => [
+        `a fatal ${status}`,
+        { from: 5 * MIB, to: null, fetch: answer(() => new Response(null, { status })) },
+      ]),
+      ...[408, 429, 500, 502, 503, 504].map((status): [string, Failing] => [
+        `a ${status}, which is worth another try`,
+        { from: 0, to: MIB - 1, fetch: answer(() => new Response(null, { status })) },
+      ]),
+      [
+        'a request that failed before the server answered',
+        {
+          from: 0,
+          to: 99,
+          fetch: () => vi.fn<typeof fetch>(() => Promise.reject(new TypeError('Failed to fetch'))),
+        },
+      ],
+      [
+        'a Content-Range that is missing',
+        { from: 5000, to: 5099, fetch: partial(undefined, () => new Uint8Array(100)) },
+      ],
+      [
+        'a Content-Range that cannot be read',
+        { from: 5000, to: 5099, fetch: partial('bytes abc', () => new Uint8Array(100)) },
+      ],
+      [
+        'a Content-Range that starts elsewhere',
+        {
+          from: 5000,
+          to: 5099,
+          fetch: partial('bytes 6000-6099/300000', () => new Uint8Array(100)),
+        },
+      ],
+      [
+        'a Content-Range that is not a range of the file',
+        { from: 5000, to: 5099, fetch: partial('bytes 5000-5099/5050', () => new Uint8Array(100)) },
+      ],
+      [
+        'a total that is not the size of the file, in a 206',
+        {
+          from: 0,
+          to: 99,
+          fileSize: 1001,
+          fetch: partial('bytes 0-99/1000', () => new Uint8Array(100)),
+        },
+      ],
+      [
+        'a total that is not the size of the file, in a 200',
+        {
+          from: 0,
+          to: null,
+          fileSize: 99,
+          fetch: answer(
+            () =>
+              new Response(new Uint8Array(100), {
+                status: 200,
+                headers: { 'Content-Length': '100' },
+              }),
+          ),
+        },
+      ],
+      [
+        'a 200 at a start past 0',
+        {
+          from: 5000,
+          to: null,
+          fetch: answer(
+            () =>
+              new Response(new Uint8Array(100), {
+                status: 200,
+                headers: { 'Content-Length': '100' },
+              }),
+          ),
+        },
+      ],
+      [
+        'a 200 with no Content-Length',
+        {
+          from: 0,
+          to: null,
+          fetch: answer(() => new Response(new Uint8Array(100), { status: 200 })),
+        },
+      ],
+      ['a 206 with no body', { from: 0, to: 9, fetch: partial('bytes 0-9/100', () => null) }],
+      [
+        'a body that breaks',
+        {
+          from: 0,
+          to: 99,
+          inBody: true,
+          fetch: partial('bytes 0-99/1000', () => {
+            let pulls = 0
+            return new ReadableStream<Uint8Array>({
+              pull(controller) {
+                pulls += 1
+                if (pulls === 1) controller.enqueue(new Uint8Array(10))
+                else controller.error(new TypeError('terminated'))
+              },
+            })
+          }),
+        },
+      ],
+      [
+        'a body that ends before its length',
+        { from: 0, to: 99, inBody: true, fetch: partial('bytes 0-99/1000', () => bodyOf(40)) },
+      ],
+      [
+        'a body that gives something other than bytes',
+        {
+          from: 0,
+          to: 4,
+          inBody: true,
+          fetch: () =>
+            vi.fn<typeof fetch>(() =>
+              Promise.resolve({
+                status: 206,
+                headers: new Headers({ 'Content-Range': 'bytes 0-4/10' }),
+                body: { getReader: () => NOT_BYTES },
+              } as unknown as Response),
+            ),
+        },
+      ],
+    ]
+
+    it.each(failures)('names nothing of the URL in the message of %s', async (_name, failing) => {
+      const attempt = stubbed(failing.fetch(), failing.from, failing.to, {
+        url: SHARE_URL,
+        ...(failing.fileSize === undefined ? {} : { fileSize: failing.fileSize }),
+      })
+      let error: unknown
+      if (failing.inBody === true) error = (await drain((await attempt).body)).error
+      else error = await readFailure(attempt)
+      expect(error).toBeInstanceOf(ReadError)
+      const message = (error as ReadError).message
+      // The message says which bytes: that is what it has in place of the address.
+      expect(message).toContain(`bytes ${failing.from}-${failing.to ?? ''}`)
+      for (const part of [TOKEN, '/api/', '/s/', 'files', 'content', 'x.test', 'https', 'play=1']) {
+        expect(message).not.toContain(part)
+      }
+      expect(message).not.toContain('?')
+      expect(message).not.toContain('#')
+    })
   })
 
   it('does not name the query in a network error or in a body that breaks', async () => {

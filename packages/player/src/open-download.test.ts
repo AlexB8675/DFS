@@ -1,5 +1,6 @@
 import type { MessagePort } from 'node:worker_threads'
 import { setTimeout as sleep } from 'node:timers/promises'
+import { timelineEventSchema } from '@dfs/shared'
 import type { TimelineEventInput } from '@dfs/shared'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Connectivity, Downloader } from './downloader.ts'
@@ -9,6 +10,8 @@ import type { OpenDownloadOptions } from './open-download.ts'
 import type { StoreWorker } from './open.ts'
 import { PLAYS_DIRECTORY, lockName } from './opfs.ts'
 import { ReadError } from './read.ts'
+import type * as readModule from './read.ts'
+import type { OpenReadOptions, RangeRead } from './read.ts'
 import { serveStore } from './serve.ts'
 import { byteAt, startRangeServer } from './testing/range-server.ts'
 import type { Fault, RangeServer } from './testing/range-server.ts'
@@ -23,11 +26,26 @@ import { TestPlayDirectory, testLock } from './testing/play-directory.ts'
 const MIB = 1024 * 1024
 const SEED = 7
 
+// `./read.ts` is its own, except where a test sets `reads.override`: a head that fails with a
+// message that no real answer gives (every message of a read is short), to see what is done
+// with a long one.
+const reads = vi.hoisted(() => ({
+  override: null as ((options: OpenReadOptions) => Promise<RangeRead>) | null,
+}))
+vi.mock('./read.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof readModule>()
+  return {
+    ...actual,
+    openRead: (options: OpenReadOptions) => (reads.override ?? actual.openRead)(options),
+  }
+})
+
 const servers: RangeServer[] = []
 const downloaders: Downloader[] = []
 const ports: MessagePort[] = []
 
 afterEach(async () => {
+  reads.override = null
   await Promise.all(downloaders.splice(0).map((downloader) => downloader.close()))
   for (const port of ports.splice(0)) port.close()
   vi.useRealTimers()
@@ -223,6 +241,34 @@ describe('openDownload: the head', () => {
       { type: 'requestEnd', id: 1, bytes: 0, outcome: 'failed', message },
       { type: 'error', from: 'engine', code: 404, message },
     ])
+  })
+
+  it('clips the messages of a head that fails for good, so that the recorder keeps both events', async () => {
+    const server = await serve({ size: 2 * MIB })
+    const { open, events } = rig(server)
+    // More than 300 characters, with a U+0000 and half of a surrogate pair among them.
+    const message = `${'a'.repeat(250)}\u0000${'b'.repeat(250)}\ud800c`
+    reads.override = () => Promise.reject(new ReadError(message, { fatal: true, status: 404 }))
+
+    const failure: unknown = await open().catch((error: unknown) => error)
+
+    // The failure is the read's own, as it was; it is the events that are cut to what a timeline takes.
+    expect(failure).toBeInstanceOf(ReadError)
+    expect((failure as ReadError).message).toBe(message)
+    expect(server.requests).toEqual([])
+    expect(events.map((event) => event.type)).toEqual(['request', 'requestEnd', 'error'])
+    for (const event of events) {
+      const parsed = timelineEventSchema.safeParse({ ...event, t: 0 })
+      expect(parsed.success, JSON.stringify(parsed.error?.issues)).toBe(true)
+    }
+    const clipped = `${'a'.repeat(250)}${'b'.repeat(50)}`
+    expect(ofType(events, 'requestEnd')[0]?.message).toBe(clipped)
+    expect(ofType(events, 'error')[0]).toEqual({
+      type: 'error',
+      from: 'engine',
+      code: 404,
+      message: clipped,
+    })
   })
 
   it('takes the size of the file from Content-Range, holds the head, and hands the read on', async () => {
@@ -629,5 +675,58 @@ describe('openDownload: the clean-up of leftovers', () => {
     await until(() => system.removed.length > 0)
     await sleep(20)
     expect(system.removed).toEqual(['crashed'])
+  })
+})
+
+// A share link has its token in the path (`/api/s/:token/files/:id/content`), and a timeline
+// is kept by the server: no event of a play names any part of the file's route.
+describe('openDownload: the route of a share link', () => {
+  const TOKEN = 'SECRETTOKEN123'
+
+  it('is in no event, whether the head, the body or a later read fails, or the play ends', async () => {
+    fakeTimers()
+    const server = await serve({
+      size: 2 * MIB,
+      faults: [
+        { kind: 'status', status: 503 },
+        { kind: 'drop', afterBytes: 300_000 },
+        { kind: 'status', status: 404 },
+      ],
+    })
+    const url = new URL(`/api/s/${TOKEN}/files/f1/content?play=1`, server.url).href
+    const { open, events } = rig(server)
+
+    // The head is refused once (open-download's own messages), then its body breaks (the downloader's), then the play ends.
+    const opening = open({ url })
+    await until(() => ofType(events, 'retry').length === 1)
+    await vi.advanceTimersByTimeAsync(ofType(events, 'retry')[0]?.delayMs ?? 0)
+    await opening
+    await until(() => ofType(events, 'retry').length === 2)
+    await vi.advanceTimersByTimeAsync(ofType(events, 'retry')[1]?.delayMs ?? 0)
+    await until(() => ofType(events, 'error').length === 1)
+
+    expect(server.requests).toEqual([
+      { range: `bytes=0-${HEAD_BYTES - 1}` },
+      { range: `bytes=0-${HEAD_BYTES - 1}` },
+      { range: 'bytes=300000-' },
+    ])
+    const failed = ofType(events, 'requestEnd').filter((end) => end.outcome === 'failed')
+    expect(failed.map((end) => end.message)).toEqual([
+      `The server answered 503 for bytes 0-${HEAD_BYTES - 1}.`,
+      expect.stringContaining('bytes 0-'),
+      'The server answered 404 for bytes 300000-.',
+    ])
+    expect(ofType(events, 'error')).toEqual([
+      {
+        type: 'error',
+        from: 'engine',
+        code: 404,
+        message: 'The server answered 404 for bytes 300000-.',
+      },
+    ])
+    const record = JSON.stringify(events)
+    for (const part of [TOKEN, '/api/', 'content', '127.0.0.1', 'play=1', '?']) {
+      expect(record).not.toContain(part)
+    }
   })
 })

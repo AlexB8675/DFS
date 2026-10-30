@@ -34,7 +34,7 @@ export class ReadError extends Error {
 }
 
 export interface OpenReadOptions {
-  /** The file's route. Any query it has is sent, and never named by an error. */
+  /** The file's route, which is sent as it is. No error names any part of it: a share link's token is in its path. */
   url: string
   /** The first byte to read. */
   from: number
@@ -67,13 +67,14 @@ interface BodyReader {
   cancel(): Promise<void>
 }
 
-/** The path of a URL, which is all an error names of it: a query can carry a share link's token, and the address can carry a password. */
-function pathOf(url: string): string {
-  try {
-    return new URL(url, 'http://path.invalid').pathname
-  } catch {
-    return 'the URL'
-  }
+/**
+ * What an error names of a read in place of its URL: the bytes it asked for. A share link or
+ * an archive link has its token in the path, a query can carry one too, and the address can
+ * carry a password; a message reaches the timeline, which the server keeps. So no message
+ * names any part of the URL.
+ */
+function rangeOf(from: number, to: number | null): string {
+  return `bytes ${from}-${to ?? ''}`
 }
 
 function isAbortError(error: unknown): boolean {
@@ -135,7 +136,7 @@ async function* readBody(
   reader: BodyReader,
   length: number,
   signal: AbortSignal,
-  path: string,
+  asked: string,
   status: number,
 ): AsyncGenerator<Uint8Array, void, undefined> {
   let received = 0
@@ -150,19 +151,19 @@ async function* readBody(
         // An abort is the play's own business, and is not a failure of the network.
         if (signal.aborted || isAbortError(error)) throw error
         throw new ReadError(
-          `The connection for ${path} broke after ${received} of ${length} bytes.`,
+          `The connection for ${asked} broke after ${received} of ${length} bytes.`,
           { fatal: false, status, cause: error },
         )
       }
       if (result.done) {
-        throw new ReadError(`The body for ${path} ended after ${received} of ${length} bytes.`, {
+        throw new ReadError(`The body for ${asked} ended after ${received} of ${length} bytes.`, {
           fatal: false,
           status,
         })
       }
       const value = result.value
       if (!(value instanceof Uint8Array)) {
-        throw new ReadError(`The body for ${path} gave something other than bytes.`, {
+        throw new ReadError(`The body for ${asked} gave something other than bytes.`, {
           fatal: false,
           status,
         })
@@ -208,18 +209,20 @@ export async function openRead(options: OpenReadOptions): Promise<RangeRead> {
     throw new RangeError(`${fileSize} is not the size of a file`)
   }
 
-  const path = pathOf(url)
+  const asked = rangeOf(from, to)
   // Called as a plain function: a browser's `fetch` refuses to be called as a method of anything but the window.
   const doFetch = options.fetch ?? fetch
   let response: Response
   try {
     response = await doFetch(url, {
       headers: { Range: `bytes=${from}-${to ?? ''}` },
+      // The store is the one place a play's bytes are kept, sealed. Without this the browser may keep each answer, as plain bytes, in its HTTP cache on the disk, after the play and outside the store's cap.
+      cache: 'no-store',
       signal,
     })
   } catch (error) {
     if (signal.aborted || isAbortError(error)) throw error
-    throw new ReadError(`The request for ${path} failed before the server answered.`, {
+    throw new ReadError(`The request for ${asked} failed before the server answered.`, {
       fatal: false,
       cause: error,
     })
@@ -230,7 +233,7 @@ export async function openRead(options: OpenReadOptions): Promise<RangeRead> {
     dismiss(response.body)
     // A busy server or a network in between may be better in a while; the rest will answer the same.
     const worthAnotherTry = status === 408 || status === 429 || status >= 500
-    throw new ReadError(`The server answered ${status} for ${path}.`, {
+    throw new ReadError(`The server answered ${status} for ${asked}.`, {
       fatal: !worthAnotherTry,
       status,
       retryAfterMs: worthAnotherTry ? parseRetryAfter(response.headers.get('Retry-After')) : null,
@@ -239,7 +242,7 @@ export async function openRead(options: OpenReadOptions): Promise<RangeRead> {
 
   const refuse = (why: string): never => {
     dismiss(response.body)
-    throw new ReadError(`${why} (the answer was ${status} for ${path}).`, { fatal: true, status })
+    throw new ReadError(`${why} (the answer was ${status} for ${asked}).`, { fatal: true, status })
   }
 
   /** The size of the file, and the last byte the answer has. */
@@ -276,10 +279,10 @@ export async function openRead(options: OpenReadOptions): Promise<RangeRead> {
     return { total, body: emptyBody() }
   }
   if (response.body === null) {
-    throw new ReadError(`The server answered ${status} for ${path} with no body.`, {
+    throw new ReadError(`The server answered ${status} for ${asked} with no body.`, {
       fatal: false,
       status,
     })
   }
-  return { total, body: readBody(response.body.getReader(), length, signal, path, status) }
+  return { total, body: readBody(response.body.getReader(), length, signal, asked, status) }
 }

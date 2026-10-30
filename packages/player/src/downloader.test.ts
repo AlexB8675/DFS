@@ -2,7 +2,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import type { ByteRange } from '@dfs/mp4'
 import type { TimelineEventInput } from '@dfs/shared'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Downloader, RateMeter, pageConnectivity } from './downloader.ts'
+import { Downloader, RateMeter, clip, messageOf, pageConnectivity } from './downloader.ts'
 import type { Connectivity, HeadRead } from './downloader.ts'
 import { StoreError } from './errors.ts'
 import { BLOCK_BYTES, LEVEL_EVERY_MS, RETRY_BASE_MS, RETRY_MAX_MS } from './limits.ts'
@@ -2545,5 +2545,42 @@ describe('pageConnectivity', () => {
       connectivity.onOnline(() => undefined)()
       connectivity.onVisible(() => undefined)()
     }).not.toThrow()
+  })
+})
+
+// The text that a timeline takes (`timelineEventSchema`): up to 300 characters, no U+0000 and no
+// half of a surrogate pair. A message that breaks it makes the recorder drop the whole event.
+describe('clip and messageOf', () => {
+  it('leaves a short text as it is', () => {
+    expect(clip('The server answered 503 for bytes 0-.')).toBe(
+      'The server answered 503 for bytes 0-.',
+    )
+    expect(clip('')).toBe('')
+  })
+
+  it('cuts a text at 300 characters', () => {
+    expect(clip('a'.repeat(300))).toHaveLength(300)
+    expect(clip('a'.repeat(301))).toHaveLength(300)
+    expect(clip('a'.repeat(5000))).toHaveLength(300)
+  })
+
+  it('takes out U+0000 and a half of a surrogate pair, and keeps a whole pair', () => {
+    expect(clip('a\u0000b')).toBe('ab')
+    expect(clip('a\ud800b')).toBe('ab')
+    expect(clip('a\udc00b')).toBe('ab')
+    expect(clip('a\u{1f600}b')).toBe('a\u{1f600}b')
+  })
+
+  it('does not cut a pair in two at the end', () => {
+    const clipped = clip(`${'a'.repeat(299)}\u{1f600}`)
+    expect(clipped).toBe('a'.repeat(299))
+    expect(clipped.isWellFormed()).toBe(true)
+  })
+
+  it('makes messageOf an error’s message, or any other value’s text, clipped', () => {
+    expect(messageOf(new Error('broke'))).toBe('broke')
+    expect(messageOf('plain')).toBe('plain')
+    expect(messageOf(new Error(`${'x'.repeat(400)}\u0000`))).toHaveLength(300)
+    expect(messageOf(42)).toBe('42')
   })
 })

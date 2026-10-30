@@ -9,7 +9,7 @@
 // rejects. Everything is a timeline event, with its reason.
 
 import type { TimelineEventInput } from '@dfs/shared'
-import { Downloader, RateMeter, pageConnectivity, retryDelayMs } from './downloader.ts'
+import { Downloader, RateMeter, messageOf, pageConnectivity, retryDelayMs } from './downloader.ts'
 import type { Connectivity } from './downloader.ts'
 import { HEAD_BYTES } from './limits.ts'
 import { openPlayStore } from './open.ts'
@@ -131,10 +131,6 @@ function pauseFor(
   })
 }
 
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
-
 /**
  * Starts the play's download: asks for the head, opens the store for the size the head
  * says, and answers the started downloader as soon as the store is open, while the head
@@ -185,6 +181,7 @@ export async function openDownload(options: OpenDownloadOptions): Promise<Downlo
           emit({ type: 'requestEnd', id, bytes: 0, outcome: 'aborted', message: null })
           signal.throwIfAborted()
         }
+        // Clipped as the downloader's messages are: one the timeline refuses is dropped whole, and the head's fatal `error` with it.
         const message = messageOf(error)
         emit({ type: 'requestEnd', id, bytes: 0, outcome: 'failed', message })
         if (error instanceof ReadError && error.fatal) {

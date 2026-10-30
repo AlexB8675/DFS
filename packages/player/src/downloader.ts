@@ -199,9 +199,10 @@ interface Waiter {
 /**
  * Text up to 300 characters with no U+0000 and no half of a surrogate pair: what a timeline's
  * text fields take (the recorder's `clipText` does the same, and the player package does not
- * reach the page's code).
+ * reach the page's code). Every message of an event goes through it, here and in
+ * `open-download.ts`: a message that is long or unclean makes the recorder drop the whole event.
  */
-function clip(text: string): string {
+export function clip(text: string): string {
   let clipped = ''
   // Iterating a string goes by code point, and a lone surrogate comes alone.
   for (const char of text) {
@@ -213,7 +214,8 @@ function clip(text: string): string {
   return clipped
 }
 
-function messageOf(error: unknown): string {
+/** What an error says, or what any other value spells, as text that a timeline takes. */
+export function messageOf(error: unknown): string {
   return clip(error instanceof Error ? error.message : String(error))
 }
 
