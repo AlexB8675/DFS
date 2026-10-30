@@ -1,9 +1,18 @@
+import { setTimeout as sleep } from 'node:timers/promises'
 import type { MessagePort } from 'node:worker_threads'
 import type { TimelineEventInput } from '@dfs/shared'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { StoreError } from './errors.ts'
 import type { StoreErrorKind } from './errors.ts'
-import { BLOCK_BYTES, DISK_CAP_BYTES, DISK_FLOOR_BYTES, MEMORY_CAP_BYTES } from './limits.ts'
+import {
+  BLOCK_BYTES,
+  DISK_CAP_BYTES,
+  DISK_FLOOR_BYTES,
+  ESTIMATE_MS,
+  MEMORY_CAP_BYTES,
+  STORE_CALL_MS,
+  STORE_OPEN_MS,
+} from './limits.ts'
 import { openPlayStore } from './open.ts'
 import type { StoreWorker } from './open.ts'
 import { parseRequest } from './protocol.ts'
@@ -95,6 +104,7 @@ const ports: MessagePort[] = []
 const stores: PlayStore[] = []
 
 afterEach(async () => {
+  vi.useRealTimers()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
   for (const store of stores.splice(0)) await store.close()
@@ -196,6 +206,89 @@ async function fill(store: PlayStore, from: number, to: number): Promise<void> {
 function kill(worker: TestWorker | undefined): void {
   if (worker === undefined) throw new Error('the test has no worker to kill')
   worker.dispatchEvent(new Event('error'))
+}
+
+/** The clock of the timers, and nothing else: the messages between the page and the worker stay real. */
+function fakeTimers(): void {
+  vi.useFakeTimers({
+    toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'],
+  })
+}
+
+/** Waits, on the real clock, until the condition holds (`vi.waitFor` moves the fake clock when it is faked). */
+async function until(condition: () => boolean, limitMs = 5_000): Promise<void> {
+  const began = performance.now()
+  while (!condition()) {
+    if (performance.now() - began > limitMs) throw new Error('timed out waiting for a condition')
+    await sleep(1)
+  }
+}
+
+/** The state of a promise, learned without waiting for it. */
+function watch<T>(promise: Promise<T>): { state: 'pending' | 'settled'; value?: T } {
+  const watched: { state: 'pending' | 'settled'; value?: T } = { state: 'pending' }
+  promise.then(
+    (value) => {
+      watched.state = 'settled'
+      watched.value = value
+    },
+    () => {
+      watched.state = 'settled'
+    },
+  )
+  return watched
+}
+
+/** Makes a worker alive and silent: what the page sends it from now on is lost, and it answers nothing. */
+function silence(worker: TestWorker | undefined): void {
+  if (worker === undefined) throw new Error('the test has no worker to silence')
+  Object.assign(worker, { postMessage: () => undefined })
+}
+
+/** Makes a worker slow: what the page sends it from now on arrives `delayMs` later, by the fake clock. */
+function slowdown(worker: TestWorker | undefined, delayMs: number): void {
+  if (worker === undefined) throw new Error('the test has no worker to slow down')
+  const send = worker.postMessage.bind(worker)
+  Object.assign(worker, {
+    postMessage: (message: unknown, transfer: ArrayBuffer[]) => {
+      setTimeout(() => {
+        send(message, transfer)
+      }, delayMs)
+    },
+  })
+}
+
+/** Gives a worker its speed back, so that the close that ends the test does not wait for the real clock. */
+function speedUp(worker: TestWorker | undefined): void {
+  if (worker === undefined) throw new Error('the test has no worker to speed up')
+  Reflect.deleteProperty(worker, 'postMessage')
+}
+
+/** Workers that are slow from the start, as `slowdown` makes them. */
+function slowed(made: Rig, delayMs: number): () => StoreWorker {
+  return () => {
+    const worker = made.makeWorker()
+    slowdown(made.workers.at(-1), delayMs)
+    return worker
+  }
+}
+
+/** Workers that nobody serves, which receive what is sent them and answer nothing: the test's `rig` ends them like the others. */
+function unservedWorkers(made: Rig): { makeWorker: () => StoreWorker; received: () => number } {
+  let received = 0
+  return {
+    received: () => received,
+    makeWorker: () => {
+      const { port1, port2 } = new MessageChannel()
+      ports.push(port1, port2)
+      port2.on('message', () => {
+        received += 1
+      })
+      const worker = workerOver(port1, made.log)
+      made.workers.push(worker)
+      return worker
+    },
+  }
 }
 
 /** The `store` event for a disk store as asked. */
@@ -927,5 +1020,251 @@ describe('a disk that fails during the play', () => {
     kill(workers[0])
     expect(await store.write(0, block(0))).toEqual({ full: false, evictedBytes: 0, evicted: [] })
     expect(store.backend).toBe('memory')
+  })
+})
+
+// A worker that is alive but does not answer is a worker that is gone, after a deadline: the
+// play goes on in memory, with the reason, and the worker is ended (DESIGN.md §10.4). The
+// timers are the tests' own, and the messages between the page and the worker are real.
+describe('a worker that does not answer', () => {
+  const NONE = { full: false, evictedBytes: 0, evicted: [] }
+
+  it('uses memory, with the reason refused, and ends the worker, when the open is not answered in STORE_OPEN_MS', async () => {
+    fakeTimers()
+    const made = rig()
+    const silent = unservedWorkers(made)
+    const opening = watch(made.open({ makeWorker: silent.makeWorker }))
+    await until(() => silent.received() === 1)
+
+    await vi.advanceTimersByTimeAsync(STORE_OPEN_MS - 1)
+    expect(opening.state).toBe('pending')
+    expect(made.events).toEqual([])
+    expect(made.workers.map((worker) => worker.terminations)).toEqual([0])
+
+    await vi.advanceTimersByTimeAsync(1)
+    await until(() => opening.state === 'settled')
+    expect(opening.value?.backend).toBe('memory')
+    expect(made.events).toEqual([inMemory('refused')])
+    expect(made.workers.map((worker) => worker.terminations)).toEqual([1])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('opens the disk when the worker answers the open just inside STORE_OPEN_MS', async () => {
+    fakeTimers()
+    const made = rig()
+    const opening = watch(made.open({ makeWorker: slowed(made, STORE_OPEN_MS - 1) }))
+    await until(() => made.workers.length === 1)
+    await vi.advanceTimersByTimeAsync(STORE_OPEN_MS - 1)
+    await until(() => opening.state === 'settled')
+    expect(opening.value?.backend).toBe('disk')
+    expect(made.events).toEqual([opened(DISK_CAP_BYTES)])
+    expect(made.workers.map((worker) => worker.terminations)).toEqual([0])
+    expect(vi.getTimerCount()).toBe(0)
+    speedUp(made.workers[0])
+  })
+
+  it('answers a read and a write from memory when the worker stops answering mid-play, in STORE_CALL_MS, with one event', async () => {
+    fakeTimers()
+    const made = rig()
+    const store = await made.open({ fileSize: 4 * MIB })
+    await store.write(0, block(0))
+    silence(made.workers[0])
+
+    const reading = watch(store.read(0, MIB))
+    const writing = watch(store.write(MIB, block(1)))
+    await vi.advanceTimersByTimeAsync(STORE_CALL_MS - 1)
+    expect(reading.state).toBe('pending')
+    expect(writing.state).toBe('pending')
+    expect(store.backend).toBe('disk')
+    expect(made.events).toEqual([opened(DISK_CAP_BYTES)])
+
+    await vi.advanceTimersByTimeAsync(1)
+    await until(() => reading.state === 'settled' && writing.state === 'settled')
+    // What the disk held is not read from the dead worker, and the write is the memory's.
+    expect(reading.value).toBeNull()
+    expect(writing.value).toEqual(NONE)
+    expect(store.backend).toBe('memory')
+    expect(made.events).toEqual([opened(DISK_CAP_BYTES), inMemory('disk-error')])
+    expect(store.held().ranges()).toEqual([blocks(1, 2)])
+    expectSame(await store.read(MIB, 2 * MIB), block(1))
+    await until(() => made.workers[0]?.terminations === 1)
+    // The dead worker is not asked to close, and the directory is left for the next start of the app.
+    expect(made.log).not.toContain('directory removed')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('moves to memory when a write alone is not answered, and answers it', async () => {
+    fakeTimers()
+    const made = rig()
+    const store = await made.open({ fileSize: 4 * MIB })
+    silence(made.workers[0])
+    const writing = watch(store.write(0, block(0)))
+    await vi.advanceTimersByTimeAsync(STORE_CALL_MS)
+    await until(() => writing.state === 'settled')
+    expect(writing.value).toEqual(NONE)
+    expect(store.backend).toBe('memory')
+    expect(made.events).toEqual([opened(DISK_CAP_BYTES), inMemory('disk-error')])
+  })
+
+  it('does not move the play for a worker that answers just inside STORE_CALL_MS, and leaves no timer behind', async () => {
+    fakeTimers()
+    const made = rig()
+    const store = await made.open({ fileSize: 4 * MIB })
+    slowdown(made.workers[0], STORE_CALL_MS - 1)
+
+    const writing = watch(store.write(0, block(0)))
+    await vi.advanceTimersByTimeAsync(STORE_CALL_MS - 1)
+    await until(() => writing.state === 'settled')
+    expect(writing.value).toEqual(NONE)
+    expect(store.backend).toBe('disk')
+    expect(store.held().ranges()).toEqual([blocks(0, 1)])
+    expect(made.events).toEqual([opened(DISK_CAP_BYTES)])
+    expect(made.workers.map((worker) => worker.terminations)).toEqual([0])
+    expect(vi.getTimerCount()).toBe(0)
+
+    // Past the deadline that the answered request had, the disk is the store still.
+    await vi.advanceTimersByTimeAsync(2 * STORE_CALL_MS)
+    const reading = watch(store.read(0, MIB))
+    await vi.advanceTimersByTimeAsync(STORE_CALL_MS - 1)
+    await until(() => reading.state === 'settled')
+    expectSame(reading.value ?? null, block(0))
+    expect(store.backend).toBe('disk')
+    expect(made.events).toHaveLength(1)
+    speedUp(made.workers[0])
+  })
+
+  it('closes a store whose worker does not answer, in STORE_CALL_MS, and ends the worker', async () => {
+    fakeTimers()
+    const made = rig()
+    const store = await made.open({ fileSize: 4 * MIB })
+    await store.write(0, block(0))
+    silence(made.workers[0])
+
+    const closing = watch(store.close())
+    await vi.advanceTimersByTimeAsync(STORE_CALL_MS - 1)
+    expect(closing.state).toBe('pending')
+    expect(made.workers.map((worker) => worker.terminations)).toEqual([0])
+
+    await vi.advanceTimersByTimeAsync(1)
+    await until(() => closing.state === 'settled')
+    await until(() => made.workers[0]?.terminations === 1)
+    expect(vi.getTimerCount()).toBe(0)
+    await expectStoreError(store.read(0, 10), 'closed')
+    await expectStoreError(store.write(0, block(0)), 'closed')
+    // A second close is the first's answer, and ends nothing twice.
+    await store.close()
+    expect(made.workers.map((worker) => worker.terminations)).toEqual([1])
+  })
+
+  it('answers the close of the play, and ends the worker, in STORE_CALL_MS even when the store never settles its own close', async () => {
+    fakeTimers()
+    const made = rig()
+    const store = await made.open({ fileSize: 4 * MIB })
+    vi.spyOn(WorkerStore.prototype, 'close').mockImplementation(() => new Promise(() => undefined))
+
+    const closing = watch(store.close())
+    await vi.advanceTimersByTimeAsync(STORE_CALL_MS - 1)
+    expect(closing.state).toBe('pending')
+    expect(made.workers.map((worker) => worker.terminations)).toEqual([0])
+    await vi.advanceTimersByTimeAsync(1)
+    await until(() => closing.state === 'settled')
+    expect(made.workers.map((worker) => worker.terminations)).toEqual([1])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('ends the worker of a disk that the play left in STORE_CALL_MS even when the store never settles its own close', async () => {
+    fakeTimers()
+    const made = rig()
+    const store = await made.open({ fileSize: 4 * MIB })
+    vi.spyOn(WorkerStore.prototype, 'close').mockImplementation(() => new Promise(() => undefined))
+    made.directory.file.failNextWrite('InvalidStateError')
+    expect(await store.write(0, block(0))).toEqual(NONE)
+    expect(store.backend).toBe('memory')
+
+    await vi.advanceTimersByTimeAsync(STORE_CALL_MS - 1)
+    expect(made.workers.map((worker) => worker.terminations)).toEqual([0])
+    await vi.advanceTimersByTimeAsync(1)
+    await until(() => made.workers[0]?.terminations === 1)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('leaves no timer behind when the store closes in the ordinary way', async () => {
+    fakeTimers()
+    const made = rig()
+    const store = await made.open({ fileSize: 4 * MIB })
+    await store.write(0, block(0))
+    await store.close()
+    expect(made.workers.map((worker) => worker.terminations)).toEqual([1])
+    expect(vi.getTimerCount()).toBe(0)
+
+    // Nor when the play left the disk and its worker closed it.
+    const second = rig()
+    const moved = await second.open({ fileSize: 4 * MIB })
+    second.directory.file.failNextWrite('InvalidStateError')
+    await moved.write(0, block(0))
+    await until(() => second.workers[0]?.terminations === 1)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+})
+
+describe('an estimate that does not come', () => {
+  it('gives the disk its full cap when the estimate has not come in ESTIMATE_MS', async () => {
+    fakeTimers()
+    const made = rig()
+    const opening = watch(made.open({ estimate: () => new Promise(() => undefined) }))
+    await until(() => vi.getTimerCount() === 1)
+
+    await vi.advanceTimersByTimeAsync(ESTIMATE_MS - 1)
+    expect(opening.state).toBe('pending')
+    expect(made.workers).toEqual([])
+
+    await vi.advanceTimersByTimeAsync(1)
+    await until(() => opening.state === 'settled')
+    expect(opening.value?.backend).toBe('disk')
+    expect(opening.value?.capBytes).toBe(DISK_CAP_BYTES)
+    expect(made.events).toEqual([opened(DISK_CAP_BYTES)])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it("gives the disk its full cap when the browser's own estimate does not come", async () => {
+    fakeTimers()
+    vi.stubGlobal('navigator', { storage: { estimate: () => new Promise(() => undefined) } })
+    const made = rig()
+    const opening = watch(made.open({ estimate: undefined }))
+    await until(() => vi.getTimerCount() === 1)
+    await vi.advanceTimersByTimeAsync(ESTIMATE_MS)
+    await until(() => opening.state === 'settled')
+    expect(opening.value?.capBytes).toBe(DISK_CAP_BYTES)
+    expect(made.events).toEqual([opened(DISK_CAP_BYTES)])
+  })
+
+  it('takes an estimate that comes just inside ESTIMATE_MS, and leaves no timer behind', async () => {
+    fakeTimers()
+    const made = rig()
+    const opening = watch(
+      made.open({
+        // 80% of 90 MiB.
+        estimate: () =>
+          new Promise((resolve) => {
+            setTimeout(() => {
+              resolve({ quota: 90 * MIB, usage: 0 })
+            }, ESTIMATE_MS - 1)
+          }),
+      }),
+    )
+    await until(() => vi.getTimerCount() === 2)
+    await vi.advanceTimersByTimeAsync(ESTIMATE_MS - 1)
+    await until(() => opening.state === 'settled')
+    expect(opening.value?.capBytes).toBe(72 * MIB)
+    expect(made.events).toEqual([opened(72 * MIB)])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('does not wait for the estimate when there is no worker to make, and sets no timer', async () => {
+    fakeTimers()
+    const made = rig()
+    const store = await made.open({ makeWorker: null })
+    expect(store.backend).toBe('memory')
+    expect(vi.getTimerCount()).toBe(0)
   })
 })

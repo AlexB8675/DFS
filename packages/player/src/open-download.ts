@@ -6,7 +6,9 @@
 // the play's first bytes are not held up by the opening of the store. A head that fails before
 // its headers is tried again for as long as it takes, with the downloader's own pauses, and
 // only an answer that no try later can mend (the file is not there, or is not for this viewer)
-// rejects. Everything is a timeline event, with its reason.
+// rejects. Everything is a timeline event, with its reason. The opening of the store is not waited
+// for past the end of the play: a store whose worker is slow to answer does not hold up the viewer
+// who left.
 
 import type { TimelineEventInput } from '@dfs/shared'
 import { Downloader, RateMeter, messageOf, pageConnectivity, retryDelayMs } from './downloader.ts'
@@ -132,6 +134,30 @@ function pauseFor(
 }
 
 /**
+ * Waits for `promise`, or rejects at once with the signal's reason if the signal aborts first.
+ * What is waited for goes on, and is not the caller's any more: the caller sees to what it
+ * brings (it is the caller's to close a store that opens late).
+ */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (signal === undefined) return promise
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      // The reason is the caller's own, as its signal gave it, and whatever it is.
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+      reject(signal.reason)
+    }
+    if (signal.aborted) {
+      onAbort()
+    } else {
+      signal.addEventListener('abort', onAbort, { once: true })
+    }
+    void promise.then(resolve, reject).finally(() => {
+      signal.removeEventListener('abort', onAbort)
+    })
+  })
+}
+
+/**
  * Starts the play's download: asks for the head, opens the store for the size the head
  * says, and answers the started downloader as soon as the store is open, while the head
  * goes on flowing into it. It rejects only with the fatal `ReadError` of the head read (or the
@@ -218,22 +244,26 @@ export async function openDownload(options: OpenDownloadOptions): Promise<Downlo
       controller.abort()
       emit({ type: 'requestEnd', id, bytes: buffer.arrived, outcome: 'aborted', message: null })
     }
+    const opening = openPlayStore({
+      playId,
+      fileSize: total,
+      makeWorker,
+      onEvent,
+      ...(options.estimate === undefined ? {} : { estimate: options.estimate }),
+    })
     let store: PlayStore
     try {
-      store = await openPlayStore({
-        playId,
-        fileSize: total,
-        makeWorker,
-        onEvent,
-        ...(options.estimate === undefined ? {} : { estimate: options.estimate }),
-      })
+      store = await untilAborted(opening, signal)
     } catch (error) {
       abandon()
+      // A store that opens after the play was given up is closed as soon as it has opened, and one that failed to open has nothing to close.
+      opening.then((late) => late.close()).catch(() => undefined)
       throw error
     }
     if (signal?.aborted === true) {
+      // The store came in the same turn as the end of the play: it is closed in the background, and the play is over at once.
       abandon()
-      await store.close()
+      void store.close()
       signal.throwIfAborted()
     }
 

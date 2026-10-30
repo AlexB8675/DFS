@@ -38,3 +38,12 @@ export const LEVEL_EVERY_MS = 5_000
 
 /** The first read of a play: 1 MiB, which also says the file's size. */
 export const HEAD_BYTES = 1024 * 1024
+
+/** How long a request to the store's worker may wait for its answer: 15 s from when it is sent, so that it counts the time spent behind the requests before it. Sealing and writing a megabyte takes milliseconds; a worker that is silent for this long is gone, and the play moves to memory. */
+export const STORE_CALL_MS = 15_000
+
+/** How long the opening of the store's worker may take: 30 s, for the worker's script to load, the lock to be taken, the directory and its file to open, and the probe of the file. A worker that does not open in this time is not used, and the play goes on in memory. */
+export const STORE_OPEN_MS = 30_000
+
+/** How long the browser's estimate of its room (`navigator.storage.estimate()`) is waited for: 5 s. An estimate that has not come by then is taken as one that failed, and the disk store has its full cap. */
+export const ESTIMATE_MS = 5_000

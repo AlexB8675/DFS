@@ -3,6 +3,7 @@ import {
   BLOCK_BYTES,
   DISK_CAP_BYTES,
   DISK_FLOOR_BYTES,
+  ESTIMATE_MS,
   FRONTIER_BLOCKS,
   HEAD_BYTES,
   LEVEL_EVERY_MS,
@@ -12,6 +13,8 @@ import {
   RETRY_BASE_MS,
   RETRY_JITTER,
   RETRY_MAX_MS,
+  STORE_CALL_MS,
+  STORE_OPEN_MS,
 } from './limits.ts'
 
 // The store's and the downloader's bounds (DESIGN.md §10.4): each is a number the
@@ -47,6 +50,12 @@ describe('the store and the downloader limits', () => {
 
   it('makes the first read of a play 1 MiB', () => {
     expect(HEAD_BYTES).toBe(1024 * 1024)
+  })
+
+  it('gives a request to the worker of the store 15 s, its opening 30 s, and the browser 5 s for its estimate', () => {
+    expect(STORE_CALL_MS).toBe(15_000)
+    expect(STORE_OPEN_MS).toBe(30_000)
+    expect(ESTIMATE_MS).toBe(5_000)
   })
 
   it('takes whole blocks as the floor of the disk store and the cap of the memory', () => {

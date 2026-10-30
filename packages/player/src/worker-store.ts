@@ -5,15 +5,17 @@
 // from what the answers say, so that `held()` and `stats()` stay synchronous.
 
 import { StoreError } from './errors.ts'
+import { STORE_CALL_MS, STORE_OPEN_MS } from './limits.ts'
 import { dataOf, idOf, parseReply } from './protocol.ts'
 import type { Endpoint, StoreReply, StoreRequest, WireError } from './protocol.ts'
 import { RangeSet } from './ranges.ts'
 import type { PlayStore, StoreStats, WriteOutcome } from './store.ts'
 
-/** A call that waits for its answer. */
+/** A call that waits for its answer, and the deadline it has for it. */
 interface Waiting {
   resolve: (reply: StoreReply) => void
   reject: (error: StoreError) => void
+  timer: ReturnType<typeof setTimeout>
 }
 
 /** The error that an error answer stands for: a caller's mistake stays a `RangeError`, and the store's own failures keep their kinds. */
@@ -60,7 +62,12 @@ function reasonOf(event: unknown): string {
   return ''
 }
 
-/** The conversation with the worker: it numbers the requests, matches the answers, and fails every call once the worker is gone. */
+/**
+ * The conversation with the worker: it numbers the requests, matches the answers, and fails
+ * every call once the worker is gone. A worker that is alive but does not answer is gone
+ * too: each request has a deadline, counted from when it is sent, and the first to expire
+ * fails the channel as the death of the worker does.
+ */
 class Channel {
   readonly #endpoint: Endpoint
   readonly #waiting = new Map<number, Waiting>()
@@ -73,9 +80,8 @@ class Channel {
     // An answer that cannot be read fails the call it is for, so that the call does not wait for ever; one that is for no call is not ours.
     const id = reply?.id ?? idOf(data)
     if (id === null) return
-    const waiting = this.#waiting.get(id)
+    const waiting = this.#take(id)
     if (waiting === undefined) return
-    this.#waiting.delete(id)
     if (reply === null) {
       waiting.reject(new StoreError('disk', 'the worker gave an answer that cannot be read'))
     } else {
@@ -104,26 +110,53 @@ class Channel {
     return this.#dead
   }
 
+  /** Takes the call for `id` out of those that wait, and stops its deadline. Every way that a call ends goes through here. */
+  #take(id: number): Waiting | undefined {
+    const waiting = this.#waiting.get(id)
+    if (waiting === undefined) return undefined
+    this.#waiting.delete(id)
+    clearTimeout(waiting.timer)
+    return waiting
+  }
+
   /** Fails every call in flight, and every call after. */
   #fail(error: StoreError): void {
     if (this.#dead !== null) return
     this.#dead = error
     const waiting = [...this.#waiting.values()]
     this.#waiting.clear()
-    for (const call of waiting) call.reject(error)
+    for (const call of waiting) {
+      clearTimeout(call.timer)
+      call.reject(error)
+    }
   }
 
-  /** Sends a request and waits for its answer, which is a value whether it succeeded or not. It rejects only if the worker is gone. */
+  /**
+   * Sends a request and waits for its answer, which is a value whether it succeeded or not.
+   * It rejects only if the worker is gone, or does not answer in time: `STORE_OPEN_MS` for
+   * the open, `STORE_CALL_MS` for the rest, counted from now, so that a request that waits
+   * behind the earlier ones has the time they take to spend.
+   */
   ask(build: (id: number) => StoreRequest, transfer: ArrayBuffer[] = []): Promise<StoreReply> {
     if (this.#dead !== null) return Promise.reject(this.#dead)
     const id = this.#nextId
     this.#nextId += 1
     return new Promise((resolve, reject) => {
-      this.#waiting.set(id, { resolve, reject })
       try {
-        this.#endpoint.postMessage(build(id), transfer)
+        const request = build(id)
+        const deadlineMs = request.type === 'open' ? STORE_OPEN_MS : STORE_CALL_MS
+        const timer = setTimeout(() => {
+          this.#fail(
+            new StoreError(
+              'disk',
+              `the worker of the store did not answer within ${deadlineMs / 1000} s`,
+            ),
+          )
+        }, deadlineMs)
+        this.#waiting.set(id, { resolve, reject, timer })
+        this.#endpoint.postMessage(request, transfer)
       } catch (error) {
-        this.#waiting.delete(id)
+        this.#take(id)
         const reason = error instanceof Error ? error.message : 'it did not say why'
         reject(new StoreError('disk', `the request could not be sent to the worker: ${reason}`))
       }
@@ -150,9 +183,11 @@ class Channel {
  * fails on the disk has still put its bytes in the store's frontier, where they are held
  * and can be read, so its range is added too; what it evicted is reported by the next write
  * that succeeds. A write that was refused, or that found the store closed, changed nothing.
- * If the worker dies (its endpoint reports an error), every call in flight and every call
- * after rejects with a `StoreError` of kind `disk`, and so does `setPosition`, because nothing
- * will answer: the downloader sees it at once and does not wait for ever. `close` resolves.
+ * If the worker dies (its endpoint reports an error), or does not answer a request within
+ * its deadline (`STORE_CALL_MS`, and `STORE_OPEN_MS` for the open), every call in flight and
+ * every call after rejects with a `StoreError` of kind `disk`, and so does `setPosition`,
+ * because nothing will answer: the downloader sees it at once and does not wait for ever.
+ * `close` resolves.
  */
 export class WorkerStore implements PlayStore {
   readonly backend: 'disk' | 'memory'
@@ -178,7 +213,8 @@ export class WorkerStore implements PlayStore {
    * Opens a play's store in the worker at the other end of `endpoint`. The worker takes
    * the play's lock, opens its file, and tries it, and it says why when it cannot: a
    * `StoreError` of kind `no-opfs`, `quota` or `refused`, or a `RangeError` for a size
-   * that is not one. Once it has opened, the store is the page's to close.
+   * that is not one. A worker that has not answered in `STORE_OPEN_MS` is a `StoreError` of
+   * kind `disk`. Once it has opened, the store is the page's to close.
    */
   static async open(
     endpoint: Endpoint,
@@ -288,7 +324,9 @@ export class WorkerStore implements PlayStore {
    * A second call while the first is in flight is answered when the first is, with what the
    * first answers, and sends nothing. If the worker is gone, or goes while this waits, there
    * is nothing to delete from the page: this resolves, and the directory is left for the next
-   * start of the app to clean up (the worker's lock died with it).
+   * start of the app to clean up (the worker's lock died with it). A worker that does not
+   * answer the close within `STORE_CALL_MS` is gone in the same way, so this resolves in
+   * that time at most.
    */
   close(): Promise<void> {
     this.#closing ??= this.#close()

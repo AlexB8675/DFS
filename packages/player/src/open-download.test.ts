@@ -1,10 +1,11 @@
+import { getEventListeners } from 'node:events'
 import type { MessagePort } from 'node:worker_threads'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { timelineEventSchema } from '@dfs/shared'
 import type { TimelineEventInput } from '@dfs/shared'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Connectivity, Downloader } from './downloader.ts'
-import { HEAD_BYTES, MEMORY_CAP_BYTES, RETRY_BASE_MS } from './limits.ts'
+import { HEAD_BYTES, MEMORY_CAP_BYTES, RETRY_BASE_MS, STORE_OPEN_MS } from './limits.ts'
 import { openDownload } from './open-download.ts'
 import type { OpenDownloadOptions } from './open-download.ts'
 import type { StoreWorker } from './open.ts'
@@ -185,6 +186,33 @@ function diskWorkers(): {
     return worker
   }
   return { makeWorker, workers, log, directory }
+}
+
+/** A worker that nobody serves: it receives what is sent it and answers nothing, as a worker that is alive but hung. */
+function unservedWorker(): {
+  makeWorker: () => StoreWorker
+  received: () => number
+  terminations: () => number
+} {
+  let received = 0
+  let terminations = 0
+  return {
+    received: () => received,
+    terminations: () => terminations,
+    makeWorker: () => {
+      const { port1, port2 } = new MessageChannel()
+      ports.push(port1, port2)
+      port2.on('message', () => {
+        received += 1
+      })
+      return Object.assign(port1, {
+        terminate() {
+          terminations += 1
+          port1.close()
+        },
+      })
+    },
+  }
 }
 
 interface Rig {
@@ -582,7 +610,7 @@ describe('openDownload: a head that fails before its headers', () => {
     expect(connectivity.listeners()).toBe(0)
   })
 
-  it('lets the head go and closes the store when the signal aborts while the store opens', async () => {
+  it('rejects at once, lets the head go, and closes the store when it opens, when the signal aborts while the store opens', async () => {
     // 64 KiB every 40 ms: the head takes most of a second to come, if it is let to.
     const server = await serve({ size: 2 * MIB, chunkDelayMs: 40 })
     const { open, events } = rig(server)
@@ -605,18 +633,131 @@ describe('openDownload: a head that fails before its headers', () => {
     await until(() => ofType(events, 'firstByte').length === 1)
     const reason = new Error('the view moved on')
     controller.abort(reason)
-    door.open()
 
+    // It does not wait for the store: the door is still shut.
     expect(await settled).toBe(reason)
     // The head's connection is let go of, long before the head would have come.
     await until(() => server.openResponses() === 0, 300)
     expect(ofType(events, 'requestEnd')).toEqual([
       expect.objectContaining({ id: 1, outcome: 'aborted' }),
     ])
-    // The store that was opened for a play that did not go on is closed, and its worker ended.
+    expect(ofType(events, 'store')).toEqual([])
+    expect(disk.workers).toEqual([])
+
+    // The store that opens for a play that did not go on is closed, and its worker ended.
+    door.open()
+    await until(() => disk.log.includes('worker terminated'))
     expect(ofType(events, 'store')).toHaveLength(1)
     expect(disk.workers).toHaveLength(1)
-    expect(disk.log).toContain('worker terminated')
+    expect(disk.log.slice(-3)).toEqual([
+      'directory removed',
+      'lock released play-1',
+      'worker terminated',
+    ])
+    expect(ofType(events, 'requestEnd')).toHaveLength(1)
+  })
+
+  it('leaves no listener on the signal once the download is open', async () => {
+    const server = await serve({ size: 2 * MIB })
+    const { open } = rig(server)
+    const controller = new AbortController()
+    await open({ signal: controller.signal })
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0)
+  })
+
+  it('rejects at once when the signal aborts as the store arrives, and closes it', async () => {
+    const server = await serve({ size: 2 * MIB })
+    const controller = new AbortController()
+    const reason = new Error('the view moved on')
+    const disk = diskWorkers()
+    const events: TimelineEventInput[] = []
+    const opening = openDownload({
+      url: server.url,
+      playId: 'play-1',
+      makeWorker: disk.makeWorker,
+      estimate: () => Promise.resolve({ quota: 10 * 1024 ** 3, usage: 0 }),
+      connectivity: new FakeConnectivity(),
+      signal: controller.signal,
+      onEvent: (event) => {
+        events.push(event)
+        // The viewer leaves in the turn after the store has opened, when the opening has nearly answered.
+        if (event.type === 'store') {
+          queueMicrotask(() => {
+            queueMicrotask(() => {
+              controller.abort(reason)
+            })
+          })
+        }
+      },
+    })
+    await expect(opening).rejects.toBe(reason)
+    await until(() => disk.log.includes('worker terminated'))
+    expect(ofType(events, 'requestEnd')).toEqual([
+      expect.objectContaining({ id: 1, outcome: 'aborted' }),
+    ])
+  })
+
+  it('rejects at once when the signal aborts while a worker that does not answer is opening, and the worker is ended when its open expires', async () => {
+    fakeTimers()
+    const server = await serve({ size: 2 * MIB })
+    const { open, events } = rig(server)
+    const silent = unservedWorker()
+    const controller = new AbortController()
+
+    const opening = open({
+      signal: controller.signal,
+      makeWorker: silent.makeWorker,
+      estimate: () => Promise.resolve({ quota: 10 * 1024 ** 3, usage: 0 }),
+    })
+    let state = 'pending'
+    const settled = opening.then(
+      () => 'opened',
+      (error: unknown) => {
+        state = 'rejected'
+        return error
+      },
+    )
+    await until(() => silent.received() === 1)
+    const reason = new Error('the view moved on')
+    controller.abort(reason)
+
+    // No time has passed on the clock of the timers: the worker has not been given up, and the opening is over.
+    await until(() => state === 'rejected')
+    expect(await settled).toBe(reason)
+    expect(silent.terminations()).toBe(0)
+    expect(ofType(events, 'requestEnd')).toEqual([
+      expect.objectContaining({ id: 1, outcome: 'aborted' }),
+    ])
+
+    // The worker that never answered is given up when its time is over, and does not keep its lock for the life of the tab.
+    await vi.advanceTimersByTimeAsync(STORE_OPEN_MS)
+    await until(() => silent.terminations() === 1)
+    expect(ofType(events, 'store')).toEqual([
+      { type: 'store', backend: 'memory', capBytes: MEMORY_CAP_BYTES, reason: 'refused' },
+    ])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('plays on in memory when the worker of the store does not answer the open', async () => {
+    fakeTimers()
+    const server = await serve({ size: 2 * MIB })
+    const { open, events } = rig(server)
+    const silent = unservedWorker()
+
+    const opening = open({
+      makeWorker: silent.makeWorker,
+      estimate: () => Promise.resolve({ quota: 10 * 1024 ** 3, usage: 0 }),
+    })
+    await until(() => silent.received() === 1)
+    await vi.advanceTimersByTimeAsync(STORE_OPEN_MS)
+    const downloader = await opening
+
+    expect(silent.terminations()).toBe(1)
+    expect(ofType(events, 'store')).toEqual([
+      { type: 'store', backend: 'memory', capBytes: MEMORY_CAP_BYTES, reason: 'refused' },
+    ])
+    await downloader.whenHeld({ start: 0, end: HEAD_BYTES })
+    await expectBytesRight(downloader, 0, HEAD_BYTES)
   })
 })
 

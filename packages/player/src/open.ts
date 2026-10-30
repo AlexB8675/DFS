@@ -8,7 +8,10 @@
 // the bytes of the disk can no longer be read, and the downloader fetches what it needs
 // again. Each change of store is one `store` event on the timeline, with its reason. A
 // failure of the store is never the caller's: only a call that is wrong (a `RangeError`)
-// or that comes after the play closed (`closed`) is rejected.
+// or that comes after the play closed (`closed`) is rejected. A worker that is alive but does
+// not answer is a worker that is gone: its requests have deadlines (`STORE_OPEN_MS`,
+// `STORE_CALL_MS`), and so has the browser's estimate (`ESTIMATE_MS`), so that nothing a play
+// waits for can hold it for ever.
 
 import type { TimelineEventInput } from '@dfs/shared'
 import { StoreError } from './errors.ts'
@@ -16,8 +19,10 @@ import {
   BLOCK_BYTES,
   DISK_CAP_BYTES,
   DISK_FLOOR_BYTES,
+  ESTIMATE_MS,
   MEMORY_CAP_BYTES,
   QUOTA_SHARE,
+  STORE_CALL_MS,
 } from './limits.ts'
 import type { Endpoint } from './protocol.ts'
 import type { RangeSet } from './ranges.ts'
@@ -77,6 +82,21 @@ function endWorker(worker: StoreWorker): void {
   }
 }
 
+/** Calls `attempt` and waits for it to settle, or for `ms`, whichever comes first. It does not reject, and it leaves no timer. */
+async function settledOrAfter(attempt: () => Promise<unknown>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    const late = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, ms)
+    })
+    await Promise.race([attempt(), late])
+  } catch {
+    // What the attempt failed with is of no use here: it is over.
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 /**
  * The browser's estimate, called as a call of its storage (a browser refuses it as a call of
  * anything else). A browser that has no estimate says nothing.
@@ -91,16 +111,25 @@ async function browserEstimate(): Promise<unknown> {
 
 /**
  * The room the origin has left, in bytes, or null when the browser does not say: the
- * estimate is missing, rejects or throws, or has no quota or no usage or a number that is
- * not one. A quota that is all used, or more than all, is no room.
+ * estimate is missing, rejects or throws, has not come in `ESTIMATE_MS`, or has no quota or
+ * no usage or a number that is not one. A quota that is all used, or more than all, is no room.
  */
 async function freeBytes(estimate: StorageEstimator | undefined): Promise<number | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    const given: unknown = await (estimate === undefined ? browserEstimate() : estimate())
+    const late = new Promise<undefined>((resolve) => {
+      timer = setTimeout(resolve, ESTIMATE_MS, undefined)
+    })
+    const given: unknown = await Promise.race([
+      estimate === undefined ? browserEstimate() : estimate(),
+      late,
+    ])
     if (!isRecord(given) || !isNumber(given.quota) || !isNumber(given.usage)) return null
     return Math.max(0, given.quota - given.usage)
   } catch {
     return null
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -166,12 +195,15 @@ async function choose(options: OpenPlayStoreOptions): Promise<Choice> {
   }
 }
 
-/** Closes a disk store that the play has left, and ends its worker when the close has settled. What the close fails with is of no use to the play any more. */
+/**
+ * Closes a disk store that the play has left, and ends its worker when the close has settled,
+ * or when `STORE_CALL_MS` have passed, whichever comes first: a worker that does not answer
+ * the close is ended all the same. What the close fails with is of no use to the play any more,
+ * and the directory that is left is removed at the next start of the app.
+ */
 async function retire(disk: DiskCurrent): Promise<void> {
   try {
-    await disk.store.close()
-  } catch {
-    // The play is on another store; the directory that is left is removed at the next start of the app.
+    await settledOrAfter(() => disk.store.close(), STORE_CALL_MS)
   } finally {
     endWorker(disk.worker)
   }
@@ -344,7 +376,7 @@ class FallbackStore implements PlayStore {
     }
   }
 
-  /** Closes the store that is current, and ends its worker if it is a disk store. Resolves whatever the store says. */
+  /** Closes the store that is current, and ends its worker if it is a disk store. Resolves whatever the store says, and in `STORE_CALL_MS` at most. */
   close(): Promise<void> {
     this.#closing ??= this.#close()
     return this.#closing
@@ -354,9 +386,8 @@ class FallbackStore implements PlayStore {
     this.#closed = true
     const current = this.#current
     try {
-      await current.store.close()
-    } catch {
-      // The play is over: what is left on the disk is removed at the next start of the app.
+      // What the close fails with, or a close that is not answered, leaves what is on the disk for the next start of the app to remove.
+      await settledOrAfter(() => current.store.close(), STORE_CALL_MS)
     } finally {
       if (current.kind === 'disk') endWorker(current.worker)
     }

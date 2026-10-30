@@ -1,10 +1,11 @@
 import type { MessagePort } from 'node:worker_threads'
+import { setTimeout as sleep } from 'node:timers/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { StoreError } from './errors.ts'
 import type { StoreErrorKind } from './errors.ts'
-import { BLOCK_BYTES } from './limits.ts'
+import { BLOCK_BYTES, STORE_CALL_MS, STORE_OPEN_MS } from './limits.ts'
 import { parseReply, parseRequest } from './protocol.ts'
-import type { OpenDirectory, PlayLock, StoreReply, StoreRequest } from './protocol.ts'
+import type { Endpoint, OpenDirectory, PlayLock, StoreReply, StoreRequest } from './protocol.ts'
 import { SEAL_OVERHEAD, newPlayKey } from './seal.ts'
 import { serveStore } from './serve.ts'
 import { CoreStore } from './store.ts'
@@ -81,8 +82,25 @@ async function expectStoreError(attempt: Promise<unknown>, kind: StoreErrorKind)
 const ports: MessagePort[] = []
 
 afterEach(() => {
+  vi.useRealTimers()
   for (const port of ports.splice(0)) port.close()
 })
+
+/** The clock of the timers, and nothing else: the messages between the client and the server stay real. */
+function fakeTimers(): void {
+  vi.useFakeTimers({
+    toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'],
+  })
+}
+
+/** Waits, on the real clock, until the condition holds (`vi.waitFor` moves the fake clock when it is faked). */
+async function until(condition: () => boolean, limitMs = 5_000): Promise<void> {
+  const began = performance.now()
+  while (!condition()) {
+    if (performance.now() - began > limitMs) throw new Error('timed out waiting for a condition')
+    await sleep(1)
+  }
+}
 
 /** A channel between a client and a server, both ends closed after the test. */
 function channel(): { client: MessagePort; server: MessagePort } {
@@ -1006,5 +1024,213 @@ describe('a worker that dies', () => {
     script.client.dispatchEvent(new Event('error'))
     await closing
     await expectStoreError(store.write(0, new Uint8Array(4)), 'closed')
+  })
+})
+
+// A worker that is alive but does not answer is gone as far as the play is concerned: every
+// request has its deadline, counted from when it is sent, and one that expires fails the
+// store as a dead worker does (DESIGN.md §10.4). The timers are the tests' own, and the
+// messages between the client and the server are real.
+describe('a worker that does not answer', () => {
+  interface Watched {
+    state: 'pending' | 'resolved' | 'rejected'
+    error: unknown
+  }
+
+  /** The id of the request at `index` of what the script was sent, which is one that is answered. */
+  function idAt(script: Script, index: number): number {
+    const request = script.seen[index]
+    if (request === undefined || request.type === 'position') {
+      throw new Error(`request ${index} is not one that is answered`)
+    }
+    return request.id
+  }
+
+  /** The state of a promise, learned without waiting for it. */
+  function watch(promise: Promise<unknown>): Watched {
+    const watched: Watched = { state: 'pending', error: null }
+    promise.then(
+      () => {
+        watched.state = 'resolved'
+      },
+      (error: unknown) => {
+        watched.state = 'rejected'
+        watched.error = error
+      },
+    )
+    return watched
+  }
+
+  it('fails the open when it has not been answered in STORE_OPEN_MS, and not before', async () => {
+    fakeTimers()
+    const script = new Script()
+    const opening = watch(WorkerStore.open(script.client, OPTIONS))
+    await until(() => script.seen.length === 1)
+
+    await vi.advanceTimersByTimeAsync(STORE_OPEN_MS - 1)
+    expect(opening.state).toBe('pending')
+    await vi.advanceTimersByTimeAsync(1)
+    expect(opening.state).toBe('rejected')
+    expect(opening.error).toBeInstanceOf(StoreError)
+    expect((opening.error as StoreError).kind).toBe('disk')
+    expect((opening.error as StoreError).message).toBe(
+      'the worker of the store did not answer within 30 s',
+    )
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('fails a read, and every call in flight with it, in STORE_CALL_MS after it was sent, and every call after', async () => {
+    const script = new Script()
+    const store = await script.open()
+    fakeTimers()
+    const reading = watch(store.read(0, 4))
+    const writing = watch(store.write(0, new Uint8Array(4)))
+    await until(() => script.seen.length === 3)
+    const sent = script.seen.length
+
+    await vi.advanceTimersByTimeAsync(STORE_CALL_MS - 1)
+    expect(reading.state).toBe('pending')
+    expect(writing.state).toBe('pending')
+    await vi.advanceTimersByTimeAsync(1)
+    for (const call of [reading, writing]) {
+      expect(call.state).toBe('rejected')
+      expect(call.error).toBeInstanceOf(StoreError)
+      expect((call.error as StoreError).kind).toBe('disk')
+      expect((call.error as StoreError).message).toBe(
+        'the worker of the store did not answer within 15 s',
+      )
+    }
+    expect(vi.getTimerCount()).toBe(0)
+
+    await expectStoreError(store.read(0, 4), 'disk')
+    await expectStoreError(store.write(0, new Uint8Array(4)), 'disk')
+    expect(() => {
+      store.setPosition(0)
+    }).toThrow(StoreError)
+    await sleep(20)
+    expect(script.seen.length).toBe(sent)
+  })
+
+  it('counts a request from its own send, and not from the first that is waiting', async () => {
+    const script = new Script()
+    const store = await script.open()
+    fakeTimers()
+    const first = watch(store.read(0, 4))
+    await until(() => script.seen.length === 2)
+    await vi.advanceTimersByTimeAsync(STORE_CALL_MS - 5_000)
+    const second = watch(store.read(4, 8))
+    await until(() => script.seen.length === 3)
+
+    // The first expires when its own deadline does, and fails the second with it, whose own is 5 s away.
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(first.state).toBe('rejected')
+    expect(second.state).toBe('rejected')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('does not fail a worker that answers just inside the deadline, and leaves no timer behind', async () => {
+    const script = new Script()
+    const store = await script.open()
+    fakeTimers()
+    const reading = watch(store.read(0, 4))
+    await until(() => script.seen.length === 2)
+
+    await vi.advanceTimersByTimeAsync(STORE_CALL_MS - 1)
+    script.send({ id: idAt(script, 1), ok: true, type: 'read', bytes: null })
+    await until(() => reading.state !== 'pending')
+    expect(reading.state).toBe('resolved')
+    expect(vi.getTimerCount()).toBe(0)
+
+    // Past the deadline that the answered request had, the store is as it was.
+    await vi.advanceTimersByTimeAsync(2 * STORE_CALL_MS)
+    const again = watch(store.read(0, 4))
+    await until(() => script.seen.length === 3)
+    script.send({ id: idAt(script, 2), ok: true, type: 'read', bytes: new Uint8Array([9]) })
+    await until(() => again.state !== 'pending')
+    expect(again.state).toBe('resolved')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('does not fail a worker that answers the open just inside STORE_OPEN_MS', async () => {
+    fakeTimers()
+    const script = new Script()
+    const opening = watch(WorkerStore.open(script.client, OPTIONS))
+    await until(() => script.seen.length === 1)
+    await vi.advanceTimersByTimeAsync(STORE_OPEN_MS - 1)
+    script.send({ id: idAt(script, 0), ok: true, type: 'open', capBytes: 4 * MIB, stats: stats() })
+    await until(() => opening.state !== 'pending')
+    expect(opening.state).toBe('resolved')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it.each([
+    {
+      how: 'an error',
+      answer: (id: number): unknown => ({
+        id,
+        ok: false,
+        error: { kind: 'disk', message: 'the file failed' },
+      }),
+    },
+    {
+      how: 'an answer that cannot be read',
+      answer: (id: number): unknown => ({ id, ok: true, type: 'read', bytes: 'text' }),
+    },
+    {
+      how: 'an answer of another kind',
+      answer: (id: number): unknown => ({ id, ok: true, type: 'close' }),
+    },
+  ])('leaves no timer behind when the request is answered with $how', async ({ answer }) => {
+    const script = new Script()
+    const store = await script.open()
+    fakeTimers()
+    const reading = watch(store.read(0, 4))
+    await until(() => script.seen.length === 2)
+    expect(vi.getTimerCount()).toBe(1)
+    script.sendRaw(answer(idAt(script, 1)))
+    await until(() => reading.state !== 'pending')
+    expect(reading.state).toBe('rejected')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('leaves no timer behind when the request cannot be sent', async () => {
+    fakeTimers()
+    const unsendable: Endpoint = {
+      postMessage() {
+        throw new Error('the port is closed')
+      },
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }
+    await expectStoreError(WorkerStore.open(unsendable, OPTIONS), 'disk')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('leaves no timer behind when the worker dies', async () => {
+    const script = new Script()
+    const store = await script.open()
+    fakeTimers()
+    const reading = watch(store.read(0, 4))
+    const writing = watch(store.write(0, new Uint8Array(4)))
+    await until(() => script.seen.length === 3)
+    expect(vi.getTimerCount()).toBe(2)
+    script.client.dispatchEvent(new Event('error'))
+    await until(() => reading.state !== 'pending' && writing.state !== 'pending')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('closes a store whose worker does not answer, in STORE_CALL_MS, and sends nothing after', async () => {
+    const script = new Script()
+    const store = await script.open()
+    fakeTimers()
+    const closing = watch(store.close())
+    await until(() => script.seen.length === 2)
+
+    await vi.advanceTimersByTimeAsync(STORE_CALL_MS - 1)
+    expect(closing.state).toBe('pending')
+    await vi.advanceTimersByTimeAsync(1)
+    expect(closing.state).toBe('resolved')
+    expect(vi.getTimerCount()).toBe(0)
+    await expectStoreError(store.read(0, 4), 'closed')
   })
 })
