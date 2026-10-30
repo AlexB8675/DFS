@@ -6,6 +6,15 @@
 // and ends the play. `openRead` sends the request, checks the answer before any of its body is
 // taken, and hands the body back as a stream of byte pieces that fails the same way. It uses
 // what `fetch` gives in a page and in a worker, and nothing that only Node has.
+//
+// A server that goes quiet without closing its connection (a black-holed path, a tunnel, a NAT
+// that dropped its mapping) gives the page no error to act on, so a read gives up on it: with no
+// answer, or no new piece of its body, for `READ_IDLE_MS` of waiting on the network, it fails with
+// a `ReadError` that is not fatal, and lets its connection go. The wait is the network's and only
+// that: the body is a generator that is parked at its `yield` while its consumer writes the
+// piece it was given, and no timer runs then.
+
+import { READ_IDLE_MS } from './limits.ts'
 
 /** Why a read failed, and what the downloader should do about it. */
 export class ReadError extends Error {
@@ -122,6 +131,39 @@ function parseRetryAfter(header: string | null): number | null {
   return Number.isNaN(at) ? null : Math.max(0, at - Date.now())
 }
 
+/**
+ * Waits for `promise`, but not longer than `READ_IDLE_MS`. When the time is up the wait ends
+ * with the error `expire` makes, which also lets go of whatever `promise` waits on; `discard`
+ * is given what `promise` brings if it comes after that. The timer is cleared whenever the
+ * promise settles first.
+ */
+function untilIdle<T>(
+  promise: Promise<T>,
+  expire: () => ReadError,
+  discard?: (late: T) => void,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let expired = false
+    const timer = setTimeout(() => {
+      expired = true
+      reject(expire())
+    }, READ_IDLE_MS)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        if (expired) discard?.(value)
+        else resolve(value)
+      },
+      (error: unknown) => {
+        clearTimeout(timer)
+        // What fails after the read gave up is the abort that it made itself. Before that, the failure is the promise's own, whatever it is.
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+        if (!expired) reject(error)
+      },
+    )
+  })
+}
+
 /** Lets the body of a response go, which is not waited for: the connection is not worth a wait. */
 function dismiss(source: { cancel(): Promise<void> } | null | undefined): void {
   try {
@@ -138,6 +180,7 @@ async function* readBody(
   signal: AbortSignal,
   asked: string,
   status: number,
+  link: Link,
 ): AsyncGenerator<Uint8Array, void, undefined> {
   let received = 0
   try {
@@ -146,10 +189,18 @@ async function* readBody(
       signal.throwIfAborted()
       let result: { done: boolean; value?: unknown }
       try {
-        result = await reader.read()
+        // The timer runs while this waits for the network, and stops when it answers: the `yield` below parks the generator while the consumer writes, with no timer.
+        result = await untilIdle(reader.read(), () => {
+          link.own.abort()
+          return new ReadError(
+            `The server sent nothing for ${READ_IDLE_MS / 1000} s for ${asked}, after ${received} of ${length} bytes.`,
+            { fatal: false, status },
+          )
+        })
       } catch (error) {
         // An abort is the play's own business, and is not a failure of the network.
         if (signal.aborted || isAbortError(error)) throw error
+        if (error instanceof ReadError) throw error
         throw new ReadError(
           `The connection for ${asked} broke after ${received} of ${length} bytes.`,
           { fatal: false, status, cause: error },
@@ -176,7 +227,35 @@ async function* readBody(
     }
   } finally {
     // Whatever ended the body (its length, a failure, an abort, a consumer that stopped) lets the connection go.
+    link.release()
     dismiss(reader)
+  }
+}
+
+/**
+ * The signal that a read's fetch is given: its own, which follows the caller's (with its
+ * reason) and is also aborted when the server goes quiet, so that the request is let go of.
+ * `AbortSignal.any` would do this in one line, but Firefox 120 and Safari 17.0 lack it.
+ */
+interface Link {
+  /** Aborts the request. */
+  readonly own: AbortController
+  /** Stops following the caller's signal; the read is over. */
+  release: () => void
+}
+
+function linkTo(signal: AbortSignal): Link {
+  const own = new AbortController()
+  const follow = (): void => {
+    own.abort(signal.reason)
+  }
+  if (signal.aborted) follow()
+  else signal.addEventListener('abort', follow, { once: true })
+  return {
+    own,
+    release: () => {
+      signal.removeEventListener('abort', follow)
+    },
   }
 }
 
@@ -196,6 +275,10 @@ async function* emptyBody(): AsyncGenerator<Uint8Array, void, undefined> {
  * Statuses `408`, `429` and `5xx` are not fatal, and say how long to wait if they have a
  * `Retry-After`; every other status that is not `200` or `206` is. So is an answer that is
  * not the range asked for, or is of another file than the play's.
+ *
+ * A server that does not answer, or whose body sends nothing, for `READ_IDLE_MS` is given up
+ * on: the request is aborted and the read fails with a `ReadError` that is not fatal (the
+ * time that the consumer of the body takes between two pieces is not counted).
  */
 export async function openRead(options: OpenReadOptions): Promise<RangeRead> {
   const { url, from, to, fileSize, signal } = options
@@ -212,77 +295,105 @@ export async function openRead(options: OpenReadOptions): Promise<RangeRead> {
   const asked = rangeOf(from, to)
   // Called as a plain function: a browser's `fetch` refuses to be called as a method of anything but the window.
   const doFetch = options.fetch ?? fetch
+  const link = linkTo(signal)
   let response: Response
   try {
-    response = await doFetch(url, {
-      headers: { Range: `bytes=${from}-${to ?? ''}` },
-      // The store is the one place a play's bytes are kept, sealed. Without this the browser may keep each answer, as plain bytes, in its HTTP cache on the disk, after the play and outside the store's cap.
-      cache: 'no-store',
-      signal,
-    })
+    response = await untilIdle(
+      doFetch(url, {
+        headers: { Range: `bytes=${from}-${to ?? ''}` },
+        // The store is the one place a play's bytes are kept, sealed. Without this the browser may keep each answer, as plain bytes, in its HTTP cache on the disk, after the play and outside the store's cap.
+        cache: 'no-store',
+        signal: link.own.signal,
+      }),
+      () => {
+        link.own.abort()
+        return new ReadError(
+          `The server sent nothing for ${READ_IDLE_MS / 1000} s after the request for ${asked}.`,
+          { fatal: false },
+        )
+      },
+      (late) => {
+        dismiss(late.body)
+      },
+    )
   } catch (error) {
+    link.release()
     if (signal.aborted || isAbortError(error)) throw error
+    if (error instanceof ReadError) throw error
     throw new ReadError(`The request for ${asked} failed before the server answered.`, {
       fatal: false,
       cause: error,
     })
   }
 
-  const { status } = response
-  if (status !== 200 && status !== 206) {
-    dismiss(response.body)
-    // A busy server or a network in between may be better in a while; the rest will answer the same.
-    const worthAnotherTry = status === 408 || status === 429 || status >= 500
-    throw new ReadError(`The server answered ${status} for ${asked}.`, {
-      fatal: !worthAnotherTry,
-      status,
-      retryAfterMs: worthAnotherTry ? parseRetryAfter(response.headers.get('Retry-After')) : null,
-    })
-  }
-
-  const refuse = (why: string): never => {
-    dismiss(response.body)
-    throw new ReadError(`${why} (the answer was ${status} for ${asked}).`, { fatal: true, status })
-  }
-
-  /** The size of the file, and the last byte the answer has. */
-  let total: number
-  let end: number
-  if (status === 206) {
-    const range = parseContentRange(response.headers.get('Content-Range'))
-    if (range === null) {
-      return refuse('The server’s Content-Range is missing, unreadable or without the file’s size')
+  // The link is the body's to let go of once there is a body; every other way out of here lets go of it.
+  let owned = false
+  try {
+    const { status } = response
+    if (status !== 200 && status !== 206) {
+      dismiss(response.body)
+      // A busy server or a network in between may be better in a while; the rest will answer the same.
+      const worthAnotherTry = status === 408 || status === 429 || status >= 500
+      throw new ReadError(`The server answered ${status} for ${asked}.`, {
+        fatal: !worthAnotherTry,
+        status,
+        retryAfterMs: worthAnotherTry ? parseRetryAfter(response.headers.get('Retry-After')) : null,
+      })
     }
-    if (range.start !== from) {
-      return refuse(`The server answered from ${range.start} and not from ${from}`)
-    }
-    if (range.end < range.start || range.end >= range.total) {
-      return refuse('The server’s Content-Range is not a range of the file')
-    }
-    total = range.total
-    end = range.end
-  } else {
-    if (from !== 0) return refuse(`The server ignored the byte range and sent the file from 0`)
-    const length = parseDigits(response.headers.get('Content-Length'))
-    if (length === null) return refuse('The server did not say how long the file is')
-    total = length
-    end = length - 1
-  }
-  if (fileSize !== null && total !== fileSize) {
-    return refuse(`The server’s file is ${total} bytes and the play’s is ${fileSize}`)
-  }
 
-  // What is read is what was asked for: a server may send less, but not more.
-  const length = Math.min(end, to ?? end) - from + 1
-  if (length <= 0) {
-    dismiss(response.body)
-    return { total, body: emptyBody() }
+    const refuse = (why: string): never => {
+      dismiss(response.body)
+      throw new ReadError(`${why} (the answer was ${status} for ${asked}).`, {
+        fatal: true,
+        status,
+      })
+    }
+
+    /** The size of the file, and the last byte the answer has. */
+    let total: number
+    let end: number
+    if (status === 206) {
+      const range = parseContentRange(response.headers.get('Content-Range'))
+      if (range === null) {
+        return refuse(
+          'The server’s Content-Range is missing, unreadable or without the file’s size',
+        )
+      }
+      if (range.start !== from) {
+        return refuse(`The server answered from ${range.start} and not from ${from}`)
+      }
+      if (range.end < range.start || range.end >= range.total) {
+        return refuse('The server’s Content-Range is not a range of the file')
+      }
+      total = range.total
+      end = range.end
+    } else {
+      if (from !== 0) return refuse(`The server ignored the byte range and sent the file from 0`)
+      const length = parseDigits(response.headers.get('Content-Length'))
+      if (length === null) return refuse('The server did not say how long the file is')
+      total = length
+      end = length - 1
+    }
+    if (fileSize !== null && total !== fileSize) {
+      return refuse(`The server’s file is ${total} bytes and the play’s is ${fileSize}`)
+    }
+
+    // What is read is what was asked for: a server may send less, but not more.
+    const length = Math.min(end, to ?? end) - from + 1
+    if (length <= 0) {
+      dismiss(response.body)
+      return { total, body: emptyBody() }
+    }
+    if (response.body === null) {
+      throw new ReadError(`The server answered ${status} for ${asked} with no body.`, {
+        fatal: false,
+        status,
+      })
+    }
+    const reader = response.body.getReader()
+    owned = true
+    return { total, body: readBody(reader, length, signal, asked, status, link) }
+  } finally {
+    if (!owned) link.release()
   }
-  if (response.body === null) {
-    throw new ReadError(`The server answered ${status} for ${asked} with no body.`, {
-      fatal: false,
-      status,
-    })
-  }
-  return { total, body: readBody(response.body.getReader(), length, signal, asked, status) }
 }

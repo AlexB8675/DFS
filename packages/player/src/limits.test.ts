@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   BLOCK_BYTES,
+  COVER_AHEAD_MS,
   DISK_CAP_BYTES,
   DISK_FLOOR_BYTES,
   ESTIMATE_MS,
@@ -11,9 +12,11 @@ import {
   MEMORY_CAP_BYTES,
   QUOTA_SHARE,
   RATE_WINDOW_MS,
+  READ_IDLE_MS,
   RETRY_BASE_MS,
   RETRY_JITTER,
   RETRY_MAX_MS,
+  STALL_COVER_MS,
   STORE_CALL_MS,
   STORE_OPEN_MS,
   WAKE_GRACE_MS,
@@ -63,6 +66,16 @@ describe('the store and the downloader limits', () => {
   it('takes a timer that fires 1 s late for a page that stood still, and gives its request 2 s more', () => {
     expect(LATE_TIMER_MS).toBe(1_000)
     expect(WAKE_GRACE_MS).toBe(2_000)
+  })
+
+  it('gives up on a read that has been silent for 10 s, and takes one that has not moved for 2 s as not covering anything', () => {
+    expect(READ_IDLE_MS).toBe(10_000)
+    expect(STALL_COVER_MS).toBe(2_000)
+    expect(STALL_COVER_MS).toBeLessThan(READ_IDLE_MS)
+  })
+
+  it('counts a place as covered by a read when the read will be there within half a second', () => {
+    expect(COVER_AHEAD_MS).toBe(500)
   })
 
   it('takes whole blocks as the floor of the disk store and the cap of the memory', () => {

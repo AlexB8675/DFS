@@ -1,4 +1,6 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { getEventListeners } from 'node:events'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { READ_IDLE_MS } from './limits.ts'
 import { ReadError, openRead } from './read.ts'
 import type { OpenReadOptions } from './read.ts'
 import { byteAt, startRangeServer } from './testing/range-server.ts'
@@ -223,7 +225,7 @@ describe('the ranges asked for', () => {
     expect((await collect(body)).length).toBe(10)
   })
 
-  it('sends the request as given: url, Range, and the signal', async () => {
+  it('sends the request as given: url, Range, and a signal that follows the caller’s', async () => {
     const controller = new AbortController()
     const fetchStub = stub(
       () =>
@@ -237,7 +239,14 @@ describe('the ranges asked for', () => {
     const [input, init] = fetchStub.mock.calls[0] ?? []
     expect(input).toBe('http://stub.test/file.bin')
     expect(new Headers(init?.headers).get('Range')).toBe('bytes=10-19')
-    expect(init?.signal).toBe(controller.signal)
+    // The read gives its fetch a signal of its own (it aborts the request when the server goes quiet); the caller's abort, and its reason, reach the fetch through it.
+    const given = init?.signal
+    expect(given).toBeDefined()
+    expect(given?.aborted).toBe(false)
+    const reason = new Error('the viewer left')
+    controller.abort(reason)
+    expect(given?.aborted).toBe(true)
+    expect(given?.reason).toBe(reason)
   })
 
   it('keeps the answer out of the browser’s HTTP cache, so no plaintext is left on the disk', async () => {
@@ -968,6 +977,339 @@ describe('how the body is read', () => {
     const pieces: number[] = []
     for await (const part of body) pieces.push(part.length)
     expect(pieces).toEqual([10])
+  })
+})
+
+describe('a read whose server goes quiet', () => {
+  const seconds = READ_IDLE_MS / 1000
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  /** A `fetch` that does not answer, and gives up when its signal is aborted, as a real one does. */
+  function silentFetch(): ReturnType<typeof vi.fn<typeof fetch>> {
+    return vi.fn<typeof fetch>(
+      (_input, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            reject(new DOMException('aborted', 'AbortError'))
+          })
+        }),
+    )
+  }
+
+  /**
+   * A body that the test feeds: the pieces it has been given come at once, and nothing else
+   * does. With `breaksOnAbort` the stream errors when the request is aborted, as a real
+   * connection does; without it only a cancel of the reader is seen.
+   */
+  function feed(breaksOnAbort = false): {
+    fetchStub: ReturnType<typeof vi.fn<typeof fetch>>
+    push: (count: number) => void
+    cancelled: () => number
+  } {
+    let controller: ReadableStreamDefaultController<Uint8Array> | undefined
+    let cancels = 0
+    const stream = new ReadableStream<Uint8Array>({
+      start(held) {
+        controller = held
+      },
+      cancel() {
+        cancels += 1
+      },
+    })
+    const fetchStub = vi.fn<typeof fetch>((_input, init) => {
+      if (breaksOnAbort) {
+        init?.signal?.addEventListener('abort', () => {
+          controller?.error(init.signal?.reason)
+        })
+      }
+      return Promise.resolve(
+        new Response(stream, { status: 206, headers: { 'Content-Range': 'bytes 0-999/1000' } }),
+      )
+    })
+    return {
+      fetchStub,
+      push: (count) => {
+        controller?.enqueue(new Uint8Array(count))
+      },
+      cancelled: () => cancels,
+    }
+  }
+
+  interface Seen {
+    state: 'pending' | 'resolved' | 'rejected'
+    error: unknown
+  }
+
+  /** What a promise has done so far, without waiting for it. */
+  function watch(promise: Promise<unknown>): Seen {
+    const seen: Seen = { state: 'pending', error: undefined }
+    promise.then(
+      () => {
+        seen.state = 'resolved'
+      },
+      (error: unknown) => {
+        seen.state = 'rejected'
+        seen.error = error
+      },
+    )
+    return seen
+  }
+
+  it('gives up on a request that has no answer in READ_IDLE_MS, and not before', async () => {
+    const fetchStub = silentFetch()
+    const seen = watch(stubbed(fetchStub, 0, 999))
+
+    await vi.advanceTimersByTimeAsync(READ_IDLE_MS - 1)
+    expect(seen.state).toBe('pending')
+    await vi.advanceTimersByTimeAsync(1)
+    expect(seen.state).toBe('rejected')
+
+    expect(seen.error).toBeInstanceOf(ReadError)
+    expect(seen.error).toMatchObject({ fatal: false, status: null, retryAfterMs: null })
+    expect((seen.error as ReadError).message).toBe(
+      `The server sent nothing for ${seconds} s after the request for bytes 0-999.`,
+    )
+    // The request itself is let go of, not left to hang.
+    expect(fetchStub.mock.calls[0]?.[1]?.signal?.aborted).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('gives up on a request whose fetch does not even honour the abort', async () => {
+    const fetchStub = vi.fn<typeof fetch>(() => new Promise(() => undefined))
+    const seen = watch(stubbed(fetchStub, 0, null))
+
+    await vi.advanceTimersByTimeAsync(READ_IDLE_MS)
+
+    expect(seen.state).toBe('rejected')
+    expect(seen.error).toBeInstanceOf(ReadError)
+    expect(seen.error).toMatchObject({ fatal: false })
+  })
+
+  it('cancels the body of an answer that comes after the read gave up', async () => {
+    let cancels = 0
+    let answer: (response: Response) => void = () => undefined
+    const fetchStub = vi.fn<typeof fetch>(
+      () =>
+        new Promise<Response>((resolve) => {
+          answer = resolve
+        }),
+    )
+    const seen = watch(stubbed(fetchStub, 0, 999))
+    await vi.advanceTimersByTimeAsync(READ_IDLE_MS)
+    expect(seen.state).toBe('rejected')
+
+    answer(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          cancel() {
+            cancels += 1
+          },
+        }),
+        { status: 206, headers: { 'Content-Range': 'bytes 0-999/1000' } },
+      ),
+    )
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(cancels).toBe(1)
+  })
+
+  it('gives up on a body that sends nothing for READ_IDLE_MS, after the pieces it had sent', async () => {
+    const source = feed()
+    source.push(100)
+    const { body } = await stubbed(source.fetchStub, 0, 999)
+    const iterator = body[Symbol.asyncIterator]()
+
+    const first = await iterator.next()
+    expect(first.done).toBe(false)
+    expect(first.value).toHaveLength(100)
+    const next = watch(iterator.next())
+    await vi.advanceTimersByTimeAsync(READ_IDLE_MS - 1)
+    expect(next.state).toBe('pending')
+    await vi.advanceTimersByTimeAsync(1)
+    expect(next.state).toBe('rejected')
+
+    expect(next.error).toBeInstanceOf(ReadError)
+    expect(next.error).toMatchObject({ fatal: false, status: 206 })
+    expect((next.error as ReadError).message).toBe(
+      `The server sent nothing for ${seconds} s for bytes 0-999, after 100 of 1000 bytes.`,
+    )
+    // The connection is let go of: the request is aborted and the reader cancelled.
+    expect(source.fetchStub.mock.calls[0]?.[1]?.signal?.aborted).toBe(true)
+    expect(source.cancelled()).toBe(1)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('gives up on a body that never sent a piece', async () => {
+    const source = feed()
+    const { body } = await stubbed(source.fetchStub, 0, 999)
+    const next = watch(body[Symbol.asyncIterator]().next())
+
+    await vi.advanceTimersByTimeAsync(READ_IDLE_MS)
+
+    expect(next.state).toBe('rejected')
+    expect(next.error).toMatchObject({ name: 'ReadError', fatal: false })
+    expect((next.error as ReadError).message).toContain('after 0 of 1000 bytes')
+  })
+
+  it('counts the silence from the last piece, so that a slow body that keeps moving is never given up on', async () => {
+    const source = feed()
+    const { body } = await stubbed(source.fetchStub, 0, 999)
+    const pieces: number[] = []
+    const seen = watch(
+      (async () => {
+        for await (const piece of body) pieces.push(piece.length)
+      })(),
+    )
+
+    // A piece every 9 s for 90 s: each wait is short of the limit, though the read lasts nine times as long.
+    for (let piece = 0; piece < 10; piece += 1) {
+      await vi.advanceTimersByTimeAsync(READ_IDLE_MS - 1000)
+      expect(seen.state).toBe('pending')
+      source.push(100)
+    }
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(seen.state).toBe('resolved')
+    expect(pieces).toEqual(new Array<number>(10).fill(100))
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('does not count the time its consumer takes: a body that waits to be asked for its next piece never times out', async () => {
+    const source = feed()
+    source.push(100)
+    source.push(100)
+    const { body } = await stubbed(source.fetchStub, 0, 999)
+    const iterator = body[Symbol.asyncIterator]()
+
+    expect((await iterator.next()).done).toBe(false)
+    // The consumer writes the piece to a slow store for a minute: the body is not waiting on the network, and no timer runs.
+    expect(vi.getTimerCount()).toBe(0)
+    await vi.advanceTimersByTimeAsync(6 * READ_IDLE_MS)
+    const second = await iterator.next()
+
+    expect(second.done).toBe(false)
+    expect(second.value).toHaveLength(100)
+    expect(source.fetchStub.mock.calls[0]?.[1]?.signal?.aborted).toBe(false)
+  })
+
+  it('does not count the time between the answer and the first request for the body', async () => {
+    const source = feed()
+    source.push(100)
+    const { body } = await stubbed(source.fetchStub, 0, 999)
+
+    await vi.advanceTimersByTimeAsync(6 * READ_IDLE_MS)
+
+    const first = await body[Symbol.asyncIterator]().next()
+    expect(first.done).toBe(false)
+    expect(first.value).toHaveLength(100)
+  })
+
+  it('stops its timer when the caller aborts, and the abort is not a ReadError', async () => {
+    const source = feed(true)
+    source.push(100)
+    const controller = new AbortController()
+    const { body } = await stubbed(source.fetchStub, 0, 999, { signal: controller.signal })
+    const iterator = body[Symbol.asyncIterator]()
+    await iterator.next()
+    const next = watch(iterator.next())
+    expect(vi.getTimerCount()).toBe(1)
+
+    controller.abort()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(next.state).toBe('rejected')
+    expect(next.error).not.toBeInstanceOf(ReadError)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('stops its timer when the caller aborts a request that has no answer', async () => {
+    const controller = new AbortController()
+    const seen = watch(stubbed(silentFetch(), 0, 999, { signal: controller.signal }))
+    expect(vi.getTimerCount()).toBe(1)
+
+    controller.abort()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(seen.state).toBe('rejected')
+    expect(seen.error).not.toBeInstanceOf(ReadError)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('leaves no timer behind a body that ended, and none behind a consumer that stopped early', async () => {
+    const whole = feed()
+    whole.push(1000)
+    const { body: ended } = await stubbed(whole.fetchStub, 0, 999)
+    expect((await collect(ended)).length).toBe(1000)
+    expect(vi.getTimerCount()).toBe(0)
+
+    const early = feed()
+    early.push(100)
+    const { body: stopped } = await stubbed(early.fetchStub, 0, 999)
+    for await (const piece of stopped) {
+      expect(piece.length).toBe(100)
+      break
+    }
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('leaves no listener on the caller’s signal once the read is over, however it ended', async () => {
+    const ok = new AbortController()
+    const whole = feed()
+    whole.push(1000)
+    await collect((await stubbed(whole.fetchStub, 0, 999, { signal: ok.signal })).body)
+    expect(getEventListeners(ok.signal, 'abort')).toHaveLength(0)
+
+    const refused = new AbortController()
+    await rejection(
+      stubbed(
+        stub(() => new Response(null, { status: 404 })),
+        0,
+        999,
+        { signal: refused.signal },
+      ),
+    )
+    expect(getEventListeners(refused.signal, 'abort')).toHaveLength(0)
+
+    const quiet = new AbortController()
+    const pending = watch(stubbed(silentFetch(), 0, 999, { signal: quiet.signal }))
+    await vi.advanceTimersByTimeAsync(READ_IDLE_MS)
+    expect(pending.state).toBe('rejected')
+    expect(getEventListeners(quiet.signal, 'abort')).toHaveLength(0)
+
+    const broken = new AbortController()
+    const stalled = feed()
+    const { body } = await stubbed(stalled.fetchStub, 0, 999, { signal: broken.signal })
+    const next = watch(body[Symbol.asyncIterator]().next())
+    await vi.advanceTimersByTimeAsync(READ_IDLE_MS)
+    expect(next.state).toBe('rejected')
+    expect(getEventListeners(broken.signal, 'abort')).toHaveLength(0)
+  })
+
+  it('names no part of the URL when it gives up', async () => {
+    const url = 'https://x.test/api/s/SECRETTOKEN123/files/f1/content?play=1'
+    const seen = watch(stubbed(silentFetch(), 0, 999, { url }))
+    await vi.advanceTimersByTimeAsync(READ_IDLE_MS)
+    expect(seen.state).toBe('rejected')
+    const message = (seen.error as ReadError).message
+    expect(message).not.toContain('SECRETTOKEN123')
+    expect(message).not.toContain('/api/')
+    expect(message).not.toContain('?')
+
+    const source = feed()
+    const { body } = await stubbed(source.fetchStub, 0, 999, { url })
+    const next = watch(body[Symbol.asyncIterator]().next())
+    await vi.advanceTimersByTimeAsync(READ_IDLE_MS)
+    const bodyMessage = (next.error as ReadError).message
+    expect(bodyMessage).not.toContain('SECRETTOKEN123')
+    expect(bodyMessage).not.toContain('/api/')
+    expect(bodyMessage).not.toContain('?')
   })
 })
 

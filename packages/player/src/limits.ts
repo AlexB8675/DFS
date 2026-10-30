@@ -53,3 +53,12 @@ export const LATE_TIMER_MS = 1_000
 
 /** The extra time given once to a request whose deadline fired late: 2 s, for the answers that were waiting to be handled when the page woke. An expiry that is not late, and the expiry of this grace, are the worker's death. */
 export const WAKE_GRACE_MS = 2_000
+
+/** How long a read may wait on the network before it is given up as stalled: 10 s with no response headers, or with no new piece of the body. Only the time spent waiting on the network counts, never the time spent writing what came to the store. The read is tried again from its next byte, after the usual pause. */
+export const READ_IDLE_MS = 10_000
+
+/** How long a read may go without a piece (or without a write finishing) before it no longer covers any place, so that the engine's reads go around it, and before a return of the network opens it again: 2 s. */
+export const STALL_COVER_MS = 2_000
+
+/** How far ahead of its next byte a read covers a place, in time at the measured rate: half a second, but never more than a block. Where the rate is not known yet a read covers a block. */
+export const COVER_AHEAD_MS = 500

@@ -5,7 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Downloader, RateMeter, clip, messageOf, pageConnectivity } from './downloader.ts'
 import type { Connectivity, HeadRead } from './downloader.ts'
 import { StoreError } from './errors.ts'
-import { BLOCK_BYTES, LEVEL_EVERY_MS, RETRY_BASE_MS, RETRY_MAX_MS } from './limits.ts'
+import {
+  BLOCK_BYTES,
+  LEVEL_EVERY_MS,
+  READ_IDLE_MS,
+  RETRY_BASE_MS,
+  RETRY_MAX_MS,
+  STALL_COVER_MS,
+} from './limits.ts'
 import { ReadError } from './read.ts'
 import { RangeSet } from './ranges.ts'
 import { newPlayKey } from './seal.ts'
@@ -109,6 +116,8 @@ class SpyStore implements PlayStore {
   /** Ranges that `held()` does not say until they are written, so that a play can have a gap after it was done, as an eviction leaves one. */
   readonly hidden = new RangeSet()
   failNextWrite: Error | null = null
+  /** How long a write takes, by the timers of the test (the fake ones, when they are in use); 0 is at once. */
+  writeDelayMs = 0
   /** How many of the next reads answer null, as a read of a block that was evicted in between does. */
   nullReads = 0
   /** How many reads were asked of the store. */
@@ -141,6 +150,11 @@ class SpyStore implements PlayStore {
   }
 
   async write(offset: number, bytes: Uint8Array): Promise<WriteOutcome> {
+    if (this.writeDelayMs > 0) {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, this.writeDelayMs)
+      })
+    }
     if (this.failNextWrite !== null) {
       const failure = this.failNextWrite
       this.failNextWrite = null
@@ -835,7 +849,7 @@ describe('Downloader: coming back', () => {
     expect(stub.calls).toHaveLength(2)
   })
 
-  it('ignores online and visible outside a pause', async () => {
+  it('ignores online and visible outside a pause, for a read that is moving', async () => {
     const size = 2 * MIB
     const stub = stubNetwork((call) => pipeFor(call, size))
     const rig = build({
@@ -846,7 +860,8 @@ describe('Downloader: coming back', () => {
 
     rig.downloader.start()
     await until(() => stub.pipes.length === 1)
-    expect(rig.connectivity.listeners()).toBe(0)
+    // While a read is open the downloader hears the network's return, for the reads that have gone quiet; this one has not.
+    expect(rig.connectivity.listeners()).toBe(2)
     rig.connectivity.fireOnline()
     rig.connectivity.fireVisible()
     await settle()
@@ -1325,7 +1340,7 @@ describe('Downloader: the position', () => {
 
 describe('Downloader: the level', () => {
   it('is sent every LEVEL_EVERY_MS while a read is open, and not after done', async () => {
-    const size = 2 * MIB
+    const size = 3 * MIB
     const store = memoryStore(size)
     const stub = stubNetwork((call) => pipeFor(call, size))
     const rig = build({ url: 'http://stub.invalid/file', store, fetch: stub.fetch })
@@ -1341,15 +1356,19 @@ describe('Downloader: the level', () => {
     expect(ofType(rig.events, 'storeLevel')).toEqual([
       { type: 'storeLevel', storedBytes: MIB, aheadBytes: MIB, evictedBytes: 0 },
     ])
-    await vi.advanceTimersByTimeAsync(LEVEL_EVERY_MS)
+    // The server keeps sending (a read that is quiet for READ_IDLE_MS is given up on, and the level with it).
+    await vi.advanceTimersByTimeAsync(LEVEL_EVERY_MS - 1000)
+    stub.pipes[0]?.push(MIB, 2 * MIB)
+    await until(() => store.held().heldFrom(0) === 2 * MIB)
+    await vi.advanceTimersByTimeAsync(1000)
     expect(ofType(rig.events, 'storeLevel')).toHaveLength(2)
 
     // The position is where the ahead is counted from.
     rig.downloader.setPosition(MIB / 2)
     await vi.advanceTimersByTimeAsync(LEVEL_EVERY_MS)
-    expect(ofType(rig.events, 'storeLevel')[2]).toMatchObject({ aheadBytes: MIB / 2 })
+    expect(ofType(rig.events, 'storeLevel')[2]).toMatchObject({ aheadBytes: 1.5 * MIB })
 
-    stub.pipes[0]?.push(MIB, size)
+    stub.pipes[0]?.push(2 * MIB, size)
     stub.pipes[0]?.end()
     await until(() => rig.downloader.state() === 'done')
     // One more, for the end of the download; then none, for no read is open.
@@ -2367,7 +2386,8 @@ describe('Downloader: fetchNow', () => {
     rig.connectivity.isOnline = true
     rig.connectivity.fireOnline()
     await until(() => stub.calls.length === 2)
-    expect(rig.connectivity.listeners()).toBe(0)
+    // The pause's listeners are gone; the reopened read has the downloader's own two.
+    expect(rig.connectivity.listeners()).toBe(2)
   })
 
   it('does not read a range again in a tight loop when the store lets go of it at once', async () => {
@@ -2750,6 +2770,523 @@ describe('Downloader: the rate', () => {
     expect(rate).not.toBeNull()
     expect(rate).toBeGreaterThan(0.75 * MIB)
     expect(rate).toBeLessThan(1.25 * MIB)
+  })
+})
+
+describe('Downloader: a read that goes quiet', () => {
+  // The clock of these tests is the fake one, so that the time a read has been quiet moves with the timers.
+  const now = (): number => Date.now()
+  const KIB = 1024
+  const size = 8 * MIB
+
+  /** A downloader on a stub whose every read is a pipe that the test feeds, started and with its first read open. */
+  async function reading(
+    options: { store?: SpyStore; total?: number } = {},
+  ): Promise<{ rig: Rig; stub: Stub; store: SpyStore }> {
+    const total = options.total ?? size
+    const store = options.store ?? memoryStore(total)
+    const stub = stubNetwork((call) => pipeFor(call, total))
+    const rig = build({ url: 'http://stub.invalid/file', store, fetch: stub.fetch, now })
+    rig.downloader.start()
+    await until(() => stub.pipes.length === 1)
+    return { rig, stub, store }
+  }
+
+  /** The pipe of a call (every read of these tests is a pipe, in the order of the calls). */
+  function pipeOf(stub: Stub, call: StubCall | undefined): Pipe | undefined {
+    return call === undefined ? undefined : stub.pipes[call.index]
+  }
+
+  it('gives up on a read that sends nothing for READ_IDLE_MS, tries it again from its next byte after the usual pause, and logs why', async () => {
+    const { rig, stub, store } = await reading()
+    stub.pipes[0]?.push(0, 100 * KIB)
+    await until(() => store.held().heldFrom(0) === 100 * KIB)
+
+    await vi.advanceTimersByTimeAsync(READ_IDLE_MS - 1)
+    expect(ofType(rig.events, 'retry')).toEqual([])
+    expect(stub.calls[0]?.signal.aborted).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    await until(() => ofType(rig.events, 'retry').length === 1)
+
+    expect(rig.downloader.state()).toBe('waiting')
+    expect(rig.downloader.failure()).toBeNull()
+    expect(ofType(rig.events, 'retry')).toEqual([
+      { type: 'retry', attempt: 1, delayMs: RETRY_BASE_MS, offset: 100 * KIB },
+    ])
+    expect(ofType(rig.events, 'requestEnd')).toEqual([
+      {
+        type: 'requestEnd',
+        id: 1,
+        bytes: 100 * KIB,
+        outcome: 'failed',
+        message: `The server sent nothing for ${READ_IDLE_MS / 1000} s for bytes 0-, after 102400 of ${size} bytes.`,
+      },
+    ])
+    // The connection was let go of, and the play did not end: nothing was said to be an error.
+    expect(stub.calls[0]?.signal.aborted).toBe(true)
+    expect(ofType(rig.events, 'error')).toEqual([])
+
+    // The pause is the usual one, and the read reopens at the exact next byte.
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS - 1)
+    expect(stub.calls).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(1)
+    await until(() => stub.pipes.length === 2)
+    expect(stub.calls[1]).toMatchObject({ from: 100 * KIB, to: null })
+    expect(ofType(rig.events, 'request')[1]).toEqual({
+      type: 'request',
+      id: 2,
+      from: 100 * KIB,
+      to: null,
+    })
+
+    stub.pipes[1]?.push(100 * KIB, size)
+    await until(() => rig.downloader.state() === 'done')
+    expect(await firstMismatch(store, { start: 0, end: size })).toBe(-1)
+  })
+
+  it('gives up on a request that gets no answer, and reopens it after the pause', async () => {
+    const store = memoryStore(size)
+    const later = stubNetwork((call) => wholeRange(call, size))
+    // The first request is never answered: its fetch waits for the abort, as a real one does.
+    let firstSignal: AbortSignal | null = null
+    const hanging: typeof fetch = (input, init) => {
+      if (firstSignal !== null) return later.fetch(input, init)
+      const signal = init?.signal
+      if (signal === undefined || signal === null) throw new Error('the stub was given no signal')
+      firstSignal = signal
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          reject(new DOMException('aborted', 'AbortError'))
+        })
+      })
+    }
+    const rig = build({ url: 'http://stub.invalid/file', store, fetch: hanging, now })
+
+    rig.downloader.start()
+    await until(() => firstSignal !== null)
+    await vi.advanceTimersByTimeAsync(READ_IDLE_MS)
+    await until(() => ofType(rig.events, 'retry').length === 1)
+
+    expect(ofType(rig.events, 'retry')[0]).toEqual({
+      type: 'retry',
+      attempt: 1,
+      delayMs: RETRY_BASE_MS,
+      offset: 0,
+    })
+    expect(ofType(rig.events, 'requestEnd')[0]).toMatchObject({
+      id: 1,
+      bytes: 0,
+      outcome: 'failed',
+      message: `The server sent nothing for ${READ_IDLE_MS / 1000} s after the request for bytes 0-.`,
+    })
+    expect(ofType(rig.events, 'firstByte')).toEqual([])
+    expect(firstSignal).toMatchObject({ aborted: true })
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS)
+    await until(() => rig.downloader.state() === 'done')
+    expect(await firstMismatch(store, { start: 0, end: size })).toBe(-1)
+  })
+
+  it('goes on with the usual, growing pauses when it goes quiet again and again', async () => {
+    const { rig, stub } = await reading()
+
+    for (const delayMs of [RETRY_BASE_MS, 2 * RETRY_BASE_MS, 4 * RETRY_BASE_MS]) {
+      await vi.advanceTimersByTimeAsync(READ_IDLE_MS)
+      await until(() => ofType(rig.events, 'retry').at(-1)?.delayMs === delayMs)
+      await vi.advanceTimersByTimeAsync(delayMs)
+      await until(() => rig.downloader.state() === 'reading')
+    }
+
+    expect(ofType(rig.events, 'retry').map((retry) => retry.attempt)).toEqual([1, 2, 3])
+    expect(stub.calls).toHaveLength(4)
+  })
+
+  it('does not give up on a slow body that keeps moving', async () => {
+    const { rig, stub, store } = await reading()
+
+    // A piece every 9 s for a minute: no wait is as long as READ_IDLE_MS.
+    for (let piece = 0; piece < 7; piece += 1) {
+      await vi.advanceTimersByTimeAsync(READ_IDLE_MS - 1000)
+      stub.pipes[0]?.push(piece * 100 * KIB, (piece + 1) * 100 * KIB)
+      await until(() => store.held().heldFrom(0) === (piece + 1) * 100 * KIB)
+    }
+
+    expect(stub.calls).toHaveLength(1)
+    expect(ofType(rig.events, 'retry')).toEqual([])
+    expect(ofType(rig.events, 'requestEnd')).toEqual([])
+    expect(rig.downloader.state()).toBe('reading')
+  })
+
+  it('does not count the time the store takes to write: a store that is slower than READ_IDLE_MS is not a stall', async () => {
+    const store = memoryStore(size)
+    store.writeDelayMs = 3 * READ_IDLE_MS
+    const { rig, stub } = await reading({ store })
+    stub.pipes[0]?.push(0, 100 * KIB)
+    stub.pipes[0]?.push(100 * KIB, 200 * KIB)
+
+    // Two writes of 30 s each, one after the other, and the network is never waited on for more than an instant.
+    await vi.advanceTimersByTimeAsync(2 * 3 * READ_IDLE_MS)
+    await until(() => store.held().heldFrom(0) === 200 * KIB)
+
+    expect(stub.calls).toHaveLength(1)
+    expect(stub.calls[0]?.signal.aborted).toBe(false)
+    expect(ofType(rig.events, 'retry')).toEqual([])
+    expect(ofType(rig.events, 'requestEnd')).toEqual([])
+    expect(rig.downloader.state()).toBe('reading')
+  })
+
+  it('counts the quiet from the last write that finished, so that a slow store does not make a healthy read look like a stall to the engine', async () => {
+    const store = memoryStore(size)
+    store.writeDelayMs = 5_000
+    const { rig, stub } = await reading({ store })
+    stub.pipes[0]?.push(0, 100 * KIB)
+    await vi.advanceTimersByTimeAsync(5_000)
+    await until(() => store.held().heldFrom(0) === 100 * KIB)
+
+    // The write took longer than STALL_COVER_MS, and the read has just moved: it covers the byte after what it wrote.
+    void rig.downloader.fetchNow({ start: 100 * KIB, end: 100 * KIB + 10 }).catch(() => undefined)
+    await settle()
+
+    expect(stub.calls).toHaveLength(1)
+  })
+
+  it('answers the engine through a read of its own when the read that would have brought its bytes goes quiet, with no further call from the engine', async () => {
+    const { rig, stub, store } = await reading()
+    stub.pipes[0]?.push(0, 100 * KIB)
+    await until(() => store.held().heldFrom(0) === 100 * KIB)
+
+    // The engine asks for the next 64 KiB while the read is moving, as the stalled-read probe does: the read covers them.
+    await vi.advanceTimersByTimeAsync(200)
+    let answer: Uint8Array | null = null
+    rig.downloader.read({ start: 100 * KIB, end: 164 * KIB }).then(
+      (bytes) => {
+        answer = bytes
+      },
+      () => undefined,
+    )
+    await settle()
+    expect(stub.calls).toHaveLength(1)
+
+    // The read goes quiet: after STALL_COVER_MS it covers nothing, and the engine's bytes are asked for.
+    await vi.advanceTimersByTimeAsync(STALL_COVER_MS - 200)
+    await settle()
+    expect(stub.calls).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(1)
+    await until(() => stub.pipes.length === 2)
+    expect(stub.calls[1]).toMatchObject({ from: 100 * KIB, to: 164 * KIB - 1 })
+    expect(ofType(rig.events, 'retry')).toEqual([])
+
+    stub.pipes[1]?.push(100 * KIB, 164 * KIB)
+    await until(() => answer !== null)
+    expect(answer).toEqual(bytesOf(100 * KIB, 164 * KIB))
+    // All of this was before the quiet read was given up on.
+    expect(ofType(rig.events, 'retry')).toEqual([])
+    expect(stub.calls[0]?.signal.aborted).toBe(false)
+  })
+
+  it('opens a read of its own at once for a range that the engine asks for after the quiet began', async () => {
+    const { rig, stub, store } = await reading()
+    stub.pipes[0]?.push(0, 100 * KIB)
+    await until(() => store.held().heldFrom(0) === 100 * KIB)
+    await vi.advanceTimersByTimeAsync(3_000)
+
+    void rig.downloader.fetchNow({ start: 100 * KIB, end: 164 * KIB }).catch(() => undefined)
+    await until(() => stub.pipes.length === 2)
+
+    expect(stub.calls[1]).toMatchObject({ from: 100 * KIB, to: 164 * KIB - 1 })
+  })
+
+  it('does not open an onward read where a quiet one is when the position moves: that read is given up on by its own limit', async () => {
+    const { rig, stub, store } = await reading()
+    stub.pipes[0]?.push(0, 100 * KIB)
+    await until(() => store.held().heldFrom(0) === 100 * KIB)
+    await vi.advanceTimersByTimeAsync(3 * STALL_COVER_MS)
+
+    rig.downloader.setPosition(50 * KIB)
+    await settle()
+
+    expect(stub.calls).toHaveLength(1)
+    expect(ofType(rig.events, 'restart')).toEqual([])
+  })
+
+  it('gives up on a priority read that goes quiet, and reads from its next byte after its own pause', async () => {
+    const { rig, stub, store } = await reading()
+    const waiting = rig.downloader.fetchNow({ start: 5 * MIB, end: 5 * MIB + 300 * KIB })
+    await until(() => stub.pipes.length === 2)
+    stub.pipes[1]?.push(5 * MIB, 5 * MIB + 100 * KIB)
+    await until(() => store.held().has({ start: 5 * MIB, end: 5 * MIB + 100 * KIB }))
+
+    await vi.advanceTimersByTimeAsync(READ_IDLE_MS)
+    await until(() => ofType(rig.events, 'retry').length >= 2)
+
+    // The onward read, which had nothing, has its own retry; the priority read's is at its next byte.
+    const retries = ofType(rig.events, 'retry')
+    expect(retries.filter((retry) => retry.offset === 5 * MIB + 100 * KIB)).toEqual([
+      { type: 'retry', attempt: 1, delayMs: RETRY_BASE_MS, offset: 5 * MIB + 100 * KIB },
+    ])
+    expect(ofType(rig.events, 'requestEnd').find((end) => end.id === 2)).toMatchObject({
+      outcome: 'failed',
+      bytes: 100 * KIB,
+    })
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS)
+    await until(() => stub.calls.some((call) => call.from === 5 * MIB + 100 * KIB))
+    const again = stub.calls.find((call) => call.from === 5 * MIB + 100 * KIB)
+    expect(again).toMatchObject({ to: 5 * MIB + 300 * KIB - 1 })
+    pipeOf(stub, again)?.push(5 * MIB + 100 * KIB, 5 * MIB + 300 * KIB)
+    await waiting
+    expect(await firstMismatch(store, { start: 5 * MIB, end: 5 * MIB + 300 * KIB })).toBe(-1)
+  })
+
+  describe('and the network comes back', () => {
+    const comings: [string, (connectivity: FakeConnectivity) => void][] = [
+      [
+        'online',
+        (connectivity) => {
+          connectivity.fireOnline()
+        },
+      ],
+      [
+        'the page becoming visible while online',
+        (connectivity) => {
+          connectivity.fireVisible()
+        },
+      ],
+    ]
+
+    it.each(comings)(
+      'restarts a read that has been quiet for more than STALL_COVER_MS at its next byte at once, with no pause: %s',
+      async (_name, fire) => {
+        const { rig, stub, store } = await reading()
+        stub.pipes[0]?.push(0, 100 * KIB)
+        await until(() => store.held().heldFrom(0) === 100 * KIB)
+        await vi.advanceTimersByTimeAsync(3_000)
+
+        fire(rig.connectivity)
+        await until(() => stub.pipes.length === 2)
+
+        expect(stub.calls[1]).toMatchObject({ from: 100 * KIB, to: null })
+        expect(stub.calls[0]?.signal.aborted).toBe(true)
+        expect(ofType(rig.events, 'retry')).toEqual([])
+        expect(ofType(rig.events, 'restart')).toEqual([])
+        expect(ofType(rig.events, 'error')).toEqual([])
+        expect(ofType(rig.events, 'requestEnd')).toEqual([
+          {
+            type: 'requestEnd',
+            id: 1,
+            bytes: 100 * KIB,
+            outcome: 'failed',
+            message: 'The read had been quiet for 3 s when the network came back.',
+          },
+        ])
+        expect(rig.downloader.state()).toBe('reading')
+
+        stub.pipes[1]?.push(100 * KIB, size)
+        await until(() => rig.downloader.state() === 'done')
+        expect(await firstMismatch(store, { start: 0, end: size })).toBe(-1)
+      },
+    )
+
+    it.each(comings)(
+      'leaves a read that moved within STALL_COVER_MS alone: %s',
+      async (_name, fire) => {
+        const { rig, stub, store } = await reading()
+        stub.pipes[0]?.push(0, 100 * KIB)
+        await until(() => store.held().heldFrom(0) === 100 * KIB)
+        await vi.advanceTimersByTimeAsync(STALL_COVER_MS)
+
+        fire(rig.connectivity)
+        await settle()
+
+        expect(stub.calls).toHaveLength(1)
+        expect(stub.calls[0]?.signal.aborted).toBe(false)
+      },
+    )
+
+    it('does not hear the page become visible while the network is down', async () => {
+      const { rig, stub, store } = await reading()
+      stub.pipes[0]?.push(0, 100 * KIB)
+      await until(() => store.held().heldFrom(0) === 100 * KIB)
+      await vi.advanceTimersByTimeAsync(3_000)
+      rig.connectivity.isOnline = false
+
+      rig.connectivity.fireVisible()
+      await settle()
+
+      expect(stub.calls).toHaveLength(1)
+      expect(stub.calls[0]?.signal.aborted).toBe(false)
+    })
+
+    it('restarts a priority read that has been quiet, and the wait is answered by the new one', async () => {
+      const { rig, stub, store } = await reading()
+      const waiting = rig.downloader.fetchNow({ start: 5 * MIB, end: 5 * MIB + 300 * KIB })
+      await until(() => stub.pipes.length === 2)
+      stub.pipes[1]?.push(5 * MIB, 5 * MIB + 100 * KIB)
+      await until(() => store.held().has({ start: 5 * MIB, end: 5 * MIB + 100 * KIB }))
+      await vi.advanceTimersByTimeAsync(3_000)
+
+      rig.connectivity.fireOnline()
+      await until(() => stub.calls.some((call) => call.from === 5 * MIB + 100 * KIB))
+
+      expect(stub.calls[1]?.signal.aborted).toBe(true)
+      const again = stub.calls.filter(
+        (call) => call.from === 5 * MIB + 100 * KIB && call.to === 5 * MIB + 300 * KIB - 1,
+      )
+      expect(again).toHaveLength(1)
+      expect(ofType(rig.events, 'retry')).toEqual([])
+      pipeOf(stub, again[0])?.push(5 * MIB + 100 * KIB, 5 * MIB + 300 * KIB)
+      await waiting
+      expect(await firstMismatch(store, { start: 5 * MIB, end: 5 * MIB + 300 * KIB })).toBe(-1)
+    })
+
+    it('opens one read for a gap, not two, when the network comes back to a pause and to a quiet read together', async () => {
+      const store = memoryStore(size)
+      // The first onward read is at 6 MiB; the position moves back, and the second, at 1 MiB, is refused for a long while.
+      const stub = stubNetwork((call) =>
+        call.index === 1 ? refusal(503, '20') : pipeFor(call, size),
+      )
+      const rig = build({ url: 'http://stub.invalid/file', store, fetch: stub.fetch, now })
+      rig.downloader.setPosition(6 * MIB)
+      rig.downloader.start()
+      await until(() => stub.pipes.length === 1)
+      stub.pipes[0]?.push(6 * MIB, 6 * MIB + 100 * KIB)
+      await until(() => store.held().has({ start: 6 * MIB, end: 6 * MIB + 100 * KIB }))
+      rig.downloader.setPosition(MIB)
+      await until(() => ofType(rig.events, 'retry').length === 1)
+      expect(stub.calls.map((call) => call.from)).toEqual([6 * MIB, MIB])
+      await vi.advanceTimersByTimeAsync(3_000)
+
+      rig.connectivity.fireOnline()
+      await until(() => stub.pipes.length === 2)
+      await settle()
+
+      expect(stub.calls.map((call) => call.from)).toEqual([6 * MIB, MIB, MIB])
+      expect(stub.calls[0]?.signal.aborted).toBe(true)
+    })
+
+    it('listens while a read is open, and lets go of the listeners when the downloader closes', async () => {
+      const { rig } = await reading()
+      expect(rig.connectivity.listeners()).toBe(2)
+
+      await rig.downloader.close()
+
+      expect(rig.connectivity.listeners()).toBe(0)
+    })
+  })
+
+  describe('and a place is said to be covered', () => {
+    /** A downloader whose first read has brought `bytes` from 0 at 100 ms, on a clock that the test sets, at 1100 ms: a second of receiving, so the rate is known. */
+    async function measured(
+      bytes: number,
+      total = 32 * MIB,
+    ): Promise<{ rig: Rig; stub: Stub; clock: { now: number } }> {
+      const clock = { now: 0 }
+      const store = memoryStore(total, 64 * MIB)
+      const stub = stubNetwork((call) => pipeFor(call, total))
+      const rig = build({
+        url: 'http://stub.invalid/file',
+        store,
+        fetch: stub.fetch,
+        now: () => clock.now,
+      })
+      rig.downloader.start()
+      await until(() => stub.pipes.length === 1)
+      clock.now = 100
+      stub.pipes[0]?.push(0, bytes)
+      await until(() => store.held().heldFrom(0) === bytes)
+      clock.now = 1100
+      return { rig, stub, clock }
+    }
+
+    /** Asks for ten bytes at `start`, and answers whether a read of its own was opened for them. */
+    async function opensARead(rig: Rig, stub: Stub, start: number): Promise<boolean> {
+      const before = stub.calls.length
+      void rig.downloader.fetchNow({ start, end: start + 10 }).catch(() => undefined)
+      await settle()
+      return stub.calls.length > before
+    }
+
+    it('reaches half a second ahead of the read at the rate it is received, when that is less than a block', async () => {
+      const { rig, stub } = await measured(100 * KIB)
+      expect(rig.downloader.rate()).toBe(100 * KIB)
+
+      // 100 KiB a second reaches 50 KiB ahead of the 100 KiB it has brought.
+      expect(await opensARead(rig, stub, 150 * KIB)).toBe(false)
+      expect(await opensARead(rig, stub, 150 * KIB + 1)).toBe(true)
+      expect(stub.calls[1]).toMatchObject({ from: 150 * KIB + 1, to: 150 * KIB + 10 })
+    })
+
+    it('reaches no more than a block, however fast the read is', async () => {
+      const { rig, stub } = await measured(4 * MIB)
+      expect(rig.downloader.rate()).toBe(4 * MIB)
+
+      expect(await opensARead(rig, stub, 4 * MIB + BLOCK_BYTES)).toBe(false)
+      expect(await opensARead(rig, stub, 4 * MIB + BLOCK_BYTES + 1)).toBe(true)
+    })
+
+    it('reaches a block while the rate is not known yet', async () => {
+      const { rig, stub, clock } = await measured(100 * KIB)
+      clock.now = 600
+      expect(rig.downloader.rate()).toBeNull()
+
+      expect(await opensARead(rig, stub, 100 * KIB + BLOCK_BYTES)).toBe(false)
+      expect(await opensARead(rig, stub, 100 * KIB + BLOCK_BYTES + 1)).toBe(true)
+    })
+
+    it('reaches a few bytes of a trickle, and always the byte the read is at', async () => {
+      const { rig, stub } = await measured(KIB)
+      expect(rig.downloader.rate()).toBe(KIB)
+
+      expect(await opensARead(rig, stub, KIB)).toBe(false)
+      expect(await opensARead(rig, stub, KIB + KIB / 2)).toBe(false)
+      expect(await opensARead(rig, stub, KIB + KIB / 2 + 1)).toBe(true)
+    })
+  })
+
+  it('counts the quiet from the last piece that came, also while it is being written', async () => {
+    const store = memoryStore(size)
+    const { rig, stub } = await reading({ store })
+    stub.pipes[0]?.push(0, 100 * KIB)
+    await until(() => store.held().heldFrom(0) === 100 * KIB)
+
+    // The next piece comes after 1.9 s and takes a second to write: 2.4 s since the last write, but 0.5 s since the piece.
+    await vi.advanceTimersByTimeAsync(1_900)
+    store.writeDelayMs = 1_000
+    stub.pipes[0]?.push(100 * KIB, 200 * KIB)
+    await settle()
+    await vi.advanceTimersByTimeAsync(500)
+    void rig.downloader.fetchNow({ start: 100 * KIB, end: 100 * KIB + 10 }).catch(() => undefined)
+    await settle()
+
+    expect(stub.calls).toHaveLength(1)
+  })
+
+  it('leaves no timer of its own once the wait is answered, and none after close', async () => {
+    // A file of 200 KiB: the read that answers the wait brings its end, so that nothing else runs.
+    const { rig, stub } = await reading({ total: 200 * KIB })
+    stub.pipes[0]?.push(0, 100 * KIB)
+    await settle()
+    const waiting = rig.downloader.fetchNow({ start: 100 * KIB, end: 164 * KIB })
+    await settle()
+    // The read covers the wait's bytes, and a look is set for when it would have gone quiet.
+
+    stub.pipes[0]?.push(100 * KIB, 200 * KIB)
+    await waiting
+    await until(() => rig.downloader.state() === 'done')
+
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('leaves no timer of its own after close, whatever it waited for', async () => {
+    const { rig, stub, store } = await reading()
+    stub.pipes[0]?.push(0, 100 * KIB)
+    await until(() => store.held().heldFrom(0) === 100 * KIB)
+    const waiting = rig.downloader.fetchNow({ start: 100 * KIB, end: 164 * KIB })
+    waiting.catch(() => undefined)
+    await settle()
+
+    await rig.downloader.close()
+
+    await expect(waiting).rejects.toMatchObject({ kind: 'closed' })
+    expect(vi.getTimerCount()).toBe(0)
   })
 })
 

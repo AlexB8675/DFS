@@ -5,7 +5,13 @@ import { timelineEventSchema } from '@dfs/shared'
 import type { TimelineEventInput } from '@dfs/shared'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Connectivity, Downloader } from './downloader.ts'
-import { HEAD_BYTES, MEMORY_CAP_BYTES, RETRY_BASE_MS, STORE_OPEN_MS } from './limits.ts'
+import {
+  HEAD_BYTES,
+  MEMORY_CAP_BYTES,
+  READ_IDLE_MS,
+  RETRY_BASE_MS,
+  STORE_OPEN_MS,
+} from './limits.ts'
 import { openDownload } from './open-download.ts'
 import type { OpenDownloadOptions } from './open-download.ts'
 import type { StoreWorker } from './open.ts'
@@ -578,10 +584,12 @@ describe('openDownload: a head that fails before its headers', () => {
 
     connectivity.isOnline = true
     connectivity.fireOnline()
-    await opening
+    const downloader = await opening
     // The head was asked for again at once, and not after the 20 s.
     expect(server.requests.length).toBeGreaterThanOrEqual(2)
     expect(server.requests[1]).toEqual({ range: `bytes=0-${HEAD_BYTES - 1}` })
+    // The pause's listeners are gone; the downloader, which reads on, hears the network until it has read the file.
+    await until(() => downloader.state() === 'done')
     expect(connectivity.listeners()).toBe(0)
   })
 
@@ -749,6 +757,9 @@ describe('openDownload: a head that fails before its headers', () => {
       estimate: () => Promise.resolve({ quota: 10 * 1024 ** 3, usage: 0 }),
     })
     await until(() => silent.received() === 1)
+    // The head's bytes are on their way over real sockets, which the fake clock does not move: they are in before it does.
+    await until(() => server.openResponses() === 0)
+    await sleep(50)
     await vi.advanceTimersByTimeAsync(STORE_OPEN_MS)
     const downloader = await opening
 
@@ -758,6 +769,198 @@ describe('openDownload: a head that fails before its headers', () => {
     ])
     await downloader.whenHeld({ start: 0, end: HEAD_BYTES })
     await expectBytesRight(downloader, 0, HEAD_BYTES)
+  })
+})
+
+describe('openDownload: a head that goes quiet', () => {
+  const size = 2 * MIB
+  const KIB = 1024
+
+  interface Call {
+    range: string
+    from: number
+    to: number
+    signal: AbortSignal
+  }
+
+  /**
+   * A `fetch` for the tests of the head: what the first request gets is `first`, a body that
+   * the test feeds (`'feed'`), or no answer at all, which gives up when the request is
+   * aborted, as a real one does (`'none'`); every later request gets all of its range.
+   */
+  function network(first: 'feed' | 'none'): {
+    fetch: typeof fetch
+    calls: Call[]
+    push: (start: number, end: number) => void
+  } {
+    const calls: Call[] = []
+    let feed: ReadableStreamDefaultController<Uint8Array> | undefined
+    const fetchStub: typeof fetch = (_input, init) => {
+      const signal = init?.signal
+      if (signal === undefined || signal === null) throw new Error('the stub was given no signal')
+      const range = new Headers(init?.headers).get('Range') ?? ''
+      const match = /^bytes=(\d+)-(\d*)$/.exec(range)
+      const from = Number(match?.[1])
+      const to = match?.[2] === '' ? size - 1 : Number(match?.[2])
+      calls.push({ range, from, to, signal })
+      const headers = { 'Content-Range': `bytes ${from}-${to}/${size}` }
+      if (calls.length > 1) {
+        return Promise.resolve(new Response(bytesOf(from, to + 1), { status: 206, headers }))
+      }
+      if (first === 'none') {
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => {
+            reject(new DOMException('aborted', 'AbortError'))
+          })
+        })
+      }
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          feed = controller
+          signal.addEventListener('abort', () => {
+            try {
+              controller.error(signal.reason)
+            } catch {
+              // A body that is over has nothing to break.
+            }
+          })
+        },
+      })
+      return Promise.resolve(new Response(stream, { status: 206, headers }))
+    }
+    return {
+      fetch: fetchStub,
+      calls,
+      push: (start, end) => {
+        feed?.enqueue(bytesOf(start, end))
+      },
+    }
+  }
+
+  /** Options that keep the store from opening for STORE_OPEN_MS: its worker is alive and says nothing. */
+  function slowStore(): Pick<OpenDownloadOptions, 'makeWorker' | 'estimate'> {
+    return {
+      makeWorker: unservedWorker().makeWorker,
+      estimate: () => Promise.resolve({ quota: 10 * 1024 ** 3, usage: 0 }),
+    }
+  }
+
+  it('gives up on a head that has no answer, and asks for it again after the usual pause', async () => {
+    fakeTimers()
+    const server = await serve({ size })
+    const { open, events } = rig(server)
+    const net = network('none')
+
+    const opening = open({ fetch: net.fetch })
+    await until(() => net.calls.length === 1)
+    await vi.advanceTimersByTimeAsync(READ_IDLE_MS - 1)
+    expect(ofType(events, 'retry')).toEqual([])
+    await vi.advanceTimersByTimeAsync(1)
+    await until(() => ofType(events, 'retry').length === 1)
+
+    expect(ofType(events, 'retry')).toEqual([
+      { type: 'retry', attempt: 1, delayMs: RETRY_BASE_MS, offset: 0 },
+    ])
+    expect(ofType(events, 'requestEnd')).toEqual([
+      {
+        type: 'requestEnd',
+        id: 1,
+        bytes: 0,
+        outcome: 'failed',
+        message: `The server sent nothing for ${READ_IDLE_MS / 1000} s after the request for bytes 0-${HEAD_BYTES - 1}.`,
+      },
+    ])
+    expect(net.calls[0]?.signal.aborted).toBe(true)
+
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS)
+    const downloader = await opening
+    expect(net.calls[1]).toMatchObject({ from: 0, to: HEAD_BYTES - 1 })
+    await downloader.whenHeld({ start: 0, end: HEAD_BYTES })
+    await expectBytesRight(downloader, 0, HEAD_BYTES)
+  })
+
+  it('gives up on a head whose body goes quiet, also while the store is opening, and the downloader reads on from the next byte', async () => {
+    fakeTimers()
+    const server = await serve({ size })
+    const { open, events } = rig(server)
+    const net = network('feed')
+
+    const opening = open({ fetch: net.fetch, ...slowStore() })
+    await until(() => net.calls.length === 1)
+    net.push(0, 100 * KIB)
+    await sleep(20)
+    // The store has not opened, the head is quiet: its own limit ends it, and the downloader finds that when it takes the head over.
+    await vi.advanceTimersByTimeAsync(READ_IDLE_MS)
+    expect(ofType(events, 'retry')).toEqual([])
+    await vi.advanceTimersByTimeAsync(STORE_OPEN_MS - READ_IDLE_MS)
+    const downloader = await opening
+    await until(() => ofType(events, 'retry').length === 1)
+
+    expect(ofType(events, 'retry')).toEqual([
+      { type: 'retry', attempt: 1, delayMs: RETRY_BASE_MS, offset: 100 * KIB },
+    ])
+    expect(ofType(events, 'requestEnd')).toEqual([
+      {
+        type: 'requestEnd',
+        id: 1,
+        bytes: 100 * KIB,
+        outcome: 'failed',
+        message: `The server sent nothing for ${READ_IDLE_MS / 1000} s for bytes 0-${HEAD_BYTES - 1}, after 102400 of ${HEAD_BYTES} bytes.`,
+      },
+    ])
+    expect(net.calls[0]?.signal.aborted).toBe(true)
+
+    await vi.advanceTimersByTimeAsync(RETRY_BASE_MS)
+    await until(() => net.calls.length === 2)
+    expect(net.calls[1]).toMatchObject({ from: 100 * KIB })
+    await until(() => downloader.state() === 'done')
+    await expectBytesRight(downloader, 0, size)
+  })
+
+  it('does not count the time the store takes to open: a head that has all its bytes waits for as long as the store needs', async () => {
+    fakeTimers()
+    const whole = HEAD_BYTES
+    const server = await serve({ size: whole })
+    const { open, events } = rig(server)
+
+    const opening = open({ ...slowStore() })
+    await until(() => server.requests.length === 1)
+    await until(() => server.openResponses() === 0)
+    await sleep(50)
+    // The store takes three times READ_IDLE_MS to open; the head has had all its bytes from the start.
+    await vi.advanceTimersByTimeAsync(STORE_OPEN_MS)
+    const downloader = await opening
+    await until(() => downloader.state() === 'done')
+
+    expect(ofType(events, 'retry')).toEqual([])
+    expect(server.requests).toHaveLength(1)
+    expect(ofType(events, 'requestEnd')).toEqual([
+      { type: 'requestEnd', id: 1, bytes: whole, outcome: 'done', message: null },
+    ])
+    await expectBytesRight(downloader, 0, whole)
+  })
+
+  it('does not give up on a head that is slow but keeps moving', async () => {
+    fakeTimers()
+    const server = await serve({ size })
+    const { open, events } = rig(server)
+    const net = network('feed')
+
+    const opening = open({ fetch: net.fetch, ...slowStore() })
+    await until(() => net.calls.length === 1)
+    // A piece every 9 s: the head lasts 90 s, and no wait for a piece is as long as the limit. The store opens in the middle of it.
+    for (let piece = 0; piece < 10; piece += 1) {
+      await vi.advanceTimersByTimeAsync(READ_IDLE_MS - 1000)
+      net.push(piece * 100 * KIB, (piece + 1) * 100 * KIB)
+      await sleep(5)
+    }
+    const downloader = await opening
+    await until(() => downloader.state() === 'reading')
+    await sleep(20)
+
+    expect(ofType(events, 'retry')).toEqual([])
+    expect(net.calls).toHaveLength(1)
+    expect(net.calls[0]?.signal.aborted).toBe(false)
   })
 })
 

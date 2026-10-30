@@ -11,6 +11,13 @@
 // timeline event, with its reason. `openDownload` makes one and hands it the head read of the
 // play, which is its first onward read.
 //
+// A read that goes quiet without an error (a black-holed path, a tunnel, a NAT that dropped its
+// mapping) gives up on its own, in `read.ts`, after `READ_IDLE_MS`, and is tried again from its
+// next byte like any read that fails. Meanwhile the engine is not made to wait for it: a read that
+// has not moved for `STALL_COVER_MS` covers no place for the engine's reads, which go around it;
+// and when the network comes back (`online`, or the page visible with the network up) a read that
+// has been quiet that long is opened again at once.
+//
 // The page's connection is reached through `globalThis` with runtime checks, and the timers
 // are the global ones, so the file needs no DOM types and runs in a page, a worker and Node
 // alike.
@@ -21,11 +28,13 @@ import { blockOf } from './blocks.ts'
 import { StoreError } from './errors.ts'
 import {
   BLOCK_BYTES,
+  COVER_AHEAD_MS,
   LEVEL_EVERY_MS,
   RATE_WINDOW_MS,
   RETRY_BASE_MS,
   RETRY_JITTER,
   RETRY_MAX_MS,
+  STALL_COVER_MS,
 } from './limits.ts'
 import { ReadError, openRead } from './read.ts'
 import type { PlayStore, WriteOutcome } from './store.ts'
@@ -167,6 +176,8 @@ interface ActiveRead {
   received: number
   /** The file offset of the next byte to be written. */
   at: number
+  /** When, by the downloader's clock, the read last moved: it opened, a piece of its body came, or a write of its bytes finished. */
+  lastAt: number
 }
 
 /** A wait before a read is tried again. */
@@ -316,6 +327,10 @@ export class Downloader {
   #levels: ReturnType<typeof setInterval> | null = null
   /** The check of a full store: one at a time, and `again` when the position moved during it. */
   #check: { running: boolean; again: boolean } = { running: false, again: false }
+  /** The release of what the downloader hears of the network while any read is open: `online`, and the page visible. */
+  #unlisten: (() => void) | null = null
+  /** The look at those who wait that is to be made when a read that covers a place of theirs will have gone quiet. `at` is when, by the downloader's clock. */
+  #recheck: { timer: ReturnType<typeof setTimeout>; at: number } | null = null
   /** Where the onward reads would go on if the store had room: the first gap at or after the position when it filled. A read that opens anywhere else, once there is room, is a seek. */
   #stoppedAt = 0
 
@@ -371,6 +386,7 @@ export class Downloader {
       metered: true,
       received: 0,
       at: 0,
+      lastAt: this.#now(),
     }
     this.#reads.add(read)
     this.#startLevels()
@@ -413,10 +429,10 @@ export class Downloader {
   /**
    * Opens a read at once for each part of `range` that is not held, alongside the onward
    * reads (priority reads have no limit; they are short), unless a read covers where the
-   * part begins. Resolves when the whole range is held, by whichever read brings it; rejects
-   * with the `ReadError` if the play fails, and with a `StoreError` of kind `closed` if the
-   * downloader closes first. A priority read that fails is tried again after a pause of its
-   * own, as the onward reads are.
+   * part begins (a read that has not moved for STALL_COVER_MS covers nothing). Resolves when
+   * the whole range is held, by whichever read brings it; rejects with the `ReadError` if the
+   * play fails, and with a `StoreError` of kind `closed` if the downloader closes first. A
+   * priority read that fails is tried again after a pause of its own, as the onward reads are.
    */
   fetchNow(range: ByteRange): Promise<void> {
     return this.#wait(range, true)
@@ -461,6 +477,7 @@ export class Downloader {
     if (this.#pause !== null) this.#endPause(this.#pause)
     for (const waiter of [...this.#waiters]) this.#refuse(waiter, closedError())
     this.#stopLevels()
+    this.#stopRecheck()
     try {
       await this.#store.close()
     } catch {
@@ -483,16 +500,58 @@ export class Downloader {
     if (state !== 'reading') this.#stopLevelsIfIdle()
   }
 
+  /**
+   * What runs while any read is open: the interval of the level, and the hearing of the
+   * network's return (`online`, and the page visible with the network up), which restarts the
+   * reads that were quiet. Starting it again while it runs changes nothing.
+   */
   #startLevels(): void {
     this.#levels ??= setInterval(() => {
       this.#sendLevel()
     }, LEVEL_EVERY_MS)
+    if (this.#unlisten === null) {
+      const releases = [
+        this.#connectivity.onOnline(() => {
+          this.#networkBack()
+        }),
+        this.#connectivity.onVisible(() => {
+          if (this.#connectivity.online()) this.#networkBack()
+        }),
+      ]
+      this.#unlisten = () => {
+        for (const release of releases) release()
+      }
+    }
   }
 
   #stopLevels(): void {
-    if (this.#levels === null) return
-    clearInterval(this.#levels)
-    this.#levels = null
+    if (this.#levels !== null) {
+      clearInterval(this.#levels)
+      this.#levels = null
+    }
+    this.#unlisten?.()
+    this.#unlisten = null
+  }
+
+  /**
+   * The network is back: every read that has not moved for more than STALL_COVER_MS is let
+   * go of (with the reason on the timeline) and the choice of what to read is made again, which
+   * opens each at its next byte at once. It is not a failure of the play, so there is no pause
+   * and the failures in a row are not counted.
+   */
+  #networkBack(): void {
+    if (this.#closed || this.#state === 'failed') return
+    const now = this.#now()
+    let restarted = false
+    for (const read of [...this.#reads]) {
+      const quietMs = now - read.lastAt
+      if (quietMs <= STALL_COVER_MS) continue
+      const message = clip(
+        `The read had been quiet for ${Math.round(quietMs / 1000)} s when the network came back.`,
+      )
+      if (this.#end(read, 'failed', message)) restarted = true
+    }
+    if (restarted) this.#reconsider()
   }
 
   /** Stops the level when no read is open. A read that ends and is followed by another at once leaves the level as it is, so that its phase is not restarted by each. */
@@ -528,17 +587,35 @@ export class Downloader {
   }
 
   /**
-   * Whether a read that is open will bring byte `x` soon, so that no other is needed for
-   * it: the read's next byte is at `x`, or less than a block before it, and the read does
-   * not stop before `x`.
+   * How far past its next byte a read covers: what it brings in COVER_AHEAD_MS at the rate
+   * it is received, but no more than a block; a block while the rate is not known.
    */
-  #covers(x: number): boolean {
+  #reach(): number {
+    const rate = this.#meter.rate(this.#now())
+    return rate === null ? BLOCK_BYTES : Math.min(BLOCK_BYTES, (rate * COVER_AHEAD_MS) / 1000)
+  }
+
+  /**
+   * The reads that will bring byte `x` soon, so that no other is needed for it: a read's next
+   * byte is at `x`, or no further before it than its reach, and the read does not stop before
+   * `x`. With `moving`, only the reads that have moved within STALL_COVER_MS count: one that
+   * has not is not bringing anything, and the reads of the engine go around it.
+   */
+  #covering(x: number, moving: boolean): ActiveRead[] {
+    const reach = this.#reach()
+    const now = this.#now()
+    const covering: ActiveRead[] = []
     for (const read of this.#reads) {
-      if (read.at <= x && x <= read.at + BLOCK_BYTES && (read.to === null || x <= read.to)) {
-        return true
-      }
+      if (read.at > x || x > read.at + reach || (read.to !== null && x > read.to)) continue
+      if (moving && now - read.lastAt > STALL_COVER_MS) continue
+      covering.push(read)
     }
-    return false
+    return covering
+  }
+
+  /** Whether a read that is open will bring byte `x` soon (see `#covering`), whether or not it has gone quiet: the choice of the onward reads, since a quiet one is given up on by its own limit. */
+  #covers(x: number): boolean {
+    return this.#covering(x, false).length > 0
   }
 
   /**
@@ -611,6 +688,7 @@ export class Downloader {
       metered: false,
       received: 0,
       at: from,
+      lastAt: this.#now(),
     }
     this.#nextId += 1
     this.#reads.add(read)
@@ -676,6 +754,7 @@ export class Downloader {
       for await (const piece of body) {
         if (!this.#isCurrent(read)) return
         read.received += piece.length
+        read.lastAt = this.#now()
         if (!read.metered) this.#meter.add(this.#now(), piece.length)
         // A read that has brought a whole block is a network that works: the pauses start again.
         if (read.received >= BLOCK_BYTES) this.#working(read)
@@ -750,6 +829,8 @@ export class Downloader {
       }
       if (!this.#isCurrent(read)) return false
       read.at += length
+      // A write that took long is no quiet of the read: it moved when its bytes were taken.
+      read.lastAt = this.#now()
       this.#checkWaiters()
       if (outcome.full && !this.#onFull(read)) return false
       if (this.#store.held().heldFrom(read.at) > 0) {
@@ -907,6 +988,7 @@ export class Downloader {
     if (this.#pause !== null) this.#endPause(this.#pause)
     for (const waiter of [...this.#waiters]) this.#refuse(waiter, error)
     this.#stopLevels()
+    this.#stopRecheck()
   }
 
   /** A read failed in a way that a later try may mend: its own line waits, and the others go on. */
@@ -1042,15 +1124,54 @@ export class Downloader {
     })
   }
 
-  /** Reads what a wait is owed: a priority read for each part of its range that is not held and that no read covers. */
+  /**
+   * Reads what a wait is owed: a priority read for each part of its range that is not held
+   * and that no read covers. A read that has gone quiet covers nothing; and when a read that is
+   * moving covers a part, a look is set for the time it will have gone quiet, if it does.
+   */
   #serve(waiter: Waiter): void {
     if (this.#closed || this.#failure !== null || !this.#waiters.has(waiter)) return
     if (!waiter.priority || waiter.pause !== null) return
     const held = this.#store.held()
     const { start, end } = waiter.range
+    let quietAt = Number.POSITIVE_INFINITY
     for (let gap = held.firstGap(start, end); gap !== null; gap = held.firstGap(gap.end, end)) {
-      if (!this.#covers(gap.start)) this.#open('priority', gap.start, gap.end - 1, waiter)
+      const covering = this.#covering(gap.start, true)
+      if (covering.length === 0) {
+        this.#open('priority', gap.start, gap.end - 1, waiter)
+      } else {
+        // The part is covered until its last mover has been quiet for STALL_COVER_MS.
+        const lastMove = Math.max(...covering.map((read) => read.lastAt))
+        quietAt = Math.min(quietAt, lastMove + STALL_COVER_MS)
+      }
     }
+    if (quietAt !== Number.POSITIVE_INFINITY) this.#lookAt(quietAt)
+  }
+
+  /**
+   * Sets the look at those who wait for just after `quietAt` (by the downloader's clock),
+   * unless one is set for that time or before. At the look each wait is served again: a read
+   * that has gone quiet covers nothing by then, and the wait gets a read of its own, without
+   * waiting for the quiet read to give up or for the engine to ask again.
+   */
+  #lookAt(quietAt: number): void {
+    const at = quietAt + 1
+    if (this.#recheck !== null && this.#recheck.at <= at) return
+    this.#stopRecheck()
+    const timer = setTimeout(
+      () => {
+        this.#recheck = null
+        for (const waiter of [...this.#waiters]) this.#serve(waiter)
+      },
+      Math.max(1, at - this.#now()),
+    )
+    this.#recheck = { timer, at }
+  }
+
+  #stopRecheck(): void {
+    if (this.#recheck === null) return
+    clearTimeout(this.#recheck.timer)
+    this.#recheck = null
   }
 
   /** Answers the waits whose range is held, after a write. */
@@ -1068,6 +1189,7 @@ export class Downloader {
     waiter.unlisten?.()
     waiter.unlisten = null
     if (waiter.pause !== null) this.#endPause(waiter.pause)
+    if (this.#waiters.size === 0) this.#stopRecheck()
   }
 
   #answer(waiter: Waiter): void {
