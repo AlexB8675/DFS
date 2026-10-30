@@ -1687,7 +1687,7 @@ describe('Downloader: a seek', () => {
       return { rig, store, server }
     }
 
-    it('opens a read where a seek back lands, with a restart, lets go of the block that waits, and answers a wait there with no fetchNow', async () => {
+    it('opens a read where a seek back lands, with a restart, keeps the block that waits, and answers a wait there with no fetchNow', async () => {
       const { rig, store, server } = await fullAtTwenty()
       const requests = server.requests.length
       const events = rig.events.length
@@ -1703,12 +1703,15 @@ describe('Downloader: a seek', () => {
       expect(ofType(after, 'restart')).toEqual([
         { type: 'restart', offset: 5 * MIB, reason: 'seek' },
       ])
-      expect(ofType(after, 'storeFull').map((event) => event.on)).toEqual([false])
-      // The block that waited is the farthest data, and it was let go of, the position being where it is.
-      expect(store.evictions.at(-1)).toEqual({
-        range: { start: 28 * MIB, end: 29 * MIB },
-        position: 5 * MIB,
+      // The store said that it has room (it may fill again by now, so only the first change counts).
+      expect(ofType(after, 'storeFull').map((event) => event.on)[0]).toBe(false)
+      // The block that waited is the farthest data, farther than the gap at the seek: it stays, held and right, and is not counted as full.
+      expect(store.evictions.map((eviction) => eviction.range)).not.toContainEqual({
+        start: 28 * MIB,
+        end: 29 * MIB,
       })
+      expect(store.held().has({ start: 28 * MIB, end: 29 * MIB })).toBe(true)
+      expect(await firstMismatch(store, { start: 28 * MIB, end: 29 * MIB })).toBe(-1)
       const restartAt = after.findIndex((event) => event.type === 'restart')
       const requestAt = after.findIndex((event) => event.type === 'request')
       expect(requestAt).toBe(restartAt + 1)
@@ -1740,11 +1743,8 @@ describe('Downloader: a seek', () => {
       expect(ofType(after, 'restart')).toEqual([
         { type: 'restart', offset: 5 * MIB, reason: 'seek' },
       ])
-      expect(ofType(after, 'storeFull').map((event) => event.on)).toEqual([false])
-      expect(store.evictions.map((eviction) => eviction.range)).toContainEqual({
-        start: 28 * MIB,
-        end: 29 * MIB,
-      })
+      expect(ofType(after, 'storeFull').map((event) => event.on)[0]).toBe(false)
+      expect(store.held().has({ start: 28 * MIB, end: 29 * MIB })).toBe(true)
     })
 
     it('goes on reading ahead as the engine plays on from there, with the one onward read and no request for each read', async () => {
@@ -1830,6 +1830,124 @@ describe('Downloader: a seek', () => {
       expect(server.requests[1]).toEqual({ range: `bytes=${9 * MIB}-` })
       expect(ofType(rig.events, 'restart')).toEqual([
         { type: 'restart', offset: 9 * MIB, reason: 'seek' },
+      ])
+    })
+  })
+
+  describe('a read far from the position in a full store', () => {
+    /** A file of 32 MiB over a store of 8 MiB, read from the start until the store is full: it holds [0, 9) MiB with the block at 8 MiB waiting, and the position is at 0. */
+    async function fullAtStart(): Promise<{ rig: Rig; store: SpyStore; server: RangeServer }> {
+      const size = 32 * MIB
+      const server = await serve({ size })
+      const store = memoryStore(size, 8 * MIB)
+      const rig = build({ url: server.url, store })
+      rig.downloader.start()
+      await until(() => rig.downloader.state() === 'full')
+      await settle()
+      expect(store.held().ranges()).toEqual([{ start: 0, end: 9 * MIB }])
+      return { rig, store, server }
+    }
+
+    it('answers a read of two blocks beyond the first gap at once, with one request, the right bytes, and no retry', async () => {
+      const { rig, store, server } = await fullAtStart()
+      const requests = server.requests.length
+      const events = rig.events.length
+
+      const began = performance.now()
+      const bytes = await Promise.race([
+        rig.downloader.read({ start: 20 * MIB, end: 22 * MIB }),
+        sleep(1000).then(() => null),
+      ])
+      // A read that the store lets go of block by block would go on for ever: this one is answered, and well within a second.
+      expect(bytes).not.toBeNull()
+      expect(performance.now() - began).toBeLessThan(1000)
+      expect(Buffer.compare(bytes ?? new Uint8Array(0), bytesOf(20 * MIB, 22 * MIB))).toBe(0)
+      const made = server.requests.slice(requests)
+      expect(made.length).toBeLessThanOrEqual(4)
+      expect(made[0]).toEqual({ range: `bytes=${20 * MIB}-${22 * MIB - 1}` })
+      const after = rig.events.slice(events)
+      expect(ofType(after, 'retry')).toEqual([])
+      expect(ofType(after, 'error')).toEqual([])
+      // The download is as it was: stopped for the block near the position, and the far blocks do not change that.
+      expect(ofType(after, 'storeFull')).toEqual([])
+      expect(rig.downloader.state()).toBe('full')
+      expect(store.held().ranges()).toEqual([
+        { start: 0, end: 9 * MIB },
+        { start: 20 * MIB, end: 22 * MIB },
+      ])
+      await expectHeldBytesRight(store)
+    })
+
+    it('answers a read of one block beyond the first gap, and does not count its bytes as let go of', async () => {
+      const { rig, store, server } = await fullAtStart()
+      const requests = server.requests.length
+      const events = rig.events.length
+
+      const bytes = await rig.downloader.read({ start: 20 * MIB, end: 21 * MIB })
+
+      expect(Buffer.compare(bytes, bytesOf(20 * MIB, 21 * MIB))).toBe(0)
+      expect(server.requests.slice(requests)).toEqual([
+        { range: `bytes=${20 * MIB}-${21 * MIB - 1}` },
+      ])
+      // The store did not let go of the bytes as soon as it had them, so there is no failure and no pause.
+      const after = rig.events.slice(events)
+      expect(ofType(after, 'retry')).toEqual([])
+      expect(ofType(after, 'error')).toEqual([])
+      expect(ofType(after, 'requestEnd').map((end) => end.outcome)).toEqual(['done'])
+      expect(store.held().has({ start: 20 * MIB, end: 21 * MIB })).toBe(true)
+    })
+
+    it('answers a fetchNow for the end of the file the same way, and goes on at the position when it moves', async () => {
+      const { rig, store, server } = await fullAtStart()
+      const requests = server.requests.length
+
+      await rig.downloader.fetchNow({ start: 30 * MIB, end: 32 * MIB })
+      expect(store.held().has({ start: 30 * MIB, end: 32 * MIB })).toBe(true)
+      expect(server.requests.length - requests).toBeLessThanOrEqual(4)
+
+      // The position goes on, and makes room for the block that waits near it; the far blocks are no hindrance, and the read goes on where it stopped.
+      rig.downloader.setPosition(5 * MIB)
+      await until(() => server.requests.length === requests + 2, 2000)
+      expect(server.requests[requests + 1]).toEqual({ range: `bytes=${9 * MIB}-${30 * MIB - 1}` })
+      expect(ofType(rig.events, 'restart')).toEqual([])
+      expect(ofType(rig.events, 'retry')).toEqual([])
+      expect(ofType(rig.events, 'error')).toEqual([])
+    })
+
+    it('does not stop for the block of a read ahead of the position that waits while the gap at the seek is open', async () => {
+      const size = 40 * MIB
+      const store = memoryStore(size, 4 * MIB)
+      const stub = stubNetwork((call) => pipeFor(call, size))
+      const rig = build({ url: 'http://stub.invalid/file', store, fetch: stub.fetch })
+
+      rig.downloader.setPosition(20 * MIB)
+      rig.downloader.start()
+      await until(() => stub.pipes.length === 1)
+      // The read at 20 MiB fills the four slots of the store.
+      stub.pipes[0]?.push(20 * MIB, 24 * MIB)
+      await until(() => store.held().heldFrom(20 * MIB) === 4 * MIB)
+      expect(rig.downloader.state()).toBe('reading')
+
+      // A seek back: the read ahead of the position goes on, and a second read opens at the seek.
+      rig.downloader.setPosition(5 * MIB)
+      await until(() => stub.pipes.length === 2)
+      expect(stub.calls[1]).toMatchObject({ from: 5 * MIB, to: 20 * MIB - 1 })
+
+      // The read ahead brings its next block, which finds no slot (no block is farther from the position than it is) and waits. It is farther than the gap at the seek, so the store is not full on its account.
+      stub.pipes[0]?.push(24 * MIB, 25 * MIB)
+      await until(() => store.held().heldFrom(20 * MIB) === 5 * MIB)
+      await settle()
+      expect(rig.downloader.state()).toBe('reading')
+      expect(ofType(rig.events, 'storeFull')).toEqual([])
+      expect(stub.calls.map((call) => call.signal.aborted)).toEqual([false, false])
+
+      // The read at the seek brings its block, which takes the slot of the block farthest from the position.
+      stub.pipes[1]?.push(5 * MIB, 6 * MIB)
+      await until(() => store.held().has({ start: 5 * MIB, end: 6 * MIB }))
+      expect(store.held().has({ start: 23 * MIB, end: 24 * MIB })).toBe(false)
+      expect(rig.downloader.state()).toBe('reading')
+      expect(ofType(rig.events, 'restart')).toEqual([
+        { type: 'restart', offset: 5 * MIB, reason: 'seek' },
       ])
     })
   })

@@ -382,8 +382,8 @@ export class Downloader {
    * Says where the play is. The store is given the position first, in every state, and a
    * position that is not in the file is a `RangeError` that changes nothing. A full store
    * is checked for room, since the position is what makes room: it frees a slot for the
-   * block that waits, or, when the first gap is nearer than that block, lets go of it, so
-   * that a seek out of the data that fills the store opens a read where it lands. Otherwise the choice of
+   * block that waits, and a block that is farther than the first gap does not make the store
+   * full, so that a seek out of the data that fills the store opens a read where it lands. Otherwise the choice of
    * what to read is made again: an onward read that is behind the position yields; if the
    * first gap at or after the position is not where a read is reading, a read opens there
    * (a seek: the third onward read gives up the one farthest from the position); nothing
@@ -791,9 +791,9 @@ export class Downloader {
 
   /**
    * Asks whether the store has room again, now that the position moved: a write of no bytes
-   * places the blocks that wait under the new position (and lets go of those that are
-   * further from it than the first gap), and answers whether any still does. One check is
-   * made at a time; a move during it makes one more, at the position then. When there is
+   * places the blocks that wait under the new position, and answers whether any still does
+   * and is no farther from it than the first gap (a farther block does not stop the download
+   * from filling the gap). One check is made at a time; a move during it makes one more, at the position then. When there is
    * room the read opens at the first gap, and it is a seek, and says so, unless that is
    * where the onward reads stopped. The restart is sent here and not by the read that opens,
    * since the engine reads at a seek as it moves the position: its read has opened by now and
