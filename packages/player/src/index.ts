@@ -3,6 +3,8 @@
 // they are built.
 
 export * from './blocks.ts'
+export { Downloader, pageConnectivity } from './downloader.ts'
+export type { Connectivity, DownloaderOptions, DownloaderState } from './downloader.ts'
 export * from './errors.ts'
 export * from './limits.ts'
 export { openPlayStore } from './open.ts'
