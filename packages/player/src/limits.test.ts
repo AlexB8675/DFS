@@ -29,9 +29,9 @@ describe('the store and the downloader limits', () => {
     expect(DISK_FLOOR_BYTES).toBe(64 * 1024 * 1024)
   })
 
-  it('caps the memory fallback at 256 MiB and keeps 4 frontier blocks outside the cap', () => {
+  it('caps the memory fallback at 256 MiB and keeps 8 frontier blocks outside the cap', () => {
     expect(MEMORY_CAP_BYTES).toBe(256 * 1024 * 1024)
-    expect(FRONTIER_BLOCKS).toBe(4)
+    expect(FRONTIER_BLOCKS).toBe(8)
   })
 
   it('retries after 500 ms, doubling to at most 30 s, with 20% of jitter', () => {

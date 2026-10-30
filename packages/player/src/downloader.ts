@@ -1,12 +1,11 @@
-// The downloader's onward read (DESIGN.md §10.4; the iron-clad spec §4.7). From the position
-// to the end of the file, as far as the store allows: it reads the first stretch that is not
-// held, writes what comes to the store a block at a time, and goes on to the next stretch when
-// it meets data that is held. It "retries for as long as the play lasts, with growing pauses,
-// and resumes at once on `online` and on returning to the page"; it stops, and says so, when
-// the store is full of data nearer the position; and it ends only when every byte from the
-// position to the end is held, or when the server says that no try later can work. Everything
-// that happens is a timeline event, with its reason. A seek, a priority read and the engine's
-// own interface are built on this and are not part of it.
+// The downloader (DESIGN.md §10.4; the iron-clad spec §4.7). From the position to the end of
+// the file, as far as the store allows: it reads the first stretch that is not held, writes
+// what comes to the store a block at a time, and goes on to the next stretch when it meets
+// data that is held. It "retries for as long as the play lasts, with growing pauses, and
+// resumes at once on `online` and on returning to the page"; it stops, and says so, when the
+// store is full of data nearer the position; and it ends only when every byte from the
+// position to the end is held, or when the server says that no try later can work.
+// Everything that happens is a timeline event, with its reason.
 //
 // The page's connection is reached through `globalThis` with runtime checks, and the timers
 // are the global ones, so the file needs no DOM types and runs in a page, a worker and Node
@@ -102,15 +101,21 @@ export interface DownloaderOptions {
   fetch?: typeof fetch
   /** A number from 0 up to 1, for the jitter of the pauses; `Math.random` when it is missing. */
   random?: () => number
-  /** The clock, in milliseconds. The onward read measures no time of its own (its timers carry all of it), so it is not read yet. */
+  /** The clock, in milliseconds. The reads measure no time of their own (their timers carry all of it), so it is not read yet. */
   now?: () => number
 }
+
+/** What a read is for: the onward read follows the position; a priority read is for a range someone waits for. */
+type ReadKind = 'onward' | 'priority'
 
 /** A read that is open. */
 interface ActiveRead {
   readonly id: number
+  readonly kind: ReadKind
   /** Aborted whenever the downloader lets the read go, so that its connection closes at once. */
   readonly controller: AbortController
+  /** The last byte the read asks for, included; null when it runs to the end of the file. */
+  readonly to: number | null
   /** The bytes that the read has received, written or not. */
   received: number
   /** The file offset of the next byte to be written. */
@@ -151,6 +156,26 @@ function isClosed(error: unknown): boolean {
   return error instanceof StoreError && error.kind === 'closed'
 }
 
+/**
+ * How long to wait after the nth failure in a row (§10.4): RETRY_BASE_MS doubled n − 1
+ * times, to RETRY_MAX_MS at most, moved by up to RETRY_JITTER either way. A server that
+ * said how long to wait (`Retry-After`) is believed as a least, since a pause that is
+ * shorter than the server's own would only be answered again; the pause still grows with
+ * the failures, so a server that says 0 is not asked in a tight loop, and no pause that
+ * follows a `Retry-After` is longer than RETRY_MAX_MS, since a play does not stall for
+ * minutes on a server's say.
+ */
+export function retryDelayMs(error: unknown, attempt: number, random: () => number): number {
+  const backoff = Math.round(
+    Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** (attempt - 1)) *
+      (1 + RETRY_JITTER * (2 * random() - 1)),
+  )
+  if (error instanceof ReadError && error.retryAfterMs !== null) {
+    return Math.min(RETRY_MAX_MS, Math.max(error.retryAfterMs, backoff))
+  }
+  return backoff
+}
+
 export class Downloader {
   readonly #url: string
   readonly #store: PlayStore
@@ -165,14 +190,15 @@ export class Downloader {
   #started = false
   #closed = false
   #closing: Promise<void> | null = null
-  /** Where the play is: the read begins at the first gap at or after it. */
+  /** Where the play is: the onward read begins at the first gap at or after it. */
   #position = 0
   #nextId = 1
-  #read: ActiveRead | null = null
-  /** How many reads have failed in a row, which the next pause is long for. */
+  /** The reads that are open. */
+  readonly #reads = new Set<ActiveRead>()
+  /** How many onward reads have failed in a row, which the next pause is long for. */
   #failures = 0
   #pause: Pause | null = null
-  /** The one interval of the level, running while the downloader reads. */
+  /** The one interval of the level, running while any read is open. */
   #levels: ReturnType<typeof setInterval> | null = null
   /** The check of a full store: one at a time, and `again` when the position moved during it. */
   #check: { running: boolean; again: boolean } = { running: false, again: false }
@@ -245,8 +271,7 @@ export class Downloader {
 
   async #shutDown(): Promise<void> {
     this.#closed = true
-    const read = this.#read
-    if (read !== null) this.#end(read, 'aborted', null)
+    for (const read of [...this.#reads]) this.#end(read, 'aborted', null)
     const pause = this.#pause
     if (pause !== null) this.#endPause(pause)
     this.#stopLevels()
@@ -266,10 +291,10 @@ export class Downloader {
     }
   }
 
-  /** Changes the state. The level goes on while the downloader reads and stops in every other state. */
+  /** Changes the state. The level goes on while a read is open and stops when none is. */
   #setState(state: DownloaderState): void {
     this.#state = state
-    if (state !== 'reading') this.#stopLevels()
+    if (state !== 'reading') this.#stopLevelsIfIdle()
   }
 
   #startLevels(): void {
@@ -282,6 +307,11 @@ export class Downloader {
     if (this.#levels === null) return
     clearInterval(this.#levels)
     this.#levels = null
+  }
+
+  /** Stops the level when no read is open. A read that ends and is followed by another at once leaves the level as it is, so that its phase is not restarted by each. */
+  #stopLevelsIfIdle(): void {
+    if (this.#reads.size === 0) this.#stopLevels()
   }
 
   #sendLevel(): void {
@@ -299,19 +329,18 @@ export class Downloader {
     return this.#store.held().firstGap(this.#position, this.#store.fileSize)
   }
 
-  /** Whether `read` is the read that is open: a read that was let go of is not, and what it meets after that is not the play's concern. */
+  /** Whether `read` is open: a read that was let go of is not, and what it meets after that is not the play's concern. */
   #isCurrent(read: ActiveRead): boolean {
-    return this.#read === read
+    return this.#reads.has(read)
   }
 
   /**
-   * Ends the read that is open, once: the connection is let go of whatever the body was
-   * doing, and the timeline hears the end of the request. Answers whether it was the
-   * current read (a read that was ended already is not ended again).
+   * Ends a read that is open, once: the connection is let go of whatever the body was
+   * doing, and the timeline hears the end of the request. Answers whether it was open (a
+   * read that was ended already is not ended again). What follows is the caller's.
    */
   #end(read: ActiveRead, outcome: 'done' | 'aborted' | 'failed', message: string | null): boolean {
-    if (!this.#isCurrent(read)) return false
-    this.#read = null
+    if (!this.#reads.delete(read)) return false
     read.controller.abort()
     this.#emit({ type: 'requestEnd', id: read.id, bytes: read.received, outcome, message })
     return true
@@ -319,7 +348,8 @@ export class Downloader {
 
   /** Reads the first stretch from the position that is not held, or finishes when there is none. */
   #openNext(): void {
-    if (this.#closed || this.#read !== null || this.#state === 'failed') return
+    if (this.#closed || this.#state === 'failed' || this.#state === 'full') return
+    if (this.#reads.size > 0) return
     const gap = this.#nextGap()
     if (gap === null) {
       this.#finish()
@@ -328,18 +358,25 @@ export class Downloader {
     const fileSize = this.#store.fileSize
     // Something is held after the gap unless it runs to the end of the file: the read stops where that begins.
     const to = gap.end < fileSize ? gap.end - 1 : null
+    this.#open('onward', gap.start, to)
+    this.#setState('reading')
+  }
+
+  /** Opens a read from `from` to `to` (included; null: to the end of the file) and tells the timeline. */
+  #open(kind: ReadKind, from: number, to: number | null): void {
     const read: ActiveRead = {
       id: this.#nextId,
+      kind,
       controller: new AbortController(),
+      to,
       received: 0,
-      at: gap.start,
+      at: from,
     }
     this.#nextId += 1
-    this.#read = read
-    this.#setState('reading')
+    this.#reads.add(read)
     this.#startLevels()
-    this.#emit({ type: 'request', id: read.id, from: gap.start, to })
-    void this.#pump(read, gap.start, to)
+    this.#emit({ type: 'request', id: read.id, from, to })
+    void this.#pump(read, from, to)
   }
 
   /** Every byte from the position to the end is held. */
@@ -378,24 +415,35 @@ export class Downloader {
       return
     }
     // The body gave all it was asked for (or all that the server would send of it).
-    if (this.#end(read, 'done', null)) this.#openNext()
+    this.#finished(read)
+  }
+
+  /** A read ended clean: its body is complete, or it met data that is held. A clean end is a network that works, whatever the read received, so the pauses start again. */
+  #finished(read: ActiveRead): void {
+    const received = read.received
+    if (!this.#end(read, 'done', null)) return
+    if (received > 0) this.#failures = 0
+    this.#openNext()
   }
 
   /**
-   * Writes a piece of a body to the store, a block at a time. Answers whether the read goes on;
+   * Writes a piece of a body to the store, a block at a time, and only what is not held: a
+   * part that runs into held data is written up to it. Answers whether the read goes on;
    * when it does not, the read has been ended or let go of, and what follows is arranged.
    */
   async #take(read: ActiveRead, piece: Uint8Array): Promise<boolean> {
     let taken = 0
     while (taken < piece.length) {
-      const length = Math.min(piece.length - taken, (blockOf(read.at) + 1) * BLOCK_BYTES - read.at)
-      const part = piece.subarray(taken, taken + length)
-      taken += length
-      // Held already, by a read that was faster: it is not written again, and this read has met what is held.
-      if (this.#store.held().has({ start: read.at, end: read.at + length })) {
-        this.#metHeld(read)
+      const wanted = Math.min(piece.length - taken, (blockOf(read.at) + 1) * BLOCK_BYTES - read.at)
+      // The first byte of the part that is held, if any: the read writes up to it, and has met it if it is the read's own next byte.
+      const gap = this.#store.held().firstGap(read.at, read.at + wanted)
+      if (gap?.start !== read.at) {
+        this.#finished(read)
         return false
       }
+      const length = gap.end - gap.start
+      const part = piece.subarray(taken, taken + length)
+      taken += length
       let outcome: WriteOutcome
       try {
         outcome = await this.#store.write(read.at, part)
@@ -410,16 +458,11 @@ export class Downloader {
         return false
       }
       if (this.#store.held().heldFrom(read.at) > 0) {
-        this.#metHeld(read)
+        this.#finished(read)
         return false
       }
     }
     return true
-  }
-
-  /** The read's next byte is held: it has done what it was for, and the next stretch that is not held is read. */
-  #metHeld(read: ActiveRead): void {
-    if (this.#end(read, 'done', null)) this.#openNext()
   }
 
   /**
@@ -429,7 +472,7 @@ export class Downloader {
    */
   #storeFull(read: ActiveRead): void {
     if (this.#nextGap() === null) {
-      this.#metHeld(read)
+      this.#finished(read)
       return
     }
     if (!this.#end(read, 'aborted', null)) return
@@ -464,8 +507,10 @@ export class Downloader {
         }
         // The play closed, or went on another way, while the store answered.
         if (this.#closed || this.#state !== 'full') return
-        if (!outcome.full) {
+        // Room, or nothing left to read: blocks may wait still, but a download with nothing to read is not full, it is done.
+        if (!outcome.full || this.#nextGap() === null) {
           this.#emit({ type: 'storeFull', on: false, storedBytes: this.#store.stats().storedBytes })
+          this.#setState('waiting')
           this.#openNext()
           return
         }
@@ -527,11 +572,10 @@ export class Downloader {
   }
 
   /**
-   * Waits to try again. The nth failure in a row waits RETRY_BASE_MS doubled n − 1 times,
-   * to RETRY_MAX_MS at most, moved by up to RETRY_JITTER either way; a server that said how
-   * long to wait is believed, to RETRY_MAX_MS at most, since a play does not stall for minutes
-   * on a server's say. `online` and a return to the page end the wait and reopen at once. If
-   * there is nothing left to read by now, there is nothing to wait for.
+   * Waits to try again, for as long as `retryDelayMs` says. `online` ends the wait and
+   * reopens at once, and so does a return to the page when the network is up (a page that is
+   * back with the network down would only fail again, and lengthen the pauses). If there is
+   * nothing left to read by now, there is nothing to wait for.
    */
   #pauseThenRetry(error: unknown): void {
     const gap = this.#nextGap()
@@ -541,13 +585,7 @@ export class Downloader {
     }
     this.#failures += 1
     const attempt = this.#failures
-    const delayMs =
-      error instanceof ReadError && error.retryAfterMs !== null
-        ? Math.min(error.retryAfterMs, RETRY_MAX_MS)
-        : Math.round(
-            Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** (attempt - 1)) *
-              (1 + RETRY_JITTER * (2 * this.#random() - 1)),
-          )
+    const delayMs = retryDelayMs(error, attempt, this.#random)
     this.#emit({ type: 'retry', attempt, delayMs, offset: gap.start })
     this.#setState('waiting')
     const resume = (): void => {
@@ -557,7 +595,12 @@ export class Downloader {
       this.#openNext()
     }
     const timer = setTimeout(resume, delayMs)
-    const releases = [this.#connectivity.onOnline(resume), this.#connectivity.onVisible(resume)]
+    const releases = [
+      this.#connectivity.onOnline(resume),
+      this.#connectivity.onVisible(() => {
+        if (this.#connectivity.online()) resume()
+      }),
+    ]
     this.#pause = {
       timer,
       offset: gap.start,

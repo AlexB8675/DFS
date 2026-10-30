@@ -358,46 +358,38 @@ describe.each(['disk', 'memory'] as const)('the store on the %s backend', (kind)
 
   describe('the frontier', () => {
     it('never holds more than the blocks the plan allows, and refuses a write that would add one', async () => {
-      expect(FRONTIER_BLOCKS).toBe(4)
-      const { store } = await rigOf(kind, 8 * MIB, 8 * MIB)
-      // Four blocks, each started and none complete, fill the frontier.
+      const last = (FRONTIER_BLOCKS - 1) * MIB
+      const over = FRONTIER_BLOCKS * MIB
+      // The file is longer than the frontier, so that a refusal is the frontier's and not the end of the file's.
+      const { store } = await rigOf(kind, (FRONTIER_BLOCKS + 2) * MIB, (FRONTIER_BLOCKS + 2) * MIB)
+      // As many blocks as the frontier holds, each started and none complete, fill it.
       for (let index = 0; index < FRONTIER_BLOCKS; index += 1) {
         await store.write(index * MIB, CONTENT.subarray(index * MIB, index * MIB + 100))
       }
       const before = store.held().ranges()
       expect(before).toHaveLength(FRONTIER_BLOCKS)
 
-      // A fifth block is refused whole.
-      await expectRangeError(
-        store.write(
-          FRONTIER_BLOCKS * MIB,
-          CONTENT.subarray(FRONTIER_BLOCKS * MIB, FRONTIER_BLOCKS * MIB + 100),
-        ),
-      )
+      // One block more is refused whole.
+      await expectRangeError(store.write(over, CONTENT.subarray(over, over + 100)))
       expect(store.held().ranges()).toEqual(before)
 
-      // A write that overlaps held bytes of the fourth block and reaches into the fifth is refused too, and does not change the fourth.
+      // A write that overlaps held bytes of the last block the frontier holds and reaches into the next is refused too, and does not change the last.
       const straddle = otherThan(MIB)
-      await expectRangeError(store.write(3 * MIB + 50, straddle))
+      await expectRangeError(store.write(last + 50, straddle))
       expect(store.held().ranges()).toEqual(before)
-      expectSame(await store.read(3 * MIB, 3 * MIB + 100), CONTENT.subarray(3 * MIB, 3 * MIB + 100))
-      expect(await store.read(4 * MIB, 4 * MIB + 10)).toBeNull()
+      expectSame(await store.read(last, last + 100), CONTENT.subarray(last, last + 100))
+      expect(await store.read(over, over + 10)).toBeNull()
 
       // A block that completes leaves the frontier for its slot, and then there is room for another.
       await store.write(0, plainBlock(0))
       expect(store.stats().storedBytes).toBe(MIB)
-      await store.write(
-        FRONTIER_BLOCKS * MIB,
-        CONTENT.subarray(FRONTIER_BLOCKS * MIB, FRONTIER_BLOCKS * MIB + 100),
-      )
-      expectSame(
-        await store.read(FRONTIER_BLOCKS * MIB, FRONTIER_BLOCKS * MIB + 100),
-        CONTENT.subarray(FRONTIER_BLOCKS * MIB, FRONTIER_BLOCKS * MIB + 100),
-      )
+      await store.write(over, CONTENT.subarray(over, over + 100))
+      expectSame(await store.read(over, over + 100), CONTENT.subarray(over, over + 100))
     })
 
     it('takes a write of as many new blocks as the frontier holds, and refuses one more', async () => {
-      const { store } = await rigOf(kind, 8 * MIB, 8 * MIB)
+      // The file is longer than the write, so that the refusal is the frontier's.
+      const { store } = await rigOf(kind, (FRONTIER_BLOCKS + 2) * MIB, (FRONTIER_BLOCKS + 2) * MIB)
       await expectRangeError(store.write(0, CONTENT.subarray(0, (FRONTIER_BLOCKS + 1) * MIB)))
       expect(store.held().ranges()).toEqual([])
       expect(store.stats().storedBytes).toBe(0)
@@ -407,12 +399,15 @@ describe.each(['disk', 'memory'] as const)('the store on the %s backend', (kind)
     })
 
     it('counts blocks that wait for a slot against the frontier', async () => {
-      const { store } = await rigOf(kind, 8 * MIB, MIB)
-      // One slot: the first block takes it, and the next three wait in the frontier. A block just started makes four.
-      await store.write(0, CONTENT.subarray(0, 4 * MIB))
-      await store.write(4 * MIB, CONTENT.subarray(4 * MIB, 4 * MIB + 100))
-      await expectRangeError(store.write(5 * MIB, CONTENT.subarray(5 * MIB, 5 * MIB + 100)))
-      expect(store.held().ranges()).toEqual([{ start: 0, end: 4 * MIB + 100 }])
+      const { store } = await rigOf(kind, (FRONTIER_BLOCKS + 2) * MIB, MIB)
+      const started = FRONTIER_BLOCKS * MIB
+      // One slot: the first block takes it, and the next ones wait in the frontier. A block just started makes as many as the frontier holds.
+      await store.write(0, CONTENT.subarray(0, started))
+      await store.write(started, CONTENT.subarray(started, started + 100))
+      await expectRangeError(
+        store.write(started + MIB, CONTENT.subarray(started + MIB, started + MIB + 100)),
+      )
+      expect(store.held().ranges()).toEqual([{ start: 0, end: started + 100 }])
     })
   })
 
@@ -696,27 +691,40 @@ describe.each(['disk', 'memory'] as const)('the store on the %s backend', (kind)
 
     describe('a frontier that blocks far from the position have jammed', () => {
       it('lets go of the farthest waiting block to take a write at a seek', async () => {
-        const { store } = await rigOf(kind, 16 * MIB, 4 * MIB)
+        // The waiting blocks, from block 12 up, fill the frontier; the last of them is the farthest from block 0.
+        const last = 12 + FRONTIER_BLOCKS - 1
+        const { store } = await rigOf(kind, (last + 1) * MIB, 4 * MIB)
         store.setPosition(10 * MIB)
         await writeBlocks(store, 8, 9, 10, 11)
-        const waiting = await writeBlocks(store, 12, 13, 14, 15)
-        expect(waiting.map((outcome) => outcome.full)).toEqual([true, true, true, true])
+        const waiting = await writeBlocks(
+          store,
+          ...Array.from({ length: FRONTIER_BLOCKS }, (_, index) => 12 + index),
+        )
+        expect(waiting.map((outcome) => outcome.full)).toEqual(
+          Array.from({ length: FRONTIER_BLOCKS }, () => true),
+        )
 
-        // Blocks 12 to 15 are all further from block 0 than the blocks held, and the frontier has no place for a fifth.
+        // The waiting blocks are all further from block 0 than the blocks held, and the frontier has no place for one more.
         store.setPosition(0)
         const piece = CONTENT.subarray(0, 64 * 1024)
         const outcome = await store.write(0, piece)
-        expect(outcome).toEqual({ full: true, evictedBytes: MIB, evicted: [blocks(15, 16)] })
-        expect(store.held().ranges()).toEqual([{ start: 0, end: 64 * 1024 }, blocks(8, 15)])
+        expect(outcome).toEqual({
+          full: true,
+          evictedBytes: MIB,
+          evicted: [blocks(last, last + 1)],
+        })
+        expect(store.held().ranges()).toEqual([{ start: 0, end: 64 * 1024 }, blocks(8, last)])
         expectSame(await store.read(0, 64 * 1024), piece)
-        expect(await store.read(15 * MIB, 15 * MIB + 1)).toBeNull()
-        expectSame(await store.read(14 * MIB, 15 * MIB), plainBlock(14))
+        expect(await store.read(last * MIB, last * MIB + 1)).toBeNull()
+        expectSame(await store.read((last - 1) * MIB, last * MIB), plainBlock(last - 1))
         expect(store.stats().evictedBytes).toBe(MIB)
       })
 
       it('lets go of partly filled blocks too, the farthest first, and counts only the bytes they held', async () => {
         const { store } = await rigOf(kind, 16 * MIB, 4 * MIB)
-        await startBlocks(store, 4, 5, 6, 7)
+        // As many blocks as the frontier holds, from block 4 up, each partly filled.
+        const started = Array.from({ length: FRONTIER_BLOCKS }, (_, index) => 4 + index)
+        await startBlocks(store, ...started)
         store.setPosition(15 * MIB)
         // The write adds blocks 14 and 15, so two blocks must go: the two furthest from the position.
         const piece = CONTENT.subarray(15 * MIB - 100, 15 * MIB + 100)
@@ -730,8 +738,7 @@ describe.each(['disk', 'memory'] as const)('the store on the %s backend', (kind)
           ],
         })
         expect(store.held().ranges()).toEqual([
-          { start: 6 * MIB, end: 6 * MIB + 100 },
-          { start: 7 * MIB, end: 7 * MIB + 100 },
+          ...started.slice(2).map((index) => ({ start: index * MIB, end: index * MIB + 100 })),
           { start: 15 * MIB - 100, end: 15 * MIB + 100 },
         ])
         expectSame(await store.read(15 * MIB - 100, 15 * MIB + 100), piece)
@@ -742,35 +749,54 @@ describe.each(['disk', 'memory'] as const)('the store on the %s backend', (kind)
       it('lets go of the block behind the position first when two are as far as one another', async () => {
         const { store } = await rigOf(kind, 16 * MIB, 4 * MIB)
         store.setPosition(10 * MIB)
-        await startBlocks(store, 6, 9, 11, 14)
-        const outcome = await store.write(10 * MIB, CONTENT.subarray(10 * MIB, 10 * MIB + 100))
-        // Blocks 6 and 14 are both 4 away.
-        expect(outcome.evicted).toEqual([{ start: 6 * MIB, end: 6 * MIB + 100 }])
-        expect(store.held().ranges()).toEqual([
-          { start: 9 * MIB, end: 9 * MIB + 100 },
-          { start: 10 * MIB, end: 10 * MIB + 100 },
-          { start: 11 * MIB, end: 11 * MIB + 100 },
-          { start: 14 * MIB, end: 14 * MIB + 100 },
+        // A block on each side of block 10 at every distance up to the farthest: as many blocks as the frontier holds.
+        const reach = FRONTIER_BLOCKS / 2
+        const started = Array.from({ length: reach }, (_, index) => [
+          10 - (index + 1),
+          10 + (index + 1),
         ])
+          .flat()
+          .sort((a, b) => a - b)
+        expect(started).toHaveLength(FRONTIER_BLOCKS)
+        await startBlocks(store, ...started)
+        const outcome = await store.write(10 * MIB, CONTENT.subarray(10 * MIB, 10 * MIB + 100))
+        // The block behind the position and the block ahead of it at the farthest distance are both that far away.
+        expect(outcome.evicted).toEqual([
+          { start: (10 - reach) * MIB, end: (10 - reach) * MIB + 100 },
+        ])
+        expect(store.held().ranges()).toEqual(
+          [...started.filter((index) => index !== 10 - reach), 10]
+            .sort((a, b) => a - b)
+            .map((index) => ({ start: index * MIB, end: index * MIB + 100 })),
+        )
       })
 
       it('refuses a write, and changes nothing, when too few blocks are further than what it adds', async () => {
         const { store } = await rigOf(kind, 16 * MIB, 4 * MIB)
-        await startBlocks(store, 2, 3, 4, 9)
+        // The blocks from 0 up, and block 14: all but one place of the frontier is taken by blocks that are nearer than 12 and 13.
+        await startBlocks(
+          store,
+          ...Array.from({ length: FRONTIER_BLOCKS - 1 }, (_, index) => index),
+        )
+        await startBlocks(store, 14)
         const before = store.held().ranges()
-        // The write adds blocks 5 and 6, which needs two places, and only block 9 is further than they are.
-        await expectRangeError(store.write(5 * MIB, CONTENT.subarray(5 * MIB, 6 * MIB + 100)))
+        // The write adds blocks 12 and 13, which needs two places, and only block 14 is further than they are.
+        await expectRangeError(store.write(12 * MIB, CONTENT.subarray(12 * MIB, 13 * MIB + 100)))
         expect(store.held().ranges()).toEqual(before)
         expect(store.stats().evictedBytes).toBe(0)
         expectSame(
-          await store.read(9 * MIB, 9 * MIB + 100),
-          CONTENT.subarray(9 * MIB, 9 * MIB + 100),
+          await store.read(14 * MIB, 14 * MIB + 100),
+          CONTENT.subarray(14 * MIB, 14 * MIB + 100),
         )
       })
 
       it('does not let go of a block that the write itself fills', async () => {
         const { store } = await rigOf(kind, 16 * MIB, 4 * MIB)
-        await startBlocks(store, 10, 1, 2, 3)
+        await startBlocks(
+          store,
+          10,
+          ...Array.from({ length: FRONTIER_BLOCKS - 1 }, (_, index) => index),
+        )
         const before = store.held().ranges()
         // Block 10 is further than block 9, which the write adds, but the write fills it: letting it go would only make the write add it again.
         await expectRangeError(
@@ -783,10 +809,18 @@ describe.each(['disk', 'memory'] as const)('the store on the %s backend', (kind)
       it('does not let go of a block that is nearer than any block the write adds', async () => {
         const { store } = await rigOf(kind, 16 * MIB, 4 * MIB)
         store.setPosition(10 * MIB)
-        await startBlocks(store, 9, 3, 4, 5)
+        // Half the frontier is block 9 and the blocks behind it, near the position, and half is far from it.
+        const half = FRONTIER_BLOCKS / 2
+        await startBlocks(
+          store,
+          ...Array.from({ length: half }, (_, index) => 9 - index),
+          ...Array.from({ length: half }, (_, index) => index),
+        )
         const before = store.held().ranges()
-        // The write adds blocks 10 to 13, which needs four places. Block 9 is 1 away, and block 13 is 3 away: it must stay.
-        await expectRangeError(store.write(10 * MIB, CONTENT.subarray(10 * MIB, 14 * MIB)))
+        // The write adds blocks 10 up to one more than the far half, which needs a place for each. The last of them is `half` away, and the near blocks are not further than that: they must stay, and the far half is one place short.
+        await expectRangeError(
+          store.write(10 * MIB, CONTENT.subarray(10 * MIB, (10 + half + 1) * MIB)),
+        )
         expect(store.held().ranges()).toEqual(before)
         expect(store.stats().evictedBytes).toBe(0)
       })
@@ -1044,17 +1078,17 @@ describe('the store on disk', () => {
     })
 
     it('does not let go of a frontier block whose slot write is still in flight', async () => {
-      const { store } = await diskRig(24 * MIB, 4 * MIB)
-      // Blocks 1 to 4 are complete and have their slots, and stay in the frontier until the files take them.
-      const filling = store.write(MIB, CONTENT.subarray(MIB, 5 * MIB))
+      const { store } = await diskRig(24 * MIB, FRONTIER_BLOCKS * MIB)
+      // As many blocks as the frontier holds, from block 1, are complete and have their slots, and stay in the frontier until the files take them.
+      const filling = store.write(MIB, CONTENT.subarray(MIB, (FRONTIER_BLOCKS + 1) * MIB))
       store.setPosition(20 * MIB)
       await expectRangeError(store.write(20 * MIB, CONTENT.subarray(20 * MIB, 20 * MIB + 100)))
       await filling
-      expect(store.held().ranges()).toEqual([blocks(1, 5)])
+      expect(store.held().ranges()).toEqual([blocks(1, FRONTIER_BLOCKS + 1)])
       expect(store.stats()).toEqual({
         backend: 'disk',
-        capBytes: 4 * MIB,
-        storedBytes: 4 * MIB,
+        capBytes: FRONTIER_BLOCKS * MIB,
+        storedBytes: FRONTIER_BLOCKS * MIB,
         evictedBytes: 0,
       })
     })
@@ -1063,18 +1097,17 @@ describe('the store on disk', () => {
       const { store } = await diskRig(24 * MIB, MIB)
       await store.write(0, plainBlock(0))
       await store.write(5 * MIB, plainBlock(5))
-      for (const index of [3, 4, 6]) {
+      // Blocks near block 5 start, so that with block 5 they fill the frontier.
+      const started = [3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14].slice(0, FRONTIER_BLOCKS - 1)
+      for (const index of started) {
         await store.write(index * MIB, CONTENT.subarray(index * MIB, index * MIB + 100))
       }
+      const before = store.held().ranges()
+      expect(before[0]).toEqual(blocks(0, 1))
       // At block 5, block 5 is nearer than block 0 and would take its slot, but the write at block 20 cannot be added.
       store.setPosition(5 * MIB)
       await expectRangeError(store.write(20 * MIB, CONTENT.subarray(20 * MIB, 20 * MIB + 100)))
-      expect(store.held().ranges()).toEqual([
-        blocks(0, 1),
-        { start: 3 * MIB, end: 3 * MIB + 100 },
-        { start: 4 * MIB, end: 4 * MIB + 100 },
-        { start: 5 * MIB, end: 6 * MIB + 100 },
-      ])
+      expect(store.held().ranges()).toEqual(before)
       expect(store.stats().storedBytes).toBe(MIB)
       expect(store.stats().evictedBytes).toBe(0)
       // The next write goes on as if the refused one had not been made.
@@ -1237,26 +1270,34 @@ describe('the store on disk', () => {
     })
 
     it('reports a block that two failed writes let go of once, and counts it once', async () => {
-      const { store, file } = await diskRig(8 * MIB, MIB)
+      // The last block is the one that waits; the blocks before it fill the frontier with it, up to the one that does not fit.
+      const waiting = FRONTIER_BLOCKS + 7
+      const { store, file } = await diskRig((waiting + 1) * MIB, MIB)
       await store.write(0, plainBlock(0))
-      store.setPosition(7 * MIB)
-      // The first failed write lets go of block 0, the one block with a slot, to place block 7.
+      store.setPosition(waiting * MIB)
+      // The first failed write lets go of block 0, the one block with a slot, to place the last block.
       file.failNextWrite('InvalidStateError')
-      await expectStoreError(store.write(7 * MIB, plainBlock(7)), 'disk')
-      // Blocks 0, 1 and 2 are held in the frontier, each by a write that fails to place block 7.
-      for (const index of [0, 1, 2]) {
+      await expectStoreError(store.write(waiting * MIB, plainBlock(waiting)), 'disk')
+      // Blocks 0 up are held in the frontier, each by a write that fails to place the last block; with it they are as many as the frontier holds.
+      for (let index = 0; index < FRONTIER_BLOCKS - 1; index += 1) {
         file.failNextWrite('InvalidStateError')
         await expectStoreError(store.write(index * MIB, plainBlock(index)), 'disk')
       }
-      // Block 3 does not fit in the frontier, so the furthest block in it, block 0, is let go of a second time.
+      // The next block does not fit in the frontier, so the furthest block in it, block 0, is let go of a second time.
       file.failNextWrite('InvalidStateError')
-      await expectStoreError(store.write(3 * MIB, plainBlock(3)), 'disk')
+      await expectStoreError(
+        store.write((FRONTIER_BLOCKS - 1) * MIB, plainBlock(FRONTIER_BLOCKS - 1)),
+        'disk',
+      )
       expect(store.stats().evictedBytes).toBe(2 * MIB)
 
-      const next = await store.write(7 * MIB, NOTHING)
+      const next = await store.write(waiting * MIB, NOTHING)
       // Block 0 is gone once, though two writes let go of it: it is reported once and counted once.
       expect(next).toEqual({ full: true, evictedBytes: MIB, evicted: [blocks(0, 1)] })
-      expect(store.held().ranges()).toEqual([blocks(1, 4), blocks(7, 8)])
+      expect(store.held().ranges()).toEqual([
+        blocks(1, FRONTIER_BLOCKS),
+        blocks(waiting, waiting + 1),
+      ])
     })
 
     it('reports the parts that are still gone in file order, joined where they touch', async () => {
@@ -1420,16 +1461,18 @@ describe('the store on disk', () => {
 describe('the store in memory', () => {
   it('takes a write into the room that the placing of the waiting blocks makes in the frontier', async () => {
     const { store } = await rigOf('memory', 16 * MIB, MIB)
-    // Block 0 holds the only slot, and blocks 1 to 3 wait; block 4 is started: the frontier is full.
-    await writeBlocks(store, 0, 1, 2, 3)
-    await startBlocks(store, 4)
-    // Block 3 takes the slot of block 0 and leaves the frontier, and then block 5 has a place.
-    store.setPosition(3 * MIB)
-    const piece = CONTENT.subarray(5 * MIB, 5 * MIB + 100)
-    const outcome = await store.write(5 * MIB, piece)
+    const nearest = FRONTIER_BLOCKS - 1
+    // Block 0 holds the only slot, and the blocks after it wait; the next block is started: the frontier is full.
+    await writeBlocks(store, ...Array.from({ length: FRONTIER_BLOCKS }, (_, index) => index))
+    await startBlocks(store, FRONTIER_BLOCKS)
+    // The last block that waits takes the slot of block 0 and leaves the frontier, and then the block after the started one has a place.
+    store.setPosition(nearest * MIB)
+    const after = (FRONTIER_BLOCKS + 1) * MIB
+    const piece = CONTENT.subarray(after, after + 100)
+    const outcome = await store.write(after, piece)
     expect(outcome).toEqual({ full: true, evictedBytes: MIB, evicted: [blocks(0, 1)] })
-    expectSame(await store.read(5 * MIB, 5 * MIB + 100), piece)
-    expectSame(await store.read(3 * MIB, 4 * MIB), plainBlock(3))
+    expectSame(await store.read(after, after + 100), piece)
+    expectSame(await store.read(nearest * MIB, FRONTIER_BLOCKS * MIB), plainBlock(nearest))
   })
 })
 

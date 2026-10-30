@@ -541,7 +541,7 @@ describe('Downloader: failures and retries', () => {
     expect(ofType(rig.events, 'retry').map((retry) => retry.delayMs)).toEqual([400])
   })
 
-  it('waits what Retry-After says, with no jitter, and never more than the cap', async () => {
+  it('waits what Retry-After says as a least, with no jitter on it, and never more than the cap', async () => {
     const size = 2 * MIB
     const stub = stubNetwork((call) => {
       if (call.index === 0) return refusal(503, '2')
@@ -560,6 +560,44 @@ describe('Downloader: failures and retries', () => {
     expect(rig.downloader.state()).toBe('done')
     // Two seconds as given, and not the 2.4 s of a jitter; two minutes as the cap, and not as asked.
     expect(ofType(rig.events, 'retry').map((retry) => retry.delayMs)).toEqual([2000, RETRY_MAX_MS])
+  })
+
+  it('does not hammer a server that answers Retry-After: 0: the pauses grow as without it (R10)', async () => {
+    const size = 2 * MIB
+    const stub = stubNetwork((call) =>
+      call.index < 4 ? refusal(503, '0') : wholeRange(call, size),
+    )
+    const rig = build({
+      url: 'http://stub.invalid/file',
+      store: memoryStore(size),
+      fetch: stub.fetch,
+    })
+
+    await runToEnd(rig)
+
+    expect(rig.downloader.state()).toBe('done')
+    expect(ofType(rig.events, 'retry').map((retry) => retry.delayMs)).toEqual([
+      500, 1000, 2000, 4000,
+    ])
+  })
+
+  it('takes the longer of Retry-After and its own pause: a server’s wait is a least (R10)', async () => {
+    const size = 2 * MIB
+    const stub = stubNetwork((call) =>
+      call.index < 4 ? refusal(503, '1') : wholeRange(call, size),
+    )
+    const rig = build({
+      url: 'http://stub.invalid/file',
+      store: memoryStore(size),
+      fetch: stub.fetch,
+    })
+
+    await runToEnd(rig)
+
+    // One second as the server asked while the pause is shorter; the pause once it is longer.
+    expect(ofType(rig.events, 'retry').map((retry) => retry.delayMs)).toEqual([
+      1000, 1000, 2000, 4000,
+    ])
   })
 
   it('counts a pause again from the base after a read that received a block, and not before', async () => {
@@ -588,6 +626,38 @@ describe('Downloader: failures and retries', () => {
       [2, 1000],
     ])
     expect(await firstMismatch(rig.store, { start: 0, end: size })).toBe(-1)
+  })
+
+  it('counts a pause again from the base after any read that ends clean, whatever it received (R12)', async () => {
+    const size = 3 * MIB
+    const store = memoryStore(size)
+    // Three small gaps, 64 KiB each, one in each block: no read of them receives a block.
+    const gap = 64 * 1024
+    for (const block of [0, 1, 2]) {
+      await store.write(block * MIB + gap, bytesOf(block * MIB + gap, (block + 1) * MIB))
+    }
+    // Each gap is refused once and then served.
+    const refused = new Set<number>()
+    const stub = stubNetwork((call) => {
+      if (!refused.has(call.from)) {
+        refused.add(call.from)
+        return refusal(503)
+      }
+      return wholeRange(call, size)
+    })
+    const rig = build({ url: 'http://stub.invalid/file', store, fetch: stub.fetch })
+
+    await runToEnd(rig)
+
+    expect(rig.downloader.state()).toBe('done')
+    expect(stub.calls.map((call) => call.from)).toEqual([0, 0, MIB, MIB, 2 * MIB, 2 * MIB])
+    // Each failure follows a read that ended clean, so each is the first in a row.
+    expect(ofType(rig.events, 'retry').map((retry) => [retry.attempt, retry.delayMs])).toEqual([
+      [1, 500],
+      [1, 500],
+      [1, 500],
+    ])
+    expect(await firstMismatch(store, { start: 0, end: size })).toBe(-1)
   })
 
   it('treats a RangeError from the store as a failure of the read to retry, and says so', async () => {
@@ -690,6 +760,34 @@ describe('Downloader: coming back', () => {
     await settle()
     expect(stub.calls).toHaveLength(1)
 
+    rig.connectivity.isOnline = true
+    rig.connectivity.fireOnline()
+    await until(() => rig.downloader.state() === 'done')
+    expect(stub.calls).toHaveLength(2)
+  })
+
+  it('does not end a pause on a return to the page while the network is down (R12)', async () => {
+    const size = 2 * MIB
+    const stub = stubNetwork((call) =>
+      call.index === 0 ? refusal(503, '20') : wholeRange(call, size),
+    )
+    const rig = build({
+      url: 'http://stub.invalid/file',
+      store: memoryStore(size),
+      fetch: stub.fetch,
+    })
+    rig.connectivity.isOnline = false
+
+    rig.downloader.start()
+    await until(() => rig.downloader.state() === 'waiting')
+    rig.connectivity.fireVisible()
+    await settle()
+    // The pause runs on: the page is back, but the network is not.
+    expect(rig.downloader.state()).toBe('waiting')
+    expect(stub.calls).toHaveLength(1)
+    expect(rig.connectivity.listeners()).toBe(2)
+
+    // The network comes back: that ends the pause, and a later return to the page needs nothing.
     rig.connectivity.isOnline = true
     rig.connectivity.fireOnline()
     await until(() => rig.downloader.state() === 'done')
@@ -922,6 +1020,29 @@ describe('Downloader: a store that fills', () => {
     expect(await firstMismatch(rig.store, { start: 0, end: size })).toBe(-1)
   })
 
+  it('is done, and not full for ever, when the position moves to where nothing is left to read (R12)', async () => {
+    const size = 6 * MIB
+    const server = await serve({ size })
+    const store = memoryStore(size, 4 * MIB)
+    const rig = build({ url: server.url, store })
+
+    rig.downloader.start()
+    await until(() => rig.downloader.state() === 'full')
+    // Another reader (a priority read, in Task 12) holds the rest of the file: both blocks wait for slots, and the store is still full.
+    await store.write(5 * MIB, bytesOf(5 * MIB, size))
+    expect(store.held().ranges()).toEqual([{ start: 0, end: size }])
+
+    rig.downloader.setPosition(0)
+    await until(() => rig.downloader.state() === 'done')
+
+    expect(ofType(rig.events, 'storeFull')).toEqual([
+      { type: 'storeFull', on: true, storedBytes: 4 * MIB },
+      { type: 'storeFull', on: false, storedBytes: 4 * MIB },
+    ])
+    expect(ofType(rig.events, 'storeLevel')).toHaveLength(1)
+    expect(server.requests).toHaveLength(1)
+  })
+
   it('checks one place at a time when the position moves while it checks', async () => {
     const size = 12 * MIB
     const server = await serve({ size })
@@ -1009,6 +1130,29 @@ describe('Downloader: the read and the data it meets', () => {
     expect(stub.calls[0]?.signal.aborted).toBe(true)
     expect(ofType(rig.events, 'requestEnd')[0]).toMatchObject({ id: 1, outcome: 'done' })
     expect(stub.calls[1]).toMatchObject({ from: 2 * MIB, to: null })
+  })
+
+  it('writes only what is not held of a piece that runs into held data, and ends there (R12)', async () => {
+    const size = 4 * MIB
+    const store = memoryStore(size)
+    const stub = stubNetwork((call) => pipeFor(call, size))
+    const rig = build({ url: 'http://stub.invalid/file', store, fetch: stub.fetch })
+
+    rig.downloader.start()
+    await until(() => stub.pipes.length === 1)
+    // Another reader holds 100 KiB to 200 KiB while the read is open; the piece the network gives next covers them.
+    await store.write(100 * 1024, bytesOf(100 * 1024, 200 * 1024))
+    const written = store.writes.length
+    stub.pipes[0]?.push(0, 300 * 1024)
+
+    await until(() => stub.pipes.length === 2)
+
+    // The part up to the held data was written, and nothing of the held data again.
+    expect(store.writes.slice(written)).toEqual([{ offset: 0, length: 100 * 1024 }])
+    expect(ofType(rig.events, 'requestEnd')[0]).toMatchObject({ id: 1, outcome: 'done' })
+    expect(stub.calls[1]).toMatchObject({ from: 200 * 1024, to: null })
+    expect(store.held().ranges()).toEqual([{ start: 0, end: 200 * 1024 }])
+    expect(await firstMismatch(store, { start: 0, end: 200 * 1024 })).toBe(-1)
   })
 
   it('splits what the network gives at the blocks, whatever the size of the pieces', async () => {

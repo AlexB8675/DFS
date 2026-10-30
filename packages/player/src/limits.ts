@@ -18,8 +18,8 @@ export const DISK_FLOOR_BYTES = 64 * 1024 * 1024
 /** The most that the memory fallback holds: 256 MiB, the spec's "a few hundred MB", where storage is unavailable or refused. */
 export const MEMORY_CAP_BYTES = 256 * 1024 * 1024
 
-/** How many blocks being filled, or full and waiting for a slot, are kept in memory outside the cap: 4. */
-export const FRONTIER_BLOCKS = 4
+/** How many blocks being filled, or full and waiting for a slot, are kept in memory outside the cap: 8 (8 MiB), enough for two onward reads, the priority reads, a block pending on disk and the partial blocks that aborted reads leave. */
+export const FRONTIER_BLOCKS = 8
 
 /** The first pause before a failed read is tried again: 500 ms, and each pause after it doubles. */
 export const RETRY_BASE_MS = 500
