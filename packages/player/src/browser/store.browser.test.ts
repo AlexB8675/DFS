@@ -6,14 +6,20 @@
 // which every test shares, so each test starts from a file system with nothing in it.
 
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
+import type { TimelineEventInput } from '@dfs/shared'
 import {
   BLOCK_BYTES,
+  DISK_CAP_BYTES,
+  DISK_FLOOR_BYTES,
+  MEMORY_CAP_BYTES,
   PLAYS_DIRECTORY,
+  QUOTA_SHARE,
   SEAL_OVERHEAD,
   StoreError,
   WorkerStore,
   cleanLeftovers,
   lockName,
+  openPlayStore,
   opfsDirectory,
   playLock,
 } from '../index.ts'
@@ -363,6 +369,137 @@ describe('a play on the private file system, in a worker', () => {
     expect(await failureKind(directory.openSlotFile())).toBe('no-opfs')
     await directory.remove()
     expect(await directoryExists(playId)).toBe(false)
+  })
+})
+
+describe('a play opened as the app opens it', () => {
+  /** The `store` events of a play, and the call that records them. */
+  function recorder(): {
+    events: TimelineEventInput[]
+    onEvent: (event: TimelineEventInput) => void
+  } {
+    const events: TimelineEventInput[] = []
+    return {
+      events,
+      onEvent: (event) => {
+        events.push(event)
+      },
+    }
+  }
+
+  test('is on disk in a real worker, keeps 2 MiB and gives it back, and leaves no directory after it closes', async () => {
+    const playId = newPlayId()
+    const content = randomBytes(2 * MIB)
+    const expected = content.slice()
+    const { events, onEvent } = recorder()
+
+    const store = await openPlayStore({
+      playId,
+      fileSize: 2 * MIB,
+      makeWorker: startWorker,
+      estimate: () => Promise.resolve({ quota: 10 * 1024 ** 3, usage: 0 }),
+      onEvent,
+    })
+    expect(store.backend).toBe('disk')
+    expect(store.capBytes).toBe(DISK_CAP_BYTES)
+    expect(events).toEqual([
+      { type: 'store', backend: 'disk', capBytes: DISK_CAP_BYTES, reason: null },
+    ])
+    expect(await lockHeld(playId)).toBe(true)
+
+    await store.write(0, content)
+    // The caller's bytes were not given away to the worker.
+    expect(content.byteLength).toBe(2 * MIB)
+    expect(same(content, expected)).toBe(true)
+    expect(same(await store.read(0, 2 * MIB), expected)).toBe(true)
+    expect(store.held().ranges()).toEqual([{ start: 0, end: 2 * MIB }])
+
+    await store.close()
+    expect(await directoryExists(playId)).toBe(false)
+    await untilReleased(playId)
+  })
+
+  test("takes its cap from the browser's own estimate, called as the browser wants it called", async () => {
+    const playId = newPlayId()
+    const storage = navigator.storage
+    const original = storage.estimate.bind(storage)
+    const seen: { estimate?: StorageEstimate } = {}
+    // Only a call of the storage is answered (a browser throws "illegal invocation" for any other), and what it said is kept.
+    Object.defineProperty(storage, 'estimate', {
+      configurable: true,
+      value: async function (this: unknown): Promise<StorageEstimate> {
+        if (this !== storage) throw new TypeError('Illegal invocation')
+        seen.estimate = await original()
+        return seen.estimate
+      },
+    })
+    const { events, onEvent } = recorder()
+    try {
+      const store = await openPlayStore({
+        playId,
+        fileSize: 2 * MIB,
+        makeWorker: startWorker,
+        onEvent,
+      })
+      const quota = seen.estimate?.quota
+      const usage = seen.estimate?.usage
+      if (quota === undefined || usage === undefined) {
+        throw new Error('the browser did not give a quota and a usage, or was not asked')
+      }
+      const share = Math.min(DISK_CAP_BYTES, Math.floor(QUOTA_SHARE * Math.max(0, quota - usage)))
+      const cap = Math.floor(share / MIB) * MIB
+      if (cap < DISK_FLOOR_BYTES) {
+        // A machine with so little room for the browser's files is a machine for memory.
+        expect(store.backend).toBe('memory')
+        expect(events).toEqual([
+          { type: 'store', backend: 'memory', capBytes: MEMORY_CAP_BYTES, reason: 'quota' },
+        ])
+      } else {
+        expect(store.backend).toBe('disk')
+        expect(store.capBytes).toBe(cap)
+        expect(events).toEqual([{ type: 'store', backend: 'disk', capBytes: cap, reason: null }])
+      }
+      await store.close()
+    } finally {
+      Reflect.deleteProperty(storage, 'estimate')
+    }
+  })
+
+  test('moves to memory when the worker fails, and leaves its directory for the next start of the app', async () => {
+    const playId = newPlayId()
+    const worker = startWorker()
+    const { events, onEvent } = recorder()
+    const store = await openPlayStore({
+      playId,
+      fileSize: 4 * MIB,
+      makeWorker: () => worker,
+      estimate: () => Promise.resolve({ quota: 10 * 1024 ** 3, usage: 0 }),
+      onEvent,
+    })
+    await store.write(0, randomBytes(MIB))
+    expect(await directoryExists(playId)).toBe(true)
+
+    // The page is told that the worker failed, as it is when a worker dies on its own.
+    worker.dispatchEvent(new ErrorEvent('error', { message: 'the worker failed' }))
+    const content = randomBytes(MIB)
+    const expected = content.slice()
+    await store.write(MIB, content)
+
+    expect(store.backend).toBe('memory')
+    expect(events).toEqual([
+      { type: 'store', backend: 'disk', capBytes: DISK_CAP_BYTES, reason: null },
+      { type: 'store', backend: 'memory', capBytes: MEMORY_CAP_BYTES, reason: 'disk-error' },
+    ])
+    expect(store.held().ranges()).toEqual([{ start: MIB, end: 2 * MIB }])
+    expect(same(await store.read(MIB, 2 * MIB), expected)).toBe(true)
+    // A worker that has failed is not asked to close: it is ended, which lets go of its lock and leaves its directory.
+    await untilReleased(playId)
+    expect(await directoryExists(playId)).toBe(true)
+    // The next start of the app removes it.
+    expect(await cleanLeftovers()).toBe(1)
+    expect(await directoryExists(playId)).toBe(false)
+
+    await store.close()
   })
 })
 

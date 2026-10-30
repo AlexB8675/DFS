@@ -156,18 +156,20 @@ class Channel {
  */
 export class WorkerStore implements PlayStore {
   readonly backend: 'disk' | 'memory'
-  readonly capBytes: number
   readonly fileSize: number
 
   readonly #channel: Channel
+  #capBytes: number
   #held = new RangeSet()
   #stats: StoreStats
   #closed = false
+  /** The first call of `close`, which every later call is given. */
+  #closing: Promise<void> | null = null
 
   private constructor(channel: Channel, fileSize: number, capBytes: number, stats: StoreStats) {
     this.#channel = channel
     this.fileSize = fileSize
-    this.capBytes = capBytes
+    this.#capBytes = capBytes
     this.backend = stats.backend
     this.#stats = stats
   }
@@ -204,6 +206,11 @@ export class WorkerStore implements PlayStore {
   #assertUsable(): void {
     if (this.#closed) throw new StoreError('closed', 'the store is closed')
     if (this.#channel.dead !== null) throw this.#channel.dead
+  }
+
+  /** The most that the worker's slots hold, in whole blocks: what it said when it opened, and what it said when it last shrank. */
+  get capBytes(): number {
+    return this.#capBytes
   }
 
   held(): RangeSet {
@@ -247,6 +254,21 @@ export class WorkerStore implements PlayStore {
     return reply.bytes
   }
 
+  /**
+   * Has the worker make the slots in use the store's cap (`CoreStore.shrinkToUsed`), for a
+   * disk that has no room for more, and answers the new cap. It runs after the requests that
+   * came before it, so it counts the slots that their writes have settled.
+   */
+  async shrinkToUsed(): Promise<number> {
+    this.#assertUsable()
+    const reply = await this.#channel.ask((id) => ({ id, type: 'shrink' }))
+    if (!reply.ok) throw errorOf(reply.error)
+    if (reply.type !== 'shrink') throw unexpected('shrink', reply.type)
+    this.#stats = reply.stats
+    this.#capBytes = reply.capBytes
+    return reply.capBytes
+  }
+
   setPosition(offset: number): void {
     this.#assertUsable()
     // The worker does not answer a position, so a position that is no position is refused here.
@@ -263,12 +285,17 @@ export class WorkerStore implements PlayStore {
   /**
    * Deletes everything: the worker closes the file, removes the directory and releases the
    * lock, after the requests that came before. Calls made from now on reject with `closed`.
-   * If the worker is gone, or goes while this waits, there is nothing to delete from the page:
-   * this resolves, and the directory is left for the next start of the app to clean up (the
-   * worker's lock died with it).
+   * A second call while the first is in flight is answered when the first is, with what the
+   * first answers, and sends nothing. If the worker is gone, or goes while this waits, there
+   * is nothing to delete from the page: this resolves, and the directory is left for the next
+   * start of the app to clean up (the worker's lock died with it).
    */
-  async close(): Promise<void> {
-    if (this.#closed) return
+  close(): Promise<void> {
+    this.#closing ??= this.#close()
+    return this.#closing
+  }
+
+  async #close(): Promise<void> {
     this.#closed = true
     this.#held = new RangeSet()
     try {

@@ -319,6 +319,31 @@ describe('opening and closing', () => {
     expect(log).toEqual(['file closed', 'directory removed', 'lock released play-1'])
   })
 
+  it('answers a second close only when the first is done: the directory is removed and the lock is let go', async () => {
+    const { open, log } = rig()
+    const store = await open()
+    log.length = 0
+    const first = store.close()
+    const second = store.close()
+    await second
+    // The second call did not return before the worker finished what the first asked of it.
+    expect(log).toEqual(['file closed', 'directory removed', 'lock released play-1'])
+    await first
+  })
+
+  it('answers a second close with what the first answers, when the first fails', async () => {
+    const script = new Script()
+    const store = await script.open()
+    const first = store.close()
+    const second = store.close()
+    const request = await script.request(1, 'close')
+    script.send({ id: request.id, ok: false, error: { kind: 'disk', message: 'it failed' } })
+    await expectStoreError(first, 'disk')
+    await expectStoreError(second, 'disk')
+    // Only one close was sent.
+    expect(script.seen.map((seen) => seen.type)).toEqual(['open', 'close'])
+  })
+
   it('serves a play again after it closed', async () => {
     const { open, log } = rig()
     const first = await open()
@@ -737,6 +762,85 @@ describe('requests in flight', () => {
   })
 })
 
+describe('shrinking to the slots in use', () => {
+  it('has the worker shrink its store, and takes the cap from the answer', async () => {
+    const { open } = rig()
+    const store = await open({ fileSize: 8 * MIB, capBytes: 8 * MIB })
+    await store.write(0, piece(0, 2 * MIB))
+    expect(await store.shrinkToUsed()).toBe(2 * MIB)
+    expect(store.capBytes).toBe(2 * MIB)
+    expect(store.stats()).toEqual(stats({ capBytes: 2 * MIB, storedBytes: 2 * MIB }))
+    // The worker keeps to it: a block that is further from the position than those held waits.
+    const outcome = await store.write(2 * MIB, piece(2 * MIB, 3 * MIB))
+    expect(outcome).toEqual({ full: true, evictedBytes: 0, evicted: [] })
+    expect(store.capBytes).toBe(2 * MIB)
+    expect(store.stats()).toEqual(stats({ capBytes: 2 * MIB, storedBytes: 2 * MIB }))
+    expectSame(await store.read(2 * MIB, 3 * MIB), CONTENT.subarray(2 * MIB, 3 * MIB))
+  })
+
+  it('sends a request for it, and takes the cap and the stats of the answer', async () => {
+    const script = new Script()
+    const store = await script.open(4 * MIB)
+    const shrinking = store.shrinkToUsed()
+    const request = await script.request(1, 'shrink')
+    script.send({
+      id: request.id,
+      ok: true,
+      type: 'shrink',
+      capBytes: 2 * MIB,
+      stats: stats({ capBytes: 2 * MIB, storedBytes: 2 * MIB }),
+    })
+    expect(await shrinking).toBe(2 * MIB)
+    expect(store.capBytes).toBe(2 * MIB)
+    expect(store.stats()).toEqual(stats({ capBytes: 2 * MIB, storedBytes: 2 * MIB }))
+  })
+
+  it('rejects with what the worker answers when it fails, and keeps the cap', async () => {
+    const script = new Script()
+    const store = await script.open(4 * MIB)
+    const shrinking = store.shrinkToUsed()
+    const request = await script.request(1, 'shrink')
+    script.send({
+      id: request.id,
+      ok: false,
+      error: { kind: 'closed', message: 'no play is open' },
+    })
+    await expectStoreError(shrinking, 'closed')
+    expect(store.capBytes).toBe(4 * MIB)
+  })
+
+  it('rejects an answer of another kind, as a disk error', async () => {
+    const script = new Script()
+    const store = await script.open(4 * MIB)
+    const shrinking = store.shrinkToUsed()
+    const request = await script.request(1, 'shrink')
+    script.send({ id: request.id, ok: true, type: 'close' })
+    await expectStoreError(shrinking, 'disk')
+    expect(store.capBytes).toBe(4 * MIB)
+  })
+
+  it('rejects once the store is closed, without a message to the worker', async () => {
+    const script = new Script()
+    const store = await script.open(4 * MIB)
+    const closing = store.close()
+    const request = await script.request(1, 'close')
+    script.send({ id: request.id, ok: true, type: 'close' })
+    await closing
+    await expectStoreError(store.shrinkToUsed(), 'closed')
+    expect(script.seen.map((seen) => seen.type)).toEqual(['open', 'close'])
+  })
+
+  it('rejects with a disk error once the worker is gone', async () => {
+    const script = new Script()
+    const store = await script.open(4 * MIB)
+    const shrinking = store.shrinkToUsed()
+    await script.request(1, 'shrink')
+    script.client.dispatchEvent(new Event('error'))
+    await expectStoreError(shrinking, 'disk')
+    await expectStoreError(store.shrinkToUsed(), 'disk')
+  })
+})
+
 describe('the worker', () => {
   /** Posts a raw message to a server and waits for its next answer. */
   function ask(client: MessagePort, message: unknown): Promise<unknown> {
@@ -747,6 +851,12 @@ describe('the worker', () => {
       client.postMessage(message)
     })
   }
+
+  it('answers a shrink when no store is open with a closed error', async () => {
+    const { client } = rig()
+    const answer = parseReply(await ask(client, { id: 3, type: 'shrink' }))
+    expect(answer).toMatchObject({ id: 3, ok: false, error: { kind: 'closed' } })
+  })
 
   it('answers a request when no store is open with a closed error', async () => {
     const { client } = rig()

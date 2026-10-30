@@ -5,6 +5,8 @@
 export * from './blocks.ts'
 export * from './errors.ts'
 export * from './limits.ts'
+export { openPlayStore } from './open.ts'
+export type { OpenPlayStoreOptions, StorageEstimator, StoreWorker } from './open.ts'
 export { PLAYS_DIRECTORY, cleanLeftovers, lockName, opfsDirectory, playLock } from './opfs.ts'
 export * from './ranges.ts'
 export * from './seal.ts'

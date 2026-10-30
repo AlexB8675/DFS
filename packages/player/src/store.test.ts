@@ -598,7 +598,8 @@ describe.each(['disk', 'memory'] as const)('the store on the %s backend', (kind)
       expect(outcome).toEqual({
         full: false,
         evictedBytes: 4 * MIB,
-        evicted: [blocks(0, 1), blocks(1, 2), blocks(2, 3), blocks(3, 4)],
+        // The four blocks touch, so they are one range (the order they were freed in is the one the test above checks).
+        evicted: [blocks(0, 4)],
       })
       expectSame(await store.read(20 * MIB, 24 * MIB), CONTENT.subarray(20 * MIB, 24 * MIB))
       expect(store.stats().evictedBytes).toBe(4 * MIB)
@@ -679,7 +680,7 @@ describe.each(['disk', 'memory'] as const)('the store on the %s backend', (kind)
         expect(outcome).toEqual({
           full: false,
           evictedBytes: 2 * MIB,
-          evicted: [blocks(0, 1), blocks(1, 2)],
+          evicted: [blocks(0, 2)],
         })
         expect(store.held().ranges()).toEqual([blocks(2, 4)])
         expectSame(await store.read(2 * MIB, 4 * MIB), CONTENT.subarray(2 * MIB, 4 * MIB))
@@ -789,6 +790,88 @@ describe.each(['disk', 'memory'] as const)('the store on the %s backend', (kind)
         expect(store.held().ranges()).toEqual(before)
         expect(store.stats().evictedBytes).toBe(0)
       })
+    })
+  })
+
+  describe('shrinking to the slots in use', () => {
+    it('takes the slots that hold a block as its cap, and reports it as its cap from then on', async () => {
+      const { store } = await rigOf(kind, 8 * MIB, 4 * MIB)
+      await writeBlocks(store, 0, 1)
+      expect(store.shrinkToUsed()).toBe(2 * MIB)
+      expect(store.capBytes).toBe(2 * MIB)
+      expect(store.stats()).toEqual({
+        backend: kind,
+        capBytes: 2 * MIB,
+        storedBytes: 2 * MIB,
+        evictedBytes: 0,
+      })
+    })
+
+    it('takes no slot that was never used: a block that comes after waits, and the answer is full', async () => {
+      const { store } = await rigOf(kind, 8 * MIB, 4 * MIB)
+      await writeBlocks(store, 0, 1)
+      store.shrinkToUsed()
+      // Block 2 is further from the position than the blocks that are held, so it takes no slot.
+      const outcome = await store.write(2 * MIB, plainBlock(2))
+      expect(outcome).toEqual({ full: true, evictedBytes: 0, evicted: [] })
+      expect(store.stats().storedBytes).toBe(2 * MIB)
+      expect(store.held().ranges()).toEqual([blocks(0, 3)])
+      expectSame(await store.read(2 * MIB, 3 * MIB), plainBlock(2))
+    })
+
+    it('still gives a slot to a block that is nearer to the position than the block that has it', async () => {
+      const { store } = await rigOf(kind, 8 * MIB, 4 * MIB)
+      await writeBlocks(store, 0, 1)
+      store.shrinkToUsed()
+      store.setPosition(7 * MIB)
+      const outcome = await store.write(6 * MIB, plainBlock(6))
+      expect(outcome).toEqual({ full: false, evictedBytes: MIB, evicted: [blocks(0, 1)] })
+      expect(store.held().ranges()).toEqual([blocks(1, 2), blocks(6, 7)])
+      expect(store.stats()).toEqual({
+        backend: kind,
+        capBytes: 2 * MIB,
+        storedBytes: 2 * MIB,
+        evictedBytes: MIB,
+      })
+    })
+
+    it('counts the slot of a block whose write is still in flight', async () => {
+      const { store } = await rigOf(kind, 4 * MIB, 4 * MIB)
+      const writing = store.write(0, plainBlock(0))
+      expect(store.shrinkToUsed()).toBe(MIB)
+      await writing
+      expect(store.stats()).toEqual({
+        backend: kind,
+        capBytes: MIB,
+        storedBytes: MIB,
+        evictedBytes: 0,
+      })
+      expectSame(await store.read(0, MIB), plainBlock(0))
+    })
+
+    it('takes a cap of nothing from a store that holds no block, and keeps every block it is given in the frontier', async () => {
+      const { store } = await rigOf(kind, 4 * MIB, 4 * MIB)
+      expect(store.shrinkToUsed()).toBe(0)
+      expect(store.capBytes).toBe(0)
+      const outcome = await store.write(0, plainBlock(0))
+      expect(outcome).toEqual({ full: true, evictedBytes: 0, evicted: [] })
+      expect(store.stats().capBytes).toBe(0)
+      expect(store.stats().storedBytes).toBe(0)
+      expectSame(await store.read(0, MIB), plainBlock(0))
+    })
+
+    it('may be done again, and takes no more than the slots that hold a block', async () => {
+      const { store } = await rigOf(kind, 8 * MIB, 4 * MIB)
+      await writeBlocks(store, 0)
+      expect(store.shrinkToUsed()).toBe(MIB)
+      expect(store.shrinkToUsed()).toBe(MIB)
+      expect(store.capBytes).toBe(MIB)
+    })
+
+    it('fails as closed once the store is', async () => {
+      const { store } = await rigOf(kind, 4 * MIB, 4 * MIB)
+      await store.close()
+      expect(() => store.shrinkToUsed()).toThrow(StoreError)
     })
   })
 
@@ -1151,6 +1234,94 @@ describe('the store on disk', () => {
         ],
       })
       expect(store.held().ranges()).toEqual([{ start: 500_000, end: 500_100 }, blocks(3, 4)])
+    })
+
+    it('reports a block that two failed writes let go of once, and counts it once', async () => {
+      const { store, file } = await diskRig(8 * MIB, MIB)
+      await store.write(0, plainBlock(0))
+      store.setPosition(7 * MIB)
+      // The first failed write lets go of block 0, the one block with a slot, to place block 7.
+      file.failNextWrite('InvalidStateError')
+      await expectStoreError(store.write(7 * MIB, plainBlock(7)), 'disk')
+      // Blocks 0, 1 and 2 are held in the frontier, each by a write that fails to place block 7.
+      for (const index of [0, 1, 2]) {
+        file.failNextWrite('InvalidStateError')
+        await expectStoreError(store.write(index * MIB, plainBlock(index)), 'disk')
+      }
+      // Block 3 does not fit in the frontier, so the furthest block in it, block 0, is let go of a second time.
+      file.failNextWrite('InvalidStateError')
+      await expectStoreError(store.write(3 * MIB, plainBlock(3)), 'disk')
+      expect(store.stats().evictedBytes).toBe(2 * MIB)
+
+      const next = await store.write(7 * MIB, NOTHING)
+      // Block 0 is gone once, though two writes let go of it: it is reported once and counted once.
+      expect(next).toEqual({ full: true, evictedBytes: MIB, evicted: [blocks(0, 1)] })
+      expect(store.held().ranges()).toEqual([blocks(1, 4), blocks(7, 8)])
+    })
+
+    it('reports the parts that are still gone in file order, joined where they touch', async () => {
+      const { store, file } = await diskRig(8 * MIB, 2 * MIB)
+      await store.write(0, plainBlock(0))
+      await store.write(MIB, plainBlock(1))
+      store.setPosition(7 * MIB)
+      // A write that fails after it let go of block 0 for block 7 says nothing of it.
+      file.failNextWrite('InvalidStateError')
+      await expectStoreError(store.write(7 * MIB, plainBlock(7)), 'disk')
+      // The next write lets go of block 1 for block 6, and reports both blocks, which touch, as one range.
+      const next = await store.write(6 * MIB, plainBlock(6))
+      expect(next.evicted).toEqual([blocks(0, 2)])
+      expect(next.evictedBytes).toBe(2 * MIB)
+    })
+
+    it('shrinks to the blocks that hold a slot after a full disk, and does not take the slot that the failed write gave back', async () => {
+      const { store, file } = await diskRig(8 * MIB, 4 * MIB)
+      await writeBlocks(store, 0, 1)
+      file.failNextWrite('QuotaExceededError')
+      await expectStoreError(store.write(2 * MIB, plainBlock(2)), 'quota')
+      // The failed write took a slot that was never used, and gave it back: two blocks hold a slot, and the cap is two.
+      expect(store.shrinkToUsed()).toBe(2 * MIB)
+      expect(store.stats().capBytes).toBe(2 * MIB)
+      // Block 2 is held and waits for a slot, and the slot that was given back is not one it can take.
+      const retry = await store.write(2 * MIB, NOTHING)
+      expect(retry).toEqual({ full: true, evictedBytes: 0, evicted: [] })
+      expect(store.stats().storedBytes).toBe(2 * MIB)
+      expectSame(await store.read(2 * MIB, 3 * MIB), plainBlock(2))
+    })
+
+    it('takes again a slot that a write gives back after the shrink, though more slots were taken than are held', async () => {
+      const { store, file } = await diskRig(8 * MIB, 4 * MIB)
+      await writeBlocks(store, 0, 1)
+      file.failNextWrite('QuotaExceededError')
+      await expectStoreError(store.write(2 * MIB, plainBlock(2)), 'quota')
+      // Three slots were taken in all, and two hold a block: the cap is two.
+      expect(store.shrinkToUsed()).toBe(2 * MIB)
+      store.setPosition(2 * MIB)
+      // Block 2 takes the slot of block 0, which is the furthest, and the write of the slot fails: the slot is given back.
+      file.failNextWrite('InvalidStateError')
+      await expectStoreError(store.write(2 * MIB, NOTHING), 'disk')
+      // The slot is within the cap, so block 2 takes it and block 1 is not let go of.
+      const placed = await store.write(2 * MIB, NOTHING)
+      expect(placed).toEqual({ full: false, evictedBytes: MIB, evicted: [blocks(0, 1)] })
+      expect(store.held().ranges()).toEqual([blocks(1, 3)])
+      expect(store.stats().storedBytes).toBe(2 * MIB)
+    })
+
+    it('lets a block take the slot of a write that was counted and then fails', async () => {
+      const { store, file } = await diskRig(4 * MIB, 4 * MIB)
+      file.failNextWrite('InvalidStateError')
+      const writing = store.write(0, plainBlock(0))
+      // The block has a slot chosen, which the cap counts, and its write is still sealing.
+      expect(store.shrinkToUsed()).toBe(MIB)
+      await expectStoreError(writing, 'disk')
+      // The slot is given back, and is within the cap, so the block takes it.
+      const retry = await store.write(0, NOTHING)
+      expect(retry).toEqual({ full: false, evictedBytes: 0, evicted: [] })
+      expect(store.stats()).toEqual({
+        backend: 'disk',
+        capBytes: MIB,
+        storedBytes: MIB,
+        evictedBytes: 0,
+      })
     })
 
     it('rejects a write that completes two blocks when one of their slot writes fails, and keeps both readable', async () => {

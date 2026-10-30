@@ -44,10 +44,11 @@ export interface WriteOutcome {
   /** How many bytes `evicted` covers (not those that were let go of and are held again: `stats()` counts those). */
   evictedBytes: number
   /**
-   * The file ranges that were let go of, in order: those that earlier writes made and
-   * could not report because they failed, then those that this write made to give
-   * a block a slot or to make room in the frontier. Bytes that are held again when the
-   * write resolves are left out, so the ranges are the parts that are still gone.
+   * The file ranges that were let go of and are still gone, in file order and joined
+   * where they touch: those that earlier writes made and could not report because they
+   * failed, and those that this write made to give a block a slot or to make room in
+   * the frontier. Bytes that are held again when the write resolves are left out, and
+   * so is a range that two writes let go of, which is in the list once.
    */
   evicted: readonly ByteRange[]
 }
@@ -138,12 +139,12 @@ interface SealedPart {
 
 export class CoreStore implements PlayStore {
   readonly backend: 'disk' | 'memory'
-  readonly capBytes: number
   readonly fileSize: number
 
   /** The file and the key of the play, or null for the memory backend. */
   readonly #disk: { file: SlotFile; key: PlayKey } | null
-  readonly #slotCount: number
+  /** How many slots the store has: its cap in blocks, which `shrinkToUsed` lowers. */
+  #slotCount: number
   /** What is held: the bytes in slots and in the frontier. */
   #held = new RangeSet()
   /** The slot of each block that has one. */
@@ -154,7 +155,7 @@ export class CoreStore implements PlayStore {
   readonly #frontier = new Map<number, FrontierBlock>()
   /** The slots that were used and let go, which the next block takes first (a stack). */
   readonly #freed: number[] = []
-  /** The first slot that was never used: the slots from here to the end are free. */
+  /** The first slot that was never used: the slots from here to the end are free (none, once the store has shrunk). */
   #unused = 0
   #evictedBytes = 0
   /** The ranges that eviction let go of in writes that then failed: a write that fails cannot say what it evicted, so the next one that succeeds does. */
@@ -173,8 +174,12 @@ export class CoreStore implements PlayStore {
     this.backend = backend.kind
     this.fileSize = fileSize
     this.#slotCount = Math.floor(capBytes / BLOCK_BYTES)
-    this.capBytes = this.#slotCount * BLOCK_BYTES
     this.#disk = backend.kind === 'disk' ? { file: backend.file, key: backend.key } : null
+  }
+
+  /** The most that the slots hold, in whole blocks. */
+  get capBytes(): number {
+    return this.#slotCount * BLOCK_BYTES
   }
 
   /** Where the engine last said that it reads. */
@@ -349,21 +354,23 @@ export class CoreStore implements PlayStore {
   }
 
   /**
-   * The parts of the given ranges that are not held now, in order. The worker runs one
-   * request at a time, so at the moment a write resolves the store stands as that write
-   * left it, and a range that is held then is not one that the page should drop.
+   * The parts of the given ranges that are not held now, in file order and joined where
+   * they touch. The worker runs one request at a time, so at the moment a write resolves
+   * the store stands as that write left it, and a range that is held then is not one that
+   * the page should drop. A block that two failed writes let go of is in the list twice,
+   * and is gone once.
    */
-  #stillGone(ranges: readonly ByteRange[]): ByteRange[] {
-    const gone: ByteRange[] = []
+  #stillGone(ranges: readonly ByteRange[]): readonly ByteRange[] {
+    const gone = new RangeSet()
     for (const range of ranges) {
       let from = range.start
       for (let gap = this.#held.firstGap(from, range.end); gap !== null;) {
-        gone.push(gap)
+        gone.add(gap)
         from = gap.end
         gap = this.#held.firstGap(from, range.end)
       }
     }
-    return gone
+    return gone.ranges()
   }
 
   held(): RangeSet {
@@ -550,6 +557,27 @@ export class CoreStore implements PlayStore {
       )
     }
     return result
+  }
+
+  /**
+   * Makes the slots that hold a block the store's cap, for a disk that has no room for
+   * more (the iron-clad spec §4.7): the slots that are free are not taken again, and none
+   * that was never used is, so a block that finds no slot waits, or takes the slot of a
+   * block that is further from the position than it is, as it does in a full store. A slot
+   * is in use when a settled block has it or when the write of a block to it is in flight,
+   * and a slot that a write in flight then gives back is within the cap, so it is taken
+   * again. Answers the new cap, which is nothing when no block holds a slot.
+   */
+  shrinkToUsed(): number {
+    this.#assertOpen()
+    let writing = 0
+    for (const block of this.#frontier.values()) {
+      if (block.pending) writing += 1
+    }
+    this.#slotCount = this.#slotOf.size + writing
+    this.#unused = this.#slotCount
+    this.#freed.length = 0
+    return this.capBytes
   }
 
   setPosition(offset: number): void {

@@ -57,12 +57,14 @@ export interface WireError {
 
 /**
  * What the page asks of the worker. `open` and `close` bracket a play, `write` carries
- * its bytes (the buffer is transferred, not copied), and `position` is not answered.
+ * its bytes (the buffer is transferred, not copied), `shrink` makes the slots in use the
+ * store's cap for a disk that is full, and `position` is not answered.
  */
 export type StoreRequest =
   | { id: number; type: 'open'; playId: string; fileSize: number; capBytes: number }
   | { id: number; type: 'write'; offset: number; bytes: Uint8Array }
   | { id: number; type: 'read'; start: number; end: number }
+  | { id: number; type: 'shrink' }
   | { type: 'position'; offset: number }
   | { id: number; type: 'close' }
 
@@ -71,6 +73,7 @@ export type OkReply =
   | { id: number; ok: true; type: 'open'; capBytes: number; stats: StoreStats }
   | { id: number; ok: true; type: 'write'; outcome: WriteOutcome; stats: StoreStats }
   | { id: number; ok: true; type: 'read'; bytes: Uint8Array | null }
+  | { id: number; ok: true; type: 'shrink'; capBytes: number; stats: StoreStats }
   | { id: number; ok: true; type: 'close' }
 
 /** A request that failed. A write that fails still says how the store stands, so that the page's `stats()` does not go stale. */
@@ -165,6 +168,8 @@ export function parseRequest(data: unknown): StoreRequest | null {
       return typeof data.start === 'number' && typeof data.end === 'number'
         ? { id, type: 'read', start: data.start, end: data.end }
         : null
+    case 'shrink':
+      return { id, type: 'shrink' }
     case 'close':
       return { id, type: 'close' }
     default:
@@ -201,6 +206,10 @@ export function parseReply(data: unknown): StoreReply | null {
     case 'read':
       return data.bytes === null || data.bytes instanceof Uint8Array
         ? { id, ok: true, type: 'read', bytes: data.bytes }
+        : null
+    case 'shrink':
+      return typeof data.capBytes === 'number' && isStats(data.stats)
+        ? { id, ok: true, type: 'shrink', capBytes: data.capBytes, stats: data.stats }
         : null
     case 'close':
       return { id, ok: true, type: 'close' }

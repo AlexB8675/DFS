@@ -200,6 +200,13 @@ class StoreServer {
           transfer: bytes === null ? [] : [bytes.buffer],
         }
       }
+      case 'shrink': {
+        const store = this.#store()
+        const capBytes = store.shrinkToUsed()
+        return {
+          reply: { id: request.id, ok: true, type: 'shrink', capBytes, stats: store.stats() },
+        }
+      }
       case 'position':
         this.#store().setPosition(request.offset)
         return null
