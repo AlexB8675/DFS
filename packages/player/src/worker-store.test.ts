@@ -5,9 +5,11 @@ import type { StoreErrorKind } from './errors.ts'
 import { BLOCK_BYTES } from './limits.ts'
 import { parseReply, parseRequest } from './protocol.ts'
 import type { OpenDirectory, PlayLock, StoreReply, StoreRequest } from './protocol.ts'
-import { SEAL_OVERHEAD } from './seal.ts'
+import { SEAL_OVERHEAD, newPlayKey } from './seal.ts'
 import { serveStore } from './serve.ts'
-import type { StoreStats } from './store.ts'
+import { CoreStore } from './store.ts'
+import type { PlayStore, StoreStats, WriteOutcome } from './store.ts'
+import { TestSlotFile } from './testing/slot-file.ts'
 import { TestPlayDirectory, testLock } from './testing/play-directory.ts'
 import { WorkerStore } from './worker-store.ts'
 
@@ -521,6 +523,49 @@ describe('what the client holds', () => {
     expect(store.stats().storedBytes).toBe(2 * MIB)
   })
 
+  it.each([
+    ['a whole block', 0, MIB],
+    ['the head of the block', 0, 100],
+    ['the middle of the block', 500_000, 100],
+  ])(
+    'agrees with the store when a write holds again %s that a failed write let go of',
+    async (_name, offset, length) => {
+      /** The same steps on any store: block 3 evicts block 0 and fails to reach its slot, then the bytes of block 0 are written again. */
+      async function lostThenWrittenAgain(
+        store: PlayStore,
+        failNextWrite: () => void,
+      ): Promise<WriteOutcome> {
+        await store.write(0, piece(0, MIB))
+        store.setPosition(3 * MIB)
+        failNextWrite()
+        await expectStoreError(store.write(3 * MIB, piece(3 * MIB, 4 * MIB)), 'disk')
+        return store.write(offset, piece(offset, offset + length))
+      }
+
+      const { open, directory } = rig()
+      const client = await open({ fileSize: 4 * MIB, capBytes: MIB })
+      const clientOutcome = await lostThenWrittenAgain(client, () => {
+        directory.file.failNextWrite('InvalidStateError')
+      })
+
+      const file = new TestSlotFile()
+      const core = new CoreStore({
+        backend: { kind: 'disk', file, key: await newPlayKey() },
+        fileSize: 4 * MIB,
+        capBytes: MIB,
+      })
+      const coreOutcome = await lostThenWrittenAgain(core, () => {
+        file.failNextWrite('InvalidStateError')
+      })
+
+      // What was written again is not reported as gone, and the rest of the block is.
+      expect(coreOutcome.evictedBytes).toBe(MIB - length)
+      expect(clientOutcome).toEqual(coreOutcome)
+      expect(client.held().ranges()).toEqual(core.held().ranges())
+      expect(client.stats()).toEqual(core.stats())
+    },
+  )
+
   it('also holds the range of a write that failed on the disk, and not that of a refused one', async () => {
     const { open, directory } = rig()
     const store = await open()
@@ -831,11 +876,25 @@ describe('a worker that dies', () => {
     await expectStoreError(opening, 'disk')
   })
 
-  it('rejects close, and the store is closed after it', async () => {
+  it('closes without a word to a worker that is gone, and the store is closed after it', async () => {
     const script = new Script()
     const store = await script.open()
     script.client.dispatchEvent(new Event('error'))
-    await expectStoreError(store.close(), 'disk')
+    await store.close()
     await expectStoreError(store.read(0, 4), 'closed')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(script.seen.map((request) => request.type)).toEqual(['open'])
+    // A second close is nothing, as it is for a store that closed in the ordinary way.
+    await store.close()
+  })
+
+  it('closes when the worker dies while the close is waiting for its answer', async () => {
+    const script = new Script()
+    const store = await script.open()
+    const closing = store.close()
+    await script.request(1, 'close')
+    script.client.dispatchEvent(new Event('error'))
+    await closing
+    await expectStoreError(store.write(0, new Uint8Array(4)), 'closed')
   })
 })

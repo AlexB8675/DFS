@@ -41,12 +41,13 @@ export type StoreBackend = { kind: 'disk'; file: SlotFile; key: PlayKey } | { ki
 export interface WriteOutcome {
   /** Whether a block that the write completed (or one that still waits) found no free slot, so that the downloader should stop. */
   full: boolean
-  /** How many bytes `evicted` covers. */
+  /** How many bytes `evicted` covers (not those that were let go of and are held again: `stats()` counts those). */
   evictedBytes: number
   /**
    * The file ranges that were let go of, in order: those that earlier writes made and
    * could not report because they failed, then those that this write made to give
-   * a block a slot or to make room in the frontier.
+   * a block a slot or to make room in the frontier. Bytes that are held again when the
+   * write resolves are left out, so the ranges are the parts that are still gone.
    */
   evicted: readonly ByteRange[]
 }
@@ -347,6 +348,24 @@ export class CoreStore implements PlayStore {
     this.#frontier.delete(index)
   }
 
+  /**
+   * The parts of the given ranges that are not held now, in order. The worker runs one
+   * request at a time, so at the moment a write resolves the store stands as that write
+   * left it, and a range that is held then is not one that the page should drop.
+   */
+  #stillGone(ranges: readonly ByteRange[]): ByteRange[] {
+    const gone: ByteRange[] = []
+    for (const range of ranges) {
+      let from = range.start
+      for (let gap = this.#held.firstGap(from, range.end); gap !== null;) {
+        gone.push(gap)
+        from = gap.end
+        gap = this.#held.firstGap(from, range.end)
+      }
+    }
+    return gone
+  }
+
   held(): RangeSet {
     const copy = new RangeSet()
     for (const range of this.#held.ranges()) copy.add(range)
@@ -429,7 +448,8 @@ export class CoreStore implements PlayStore {
       throw failure.error
     }
     // What a write that failed evicted is reported when this one resolves, and not when it began, so that a write that fails meanwhile is not lost.
-    const reported = [...this.#unreported.splice(0), ...evicted]
+    // What is held again by now (a block written anew after its eviction) is not reported: it is not gone.
+    const reported = this.#stillGone([...this.#unreported.splice(0), ...evicted])
     return {
       full: this.#isFull(),
       evictedBytes: reported.reduce((sum, range) => sum + range.end - range.start, 0),

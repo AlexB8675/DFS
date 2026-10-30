@@ -1107,6 +1107,52 @@ describe('the store on disk', () => {
       expect(store.stats().storedBytes).toBe(MIB)
     })
 
+    /** A one-slot store in which a failed write has evicted block 0 and left block 3 in the frontier, with the position at block 3. */
+    async function afterLostEviction(): Promise<DiskRig> {
+      const rig = await diskRig(4 * MIB, MIB)
+      await rig.store.write(0, plainBlock(0))
+      rig.store.setPosition(3 * MIB)
+      rig.file.failNextWrite('InvalidStateError')
+      await expectStoreError(rig.store.write(3 * MIB, plainBlock(3)), 'disk')
+      expect(rig.store.stats().evictedBytes).toBe(MIB)
+      return rig
+    }
+
+    it('does not report an eviction whose bytes are held again when the write resolves', async () => {
+      const { store } = await afterLostEviction()
+      // Block 3 takes the only slot, so block 0 is held again in the frontier.
+      const again = await store.write(0, plainBlock(0))
+      expect(again).toEqual({ full: true, evictedBytes: 0, evicted: [] })
+      expect(store.held().ranges()).toEqual([blocks(0, 1), blocks(3, 4)])
+      // The bytes were let go of when they were, and that is not undone.
+      expect(store.stats().evictedBytes).toBe(MIB)
+    })
+
+    it('reports only the part of an eviction that is still gone', async () => {
+      const { store } = await afterLostEviction()
+      const head = await store.write(0, CONTENT.subarray(0, 100))
+      expect(head).toEqual({
+        full: false,
+        evictedBytes: MIB - 100,
+        evicted: [{ start: 100, end: MIB }],
+      })
+      expect(store.held().ranges()).toEqual([{ start: 0, end: 100 }, blocks(3, 4)])
+    })
+
+    it('reports the two parts of an eviction that is held again in its middle', async () => {
+      const { store } = await afterLostEviction()
+      const middle = await store.write(500_000, CONTENT.subarray(500_000, 500_100))
+      expect(middle).toEqual({
+        full: false,
+        evictedBytes: MIB - 100,
+        evicted: [
+          { start: 0, end: 500_000 },
+          { start: 500_100, end: MIB },
+        ],
+      })
+      expect(store.held().ranges()).toEqual([{ start: 500_000, end: 500_100 }, blocks(3, 4)])
+    })
+
     it('rejects a write that completes two blocks when one of their slot writes fails, and keeps both readable', async () => {
       const { store, file } = await diskRig(4 * MIB, 4 * MIB)
       file.failNextWrite('InvalidStateError')

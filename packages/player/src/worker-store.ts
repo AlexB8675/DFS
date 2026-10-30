@@ -151,8 +151,8 @@ class Channel {
  * and can be read, so its range is added too; what it evicted is reported by the next write
  * that succeeds. A write that was refused, or that found the store closed, changed nothing.
  * If the worker dies (its endpoint reports an error), every call in flight and every call
- * after rejects with a `StoreError` of kind `disk`, `setPosition` and `close` among them,
- * because nothing will answer: the downloader sees it at once and does not wait for ever.
+ * after rejects with a `StoreError` of kind `disk`, and so does `setPosition`, because nothing
+ * will answer: the downloader sees it at once and does not wait for ever. `close` resolves.
  */
 export class WorkerStore implements PlayStore {
   readonly backend: 'disk' | 'memory'
@@ -263,17 +263,22 @@ export class WorkerStore implements PlayStore {
   /**
    * Deletes everything: the worker closes the file, removes the directory and releases the
    * lock, after the requests that came before. Calls made from now on reject with `closed`.
-   * If the worker is gone, there is nobody to ask, and this rejects with what it failed with;
-   * the store is closed all the same, and the app's next start cleans up what is left.
+   * If the worker is gone, or goes while this waits, there is nothing to delete from the page:
+   * this resolves, and the directory is left for the next start of the app to clean up (the
+   * worker's lock died with it).
    */
   async close(): Promise<void> {
     if (this.#closed) return
     this.#closed = true
     this.#held = new RangeSet()
     try {
+      if (this.#channel.dead !== null) return
       const reply = await this.#channel.ask((id) => ({ id, type: 'close' }))
       if (!reply.ok) throw errorOf(reply.error)
       if (reply.type !== 'close') throw unexpected('close', reply.type)
+    } catch (error) {
+      // The worker died while the close waited: there is nobody to answer, and the call fails with that and nothing else.
+      if (this.#channel.dead === null) throw error
     } finally {
       this.#channel.detach()
     }
