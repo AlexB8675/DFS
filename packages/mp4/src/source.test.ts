@@ -14,6 +14,7 @@ import {
   framesIn,
   heldBytes,
   nextRead,
+  nextReads,
   openSource,
   seekCursor,
   sniff,
@@ -519,11 +520,19 @@ function builtTracks(pictureAt: number[], soundAt: number[]): TrackSpec[] {
  * `mdat`. A frame holds bytes that name it: 0x10 + its number for the picture, 0x80 +
  * its number for the sound.
  */
-function builtFile(moovFirst: boolean): Built {
+function builtFile(moovFirst: boolean, interleaved = true): Built {
   const order = [
     ...PICTURE_SIZES.map((size, at) => ({ picture: true, at, size, time: at * PICTURE_TICKS })),
     ...SOUND_SIZES.map((size, at) => ({ picture: false, at, size, time: at * SOUND_TICKS })),
-  ].sort((a, b) => a.time - b.time || (a.picture === b.picture ? 0 : a.picture ? -1 : 1))
+  ].sort((a, b) =>
+    interleaved
+      ? a.time - b.time || (a.picture === b.picture ? 0 : a.picture ? -1 : 1)
+      : a.picture === b.picture
+        ? a.at - b.at
+        : a.picture
+          ? -1
+          : 1,
+  )
 
   const zeros = (count: number): number[] => new Array<number>(count).fill(0)
   const ftyp = box('ftyp', fourcc('isom'), u32(0), fourcc('isom'))
@@ -811,6 +820,101 @@ describe('the frames a chunk of an MP4 completes (§10.4)', () => {
   })
 })
 
+describe('where each track of a file reads next (§10.4)', () => {
+  const cursor = (videoFrame: number, soundFrame: number, id: number | null = 2): Cursor => ({
+    container: 'mp4',
+    sound: id,
+    videoFrame,
+    soundFrame,
+  })
+
+  it('gives each track its own next frame in an interleaved file, the least of them being nextRead', () => {
+    const file = builtFile(false)
+    const index = mp4Of(open(file.bytes).index)
+    for (const [video, audio] of [
+      [0, 0],
+      [3, 7],
+      [11, 0],
+      [2, 39],
+    ] as const) {
+      const at = cursor(video, audio)
+      expect(nextReads(index, at)).toEqual({
+        video: file.pictureAt[video],
+        audio: file.soundAt[audio],
+      })
+      expect(Math.min(...Object.values(nextReads(index, at)).map(must))).toBe(
+        must(nextRead(index, at)),
+      )
+    }
+  })
+
+  it('keeps the tracks apart in a file of all picture and then all sound', () => {
+    const file = builtFile(false, false)
+    const index = mp4Of(open(file.bytes).index)
+    const lastPicture = must(file.pictureAt[PICTURE_COUNT - 1])
+    expect(must(file.soundAt[0])).toBeGreaterThan(lastPicture)
+    expect(nextReads(index, cursor(0, 0))).toEqual({
+      video: file.pictureAt[0],
+      audio: file.soundAt[0],
+    })
+    // The sound's next frame is far from the picture's, and nextRead names only the picture's.
+    expect(nextReads(index, cursor(5, 10))).toEqual({
+      video: file.pictureAt[5],
+      audio: file.soundAt[10],
+    })
+    expect(nextRead(index, cursor(5, 10))).toBe(file.pictureAt[5])
+  })
+
+  it('gives null for a track that has no frame left, and for both at the end', () => {
+    const file = builtFile(false)
+    const index = mp4Of(open(file.bytes).index)
+    expect(nextReads(index, cursor(PICTURE_COUNT, 5))).toEqual({
+      video: null,
+      audio: file.soundAt[5],
+    })
+    expect(nextReads(index, cursor(2, SOUND_COUNT))).toEqual({
+      video: file.pictureAt[2],
+      audio: null,
+    })
+    expect(nextReads(index, cursor(PICTURE_COUNT, SOUND_COUNT))).toEqual({
+      video: null,
+      audio: null,
+    })
+  })
+
+  it('gives null for the sound when none plays, wherever its cursor is', () => {
+    const file = builtFile(false)
+    const index = mp4Of(open(file.bytes).index)
+    expect(nextReads(index, cursor(4, 5, null))).toEqual({ video: file.pictureAt[4], audio: null })
+    expect(nextReads(index, cursor(PICTURE_COUNT, 5, null))).toEqual({ video: null, audio: null })
+  })
+
+  it('refuses a cursor of the other container, or one that is not of the index', () => {
+    const file = builtFile(false)
+    const index = mp4Of(open(file.bytes).index)
+    const matroska = matroskaCursorAndIndex()
+    expect(() => nextReads(index, matroska.cursor)).toThrow(RangeError)
+    expect(() => nextReads(matroska.index, cursor(0, 0))).toThrow(RangeError)
+    expect(() => nextReads(index, cursor(0, 0, 9))).toThrow(RangeError)
+  })
+
+  it('gives both tracks the cursor in a Matroska file, and none when it has ended', () => {
+    const { index, cursor: start } = matroskaCursorAndIndex()
+    if (index.container !== 'matroska') throw new Error('expected the index of a Matroska file')
+    expect(nextReads(index, start)).toEqual({
+      video: index.firstCluster,
+      audio: index.firstCluster,
+    })
+    expect(nextReads(index, startCursor(index, null))).toEqual({
+      video: index.firstCluster,
+      audio: null,
+    })
+    const ended = framesIn(index, start, { start: 0, bytes: webm() }).cursor
+    expect(nextRead(index, ended)).toBeNull()
+    expect(nextReads(index, ended)).toEqual({ video: null, audio: null })
+  })
+})
+
 describe('starting an MP4 for a sound (§10.4)', () => {
   const later = mp4Index(read([picture(), sound({ id: 2 }), sound({ id: 3 })]), FILE_SIZE)
 
@@ -1092,6 +1196,7 @@ describe('what the package exports (§10.4)', () => {
     expect(api.startCursor).toBe(startCursor)
     expect(api.seekCursor).toBe(seekCursor)
     expect(api.nextRead).toBe(nextRead)
+    expect(api.nextReads).toBe(nextReads)
     expect(api.framesIn).toBe(framesIn)
     expect(api.sniff).toBe(sniff)
     expect(api.mp4Index).toBe(mp4Index)

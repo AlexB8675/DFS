@@ -242,6 +242,26 @@ export function mp4Next(index: Mp4Index, cursor: Mp4Cursor): number | null {
   return least
 }
 
+/**
+ * Where each track reads next: the offset of the next frame of the picture and of
+ * the sound that plays, each null when that track is done (and the sound's null
+ * when none plays). `mp4Next` is the least of the two. A file whose sound lies
+ * apart from its picture needs both, for reading at the least alone only ever
+ * advances the track that comes first.
+ */
+export function mp4Nexts(
+  index: Mp4Index,
+  cursor: Mp4Cursor,
+): { video: number | null; audio: number | null } {
+  const track = checkCursor(index, cursor)
+  const next = (table: FrameTable, frame: number): number | null =>
+    frame < table.count ? (table.offsets[frame] ?? 0) : null
+  return {
+    video: next(index.video.table, cursor.videoFrame),
+    audio: track === null ? null : next(track.table, cursor.soundFrame),
+  }
+}
+
 /** How many frames from `from` lie whole inside the chunk, up to the first that does not. */
 function wholeIn(table: FrameTable, from: number, chunk: Chunk): number {
   const end = chunk.start + chunk.bytes.length

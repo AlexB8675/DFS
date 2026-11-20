@@ -21,7 +21,7 @@ import { matroskaSeek } from './matroska/seek.ts'
 import { matroskaFrames, matroskaStart } from './matroska/spans.ts'
 import type { MatroskaCursor } from './matroska/spans.ts'
 import { readMovie } from './movie.ts'
-import { mp4Frames, mp4Index, mp4Next, mp4Seek, mp4Start } from './mp4source.ts'
+import { mp4Frames, mp4Index, mp4Next, mp4Nexts, mp4Seek, mp4Start } from './mp4source.ts'
 import type { Mp4Cursor, Mp4Index } from './mp4source.ts'
 import type { FragmentTrack } from './write.ts'
 
@@ -239,6 +239,29 @@ export function nextRead(index: SourceIndex, cursor: Cursor): number | null {
   }
   if (cursor.container !== 'mp4') throw mismatch(index, cursor)
   return mp4Next(index, cursor)
+}
+
+/**
+ * Where each track reads next: the offset of the file of the next frame of the
+ * picture and of the sound that plays, each null when that track has none left (the
+ * sound's too when none plays). In an MP4 they are what the tables say, and in a file
+ * whose sound lies apart from its picture they are far apart, so a caller that reads
+ * from `nextRead` alone advances only the track that comes first and should read from
+ * the one that is behind. In a Matroska file both are the cursor's place, for its
+ * clusters hold the tracks together (the sound's null when none plays), and both are
+ * null when every frame has been given.
+ */
+export function nextReads(
+  index: SourceIndex,
+  cursor: Cursor,
+): { video: number | null; audio: number | null } {
+  if (index.container === 'matroska') {
+    if (cursor.container !== 'matroska') throw mismatch(index, cursor)
+    if (cursor.ended) return { video: null, audio: null }
+    return { video: cursor.at, audio: cursor.sound === null ? null : cursor.at }
+  }
+  if (cursor.container !== 'mp4') throw mismatch(index, cursor)
+  return mp4Nexts(index, cursor)
 }
 
 /**
