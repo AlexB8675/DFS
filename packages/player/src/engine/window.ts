@@ -2,7 +2,7 @@
 // that keeps the browser's Media Source buffer small, in bytes and in seconds. It
 // is told what was appended and what was removed, and says when to feed and what
 // to cut. It uses no DOM type and no timer: the engine reads the sink's buffered
-// ranges and calls it.
+// ranges and gives them to `sync`, so a silent eviction by the browser is seen.
 //
 // Times are seconds on the playback timeline (after the SourceBuffer's timestamp
 // offset), as the sink reports them. The cap is in bytes, across both tracks, and
@@ -11,6 +11,8 @@
 // `WINDOW_MIN_AHEAD_SECONDS` ahead, so the cap never starves the playhead.
 
 import {
+  FEED_STEP_SECONDS,
+  GAP_STEP_SECONDS,
   QUOTA_SHRINK,
   WINDOW_AHEAD_SECONDS,
   WINDOW_BEHIND_SECONDS,
@@ -30,8 +32,27 @@ export interface FedRun {
   keyframe: boolean
 }
 
-/** Two runs closer than this, in seconds, are joined: the rounding of the timescale is not a gap. */
+/** Two times closer than this, in seconds, are the same: the rounding of the timescale is not a gap, and a sliver this short is nothing. */
 const JOIN_SECONDS = 0.001
+
+/**
+ * The part of `run` from `start` to `end`, with its bytes prorated, or null when
+ * it is no longer than rounding. A part that does not begin where the run does is
+ * not a keyframe of a picture, as the frames before it are gone; a sound's is.
+ */
+function part(run: FedRun, start: number, end: number): FedRun | null {
+  if (end - start <= JOIN_SECONDS) return null
+  const whole = run.end - run.start
+  const kept = start - run.start <= JOIN_SECONDS && run.end - end <= JOIN_SECONDS
+  if (kept) return run
+  return {
+    ...run,
+    start,
+    end,
+    bytes: whole > 0 ? (run.bytes * (end - start)) / whole : 0,
+    keyframe: start - run.start <= JOIN_SECONDS ? run.keyframe : run.kind === 'audio',
+  }
+}
 
 export class DecoderWindow {
   private limit: number
@@ -42,37 +63,78 @@ export class DecoderWindow {
     this.limit = limitBytes
   }
 
-  /** A fragment was appended. */
+  /** A fragment was appended. It replaces the runs of its track that it overlaps, as Media Source overwrites the frames it holds at the same times: they are dropped, or trimmed with their bytes prorated. */
   fed(run: FedRun): void {
-    const runs = this.runs[run.kind]
-    let at = runs.findIndex((other) => other.start > run.start)
-    if (at < 0) at = runs.length
-    runs.splice(at, 0, { ...run })
+    const kept: FedRun[] = []
+    for (const other of this.runs[run.kind]) {
+      if (other.end <= run.start + JOIN_SECONDS || other.start >= run.end - JOIN_SECONDS) {
+        kept.push(other)
+        continue
+      }
+      const before = part(other, other.start, run.start)
+      const after = part(other, run.end, other.end)
+      if (before !== null) kept.push(before)
+      if (after !== null) kept.push(after)
+    }
+    kept.push({ ...run })
+    this.runs[run.kind] = kept.sort((a, b) => a.start - b.start)
   }
 
-  /** The browser's buffer was cut before `before`: the runs that end at or before it go, and one that straddles it stays. */
+  /** The browser's buffer was cut before `before`: every run that starts before it goes, and one that straddles it is trimmed to start there, with its bytes prorated. No end is compared with another, so a rounding between them frees nothing less. */
   removed(kind: 'video' | 'audio', before: number): void {
-    this.runs[kind] = this.runs[kind].filter((run) => run.end > before)
+    const kept: FedRun[] = []
+    for (const run of this.runs[kind]) {
+      if (run.start >= before) kept.push(run)
+      else {
+        const rest = part(run, before, run.end)
+        if (rest !== null) kept.push(rest)
+      }
+    }
+    this.runs[kind] = kept
   }
 
   /**
-   * How far ahead to feed the track, or null when it needs nothing now: its runs
-   * reach `playhead + WINDOW_AHEAD_SECONDS` without a gap, or the window is full
-   * in bytes and the track has `WINDOW_MIN_AHEAD_SECONDS` ahead.
+   * Makes the window agree with the browser: what lies outside the ranges the
+   * sink reports (`buffered`, in seconds on the playback timeline) is dropped or
+   * trimmed, with bytes prorated. The browser may evict on its own, and the
+   * window must not count, or trust, what is gone. A rounding at a range's edge
+   * drops nothing.
+   */
+  sync(kind: 'video' | 'audio', buffered: readonly (readonly [number, number])[]): void {
+    const kept: FedRun[] = []
+    for (const run of this.runs[kind]) {
+      for (const [low, high] of buffered) {
+        const piece = part(run, Math.max(run.start, low), Math.min(run.end, high))
+        if (piece !== null) kept.push(piece)
+      }
+    }
+    this.runs[kind] = kept.sort((a, b) => a.start - b.start)
+  }
+
+  /**
+   * How far to feed the track, or null when it needs nothing now: its runs reach
+   * `playhead + WINDOW_AHEAD_SECONDS` without a gap, or the window is full in
+   * bytes and the track has `WINDOW_MIN_AHEAD_SECONDS` ahead. `until` is a step,
+   * `FEED_STEP_SECONDS` past what the track holds (the playhead, when it holds
+   * nothing there), as the engine feeds to it in one call.
    */
   wants(kind: 'video' | 'audio', playhead: number): { until: number } | null {
     const ahead = this.aheadSeconds(kind, playhead)
     if (ahead >= WINDOW_AHEAD_SECONDS) return null
     if (this.bytes() >= this.limit && ahead >= WINDOW_MIN_AHEAD_SECONDS) return null
-    return { until: playhead + WINDOW_AHEAD_SECONDS }
+    return {
+      until: Math.min(playhead + WINDOW_AHEAD_SECONDS, playhead + ahead + FEED_STEP_SECONDS),
+    }
   }
 
   /**
-   * The keyframe time to cut the track before, or null when nothing is due. While
-   * the bytes are under the limit it is the latest keyframe at or before
-   * `playhead − WINDOW_BEHIND_SECONDS`; at or over the limit it is the latest at
-   * or before the playhead. Never later than the playhead's own keyframe, so the
-   * group being played is never cut, and null when nothing is fed before it.
+   * The time to cut the track before, or null when nothing is due. While the
+   * bytes are under the limit the bound is `playhead − WINDOW_BEHIND_SECONDS`; at
+   * or over it, the playhead. The answer is the latest of:
+   * - a keyframe's time at or before the bound, with something fed before it, so
+   *   the group being played is never cut;
+   * - the end of a group already played: a run that ends at or before the bound
+   *   and is followed by nothing or a gap, so the last group can be cut too.
    */
   toRemove(kind: 'video' | 'audio', playhead: number): number | null {
     const runs = this.runs[kind]
@@ -80,16 +142,22 @@ export class DecoderWindow {
     if (first === undefined) return null
     const bound = this.bytes() >= this.limit ? playhead : playhead - WINDOW_BEHIND_SECONDS
     let at: number | null = null
-    for (const run of runs) {
-      if (run.start > bound) break
-      if (run.keyframe) at = run.start
+    for (const [index, run] of runs.entries()) {
+      if (run.start <= bound && run.keyframe && run.start > first.start) {
+        at = Math.max(at ?? run.start, run.start)
+      }
+      const next = runs[index + 1]
+      const ends = next === undefined || next.start > run.end + JOIN_SECONDS
+      if (ends && run.end <= bound) at = Math.max(at ?? run.end, run.end)
     }
-    return at !== null && at > first.start ? at : null
+    return at
   }
 
-  /** A quota error: the limit shrinks by `QUOTA_SHRINK`, to no less than `WINDOW_FLOOR_BYTES`. Answers the new limit. */
+  /** A quota error: the limit shrinks by `QUOTA_SHRINK` of the less of the limit and what the window holds, to no less than `WINDOW_FLOOR_BYTES`, so a window that holds less than its limit is cut below what it holds. Answers the new limit. */
   quota(): number {
-    const shrunk = Math.max(WINDOW_FLOOR_BYTES, Math.floor(this.limit * QUOTA_SHRINK))
+    const held = this.bytes()
+    const from = held > 0 ? Math.min(this.limit, held) : this.limit
+    const shrunk = Math.max(WINDOW_FLOOR_BYTES, Math.floor(from * QUOTA_SHRINK))
     this.limit = Math.min(this.limit, shrunk)
     return this.limit
   }
@@ -102,15 +170,25 @@ export class DecoderWindow {
     return total
   }
 
-  /** The seconds the track's runs reach from the playhead without a gap. 0 when none covers the playhead. */
+  /**
+   * The seconds the track's runs reach from the playhead without a gap. A track
+   * with no run at the playhead counts from the first run that starts within
+   * `GAP_STEP_SECONDS` after it (a picture's first frame shows a little after 0,
+   * and a sound may start late). 0 when there is none.
+   */
   aheadSeconds(kind: 'video' | 'audio', playhead: number): number {
-    let reach = playhead
+    let reach: number | null = null
     for (const run of this.runs[kind]) {
-      if (run.end <= reach) continue
-      if (run.start > reach + JOIN_SECONDS) break
-      reach = run.end
+      if (run.end <= playhead) continue
+      if (reach === null) {
+        if (run.start > playhead + GAP_STEP_SECONDS) break
+        reach = run.end
+      } else {
+        if (run.start > reach + JOIN_SECONDS) break
+        reach = Math.max(reach, run.end)
+      }
     }
-    return reach - playhead
+    return reach === null ? 0 : reach - playhead
   }
 
   /** Empties the window, for a seek outside it or a reopen. The limit stays as the quota errors have shrunk it. */

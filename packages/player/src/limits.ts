@@ -74,6 +74,12 @@ export const WINDOW_BEHIND_SECONDS = 5
 /** The least a track is fed ahead of the playhead even when the window is full in bytes: 1 s. The byte cap never starves the playhead, so a 4K file's full window still gets its next second, and the overshoot is about a second's worth plus a fragment. */
 export const WINDOW_MIN_AHEAD_SECONDS = 1
 
+/** How far ahead of what a track holds the engine feeds in one call: 1 s. `wants` answers a step, never the whole 30 s, so a full window is not overshot by more than a step. */
+export const FEED_STEP_SECONDS = 1
+
+/** The gap at a playhead that a track's coverage steps over: 2 s. A track whose first frame comes after the playhead (a B-frame picture's first shows at about 0.03 s, a sound may start late) counts from its first run when that starts within this. The watchdog steps over a gap of the same size. */
+export const GAP_STEP_SECONDS = 2
+
 /** The window's total across tracks: 64 MiB, well under Firefox's ~150 MB and phones' lower caps. At 120 Mbit/s it is about 4 s ahead, and the store refills it just in time. */
 export const WINDOW_BYTES = 64 * 1024 * 1024
 
