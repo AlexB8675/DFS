@@ -37,6 +37,7 @@ import {
   WINDOW_BEHIND_SECONDS,
   WINDOW_BYTES,
   WINDOW_FLOOR_BYTES,
+  WINDOW_MIN_AHEAD_SECONDS,
 } from './limits.ts'
 
 // The store's and the downloader's bounds (DESIGN.md §10.4): each is a number the
@@ -107,6 +108,7 @@ describe('the store and the downloader limits', () => {
     expect(QUOTA_SHRINK).toBe(0.75)
     expect(WINDOW_FLOOR_BYTES).toBe(16 * 1024 * 1024)
     expect(WINDOW_FLOOR_BYTES).toBeLessThan(WINDOW_BYTES)
+    expect(WINDOW_MIN_AHEAD_SECONDS).toBe(1)
   })
 
   it('reads 1 MiB at a cursor and doubles to 32 MiB, reads 1 MiB of the file end, and keeps 40 MiB of the index chunks', () => {

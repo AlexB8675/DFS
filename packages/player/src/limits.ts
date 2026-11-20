@@ -71,6 +71,9 @@ export const WINDOW_AHEAD_SECONDS = 30
 /** The played time kept in the decoder window for a short seek back: 5 s. */
 export const WINDOW_BEHIND_SECONDS = 5
 
+/** The least a track is fed ahead of the playhead even when the window is full in bytes: 1 s. The byte cap never starves the playhead, so a 4K file's full window still gets its next second, and the overshoot is about a second's worth plus a fragment. */
+export const WINDOW_MIN_AHEAD_SECONDS = 1
+
 /** The window's total across tracks: 64 MiB, well under Firefox's ~150 MB and phones' lower caps. At 120 Mbit/s it is about 4 s ahead, and the store refills it just in time. */
 export const WINDOW_BYTES = 64 * 1024 * 1024
 
