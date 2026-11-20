@@ -4,8 +4,9 @@
 // are tested in Node, though only the browser suites use them. They stand in for
 // the player's own choices, which come in step 4. Where a picture ends is the
 // reader's now (`timing.ts`, for the index's duration), and is given here again
-// for the browser suites, which have always had it from this file.
+// for the browser suites, which have always had it from this file; `fragmentRuns` is the package's now (`fragments.ts`), and is given here again the same way.
 
+export { fragmentRuns } from '../fragments.ts'
 export { pictureEnd } from '../timing.ts'
 
 /** What the choice needs of a corpus file: its title, the size, whether `corpus:make` made it, and what is expected of it. */
@@ -56,45 +57,4 @@ export function filesToPlay<T extends Candidate>(files: readonly T[], all: boole
     if (chosen) taken.add(chosen)
   }
   return [...made, ...users.filter((file) => taken.has(file))]
-}
-
-/** The least of a frame table that cutting frames into fragments needs. */
-interface RunTable {
-  count: number
-  timescale: number
-  durations: Uint32Array
-  sync: Uint8Array
-}
-
-/**
- * Frames [from, to) cut into runs for fragments, each [first, end) in order and
- * with no gap: no run covers more than a second of the track's time (a frame that
- * lasts longer is a run of its own), and with `atKeyframes` a run that has
- * covered half a second ends at the next keyframe, so that a picture's fragments
- * start at a keyframe where they can (a fragment needn't). A sound's frames all
- * are keyframes, and cut nothing: pass `atKeyframes` false.
- */
-export function fragmentRuns(
-  table: RunTable,
-  from: number,
-  to: number,
-  atKeyframes: boolean,
-): [number, number][] {
-  const runs: [number, number][] = []
-  const limit = table.timescale
-  const half = table.timescale / 2
-  let start = from
-  let covered = 0
-  for (let i = from; i < to; i += 1) {
-    const ticks = table.durations[i] ?? 0
-    const cut = covered + ticks > limit || (atKeyframes && table.sync[i] === 1 && covered >= half)
-    if (i > start && cut) {
-      runs.push([start, i])
-      start = i
-      covered = 0
-    }
-    covered += ticks
-  }
-  if (to > start) runs.push([start, to])
-  return runs
 }

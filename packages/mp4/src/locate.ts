@@ -11,6 +11,20 @@ import { Mp4Error } from './errors.ts'
 
 const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER)
 
+/** The most a `moov` may hold: a larger one is damage, not an index (§10.4). The longest of the user's files has a few MB. */
+export const MAX_MOOV_BYTES = 256 * 1024 * 1024
+
+/** A `moov` of this many bytes is refused if it is past the bound. */
+function checkMoovSize(start: number, end: number): void {
+  const size = end - start
+  if (size > MAX_MOOV_BYTES) {
+    throw new Mp4Error(
+      'damaged',
+      `The 'moov' box at offset ${start} is ${size} bytes, which is more than the ${MAX_MOOV_BYTES} bytes that an index may hold.`,
+    )
+  }
+}
+
 /** The shortest box there is: a header of 8 bytes and nothing in it. A range of the file shorter than this holds no box. */
 const MIN_BOX = 8
 
@@ -76,7 +90,7 @@ function topLevelBoxes(head: Uint8Array, fileSize: number): TopLevel {
  * file is the whole of the samples).
  *
  * A moov of size 0 runs to the end of the file. One that claims more than the
- * file holds is refused as `Mp4Error('damaged')`, and a `moof` among the boxes
+ * file holds, or more than `MAX_MOOV_BYTES`, is refused as `Mp4Error('damaged')`, and a `moof` among the boxes
  * of the head, wherever, as `Mp4Error('fragmented')`: a file in fragments has
  * nothing to split. A `fileSize` that isn't a count of bytes is a RangeError,
  * the caller's mistake and not the file's.
@@ -108,12 +122,14 @@ export function locateMoov(
         `The 'moov' box at offset ${moov.start} claims to end at ${moov.end}, but the file has ${fileSize} bytes.`,
       )
     }
+    checkMoovSize(moov.start, moov.end)
     return { start: moov.start, end: moov.end }
   }
 
   // An index at the end: the last box of the head is the mdat, and the head ends in it or just after it, so the box after it is the moov, to the end of the file. QuickTime's `wide` and `free` before the mdat are boxes of the head like any other.
   const last = boxes.at(-1)
   if (last?.type === 'mdat' && cutOff && fileSize - last.end >= MIN_BOX) {
+    checkMoovSize(last.end, fileSize)
     return { start: last.end, end: fileSize }
   }
   return null

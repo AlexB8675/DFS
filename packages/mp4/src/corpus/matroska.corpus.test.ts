@@ -558,14 +558,16 @@ function entryOf(track: MatroskaPlayTrack): SampleEntry {
 
 /**
  * An `hvcC` box (whole, header included) with the array_completeness bit of each
- * array of parameter sets cleared, or null where the arrays can't be walked. FFmpeg's
+ * array of parameter sets cleared (`complete` false) or set, or null where the arrays
+ * can't be walked. The reader sets it (Safari takes `hvc1` only then), whatever the
+ * CodecPrivate says; FFmpeg's
  * MP4 muxer sets that bit (0xa0 for the VPS, where the CodecPrivate of a Matroska
  * file written by ffmpeg has 0x20) whatever the record it was given said: the
  * bit says that every NAL unit of the type is in the array, which the muxer takes
  * as true and a reader that carries the CodecPrivate as it is does not. Everything
  * else in the box is compared as it is.
  */
-function withoutCompleteness(hvcC: Uint8Array): Uint8Array | null {
+function withCompleteness(hvcC: Uint8Array, complete: boolean): Uint8Array | null {
   const out = Uint8Array.from(hvcC)
   // The 8 bytes of the box's header and the 22 of the record's fixed fields, then the number of arrays.
   let at = 8 + 22
@@ -576,7 +578,7 @@ function withoutCompleteness(hvcC: Uint8Array): Uint8Array | null {
     const header = out[at]
     const count = ((out[at + 1] ?? 0) << 8) | (out[at + 2] ?? 0)
     if (header === undefined) return null
-    out[at] = header & 0x7f
+    out[at] = complete ? header | 0x80 : header & 0x7f
     at += 3
     for (let unit = 0; unit < count; unit += 1)
       at += 2 + (((out[at] ?? 0) << 8) | (out[at + 1] ?? 0))
@@ -596,7 +598,7 @@ function differsAt(a: Uint8Array, b: Uint8Array): number {
  * and each configuration box, the same boxes in both. Byte for byte, but for
  * `esds`, which ffmpeg writes with the bit rates the stream has (a Matroska file has
  * none): its object type and its DecoderSpecificInfo; and for the `hvcC` of ffmpeg's
- * remux, whose array_completeness bits are ffmpeg's (`withoutCompleteness`). The entry
+ * remux, whose array_completeness bits are ffmpeg's (`withCompleteness`). The entry
  * it should be is ffmpeg's remux (`expectedFrom` 'remux') or one this suite built.
  */
 function entryProblems(
@@ -650,12 +652,14 @@ function entryProblems(
         }
       }
     } else {
-      // ffmpeg's `hvcC` is compared but for the array_completeness bits (see `withoutCompleteness`).
-      const lenient = type === 'hvcC' && expectedFrom === 'remux'
-      const x = lenient ? withoutCompleteness(a) : a
-      const y = lenient ? withoutCompleteness(b) : b
+      // An `hvcC` is compared but for the array_completeness bits (see `withCompleteness`): ours has them all set, and the record it was built from or ffmpeg's has what it has.
+      const lenient = type === 'hvcC'
+      const x = lenient ? withCompleteness(a, false) : a
+      const y = lenient ? withCompleteness(b, false) : b
       if (x === null || y === null) {
         problems.push(`${label}: an 'hvcC' box whose arrays can't be walked`)
+      } else if (lenient && differsAt(withCompleteness(a, true) ?? a, a) < a.length) {
+        problems.push(`${label}: an 'hvcC' box whose arrays are not all marked complete`)
       } else if (x.length !== y.length || differsAt(x, y) < x.length) {
         problems.push(
           `${label}: '${type}' box of ${a.length} bytes, ${expectedBy}'s of ${b.length}, first differing at byte ${differsAt(x, y)}`,

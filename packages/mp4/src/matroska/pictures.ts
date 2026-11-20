@@ -183,6 +183,26 @@ function hasParameterSets(config: Uint8Array): boolean {
   return HEVC_PARAMETER_SETS.every((type) => found.has(type))
 }
 
+/**
+ * A copy of an `hvcC` record with `array_completeness` (bit 7 of the first byte
+ * of each array) set, whatever the CodecPrivate said: a writer that muxes with
+ * the parameter sets also in the stream marks its arrays incomplete, and Safari
+ * then won't take `hvc1`. The record has been walked by `hasParameterSets`, so it
+ * is whole.
+ */
+function completeArrays(config: Uint8Array): Uint8Array {
+  const copy = config.slice()
+  const view = new DataView(copy.buffer, copy.byteOffset, copy.length)
+  let at = HEVC_ARRAYS + 1
+  for (let array = 0; array < view.getUint8(HEVC_ARRAYS); array += 1) {
+    view.setUint8(at, view.getUint8(at) | 0x80)
+    const units = view.getUint16(at + 1)
+    at += 3
+    for (let unit = 0; unit < units; unit += 1) at += 2 + view.getUint16(at)
+  }
+  return copy
+}
+
 /** What the first keyframe of a VP9 stream says of its colour configuration. */
 export interface Vp9Header {
   profile: number
@@ -437,7 +457,7 @@ export function pictureEntry(track: MatroskaTrack, keyframe: Uint8Array | null):
     case 'V_MPEGH/ISO/HEVC': {
       const hvcC = record(track, 'hvcC')
       type = hasParameterSets(hvcC) ? 'hvc1' : 'hev1'
-      config = box('hvcC', hvcC)
+      config = box('hvcC', completeArrays(hvcC))
       dolbyType = type === 'hvc1' ? 'dvh1' : 'dvhe'
       break
     }

@@ -245,6 +245,23 @@ describe('the entry of an HEVC picture', () => {
     expect(entry).toEqual(visualEntry('hev1', { width: 1920, height: 1080 }, config))
   })
 
+  it('marks every array of the record complete, whatever the CodecPrivate says, and leaves what it was given as it was', () => {
+    // Arrays of an incomplete kind (bit 7 of their first byte clear): Safari takes hvc1 only when they are marked complete.
+    const given = hevcRecord([32, 33, 34])
+    let at = 23
+    for (let array = 0; array < 3; array += 1) {
+      given[at] = (given[at] ?? 0) & 0x3f
+      at += 3 + 2 + 2 + 2 // the array's header, the unit's length and the unit's two bytes
+    }
+    const before = given.slice()
+    const entry = pictureEntry(picture({ codecId: 'V_MPEGH/ISO/HEVC', codecPrivate: given }), null)
+    expect(typeOf(entry)).toBe('hvc1')
+    expect(entry).toEqual(
+      visualEntry('hvc1', { width: 1920, height: 1080 }, box('hvcC', hevcRecord([32, 33, 34]))),
+    )
+    expect(given).toEqual(before)
+  })
+
   it('does not count an array of no units, nor an array of another type, as the parameter set', () => {
     // The VPS array holds no unit; a fourth array, of SEI (39), takes the place of the PPS.
     const record = concat(

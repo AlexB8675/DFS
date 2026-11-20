@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { Mp4Error } from './errors.ts'
 import type { Mp4Refusal } from './errors.ts'
-import { locateMoov, moovIn } from './locate.ts'
+import { MAX_MOOV_BYTES, locateMoov, moovIn } from './locate.ts'
 import { readMovie } from './movie.ts'
+import { openSource } from './source.ts'
 import { box, concat, fourcc, movie, u32, u64 } from './testing/build.ts'
 
 /** What `run` throws, which must be an `Mp4Error` of this reason. */
@@ -294,5 +295,39 @@ describe('the moov in the range that was read (§10.4)', () => {
   it('is found, whatever comes after it', () => {
     // A damaged box after the moov is not looked at: the moov is what was asked for.
     expect(moovIn(concat(index, u32(3), fourcc('free')))).toEqual(index)
+  })
+})
+
+describe('the most a moov may hold (§10.4)', () => {
+  const MIB = 1024 * 1024
+
+  it('is 256 MiB', () => {
+    expect(MAX_MOOV_BYTES).toBe(256 * MIB)
+  })
+
+  it('takes a moov of the bound and refuses one byte more as damaged, with the size and the bound in the sentence', () => {
+    const fileSize = 2 * 1024 * MIB
+    expect(locateMoov(concat(FTYP, open('moov', MAX_MOOV_BYTES)), fileSize)).toEqual({
+      start: 32,
+      end: 32 + MAX_MOOV_BYTES,
+    })
+    const error = refusal('damaged', () =>
+      locateMoov(concat(FTYP, open('moov', MAX_MOOV_BYTES + 1)), fileSize),
+    )
+    expect(error.message).toContain(String(MAX_MOOV_BYTES + 1))
+    expect(error.message).toContain(String(MAX_MOOV_BYTES))
+  })
+
+  it('refuses a moov of 257 MiB at the end of the file, and one that opening the file meets', () => {
+    const size = 257 * MIB
+    const head = concat(FTYP, open('mdat', 1000))
+    const fileSize = 32 + 1000 + size
+    // The moov follows the mdat, to the end of the file.
+    refusal('damaged', () => locateMoov(head, fileSize))
+    const error = refusal('damaged', () =>
+      openSource([{ start: 0, bytes: concat(FTYP, open('moov', size)) }], 32 + size),
+    )
+    expect(error.message).toContain(String(size))
+    expect(error.message).toContain(String(MAX_MOOV_BYTES))
   })
 })

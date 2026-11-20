@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./testing": "./src/testing/builders.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.node.json && tsc -p tsconfig.browser.json",
