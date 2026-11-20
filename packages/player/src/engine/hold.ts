@@ -24,8 +24,10 @@ export interface HoldInput {
   bitrateBytesPerSecond: number
   /** Seconds from the playhead to the end of the video. */
   remainingSeconds: number
-  /** The store's cap in seconds of the video (its cap in bytes over the bit rate). */
-  storeCapSeconds: number
+  /** What the store can hold ahead of the playhead, in seconds of the video. The engine works it out. */
+  storeAheadCapSeconds: number
+  /** True when the downloader's state is `full`: the store can hold no more ahead, whatever the cap arithmetic says (�10.4). */
+  storeFull: boolean
 }
 
 export interface HoldDecision {
@@ -48,24 +50,33 @@ function clamp(value: number, low: number, high: number): number {
  * from it, as far as the store allows.
  */
 export function holdDecision(input: HoldInput): HoldDecision {
-  const { reason, heldAheadSeconds, rateBytesPerSecond, bitrateBytesPerSecond } = input
-  const remaining = Math.max(0, input.remainingSeconds)
-  const cap = Math.max(0, input.storeCapSeconds)
-  const known = rateBytesPerSecond !== null
-  const fast = known && rateBytesPerSecond >= bitrateBytesPerSecond * KEEPS_UP
-  const slow = known && rateBytesPerSecond < bitrateBytesPerSecond
+  const { reason, heldAheadSeconds, bitrateBytesPerSecond } = input
+  const remaining = input.remainingSeconds
+  const cap = Math.max(0, input.storeAheadCapSeconds)
+  // A rate of 0 is the downloader gone quiet (a full store, a finished file), not a slow link; a
+  // bit rate that can't be compared makes the rate unknown too.
+  const rate = input.rateBytesPerSecond
+  const bitrateOk = Number.isFinite(bitrateBytesPerSecond) && bitrateBytesPerSecond > 0
+  const known = bitrateOk && rate !== null && Number.isFinite(rate) && rate > 0
+  const fast = known && rate >= bitrateBytesPerSecond * KEEPS_UP
+  const slow = known && rate < bitrateBytesPerSecond
   const floor = reason === 'stall' ? STALL_GOAL_SECONDS : START_GOAL_SECONDS
+
+  // At the end there is nothing to wait for.
+  if (!(remaining > 0)) return { hold: false, goalSeconds: 0, slow }
 
   let goalSeconds: number
   if (fast && reason !== 'stall') {
-    return { hold: heldAheadSeconds <= 0, goalSeconds: 0, slow }
-  } else if (fast || !known) {
+    // The first frames are enough; a full store has none to give, and the play goes on.
+    return { hold: !input.storeFull && heldAheadSeconds <= 0, goalSeconds: 0, slow }
+  } else if (!slow) {
     goalSeconds = Math.min(floor, remaining, cap)
+    // Between the bit rate and its multiple the floor applies, with the cap's share.
+    if (known && !fast) goalSeconds = Math.min(remaining, clamp(0, floor, cap * CAP_SHARE))
   } else {
-    // Between the bit rate and its multiple `needed` is 0 or less, so the floor applies.
-    const needed = remaining * (1 - rateBytesPerSecond / bitrateBytesPerSecond)
+    const needed = remaining * (1 - rate / bitrateBytesPerSecond)
     goalSeconds = Math.min(remaining, clamp(needed, floor, cap * CAP_SHARE))
   }
   goalSeconds = Math.max(0, goalSeconds)
-  return { hold: heldAheadSeconds < goalSeconds, goalSeconds, slow }
+  return { hold: !input.storeFull && heldAheadSeconds < goalSeconds, goalSeconds, slow }
 }

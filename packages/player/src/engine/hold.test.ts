@@ -15,7 +15,8 @@ function input(over: Partial<HoldInput>): HoldInput {
     rateBytesPerSecond: null,
     bitrateBytesPerSecond: BITRATE,
     remainingSeconds: 600,
-    storeCapSeconds: 100,
+    storeAheadCapSeconds: 100,
+    storeFull: false,
     ...over,
   }
 }
@@ -57,9 +58,13 @@ describe('holdDecision', () => {
   })
 
   it('scales the goal by what the rest of the video takes, capped by 0.9 of the store', () => {
-    const half = { rateBytesPerSecond: BITRATE / 2, remainingSeconds: 60, storeCapSeconds: 100 }
+    const half = {
+      rateBytesPerSecond: BITRATE / 2,
+      remainingSeconds: 60,
+      storeAheadCapSeconds: 100,
+    }
     expect(holdDecision(input(half)).goalSeconds).toBeCloseTo(30)
-    expect(holdDecision(input({ ...half, storeCapSeconds: 20 })).goalSeconds).toBeCloseTo(18)
+    expect(holdDecision(input({ ...half, storeAheadCapSeconds: 20 })).goalSeconds).toBeCloseTo(18)
     expect(holdDecision(input({ ...half, reason: 'stall' })).goalSeconds).toBeCloseTo(30)
   })
 
@@ -93,11 +98,13 @@ describe('holdDecision', () => {
   })
 
   it('never asks for more than the store allows', () => {
-    expect(holdDecision(input({ storeCapSeconds: 1 })).goalSeconds).toBe(1)
-    expect(holdDecision(input({ reason: 'stall', storeCapSeconds: 2.5 })).goalSeconds).toBe(2.5)
-    const slow = holdDecision(input({ rateBytesPerSecond: 1, storeCapSeconds: 1 }))
+    expect(holdDecision(input({ storeAheadCapSeconds: 1 })).goalSeconds).toBe(1)
+    expect(holdDecision(input({ reason: 'stall', storeAheadCapSeconds: 2.5 })).goalSeconds).toBe(
+      2.5,
+    )
+    const slow = holdDecision(input({ rateBytesPerSecond: 1, storeAheadCapSeconds: 1 }))
     expect(slow.goalSeconds).toBeCloseTo(0.9)
-    expect(holdDecision(input({ storeCapSeconds: 0 })).goalSeconds).toBe(0)
+    expect(holdDecision(input({ storeAheadCapSeconds: 0 })).goalSeconds).toBe(0)
   })
 
   it('is not slow, and not fast, between the bit rate and 1.1 times it', () => {
@@ -111,5 +118,64 @@ describe('holdDecision', () => {
     expect(holdDecision(input({ rateBytesPerSecond: null })).slow).toBe(false)
     expect(holdDecision(input({ rateBytesPerSecond: BITRATE })).slow).toBe(false)
     expect(holdDecision(input({ rateBytesPerSecond: BITRATE - 1 })).slow).toBe(true)
+  })
+
+  it('never holds at the end of the video, whatever the rate', () => {
+    const none = { hold: false, goalSeconds: 0 }
+    expect(
+      holdDecision(input({ remainingSeconds: 0, rateBytesPerSecond: BITRATE * 5 })),
+    ).toMatchObject(none)
+    expect(
+      holdDecision(input({ reason: 'seek', remainingSeconds: 0, rateBytesPerSecond: BITRATE * 5 })),
+    ).toMatchObject(none)
+    expect(holdDecision(input({ remainingSeconds: 0 }))).toMatchObject(none)
+    const slow = holdDecision(input({ remainingSeconds: 0, rateBytesPerSecond: BITRATE / 2 }))
+    expect(slow).toEqual({ hold: false, goalSeconds: 0, slow: true })
+    expect(holdDecision(input({ reason: 'stall', remainingSeconds: 0 }))).toMatchObject(none)
+  })
+
+  it('never holds on a full store, and still says slow', () => {
+    const d = holdDecision(
+      input({
+        rateBytesPerSecond: BITRATE / 2,
+        remainingSeconds: 60,
+        heldAheadSeconds: 5,
+        storeFull: true,
+      }),
+    )
+    expect(d.hold).toBe(false)
+    expect(d.slow).toBe(true)
+    expect(d.goalSeconds).toBeGreaterThan(5)
+    expect(holdDecision(input({ rateBytesPerSecond: BITRATE * 3, storeFull: true })).hold).toBe(
+      false,
+    )
+  })
+
+  it('reads a rate of 0 or NaN as unknown', () => {
+    for (const rate of [0, NaN, -1, Infinity]) {
+      const d = holdDecision(
+        input({ reason: 'seek', rateBytesPerSecond: rate, heldAheadSeconds: 1 }),
+      )
+      expect(d).toEqual({ hold: true, goalSeconds: START_GOAL_SECONDS, slow: false })
+    }
+  })
+
+  it('reads a bit rate that is 0 or not finite as an unknown rate', () => {
+    for (const bitrate of [0, -5, NaN, Infinity]) {
+      const d = holdDecision(input({ rateBytesPerSecond: 500, bitrateBytesPerSecond: bitrate }))
+      expect(d).toEqual({ hold: true, goalSeconds: START_GOAL_SECONDS, slow: false })
+    }
+  })
+
+  it('gives finite goals when the remaining time is infinite', () => {
+    const slow = holdDecision(
+      input({ rateBytesPerSecond: BITRATE / 2, remainingSeconds: Infinity }),
+    )
+    expect(slow.goalSeconds).toBeCloseTo(90)
+    const fast = holdDecision(
+      input({ reason: 'stall', rateBytesPerSecond: BITRATE * 3, remainingSeconds: Infinity }),
+    )
+    expect(fast.goalSeconds).toBe(STALL_GOAL_SECONDS)
+    expect(holdDecision(input({ remainingSeconds: Infinity })).goalSeconds).toBe(START_GOAL_SECONDS)
   })
 })
