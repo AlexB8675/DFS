@@ -244,6 +244,24 @@ describe('printTimeline', () => {
     ])
   })
 
+  it('prints the engine’s seeks and the watchdog’s actions one line each', () => {
+    const text = printTimeline(
+      playOf([
+        { type: 'seek', t: 100, to: 61.5, inWindow: false, ms: null },
+        { type: 'seek', t: 450, to: 61.5, inWindow: false, ms: 350 },
+        { type: 'watchdog', t: 5000, action: 'gap', at: 12.25, detail: 'stepped over 0.04 s' },
+        { type: 'watchdog', t: 6000, action: 'quota', at: 30, detail: 'window 48 MiB' },
+      ]),
+    )
+    const events = lines(text).filter((line) => line.startsWith('+'))
+    expect(events).toEqual([
+      '+0.100s seek to=61.5 inWindow=false ms=null',
+      '+0.450s seek to=61.5 inWindow=false ms=350',
+      '+5.000s watchdog action=gap at=12.25 detail="stepped over 0.04 s"',
+      '+6.000s watchdog action=quota at=30 detail="window 48 MiB"',
+    ])
+  })
+
   it('spells out control characters from outside, so a page can’t write to the terminal', () => {
     const text = printTimeline(
       playOf([{ type: 'error', t: 10, from: 'page', code: null, message: '\u001b[31mred\u009b' }]),

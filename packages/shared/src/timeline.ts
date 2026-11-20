@@ -223,6 +223,29 @@ export const timelineEventSchema = z.discriminatedUnion('type', [
     aheadBytes: offset,
     evictedBytes: offset,
   }),
+  // The engine's seek (§10.4): sent when it starts, with `ms` null, and again
+  // when its picture comes, with `ms` the time to picture. `to` is the target
+  // in seconds; `inWindow` says whether the decoder window held it. A seek
+  // still without a picture after the deadline gets an `error` event instead.
+  z.object({
+    type: z.literal('seek'),
+    t: ms,
+    to: seconds,
+    inWindow: z.boolean(),
+    ms: ms.nullable(),
+  }),
+  // An action of the watchdog or the decoder window (§10.4), sent for every
+  // one: it stepped over a `gap`, `refeed` the window, `reopen`ed Media
+  // Source, shrank the window on a `quota` error (`detail` names the new
+  // limit; the `quota` event still says which track threw), or found the play
+  // `stuck`. `at` is the playhead in seconds.
+  z.object({
+    type: z.literal('watchdog'),
+    t: ms,
+    action: z.enum(['gap', 'refeed', 'reopen', 'quota', 'stuck']),
+    at: seconds,
+    detail: text(200),
+  }),
   // The page lost events to its size cap, or the schema refused some: either
   // may be 0.
   z.object({ type: z.literal('dropped'), t: ms, events: count, invalid: count }),

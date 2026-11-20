@@ -58,6 +58,8 @@ const EXAMPLES: TimelineEvent[] = [
     aheadBytes: 536_870_912,
     evictedBytes: 0,
   },
+  { type: 'seek', t: 978, to: 61.5, inWindow: true, ms: null },
+  { type: 'watchdog', t: 979, action: 'gap', at: 12.25, detail: 'stepped over 0.04 s' },
   { type: 'dropped', t: 980, events: 0, invalid: 1 },
   { type: 'closed', t: 2000 },
 ]
@@ -87,6 +89,8 @@ const TYPES = [
   'store',
   'storeFull',
   'storeLevel',
+  'seek',
+  'watchdog',
   'dropped',
   'closed',
 ]
@@ -169,6 +173,53 @@ describe('timeline events (§16)', () => {
     expect(timelineBatchSchema.parse(input)).toEqual(input)
     // One bad event refuses the batch, as for any other type.
     const bad = { type: 'store', t: 6, backend: 'cloud', capBytes: 0, reason: null }
+    expect(timelineBatchSchema.safeParse(batch([...events, bad])).success).toBe(false)
+  })
+
+  it('takes the engine’s seeks, with a null time to picture until the picture comes', () => {
+    const started = { type: 'seek', t: 5, to: 61.5, inWindow: false, ms: null }
+    expect(timelineBatchSchema.parse(batch([started])).events).toEqual([started])
+    const shown = { ...started, t: 480, ms: 475 }
+    expect(timelineEventSchema.parse(shown)).toEqual(shown)
+  })
+
+  it('takes every watchdog action', () => {
+    for (const action of ['gap', 'refeed', 'reopen', 'quota', 'stuck']) {
+      const event = { type: 'watchdog', t: 9, action, at: 3, detail: 'x' }
+      expect(timelineEventSchema.parse(event)).toEqual(event)
+    }
+  })
+
+  it('refuses a seek or a watchdog event with a bad field', () => {
+    const seek = { type: 'seek', t: 5, to: 10, inWindow: true, ms: 20 }
+    const dog = { type: 'watchdog', t: 6, action: 'refeed', at: 10, detail: 'window' }
+    const accepted = (event: unknown) => timelineEventSchema.safeParse(event).success
+    expect(accepted(seek)).toBe(true)
+    expect(accepted({ ...seek, to: -1 })).toBe(false)
+    expect(accepted({ ...seek, to: 1e7 + 1 })).toBe(false)
+    expect(accepted({ ...seek, inWindow: 'yes' })).toBe(false)
+    expect(accepted({ ...seek, ms: -1 })).toBe(false)
+    expect(accepted({ ...seek, ms: 1.5 })).toBe(false)
+    expect(accepted({ ...seek, ms: undefined })).toBe(false)
+    expect(accepted(dog)).toBe(true)
+    expect(accepted({ ...dog, action: 'panic' })).toBe(false)
+    expect(accepted({ ...dog, at: -1 })).toBe(false)
+    expect(accepted({ ...dog, detail: 'x'.repeat(200) })).toBe(true)
+    expect(accepted({ ...dog, detail: 'x'.repeat(201) })).toBe(false)
+    expect(accepted({ ...dog, detail: 'half a pair \ud800' })).toBe(false)
+  })
+
+  it('takes a batch that mixes the older events and the engine’s', () => {
+    const events = [
+      { type: 'phase', t: 1, phase: 'buffering' },
+      { type: 'seek', t: 2, to: 30, inWindow: false, ms: null },
+      { type: 'watchdog', t: 3, action: 'quota', at: 30, detail: 'window 48 MiB' },
+      { type: 'seek', t: 4, to: 30, inWindow: false, ms: 2 },
+      { type: 'closed', t: 5 },
+    ]
+    const input = batch(events)
+    expect(timelineBatchSchema.parse(input)).toEqual(input)
+    const bad = { type: 'watchdog', t: 6, action: 'panic', at: 0, detail: '' }
     expect(timelineBatchSchema.safeParse(batch([...events, bad])).success).toBe(false)
   })
 
