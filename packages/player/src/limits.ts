@@ -62,3 +62,56 @@ export const STALL_COVER_MS = 2_000
 
 /** How far ahead of its next byte a read covers a place, in time at the measured rate: half a second, but never more than a block. Where the rate is not known yet a read covers a block. */
 export const COVER_AHEAD_MS = 500
+
+// The playback engine's bounds (DESIGN.md §10.4; the iron-clad spec §4.8).
+
+/** How far ahead the decoder window reaches, when bytes allow: 30 s. */
+export const WINDOW_AHEAD_SECONDS = 30
+
+/** The played time kept in the decoder window for a short seek back: 5 s. */
+export const WINDOW_BEHIND_SECONDS = 5
+
+/** The window's total across tracks: 64 MiB, well under Firefox's ~150 MB and phones' lower caps. At 120 Mbit/s it is about 4 s ahead, and the store refills it just in time. */
+export const WINDOW_BYTES = 64 * 1024 * 1024
+
+/** The least the window shrinks to after quota errors: 16 MiB. */
+export const WINDOW_FLOOR_BYTES = 16 * 1024 * 1024
+
+/** The factor by which each quota error shrinks the window: 0.75. */
+export const QUOTA_SHRINK = 0.75
+
+/** The first read for the feeder at a cursor: 1 MiB. */
+export const CHUNK_BYTES = 1024 * 1024
+
+/** The largest read the feeder doubles to before a cursor that won't advance is damage: 32 MiB. */
+export const MAX_CHUNK_BYTES = 32 * 1024 * 1024
+
+/** The read of the file's end, started as soon as the size is known: 1 MiB. Samsung phone files keep a `moov` of 70 KB or less there (measured on the corpus, 2026-11-20); the OBS recordings' 7.6 MiB needs a second read. */
+export const TAIL_BYTES = 1024 * 1024
+
+/** The chunks that opening and seeks needed (the head, the tail, the Cues; `CUES_LIMIT` is 32 MiB), kept in memory for the play so that seeks don't read them again: 40 MiB. */
+export const INDEX_CACHE_BYTES = 40 * 1024 * 1024
+
+/** How often the playhead's byte offset is given to the downloader while playing: every second. */
+export const POSITION_EVERY_MS = 1_000
+
+/** The hold rule's goal at the start, in seconds of picture: 2, as the old engine's. */
+export const START_GOAL_SECONDS = 2
+
+/** The hold rule's goal after a stall, in seconds of picture: 4, as the old engine's. */
+export const STALL_GOAL_SECONDS = 4
+
+/** How long a seek may wait for its picture: 10 s. A seek with none by then is logged and refed by the watchdog. */
+export const SEEK_DEADLINE_MS = 10_000
+
+/** How long a clock or frame count that has not moved, while playing with data at the playhead, is taken as stuck: 2 s. */
+export const STUCK_MS = 2_000
+
+/** The watchdog's cadence: every 500 ms. */
+export const WATCH_EVERY_MS = 500
+
+/** The watchdog's last resort, a new Media Source at the current time, at most this many times per play: 3. After that the play fails with the reason. */
+export const REOPENS_MAX = 3
+
+/** Added to a track's `appendWindowEnd`, in seconds, so that rounding never drops its last frame: 1 ms. */
+export const APPEND_WINDOW_PAD_SECONDS = 0.001

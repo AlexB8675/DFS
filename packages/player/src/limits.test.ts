@@ -1,25 +1,42 @@
 import { describe, expect, it } from 'vitest'
 import {
+  APPEND_WINDOW_PAD_SECONDS,
   BLOCK_BYTES,
+  CHUNK_BYTES,
   COVER_AHEAD_MS,
   DISK_CAP_BYTES,
   DISK_FLOOR_BYTES,
   ESTIMATE_MS,
   FRONTIER_BLOCKS,
   HEAD_BYTES,
+  INDEX_CACHE_BYTES,
   LATE_TIMER_MS,
   LEVEL_EVERY_MS,
+  MAX_CHUNK_BYTES,
   MEMORY_CAP_BYTES,
+  POSITION_EVERY_MS,
+  QUOTA_SHRINK,
   QUOTA_SHARE,
   RATE_WINDOW_MS,
   READ_IDLE_MS,
+  REOPENS_MAX,
   RETRY_BASE_MS,
   RETRY_JITTER,
   RETRY_MAX_MS,
+  SEEK_DEADLINE_MS,
+  START_GOAL_SECONDS,
   STALL_COVER_MS,
+  STALL_GOAL_SECONDS,
+  STUCK_MS,
   STORE_CALL_MS,
   STORE_OPEN_MS,
+  TAIL_BYTES,
   WAKE_GRACE_MS,
+  WATCH_EVERY_MS,
+  WINDOW_AHEAD_SECONDS,
+  WINDOW_BEHIND_SECONDS,
+  WINDOW_BYTES,
+  WINDOW_FLOOR_BYTES,
 } from './limits.ts'
 
 // The store's and the downloader's bounds (DESIGN.md §10.4): each is a number the
@@ -81,5 +98,38 @@ describe('the store and the downloader limits', () => {
   it('takes whole blocks as the floor of the disk store and the cap of the memory', () => {
     expect(DISK_FLOOR_BYTES % BLOCK_BYTES).toBe(0)
     expect(MEMORY_CAP_BYTES % BLOCK_BYTES).toBe(0)
+  })
+
+  it('keeps 5 s behind and reaches 30 s ahead in a window of 64 MiB, which shrinks by a quarter per quota error to 16 MiB', () => {
+    expect(WINDOW_BEHIND_SECONDS).toBe(5)
+    expect(WINDOW_AHEAD_SECONDS).toBe(30)
+    expect(WINDOW_BYTES).toBe(64 * 1024 * 1024)
+    expect(QUOTA_SHRINK).toBe(0.75)
+    expect(WINDOW_FLOOR_BYTES).toBe(16 * 1024 * 1024)
+    expect(WINDOW_FLOOR_BYTES).toBeLessThan(WINDOW_BYTES)
+  })
+
+  it('reads 1 MiB at a cursor and doubles to 32 MiB, reads 1 MiB of the file end, and keeps 40 MiB of the index chunks', () => {
+    expect(CHUNK_BYTES).toBe(1024 * 1024)
+    expect(MAX_CHUNK_BYTES).toBe(32 * 1024 * 1024)
+    expect(TAIL_BYTES).toBe(1024 * 1024)
+    expect(INDEX_CACHE_BYTES).toBe(40 * 1024 * 1024)
+  })
+
+  it('gives the downloader the playhead every second, and holds for 2 s at the start and 4 s after a stall', () => {
+    expect(POSITION_EVERY_MS).toBe(1_000)
+    expect(START_GOAL_SECONDS).toBe(2)
+    expect(STALL_GOAL_SECONDS).toBe(4)
+  })
+
+  it('gives a seek 10 s, takes 2 s without movement as stuck, watches every 500 ms and reopens at most 3 times', () => {
+    expect(SEEK_DEADLINE_MS).toBe(10_000)
+    expect(STUCK_MS).toBe(2_000)
+    expect(WATCH_EVERY_MS).toBe(500)
+    expect(REOPENS_MAX).toBe(3)
+  })
+
+  it('pads the append window of a track by 1 ms', () => {
+    expect(APPEND_WINDOW_PAD_SECONDS).toBe(0.001)
   })
 })
