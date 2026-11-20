@@ -224,9 +224,11 @@ export const timelineEventSchema = z.discriminatedUnion('type', [
     evictedBytes: offset,
   }),
   // The engine's seek (§10.4): sent when it starts, with `ms` null, and again
-  // when its picture comes, with `ms` the time to picture. `to` is the target
-  // in seconds; `inWindow` says whether the decoder window held it. A seek
-  // still without a picture after the deadline gets an `error` event instead.
+  // when its picture comes, with `ms` the time to picture, even if that is
+  // after the deadline. `to` is the target in seconds; `inWindow` says whether
+  // the decoder window held it. A seek with no picture by `SEEK_DEADLINE_MS`
+  // gets an `error` event from the engine and the watchdog refeeds it; no
+  // second `seek` is sent with `ms` null.
   z.object({
     type: z.literal('seek'),
     t: ms,
@@ -244,7 +246,7 @@ export const timelineEventSchema = z.discriminatedUnion('type', [
     t: ms,
     action: z.enum(['gap', 'refeed', 'reopen', 'quota', 'stuck']),
     at: seconds,
-    detail: text(200),
+    detail: text(300),
   }),
   // The page lost events to its size cap, or the schema refused some: either
   // may be 0.

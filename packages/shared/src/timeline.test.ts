@@ -204,8 +204,8 @@ describe('timeline events (§16)', () => {
     expect(accepted(dog)).toBe(true)
     expect(accepted({ ...dog, action: 'panic' })).toBe(false)
     expect(accepted({ ...dog, at: -1 })).toBe(false)
-    expect(accepted({ ...dog, detail: 'x'.repeat(200) })).toBe(true)
-    expect(accepted({ ...dog, detail: 'x'.repeat(201) })).toBe(false)
+    expect(accepted({ ...dog, detail: 'x'.repeat(300) })).toBe(true)
+    expect(accepted({ ...dog, detail: 'x'.repeat(301) })).toBe(false)
     expect(accepted({ ...dog, detail: 'half a pair \ud800' })).toBe(false)
   })
 
