@@ -105,7 +105,8 @@ describe('the decoder window', () => {
     expect(window.aheadSeconds('video', 0)).toBe(4)
     expect(window.aheadSeconds('video', 1)).toBe(3)
     expect(window.aheadSeconds('video', 4.5)).toBe(0)
-    expect(window.aheadSeconds('video', 6.5)).toBeCloseTo(2.5)
+    expect(window.aheadSeconds('video', 6.5)).toBe(0)
+    expect(window.aheadSeconds('video', 7.5)).toBeCloseTo(1.5)
     expect(window.aheadSeconds('video', 9)).toBe(0)
     expect(window.aheadSeconds('audio', 0)).toBe(0)
   })
@@ -204,8 +205,8 @@ describe('the decoder window', () => {
 
   it('drops an earlier run whose end is a rounding past the next keyframe, so the cut frees', () => {
     const window = new DecoderWindow()
-    window.fed(run('video', 0, 1 + 1e-9, 100))
-    window.fed(run('video', 1, 2, 100))
+    window.fed(run('video', 0, 1, 100))
+    window.fed(run('video', 1, 2 + 1e-9, 100, false))
     window.fed(run('video', 2, 3, 100))
     expect(window.toRemove('video', 7.5)).toBe(2)
     window.removed('video', 2)
@@ -220,10 +221,34 @@ describe('the decoder window', () => {
     expect(window.toRemove('video', 7)).toBe(2)
     window.removed('video', 2)
     expect(window.bytes()).toBe(0)
-    // Followed by a gap.
+    // With a keyframe run before it, the last run's end is still the cut.
     window.fed(run('video', 10, 12, 100))
     window.fed(run('video', 14, 16, 100))
     expect(window.toRemove('video', 22)).toBe(16)
+  })
+
+  it('does not cut a group at a gap inside it', () => {
+    const window = new DecoderWindow(1000)
+    window.fed(run('video', 0, 1, 600, true))
+    // A group split in two by a gap of 5 ms: VFR, a chunk edge or rounding.
+    window.fed(run('video', 1.005, 2, 600, false))
+    expect(window.bytes()).toBeGreaterThanOrEqual(1000)
+    expect(window.toRemove('video', 1.5)).toBeNull()
+  })
+
+  it('counts a hole at the playhead as nothing held, once the track has started', () => {
+    const window = new DecoderWindow(1000)
+    window.fed(run('video', 0, 1, 600))
+    window.fed(run('video', 1.5, 3, 600))
+    expect(window.aheadSeconds('video', 1.25)).toBe(0)
+    expect(window.wants('video', 1.25)).toEqual({ until: 2.25 })
+    // A hole is no origin: the same playhead before the track began counts it.
+    window.reset()
+    window.fed(run('video', 1.5, 3, 600))
+    expect(window.aheadSeconds('video', 1.2)).toBeCloseTo(1.8)
+    window.reset()
+    window.fed(run('video', 3, 4, 600))
+    expect(window.aheadSeconds('video', 0)).toBe(0)
   })
 
   it('counts a track that starts late, and keeps the cap before its first frame', () => {

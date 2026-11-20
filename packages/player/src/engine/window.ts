@@ -58,6 +58,8 @@ export class DecoderWindow {
   private limit: number
   /** Each track's runs, by start. */
   private readonly runs: Record<'video' | 'audio', FedRun[]> = { video: [], audio: [] }
+  /** Each track's origin: the start of the earliest run fed since the window was made or last reset, or null before one. Where a track began, a playhead just before it is not a hole. */
+  private readonly origins: Record<'video' | 'audio', number | null> = { video: null, audio: null }
 
   constructor(limitBytes = WINDOW_BYTES) {
     this.limit = limitBytes
@@ -77,6 +79,8 @@ export class DecoderWindow {
       if (after !== null) kept.push(after)
     }
     kept.push({ ...run })
+    const origin = this.origins[run.kind]
+    if (origin === null || run.start < origin) this.origins[run.kind] = run.start
     this.runs[run.kind] = kept.sort((a, b) => a.start - b.start)
   }
 
@@ -133,8 +137,9 @@ export class DecoderWindow {
    * or over it, the playhead. The answer is the latest of:
    * - a keyframe's time at or before the bound, with something fed before it, so
    *   the group being played is never cut;
-   * - the end of a group already played: a run that ends at or before the bound
-   *   and is followed by nothing or a gap, so the last group can be cut too.
+   * - the end of the track's last run, when it ends at or before the bound, so
+   *   the last group can be cut too. A gap inside a group (VFR, a chunk edge,
+   *   rounding) is no place to cut: Media Source would remove its keyframe.
    */
   toRemove(kind: 'video' | 'audio', playhead: number): number | null {
     const runs = this.runs[kind]
@@ -142,14 +147,13 @@ export class DecoderWindow {
     if (first === undefined) return null
     const bound = this.bytes() >= this.limit ? playhead : playhead - WINDOW_BEHIND_SECONDS
     let at: number | null = null
-    for (const [index, run] of runs.entries()) {
+    for (const run of runs) {
       if (run.start <= bound && run.keyframe && run.start > first.start) {
         at = Math.max(at ?? run.start, run.start)
       }
-      const next = runs[index + 1]
-      const ends = next === undefined || next.start > run.end + JOIN_SECONDS
-      if (ends && run.end <= bound) at = Math.max(at ?? run.end, run.end)
     }
+    const last = runs[runs.length - 1]
+    if (last !== undefined && last.end <= bound) at = Math.max(at ?? last.end, last.end)
     return at
   }
 
@@ -171,29 +175,32 @@ export class DecoderWindow {
   }
 
   /**
-   * The seconds the track's runs reach from the playhead without a gap. A track
-   * with no run at the playhead counts from the first run that starts within
-   * `GAP_STEP_SECONDS` after it (a picture's first frame shows a little after 0,
-   * and a sound may start late). 0 when there is none.
+   * The seconds the track's runs reach from the playhead without a gap, with only
+   * a rounding of tolerance: a hole at the playhead is nothing held. The one
+   * allowance is for a track that has not started: when the playhead is before
+   * the track's origin by no more than `GAP_STEP_SECONDS` (a picture's first frame
+   * shows a little after 0, and a sound may start late), the time is counted from
+   * the origin. 0 when no run is held there.
    */
   aheadSeconds(kind: 'video' | 'audio', playhead: number): number {
-    let reach: number | null = null
+    const origin = this.origins[kind]
+    const notStarted = origin !== null && playhead < origin && origin - playhead <= GAP_STEP_SECONDS
+    let reach = notStarted ? origin : playhead
+    let held = false
     for (const run of this.runs[kind]) {
       if (run.end <= playhead) continue
-      if (reach === null) {
-        if (run.start > playhead + GAP_STEP_SECONDS) break
-        reach = run.end
-      } else {
-        if (run.start > reach + JOIN_SECONDS) break
-        reach = Math.max(reach, run.end)
-      }
+      if (run.start > reach + JOIN_SECONDS) break
+      reach = Math.max(reach, run.end)
+      held = true
     }
-    return reach === null ? 0 : reach - playhead
+    return held ? reach - playhead : 0
   }
 
   /** Empties the window, for a seek outside it or a reopen. The limit stays as the quota errors have shrunk it. */
   reset(): void {
     this.runs.video = []
     this.runs.audio = []
+    this.origins.video = null
+    this.origins.audio = null
   }
 }
