@@ -245,21 +245,85 @@ describe('the entry of an HEVC picture', () => {
     expect(entry).toEqual(visualEntry('hev1', { width: 1920, height: 1080 }, config))
   })
 
-  it('marks every array of the record complete, whatever the CodecPrivate says, and leaves what it was given as it was', () => {
-    // Arrays of an incomplete kind (bit 7 of their first byte clear): Safari takes hvc1 only when they are marked complete.
-    const given = hevcRecord([32, 33, 34])
+  /** An `hvcC` record whose arrays start with array_completeness clear, each of a NAL unit type and holding units of the lengths given (so no array has a fixed stride). */
+  function clearRecord(arrays: readonly [type: number, lengths: readonly number[]][]): Uint8Array {
+    return concat(
+      hvcC().subarray(8, 8 + 22),
+      [arrays.length],
+      ...arrays.map(([type, lengths]) => [
+        type,
+        ...u16(lengths.length),
+        ...lengths.flatMap((length) => [
+          ...u16(length),
+          ...Array.from({ length }, () => 0x40 + type),
+        ]),
+      ]),
+    )
+  }
+
+  /** The record inside the `hvcC` box of an entry. */
+  function arrayRecord(entry: Uint8Array): Uint8Array {
+    const at = entry.findIndex(
+      (_, i) => String.fromCharCode(...entry.subarray(i, i + 4)) === 'hvcC',
+    )
+    const size = new DataView(entry.buffer, entry.byteOffset).getUint32(at - 4)
+    return entry.subarray(at + 4, at - 4 + size)
+  }
+
+  /** The first byte of each array of a record, in order, by walking it. */
+  function arrayBytes(record: Uint8Array): number[] {
+    const view = new DataView(record.buffer, record.byteOffset, record.length)
+    const out: number[] = []
     let at = 23
-    for (let array = 0; array < 3; array += 1) {
-      given[at] = (given[at] ?? 0) & 0x3f
-      at += 3 + 2 + 2 + 2 // the array's header, the unit's length and the unit's two bytes
+    for (let array = 0; array < (record[22] ?? 0); array += 1) {
+      out.push(record[at] ?? 0)
+      const units = view.getUint16(at + 1)
+      at += 3
+      for (let unit = 0; unit < units; unit += 1) at += 2 + view.getUint16(at)
     }
+    return out
+  }
+
+  it('marks the parameter-set arrays of an hvc1 record complete and leaves the others as given (ISO/IEC 14496-15)', () => {
+    // A VPS, an SPS, a prefix SEI (39) and a PPS, every bit clear, with units of different lengths.
+    const given = clearRecord([
+      [32, [3]],
+      [33, [2, 7, 1]],
+      [39, [4, 5]],
+      [34, [6]],
+    ])
     const before = given.slice()
     const entry = pictureEntry(picture({ codecId: 'V_MPEGH/ISO/HEVC', codecPrivate: given }), null)
     expect(typeOf(entry)).toBe('hvc1')
-    expect(entry).toEqual(
-      visualEntry('hvc1', { width: 1920, height: 1080 }, box('hvcC', hevcRecord([32, 33, 34]))),
-    )
+    expect(arrayBytes(arrayRecord(entry))).toEqual([0x80 | 32, 0x80 | 33, 39, 0x80 | 34])
     expect(given).toEqual(before)
+  })
+
+  it('marks the parameter-set arrays of a Dolby Vision hvc1 base complete too', () => {
+    const given = clearRecord([
+      [32, [3]],
+      [33, [2]],
+      [34, [6]],
+    ])
+    const track = picture({
+      codecId: 'V_MPEGH/ISO/HEVC',
+      codecPrivate: given,
+      blockAdditions: [{ type: DVCC, extraData: dvRecord({ compatibility: 1 }) }],
+    })
+    const entry = pictureEntry(track, null)
+    expect(typeOf(entry)).toBe('hvc1')
+    expect(arrayBytes(arrayRecord(entry))).toEqual([0x80 | 32, 0x80 | 33, 0x80 | 34])
+  })
+
+  it('writes the record of an hev1 entry exactly as it was given, bits clear', () => {
+    const given = clearRecord([
+      [33, [2, 7]],
+      [34, [6]],
+      [39, [4]],
+    ])
+    const entry = pictureEntry(picture({ codecId: 'V_MPEGH/ISO/HEVC', codecPrivate: given }), null)
+    expect(typeOf(entry)).toBe('hev1')
+    expect(entry).toEqual(visualEntry('hev1', { width: 1920, height: 1080 }, box('hvcC', given)))
   })
 
   it('does not count an array of no units, nor an array of another type, as the parameter set', () => {

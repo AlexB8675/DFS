@@ -556,11 +556,15 @@ function entryOf(track: MatroskaPlayTrack): SampleEntry {
   }
 }
 
+/** The NAL unit types of a VPS, an SPS and a PPS, the arrays whose completeness ISO/IEC 14496-15 fixes for `hvc1`. */
+const PARAMETER_SET_TYPES = new Set([32, 33, 34])
+
 /**
  * An `hvcC` box (whole, header included) with the array_completeness bit of each
- * array of parameter sets cleared (`complete` false) or set, or null where the arrays
- * can't be walked. The reader sets it (Safari takes `hvc1` only then), whatever the
- * CodecPrivate says; FFmpeg's
+ * array of a VPS, SPS or PPS cleared (`complete` false) or set, or null where the
+ * arrays can't be walked; other arrays are as they are. The reader sets the bit
+ * for the parameter sets of an `hvc1` entry (Safari takes it only then), whatever
+ * the CodecPrivate says; FFmpeg's
  * MP4 muxer sets that bit (0xa0 for the VPS, where the CodecPrivate of a Matroska
  * file written by ffmpeg has 0x20) whatever the record it was given said: the
  * bit says that every NAL unit of the type is in the array, which the muxer takes
@@ -578,7 +582,7 @@ function withCompleteness(hvcC: Uint8Array, complete: boolean): Uint8Array | nul
     const header = out[at]
     const count = ((out[at + 1] ?? 0) << 8) | (out[at + 2] ?? 0)
     if (header === undefined) return null
-    out[at] = complete ? header | 0x80 : header & 0x7f
+    if (PARAMETER_SET_TYPES.has(header & 0x3f)) out[at] = complete ? header | 0x80 : header & 0x7f
     at += 3
     for (let unit = 0; unit < count; unit += 1)
       at += 2 + (((out[at] ?? 0) << 8) | (out[at + 1] ?? 0))
@@ -652,14 +656,21 @@ function entryProblems(
         }
       }
     } else {
-      // An `hvcC` is compared but for the array_completeness bits (see `withCompleteness`): ours has them all set, and the record it was built from or ffmpeg's has what it has.
-      const lenient = type === 'hvcC'
+      // An `hvcC` of a remux is compared strictly (ffmpeg sets the same bits as ISO/IEC 14496-15 has it). One built from the CodecPrivate is compared but for the parameter-set arrays' completeness bits (see `withCompleteness`), which for an `hvc1` ours has all set.
+      const lenient = type === 'hvcC' && expectedFrom === 'built'
       const x = lenient ? withCompleteness(a, false) : a
       const y = lenient ? withCompleteness(b, false) : b
       if (x === null || y === null) {
         problems.push(`${label}: an 'hvcC' box whose arrays can't be walked`)
-      } else if (lenient && differsAt(withCompleteness(a, true) ?? a, a) < a.length) {
-        problems.push(`${label}: an 'hvcC' box whose arrays are not all marked complete`)
+      } else if (
+        type === 'hvcC' &&
+        ours.type !== 'hev1' &&
+        ours.type !== 'dvhe' &&
+        differsAt(withCompleteness(a, true) ?? a, a) < a.length
+      ) {
+        problems.push(
+          `${label}: an 'hvcC' box whose parameter-set arrays are not all marked complete`,
+        )
       } else if (x.length !== y.length || differsAt(x, y) < x.length) {
         problems.push(
           `${label}: '${type}' box of ${a.length} bytes, ${expectedBy}'s of ${b.length}, first differing at byte ${differsAt(x, y)}`,

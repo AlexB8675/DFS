@@ -151,14 +151,22 @@ function record(track: MatroskaTrack, boxType: string): Uint8Array {
 }
 
 /**
- * Whether the `hvcC` record holds an array of each of the parameter sets, a VPS,
- * an SPS and a PPS, with a unit in it: if it does the entry is `hvc1`, which
- * keeps them in the entry alone, and if not it is `hev1`, which may carry them in
- * the frames. The arrays follow the 22 bytes of fields, each a byte (its NAL
- * unit type in the low 6 bits), the number of its units (16 bits) and the units,
- * each of 16 bits for its length and its bytes. A record cut short is damaged.
+ * The entry type for an `hvcC` record, and the record to write (DESIGN.md §10.4).
+ * The arrays follow the 22 bytes of fields, each a byte (array_completeness in
+ * bit 7, its NAL unit type in the low 6 bits), the number of its units (16 bits)
+ * and the units, each of 16 bits for its length and its bytes. A record cut short
+ * is damaged, and is checked in one walk, before anything is changed.
+ *
+ * If the record holds an array of each of the parameter sets, a VPS, an SPS and a
+ * PPS (types 32 to 34), with a unit in it, the entry is `hvc1`, which keeps them
+ * in the entry alone; if not it is `hev1`, which may carry them in the frames and
+ * whose record is written as it was given. ISO/IEC 14496-15 makes
+ * array_completeness 1 for the parameter-set arrays of an `hvc1` entry (as ffmpeg's
+ * muxer writes it, and Safari wants), whatever a Matroska writer's CodecPrivate
+ * said, so those arrays are marked complete in a copy; every other array (an SEI,
+ * say) keeps the bit it was given.
  */
-function hasParameterSets(config: Uint8Array): boolean {
+function hevcConfig(config: Uint8Array): { type: 'hvc1' | 'hev1'; record: Uint8Array } {
   const cut = () =>
     damaged(
       `the 'hvcC' record in its CodecPrivate holds ${config.length} bytes, which are too few for the arrays of parameter sets that it says it has.`,
@@ -167,11 +175,13 @@ function hasParameterSets(config: Uint8Array): boolean {
   const view = new DataView(config.buffer, config.byteOffset, config.length)
   const arrays = view.getUint8(HEVC_ARRAYS)
   const found = new Set<number>()
+  const headers: number[] = []
   let at = HEVC_ARRAYS + 1
   for (let array = 0; array < arrays; array += 1) {
     if (at + 3 > config.length) throw cut()
     const type = view.getUint8(at) & 0x3f
     const units = view.getUint16(at + 1)
+    if (HEVC_PARAMETER_SETS.includes(type)) headers.push(at)
     at += 3
     for (let unit = 0; unit < units; unit += 1) {
       if (at + 2 > config.length) throw cut()
@@ -180,27 +190,10 @@ function hasParameterSets(config: Uint8Array): boolean {
     }
     if (units > 0) found.add(type)
   }
-  return HEVC_PARAMETER_SETS.every((type) => found.has(type))
-}
-
-/**
- * A copy of an `hvcC` record with `array_completeness` (bit 7 of the first byte
- * of each array) set, whatever the CodecPrivate said: a writer that muxes with
- * the parameter sets also in the stream marks its arrays incomplete, and Safari
- * then won't take `hvc1`. The record has been walked by `hasParameterSets`, so it
- * is whole.
- */
-function completeArrays(config: Uint8Array): Uint8Array {
-  const copy = config.slice()
-  const view = new DataView(copy.buffer, copy.byteOffset, copy.length)
-  let at = HEVC_ARRAYS + 1
-  for (let array = 0; array < view.getUint8(HEVC_ARRAYS); array += 1) {
-    view.setUint8(at, view.getUint8(at) | 0x80)
-    const units = view.getUint16(at + 1)
-    at += 3
-    for (let unit = 0; unit < units; unit += 1) at += 2 + view.getUint16(at)
-  }
-  return copy
+  if (!HEVC_PARAMETER_SETS.every((type) => found.has(type))) return { type: 'hev1', record: config }
+  const record = config.slice()
+  for (const header of headers) record[header] = (record[header] ?? 0) | 0x80
+  return { type: 'hvc1', record }
 }
 
 /** What the first keyframe of a VP9 stream says of its colour configuration. */
@@ -455,9 +448,9 @@ export function pictureEntry(track: MatroskaTrack, keyframe: Uint8Array | null):
       dolbyType = 'dva1'
       break
     case 'V_MPEGH/ISO/HEVC': {
-      const hvcC = record(track, 'hvcC')
-      type = hasParameterSets(hvcC) ? 'hvc1' : 'hev1'
-      config = box('hvcC', completeArrays(hvcC))
+      const hevc = hevcConfig(record(track, 'hvcC'))
+      type = hevc.type
+      config = box('hvcC', hevc.record)
       dolbyType = type === 'hvc1' ? 'dvh1' : 'dvhe'
       break
     }
