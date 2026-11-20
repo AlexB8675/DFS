@@ -29,21 +29,31 @@ describe('Positions', () => {
     expect(positions.offsetAt(1.99)).toBe(5000)
   })
 
-  it('answers the least offset of the runs of either track that cover the time', () => {
+  it('answers the picture’s offset, whatever the sound’s runs are', () => {
     const positions = new Positions()
-    // A file of all picture and then all sound: the picture's offset is the least.
+    // A file of all picture and then all sound.
     positions.add(run('video', 0, 1, 1000))
     positions.add(run('audio', 0, 0.5, 900_000))
     positions.add(run('audio', 0.5, 1.5, 910_000))
     expect(positions.offsetAt(0.25)).toBe(1000)
     expect(positions.offsetAt(0.75)).toBe(1000)
-    // Only the sound covers 1.2 s: its offset.
-    expect(positions.offsetAt(1.2)).toBe(910_000)
-    // Runs in the order they were fed, not by time or offset.
-    const apart = new Positions()
-    apart.add(run('audio', 0, 1, 700))
-    apart.add(run('video', 0, 1, 300))
-    expect(apart.offsetAt(0.5)).toBe(300)
+    // A file of all sound and then all picture: the picture's offset, not the least.
+    const soundFirst = new Positions()
+    soundFirst.add(run('audio', 0, 1, 100))
+    soundFirst.add(run('video', 0, 1, 800_000))
+    expect(soundFirst.offsetAt(0.5)).toBe(800_000)
+  })
+
+  it('answers the nearest picture run at or before a time that only the sound covers, and null before any', () => {
+    const positions = new Positions()
+    positions.add(run('audio', 0, 4, 40))
+    positions.add(run('video', 0.033, 1, 300))
+    positions.add(run('video', 1.5, 2, 700))
+    // The picture's first frame is shown at 0.033 s: nothing of the picture is before 0.
+    expect(positions.offsetAt(0)).toBeNull()
+    // In a gap of the picture that the sound covers: the picture run before it.
+    expect(positions.offsetAt(1.2)).toBe(300)
+    expect(positions.offsetAt(3)).toBe(700)
   })
 
   it('answers the nearest run at or before a time that none covers, and null before them all', () => {
@@ -57,12 +67,13 @@ describe('Positions', () => {
     expect(positions.offsetAt(9)).toBe(5000)
   })
 
-  it('takes the run that ends nearest the time when several end before it, whichever track', () => {
+  it('takes the picture run that ends nearest the time, the least offset of those that end together', () => {
     const positions = new Positions()
     positions.add(run('video', 0, 3, 100))
     positions.add(run('audio', 0, 4, 40))
     positions.add(run('video', 3, 3.5, 300))
-    expect(positions.offsetAt(10)).toBe(40)
+    positions.add(run('video', 3, 3.5, 250))
+    expect(positions.offsetAt(10)).toBe(250)
   })
 
   it('forgets everything on clear', () => {
