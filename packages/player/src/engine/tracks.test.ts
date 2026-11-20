@@ -17,6 +17,7 @@ import {
 import type { EbmlTrackSpec, TrackSpec } from '@dfs/mp4/testing'
 import { describe, expect, it } from 'vitest'
 import { chooseEngineTracks } from './tracks.ts'
+import type { EngineRefusal } from './tracks.ts'
 
 // The choice of the tracks that play and of the names Media Source is asked for
 // them (DESIGN.md §10.4). Every file is built in code and opened with `openSource`,
@@ -126,7 +127,7 @@ function browser(takes: (mime: string) => boolean): {
 /** The tracks that a choice gave, which must be them and not a refusal. */
 function tracksOf(
   result: ReturnType<typeof chooseEngineTracks>,
-): Exclude<ReturnType<typeof chooseEngineTracks>, { refusal: string }> {
+): Exclude<ReturnType<typeof chooseEngineTracks>, EngineRefusal> {
   if ('refusal' in result) throw new Error(`expected the tracks, got: ${result.refusal}`)
   return result
 }
@@ -140,7 +141,6 @@ describe('the names that Media Source is asked for (§10.4)', () => {
     expect(result.video.mime).toBe(`video/mp4; codecs="${index.video.codec}"`)
     expect(result.audio?.kind).toBe('audio')
     expect(result.audio?.mime).toBe('audio/mp4; codecs="mp4a.40.2"')
-    expect(result.soundNote).toBeNull()
     expect(asked).toEqual([result.video.mime, result.audio?.mime])
   })
 
@@ -178,6 +178,7 @@ describe('the names that Media Source is asked for (§10.4)', () => {
     const result = chooseEngineTracks(index, (mime) => mime.startsWith('audio/'))
     expect(result).toEqual({
       refusal: `This browser's Media Source takes none of ${index.video.codecNames.join(', ')}`,
+      reason: 'codec',
     })
     expect(index.video.codecNames.length).toBeGreaterThan(1)
   })
@@ -187,6 +188,7 @@ describe('the names that Media Source is asked for (§10.4)', () => {
     const { supports, asked } = browser((mime) => mime.startsWith('audio/'))
     expect(chooseEngineTracks(index, supports)).toEqual({
       refusal: `This browser's Media Source takes none of ${index.video.codecNames.join(', ')}`,
+      reason: 'codec',
     })
     expect(asked.every((mime) => mime.startsWith('video/'))).toBe(true)
   })
@@ -201,43 +203,66 @@ describe('the sound that plays (§10.4)', () => {
       expect(index.sound).not.toBeNull()
       expect(result.video.soundId).toBe(2)
       expect(result.audio?.soundId).toBe(2)
-      expect(result.soundNote).toBeNull()
     }
   })
 
-  it('plays no sound, and says why, when the browser takes none of its names', () => {
+  it('refuses the play, as for the picture, when the browser takes none of the sound names', () => {
     const index = mp4Of([picture(), sound({ id: 2 })])
-    const result = tracksOf(chooseEngineTracks(index, (mime) => mime.startsWith('video/')))
-    expect(result.audio).toBeNull()
-    expect(result.soundNote).toBe(
-      `This browser's Media Source takes none of ${(index.sound?.codecNames ?? []).join(', ')}`,
-    )
-    // No sound plays, so none is asked of the cursor.
-    expect(result.video.soundId).toBeNull()
+    const result = chooseEngineTracks(index, (mime) => mime.startsWith('video/'))
+    expect(result).toEqual({
+      refusal: `This browser's Media Source takes none of ${(index.sound?.codecNames ?? []).join(', ')}`,
+      reason: 'codec',
+    })
   })
 
-  it("joins the sound's names with ', ' in the note", () => {
-    const result = tracksOf(
-      chooseEngineTracks(webmOf([WEBM_OPUS]), (mime) => mime.startsWith('video/')),
-    )
-    expect(result.soundNote).toBe("This browser's Media Source takes none of opus, Opus")
+  it("joins the sound's names with ', ' in the refusal", () => {
+    const result = chooseEngineTracks(webmOf([WEBM_OPUS]), (mime) => mime.startsWith('video/'))
+    expect(result).toEqual({
+      refusal: "This browser's Media Source takes none of opus, Opus",
+      reason: 'codec',
+    })
   })
 
-  it('gives no sound and no note for a file with no sound', () => {
+  it("gives the reader's own sentence and reason for a first sound it refuses", () => {
+    // PCM: no browser's Media Source takes it in MP4, so the reader refuses it.
+    const index = mp4Of([picture(), sound({ id: 2, entries: [audioEntry('sowt')] })])
+    expect(index.sound).toBeNull()
+    const offer = index.sounds[0]
+    if (offer === undefined || !('refusal' in offer)) throw new Error('expected a refused sound')
+    const { supports, asked } = browser(() => true)
+    const result = chooseEngineTracks(index, supports)
+    expect(result).toEqual({ refusal: offer.refusal.message, reason: offer.refusal.reason })
+    expect('refusal' in result && result.reason).toBe('unsupported-codec')
+    expect('refusal' in result && result.refusal).toContain('sowt')
+    expect(asked.every((mime) => mime.startsWith('video/'))).toBe(true)
+  })
+
+  it('plays with no sound for a file with no sound', () => {
     const index = mp4Of([picture()])
     expect(index.sound).toBeNull()
+    expect(index.sounds).toEqual([])
     const result = tracksOf(chooseEngineTracks(index, () => true))
     expect(result.audio).toBeNull()
-    expect(result.soundNote).toBeNull()
     expect(result.video.soundId).toBeNull()
   })
 
-  it('gives no sound and no note for a file whose first sound has no frames', () => {
+  it('plays with no sound when the first sound has no frames, though a later one is playable (carry M4)', () => {
+    const index = mp4Of([picture(), emptySound({ id: 2 }), sound({ id: 3 })])
+    expect(index.sound).toBeNull()
+    expect(index.sounds[0]).toMatchObject({ id: 3 })
+    const { supports, asked } = browser(() => true)
+    const result = tracksOf(chooseEngineTracks(index, supports))
+    expect(result.audio).toBeNull()
+    expect(result.video.soundId).toBeNull()
+    expect(asked.every((mime) => mime.startsWith('video/'))).toBe(true)
+  })
+
+  it('plays with no sound when the only sound has no frames', () => {
     const index = mp4Of([picture(), emptySound({ id: 2 })])
     expect(index.sound).toBeNull()
+    expect(index.sounds).toEqual([])
     const result = tracksOf(chooseEngineTracks(index, () => true))
     expect(result.audio).toBeNull()
-    expect(result.soundNote).toBeNull()
   })
 
   it('plays index.sound, not sounds[0], when the index plays another sound than the first', () => {
