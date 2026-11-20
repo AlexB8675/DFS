@@ -519,6 +519,13 @@ describe('Downloader: reading to the end', () => {
   })
 })
 
+describe('Downloader: the file it plays', () => {
+  it('says the size of the file, which is the store’s', () => {
+    const rig = build({ url: 'http://localhost/none', store: memoryStore(3 * MIB + 5) })
+    expect(rig.downloader.fileSize).toBe(3 * MIB + 5)
+  })
+})
+
 describe('Downloader: failures and retries', () => {
   // 1.5 MiB is the brief's case (a block and a half, and a whole number of the server's 64 KiB pieces); 1,500,000 is a multiple of neither, so that a resume rounded to a piece would be seen too.
   it.each([1_572_864, 1_500_000])(

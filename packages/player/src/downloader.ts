@@ -354,6 +354,11 @@ export class Downloader {
     this.#nextId = (options.head?.id ?? 0) + 1
   }
 
+  /** The size of the file, which is the store's. */
+  get fileSize(): number {
+    return this.#store.fileSize
+  }
+
   state(): DownloaderState {
     return this.#state
   }
