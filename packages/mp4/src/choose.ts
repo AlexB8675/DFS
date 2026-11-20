@@ -3,6 +3,7 @@ import { codecNames, initEntry } from './codecs.ts'
 import { Mp4Error } from './errors.ts'
 import { frameTable } from './frames.ts'
 import type { FrameTable } from './frames.ts'
+import { displayTimed } from './retime.ts'
 import type { Movie, SampleEntry, TrackHeader } from './movie.ts'
 import { keyframeIndexes, trackTiming } from './timing.ts'
 import type { TrackTiming } from './timing.ts'
@@ -139,7 +140,8 @@ export function playTrack(
     const entry = initEntry(only)
     refuseExternal(track, only)
     trackTiming(track, movieTimescale)
-    const table = frameTable(track, fileSize)
+    // Re-timed here, once over the whole table, so that every fragment is a slice of one timeline (`displayTimed`). The movie-level tables stay as the file has them.
+    const table = displayTimed(frameTable(track, fileSize))
     const first = firstPresented(table)
     const timing = trackTiming(track, movieTimescale, first)
     if (what === 'picture') refuseCut(track, first)

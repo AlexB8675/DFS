@@ -73,7 +73,11 @@ function listedSizes(
   return (i) => iamfPacketSize(sample(table.offsets[i] ?? 0, table.sizes[i] ?? 0)) ?? -1
 }
 
-/** Frame `i` of the table against a packet of ffprobe: `pos` (when `withPos`), `size` (as `listed` says), `dts`, `pts` and the keyframe flag, all in the stream's ticks. */
+/**
+ * Frame `i` of the table against a packet of ffprobe: `pos` (when `withPos`), `size` (as `listed` says), `pts` and the keyframe flag, all in the stream's ticks.
+ * The decode time is not compared: a play track's decode times are the running sum of its display durations (`displayTimed`), which a file's own `dts` is not
+ * where its frames are reordered. What is kept is when each frame is shown (`pts`), and that decode times rise (`compareWhole`).
+ */
 function compareFrame(
   found: Differences,
   table: FrameTable,
@@ -84,7 +88,6 @@ function compareFrame(
 ): void {
   if (withPos) found.note('pos', i, table.offsets[i], Number(packet.pos))
   found.note('size', i, listed(i), Number(packet.size))
-  found.note('dts', i, table.dts[i], packet.dts)
   found.note('pts', i, (table.dts[i] ?? 0) + (table.cts[i] ?? 0), packet.pts)
   found.note('keyframe', i, table.sync[i] === 1, packet.flags?.includes('K') ?? false)
 }
@@ -103,6 +106,14 @@ function compareWhole(
   const found = new Differences()
   for (let i = 0; i < Math.min(table.count, packets.length); i += 1) {
     compareFrame(found, table, i, packets[i] ?? {}, true, listed)
+  }
+  for (let i = 1; i < table.count; i += 1) {
+    if (!((table.dts[i] ?? 0) > (table.dts[i - 1] ?? 0))) {
+      problems.push(
+        `${label}: decode time of frame ${i} does not rise (${table.dts[i - 1]}, then ${table.dts[i]})`,
+      )
+      break
+    }
   }
   return [...problems, ...found.report(label)]
 }

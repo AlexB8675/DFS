@@ -576,17 +576,17 @@ describe('fragments (§10.4)', () => {
     expect(read.sequence).toBe(7)
     // The base of the data is the moof, with no other field in the tfhd than the track's ID.
     expect(read.tfhd).toEqual({ version: 0, flags: 0x020000, id: PICTURE_ID, remaining: 0 })
-    // The decode time of the first frame, raw: the edit list's offset is the player's.
-    expect(read.tfdt).toEqual({ version: 1, time: 1000, remaining: 0 })
+    // The decode time of the first frame, raw: the edit list's offset is the player's. The play track's frames last until the next is shown, and its decode times are the sum of those (`displayTimed`): frame 0 lasts 500 ticks, from its 2000 to the 2500 of frame 2, shown after the frame 1 shown at 0.
+    expect(read.tfdt).toEqual({ version: 1, time: 500, remaining: 0 })
     expect(read.trun.version).toBe(1)
     // The data offset, and each frame's duration, size, flags and composition offset.
     expect(read.trun.flags).toBe(0x000f01)
     expect(read.trun.count).toBe(4)
     expect(read.trun.frames).toEqual([
-      { duration: 1000, size: 20, flags: NOT_SYNC, offset: -1000 },
-      { duration: 1500, size: 30, flags: NOT_SYNC, offset: 500 },
-      { duration: 1500, size: 40, flags: SYNC, offset: 500 },
-      { duration: 1500, size: 50, flags: NOT_SYNC, offset: 500 },
+      { duration: 2000, size: 20, flags: NOT_SYNC, offset: -500 },
+      { duration: 1500, size: 30, flags: NOT_SYNC, offset: 0 },
+      { duration: 1500, size: 40, flags: SYNC, offset: 0 },
+      { duration: 1500, size: 50, flags: NOT_SYNC, offset: 0 },
     ])
 
     // The offset is from the start of the moof (which is where the fragment starts) to the first frame's bytes.
@@ -683,7 +683,7 @@ describe('fragments (§10.4)', () => {
 
   it('writes the bytes it always has for a small fragment', () => {
     // Pinned, so that a change in how the moof is put together can't change a byte of it unseen: the first three
-    // frames of the picture, a keyframe and then two that depend on others (the second with a negative composition offset).
+    // frames of the picture, a keyframe and then two that depend on others (the second with a negative composition offset: it is shown first).
     const { video } = play()
     const bytes = fragment(video, 0, 3, 7, recorder().bytesAt)
     const pinned = [
@@ -693,9 +693,9 @@ describe('fragments (§10.4)', () => {
       '00000010746668640002000000000003', // tfhd
       '0000001474666474010000000000000000000000', // tfdt
       '000000447472756e01000f010000000300000090', // trun: version 1, flags 0xf01, 3 frames, data offset 144
-      '000003e80000000a02000000000007d0', // frame 0: 1000 ticks, 10 bytes, keyframe, offset 2000
-      '000003e80000001401010000fffffc18', // frame 1: 1000 ticks, 20 bytes, depends on others, offset -1000
-      '000005dc0000001e01010000000001f4', // frame 2: 1500 ticks, 30 bytes, depends on others, offset 500
+      '000001f40000000a02000000000007d0', // frame 0: 500 ticks, 10 bytes, keyframe, offset 2000
+      '000007d00000001401010000fffffe0c', // frame 1: 2000 ticks, 20 bytes, depends on others, offset -500
+      '000005dc0000001e0101000000000000', // frame 2: 1500 ticks, 30 bytes, depends on others, offset 0
       '000000446d646174', // mdat
       'f7f8f9fa000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f3031323334353637', // the 60 bytes of the three frames
     ].join('')
