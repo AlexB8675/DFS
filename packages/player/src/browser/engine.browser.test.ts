@@ -8,11 +8,11 @@
 import type { TimelineEventInput } from '@dfs/shared'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { Downloader } from '../downloader.ts'
-import { CHUNK_BYTES, WINDOW_BYTES } from '../limits.ts'
+import { CHUNK_BYTES, WINDOW_BYTES, WINDOW_FLOOR_BYTES } from '../limits.ts'
 import { PLAYS_DIRECTORY } from '../opfs.ts'
 import { MediaSourceSink, playStreamed } from '../page/index.ts'
 import type { EngineStats } from '../page/index.ts'
-import { control, fileUrl, files } from './server.ts'
+import { clearLog, control, fileUrl, files, log, switchNetwork } from './server.ts'
 
 const synthetic = files().filter((file) => file.synthetic)
 
@@ -62,7 +62,14 @@ afterEach(async () => {
 })
 
 /** Starts a play of the named file, with its events and numbers kept. The engine's promise is not awaited. */
-function begin(name: string, options: { startAt?: number } = {}): Play {
+function begin(
+  name: string,
+  options: {
+    startAt?: number
+    windowBytes?: number
+    onEvent?: (event: TimelineEventInput, play: Play) => void
+  } = {},
+): Play {
   const file = served(name)
   if (file === undefined) throw new Error(`${name} is not served.`)
   const video = document.createElement('video')
@@ -72,6 +79,8 @@ function begin(name: string, options: { startAt?: number } = {}): Play {
   const events: TimelineEventInput[] = []
   const stats: EngineStats[] = []
   const playId = crypto.randomUUID()
+  // eslint-disable-next-line prefer-const -- the event hook reads `play`, so it is declared before the call that makes the hook run.
+  let play: Play
   const done = playStreamed({
     video,
     url: fileUrl(file.id),
@@ -79,11 +88,15 @@ function begin(name: string, options: { startAt?: number } = {}): Play {
     makeWorker,
     signal: controller.signal,
     ...(options.startAt === undefined ? {} : { startAt: options.startAt }),
-    onEvent: (event) => events.push(event),
+    ...(options.windowBytes === undefined ? {} : { windowBytes: options.windowBytes }),
+    onEvent: (event) => {
+      events.push(event)
+      options.onEvent?.(event, play)
+    },
     onStats: (numbers) => stats.push(numbers),
     estimate: roomy,
   })
-  const play: Play = {
+  play = {
     video,
     playId,
     events,
@@ -109,6 +122,7 @@ function begin(name: string, options: { startAt?: number } = {}): Play {
 async function until(play: Play, what: string, ms: number, done: () => boolean): Promise<void> {
   const from = performance.now()
   while (!done()) {
+    if (play.resolved) throw new Error(`The play ended while waiting for ${what}.`)
     if (play.rejection !== null) {
       throw new Error(`The play was rejected while waiting for ${what}.`, {
         cause: play.rejection.reason,
@@ -164,6 +178,12 @@ suite('h264-aac-faststart.mp4')('playStreamed: a play from its start', () => {
     const appended = ofType(play.events, 'append')
     expect(appended.some((event) => event.track === 'video')).toBe(true)
     expect(appended.some((event) => event.track === 'audio')).toBe(true)
+    await until(
+      play,
+      'the numbers to catch up',
+      5_000,
+      () => play.stats.at(-1)?.segments === ofType(play.events, 'append').length,
+    )
     const last = play.stats.at(-1)
     expect(last?.backend).toBe('disk')
     expect(last?.storedBytes).toBeGreaterThan(0)
@@ -177,6 +197,8 @@ suite('h264-aac-faststart.mp4')('playStreamed: a play from its start', () => {
   })
 
   test('gives the downloader the playhead while it plays', async () => {
+    // A slow link keeps the download reading: the position is not given once the download is done (the file is held whole).
+    await control({ bandwidthBytesPerSecond: 250_000 })
     const position = vi.spyOn(Downloader.prototype, 'setPosition')
     const play = begin('h264-aac-faststart.mp4')
     await until(play, 'the first picture', 15_000, () => play.video.readyState >= 2)
@@ -239,6 +261,88 @@ suite('h264-aac-faststart.mp4')('playStreamed: a play from its start', () => {
     } finally {
       SourceBuffer.prototype.appendBuffer = real
     }
+  })
+
+  test('keeps the bytes of the window under a small limit of its own', async () => {
+    // The least the window class allows is no more than its limit: 2 MiB is under every synthetic file's 5 MB.
+    const limit = 2 * 1024 * 1024
+    const play = begin('h264-aac-faststart.mp4', { windowBytes: limit })
+    await until(play, 'the first picture', 15_000, () => play.video.readyState >= 2)
+    play.video.playbackRate = 2
+    await play.video.play()
+    await until(play, 'the end', 40_000, () => play.video.ended)
+    expect(play.stats.length).toBeGreaterThan(3)
+    expect(Math.max(...play.stats.map((numbers) => numbers.windowBytes))).toBeLessThanOrEqual(
+      limit + CHUNK_BYTES,
+    )
+    expect(ofType(play.events, 'remove').length).toBeGreaterThan(0)
+    expect(ofType(play.events, 'error')).toEqual([])
+  })
+
+  test('says a quota error that nothing can mend once, waits for the playhead, and plays on when the browser takes data again', async () => {
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- the original is called on the buffer it was taken from, below.
+    const real = SourceBuffer.prototype.appendBuffer
+    let fragments = 0
+    let refusing = true
+    SourceBuffer.prototype.appendBuffer = function (this: SourceBuffer, source: BufferSource) {
+      const head = ArrayBuffer.isView(source)
+        ? new Uint8Array(source.buffer, source.byteOffset, source.byteLength)
+        : new Uint8Array(source)
+      if (String.fromCharCode(...head.subarray(4, 8)) !== 'ftyp') {
+        fragments += 1
+        if (refusing && fragments > 4) {
+          throw new DOMException('The buffer is full.', 'QuotaExceededError')
+        }
+      }
+      real.call(this, source)
+    }
+    try {
+      const play = begin('h264-aac-faststart.mp4', { windowBytes: WINDOW_FLOOR_BYTES })
+      await until(play, 'the first picture', 15_000, () => play.video.readyState >= 2)
+      await play.video.play()
+      // The playhead goes through the little that is buffered and waits at its end, while the browser refuses.
+      await new Promise((resolve) => setTimeout(resolve, 4_000))
+      expect(ofType(play.events, 'quota')).toHaveLength(1)
+      expect(
+        ofType(play.events, 'watchdog').filter((event) => event.action === 'quota'),
+      ).toHaveLength(1)
+      refusing = false
+      await until(
+        play,
+        'the clock past what was buffered',
+        20_000,
+        () => play.video.currentTime > 4,
+      )
+      expect(ofType(play.events, 'error')).toEqual([])
+    } finally {
+      SourceBuffer.prototype.appendBuffer = real
+    }
+  })
+
+  test('a failure after the first picture sends one error, stops the download and reads nothing more', async () => {
+    // A slow link keeps the read open. A network change breaks it; the read is then dropped once, and then refused for good (404).
+    await control({ bandwidthBytesPerSecond: 200_000 })
+    const play = begin('h264-aac-faststart.mp4')
+    await until(play, 'the first picture', 20_000, () => play.video.readyState >= 2)
+    await control({
+      bandwidthBytesPerSecond: 200_000,
+      faults: [
+        { kind: 'drop', afterBytes: 0 },
+        { kind: 'status', status: 404 },
+      ],
+    })
+    await switchNetwork(200)
+    await until(
+      play,
+      'the play to fail',
+      30_000,
+      () => ofType(play.events, 'phase').at(-1)?.phase === 'failed',
+    )
+    expect(ofType(play.events, 'error')).toHaveLength(1)
+    await clearLog()
+    await new Promise((resolve) => setTimeout(resolve, 3_000))
+    expect(await log()).toEqual([])
+    expect(play.stats.at(-1)?.error).not.toBeNull()
   })
 
   test('plays to its end: ended fires once, and the stream is ended once', async () => {
@@ -311,6 +415,29 @@ suite('h264-aac-faststart.mp4')('playStreamed: from a given time', () => {
     expect(frames(play.video)).toBeGreaterThan(0)
     expect(ofType(play.events, 'error')).toEqual([])
   })
+
+  test('startAt past the end starts near it, and ends', async () => {
+    const play = begin('h264-aac-faststart.mp4', { startAt: 100 })
+    await until(play, 'a picture', 15_000, () => play.video.readyState >= 2)
+    expect(play.video.currentTime).toBeGreaterThan(8)
+    let ended = 0
+    play.video.addEventListener('ended', () => {
+      ended += 1
+    })
+    await play.video.play()
+    await until(play, 'the end', 20_000, () => ended > 0 || play.video.ended)
+    expect(ofType(play.events, 'error')).toEqual([])
+  })
+
+  test('an abort during the first feeds rejects with its reason', async () => {
+    const reason = new Error('left during the first feeds')
+    const play = begin('h264-aac-faststart.mp4', {
+      onEvent: (event, started) => {
+        if (event.type === 'append') started.controller.abort(reason)
+      },
+    })
+    await expect(play.done).rejects.toBe(reason)
+  })
 })
 
 // The sound of `late-sound.mp4` is shown 0.48 s in: with the clock at 0 the element has no sound there, and waits.
@@ -377,4 +504,17 @@ describe('playStreamed: a file that cannot play', () => {
       await expectRefusal('h264-ac3.mp4', 'codec')
     },
   )
+})
+
+suite('h264-aac.mkv')('playStreamed: a Matroska file', () => {
+  test('shows a picture and plays to its end', async () => {
+    const play = begin('h264-aac.mkv')
+    await until(play, 'the first picture', 15_000, () => play.video.readyState >= 2)
+    play.video.playbackRate = 4
+    await play.video.play()
+    await until(play, 'the end', 30_000, () => play.video.ended)
+    expect(frames(play.video)).toBeGreaterThan(0)
+    expect(ofType(play.events, 'phase').at(-1)?.phase).toBe('ended')
+    expect(ofType(play.events, 'error')).toEqual([])
+  })
 })

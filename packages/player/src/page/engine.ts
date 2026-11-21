@@ -35,6 +35,9 @@ import { MediaSourceSink, SinkQuotaError } from './sink.ts'
 
 type Kind = 'video' | 'audio'
 
+/** `HTMLMediaElement.HAVE_FUTURE_DATA`: the element has data past the clock. */
+const HAVE_FUTURE_DATA = 3
+
 /** The length of a frame that the engine takes when the picture's table cannot say: a Matroska file's, which has none. */
 const UNKNOWN_FRAME_SECONDS = 1 / 30
 
@@ -45,7 +48,7 @@ export interface EngineStats {
   codecs: string[]
   /** Each SourceBuffer MIME type, and whether `MediaSource.isTypeSupported` said yes: the engine only plays a type that it did. */
   supported: Record<string, boolean>
-  /** The bytes of the file that the store holds now. */
+  /** The bytes of the file that the store has taken, cumulative: what it holds and what it has evicted. */
   bytesReceived: number
   /** Time the downloader spent reading from the network. */
   readingMs: number
@@ -96,6 +99,19 @@ export interface PlayStreamedOptions {
   onStats: (stats: EngineStats) => void
   fetch?: typeof fetch
   estimate?: StorageEstimator
+  /** For tests: the decoder window's starting limit in bytes; `WINDOW_BYTES` when missing. */
+  windowBytes?: number
+}
+
+function isRefusal(error: unknown): error is { refusal: string } {
+  return typeof error === 'object' && error !== null && 'refusal' in error
+}
+
+/** Whether a lower layer has already put the failure on the timeline: a refusal and a damaged file (the feeder's), a read the server refused for good (the download's). */
+function isTold(error: unknown): boolean {
+  return (
+    isRefusal(error) || error instanceof Mp4Error || (error instanceof ReadError && error.fatal)
+  )
 }
 
 function isAbort(error: unknown): boolean {
@@ -133,7 +149,7 @@ class Play {
   readonly #signal: AbortSignal
   /** Aborts what the feed waits on: when the play is over, or fails. The controls will abort it for a seek. */
   readonly #feedControl = new AbortController()
-  readonly #window = new DecoderWindow()
+  readonly #window: DecoderWindow
   #downloader: Downloader | null = null
   #feeder: Feeder | null = null
   #sink: MediaSourceSink | null = null
@@ -157,6 +173,12 @@ class Play {
   readonly #timers: ReturnType<typeof setInterval>[] = []
   readonly #listeners: [string, () => void][] = []
   #lastStatsAt = performance.now()
+  /** The start the sink was asked for while it has not yet put the clock there: the playhead is the start until it has. */
+  #pendingStart: number | null = null
+  /** True from a quota error that nothing could mend until the next append or removal: the timeline hears of it once. */
+  #quotaStalled = false
+  /** Where the playhead was at such an error once the play had begun: the feed waits for it to move. */
+  #stallAt: number | null = null
   readonly #stats: EngineStats = {
     phase: 'opening',
     codecs: [],
@@ -185,6 +207,7 @@ class Play {
     this.#options = options
     this.#video = options.video
     this.#signal = options.signal
+    this.#window = new DecoderWindow(options.windowBytes)
     const startAt = options.startAt
     this.#target = startAt !== undefined && Number.isFinite(startAt) && startAt > 0 ? startAt : 0
     const stop = (): void => {
@@ -219,7 +242,7 @@ class Play {
       const held = store.held()
       stats.backend = store.backend
       stats.storedBytes = store.stats().storedBytes
-      stats.bytesReceived = held.bytes()
+      stats.bytesReceived = held.bytes() + store.stats().evictedBytes
       stats.rate = downloader.rate()
     }
     stats.windowBytes = this.#window.bytes()
@@ -244,6 +267,11 @@ class Play {
 
   /** Where the playhead is: the target until the common start has put the clock there. */
   #at(): number {
+    const pending = this.#pendingStart
+    if (pending !== null) {
+      if (Math.abs(this.#video.currentTime - pending) > 0.25) return pending
+      this.#pendingStart = null
+    }
     return this.#started ? this.#video.currentTime : this.#target
   }
 
@@ -276,12 +304,22 @@ class Play {
       ...(options.estimate === undefined ? {} : { estimate: options.estimate }),
     })
     this.#downloader = downloader
-    const [opened, attached] = await Promise.allSettled([
-      Feeder.open(downloader, (mime) => MediaSource.isTypeSupported(mime), this.#emit, {
-        signal: this.#signal,
-      }),
-      MediaSourceSink.open(this.#video, null, this.#signal),
-    ])
+    // Each fails the other at once: a refused file does not wait for the element, nor the element for the file.
+    const opening = new AbortController()
+    const joined = AbortSignal.any([this.#signal, opening.signal])
+    const failOther = (reason: unknown): void => {
+      opening.abort(reason)
+    }
+    const feederOpen = Feeder.open(
+      downloader,
+      (mime) => MediaSource.isTypeSupported(mime),
+      this.#emit,
+      { signal: joined },
+    )
+    const sinkOpen = MediaSourceSink.open(this.#video, null, joined)
+    feederOpen.catch(failOther)
+    sinkOpen.catch(failOther)
+    const [opened, attached] = await Promise.allSettled([feederOpen, sinkOpen])
     if (opened.status === 'fulfilled') this.#feeder = opened.value
     if (attached.status === 'fulfilled') this.#sink = attached.value
     if (opened.status === 'rejected') throw opened.reason
@@ -298,16 +336,25 @@ class Play {
     this.#setPhase('buffering')
 
     if (this.#target > 0) await feeder.seek(this.#target, this.#feedControl.signal)
-    // The first fragments: fed until the picture is buffered, which is where the clock can be put.
+    // The first fragments: fed until every track that plays has data past the target, the file ends, or a feed makes no progress.
     for (;;) {
       const result = await this.#feedOnce()
-      if (sink.buffered('video').length > 0 || result === 'ended') break
-      if (result === 'idle') await this.#nextWake()
+      if (result === 'ended' || this.#covers(sink)) break
+      if (result === 'idle') {
+        if (!this.#quotaStalled) break
+        await this.#nextWake()
+      }
     }
+    this.#feedControl.signal.throwIfAborted()
     this.#applyCommonStart(picture)
     this.#started = true
     this.#givePosition()
     this.#publish()
+  }
+
+  /** Whether every playing track has buffered data that ends past the target. */
+  #covers(sink: MediaSourceSink): boolean {
+    return this.#kinds.every((kind) => sink.buffered(kind).some(([, end]) => end > this.#target))
   }
 
   /** The sink that the feeder gives its fragments to: it tells the window what was appended, and the timeline, and makes the sound decision's sentence. */
@@ -337,6 +384,7 @@ class Play {
         if (error instanceof SinkQuotaError) this.#quota(kind, bytes.length)
         throw error
       }
+      this.#quotaStalled = false
       this.#window.fed(run)
       this.#appended += 1
       this.#stats.segments += 1
@@ -346,9 +394,12 @@ class Play {
 
   /** A quota error: logged, and the window shrinks. The fragment stays with the feeder, to be appended again. */
   #quota(kind: Kind, pendingBytes: number): void {
+    const limit = this.#window.quota()
+    // A refusal that follows another with nothing mended between is the same stall, and is told once.
+    if (this.#quotaStalled) return
+    this.#quotaStalled = true
     this.#stats.quotaErrors += 1
     this.#say({ type: 'quota', track: kind, pendingBytes })
-    const limit = this.#window.quota()
     this.#say({
       type: 'watchdog',
       action: 'quota',
@@ -366,11 +417,20 @@ class Play {
     const sink = this.#sink
     if (sink === null) return
     const target = this.#target
-    let start = target
+    // A target past the end of the file (the feed ended before covering it): the play starts at the last frames there are.
+    const past = this.#feedDone && !this.#covers(sink)
+    let start = past ? -Infinity : target
     for (const kind of this.#kinds) {
-      const range = sink.buffered(kind).find(([, end]) => end > target)
+      const ranges = sink.buffered(kind)
+      if (past) {
+        const last = ranges.at(-1)
+        if (last !== undefined) start = Math.max(start, last[0])
+        continue
+      }
+      const range = ranges.find(([, end]) => end > target)
       if (range !== undefined) start = Math.max(start, range[0])
     }
+    if (start === -Infinity) start = target
     if (start - target > frameSeconds(picture)) {
       this.#say({
         type: 'watchdog',
@@ -379,7 +439,10 @@ class Play {
         detail: `The tracks first have frames at ${start.toFixed(3)} s, so the play starts there and not at ${target.toFixed(3)} s.`,
       })
     }
-    if (Math.abs(this.#video.currentTime - start) > 1e-6) sink.seek(start)
+    if (Math.abs(this.#video.currentTime - start) > 1e-6) {
+      sink.seek(start)
+      if (Math.abs(this.#video.currentTime - start) > 1e-6) this.#pendingStart = start
+    }
   }
 
   /** Gives the downloader the file offset of the picture at the playhead, when it is known. */
@@ -389,6 +452,7 @@ class Play {
   }
 
   #startTimers(): void {
+    this.#lastStatsAt = performance.now()
     const video = this.#video
     const wake = (): void => {
       this.#wake()
@@ -403,10 +467,19 @@ class Play {
         if (sink !== null && !this.#ended) {
           for (const kind of this.#kinds) this.#window.sync(kind, sink.buffered(kind))
         }
-        this.#wake()
+        // A play that has ended wakes only for a seek (the controls), not for a tick.
+        if (!this.#ended) this.#wake()
       }, WATCH_EVERY_MS),
       setInterval(() => {
-        if (this.#started && !this.#video.paused) this.#givePosition()
+        const video = this.#video
+        if (
+          this.#started &&
+          !video.paused &&
+          !video.ended &&
+          this.#downloader?.state() !== 'done'
+        ) {
+          this.#givePosition()
+        }
       }, POSITION_EVERY_MS),
       setInterval(() => {
         const now = performance.now()
@@ -468,23 +541,40 @@ class Play {
     const signal = this.#feedControl.signal
     try {
       signal.throwIfAborted()
-      await this.#removeDue()
+      if (this.#stallAt !== null) {
+        // After a quota error that nothing could mend, the feed waits for the playhead to move; a clock that has run out of data cannot, so a starved element tries again.
+        const moved = Math.abs(this.#video.currentTime - this.#stallAt) > 1e-3
+        if (!moved && this.#video.readyState >= HAVE_FUTURE_DATA) return 'idle'
+        this.#stallAt = null
+      }
+      if (await this.#removeDue()) this.#quotaStalled = false
       const at = this.#at()
-      let until: number | null = null
+      const untils: number[] = []
       for (const kind of this.#kinds) {
         const wanted = this.#window.wants(kind, at)
-        if (wanted !== null) until = Math.max(until ?? -Infinity, wanted.until)
+        if (wanted !== null && !untils.includes(wanted.until)) untils.push(wanted.until)
       }
-      if (until === null) return 'idle'
-      const before = this.#appended
-      const result = await feeder.feed(until, this.#fragments, signal)
-      if (result === 'ended') {
-        this.#feedDone = true
-        return 'ended'
+      untils.sort((a, b) => a - b)
+      // The least first, so that a track far ahead does not pull the other past its window in one call; the next only when that appended nothing.
+      for (const until of untils) {
+        const before = this.#appended
+        const result = await feeder.feed(until, this.#fragments, signal)
+        if (result === 'ended') {
+          this.#feedDone = true
+          return 'ended'
+        }
+        if (this.#appended > before) return 'fed'
       }
-      return this.#appended > before ? 'fed' : 'idle'
+      return 'idle'
     } catch (error) {
-      if (error instanceof SinkQuotaError) return (await this.#removeDue()) ? 'fed' : 'idle'
+      if (error instanceof SinkQuotaError) {
+        if (await this.#removeDue()) {
+          this.#quotaStalled = false
+          return 'fed'
+        }
+        if (this.#started) this.#stallAt = this.#video.currentTime
+        return 'idle'
+      }
       // The end of a feed, whether the play is over or the sink was closed under it, is no failure.
       if (isAbort(error) && !signal.aborted) return 'idle'
       throw error
@@ -524,11 +614,13 @@ class Play {
     this.#failed = true
     const message = messageOf(error)
     this.#stats.error = message
-    this.#say({ type: 'error', from: 'engine', code: null, message })
+    if (!isTold(error)) this.#say({ type: 'error', from: 'engine', code: null, message })
     this.#setPhase('failed')
     this.#feedControl.abort(error)
     this.#stopTimers()
     this.#wake()
+    // No more is read or stored; the element keeps its last picture until the signal.
+    void this.#downloader?.close()
   }
 
   /**
@@ -538,10 +630,8 @@ class Play {
    */
   rejected(error: unknown): void {
     if (this.#stopped) return
-    const refusal = typeof error === 'object' && error !== null && 'refusal' in error
-    const message = refusal ? messageOf(new Error(String(error.refusal))) : messageOf(error)
-    const told = refusal || error instanceof Mp4Error || (error instanceof ReadError && error.fatal)
-    if (!told) this.#say({ type: 'error', from: 'engine', code: null, message })
+    const message = isRefusal(error) ? messageOf(new Error(error.refusal)) : messageOf(error)
+    if (!isTold(error)) this.#say({ type: 'error', from: 'engine', code: null, message })
     this.#stats.error = message
     this.#setPhase('failed')
   }
@@ -560,6 +650,8 @@ class Play {
         )
       })
     }
+    // A SourceBuffer operation that does not end must not hold the closing.
+    this.#sink?.close()
     await pump
     await this.close()
   }

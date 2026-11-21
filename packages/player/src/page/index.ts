@@ -3,4 +3,4 @@
 
 export { MediaSourceSink, SinkQuotaError } from './sink.ts'
 export { playStreamed } from './engine.ts'
-export type { EngineStats } from './engine.ts'
+export type { EngineStats, PlayStreamedOptions } from './engine.ts'
