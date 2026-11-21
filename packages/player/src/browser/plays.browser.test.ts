@@ -9,7 +9,7 @@
 // failure leaves no screenshot (vitest.browser.config.ts). Every play of this file is checked, when its test is
 // over, for a wait that the engine left in silence.
 
-import { mp4Seek, presentationSeconds } from '@dfs/mp4'
+import { frameAtOrAfter, mp4Seek, presentationSeconds } from '@dfs/mp4'
 import { filesToPlay } from '@dfs/mp4/testing'
 import { commands } from 'vitest/browser'
 import { afterEach, describe, expect, test, vi } from 'vitest'
@@ -106,19 +106,24 @@ function recordReads(): ReadStamp[] {
 
 /**
  * The moment the store held every byte in `needed` (the end offset of each, exclusive): the latest, over them, of
- * when the first read that covers its last byte, made at or after `mark`, resolved; `mark` itself for a byte
- * that no read after it covered (it was held already). Null when there is nothing to say a moment by (Matroska).
+ * when the first read that covers its last byte, made at or after `mark`, resolved. A byte that no read covers is a
+ * fault of the measure, and fails the test naming it: it is never taken as held at `mark`. Null when there is
+ * nothing to say a moment by (Matroska, whose index keeps no frame table).
  */
 function heldAt(
   reads: readonly ReadStamp[],
   mark: number,
   needed: readonly number[],
+  what: string,
 ): number | null {
   if (needed.length === 0) return null
   let latest = mark
   for (const end of needed) {
     const covering = reads.find((read) => read.at >= mark && read.start < end && end <= read.end)
-    if (covering !== undefined) latest = Math.max(latest, covering.at)
+    if (covering === undefined) {
+      throw new Error(`The measure of ${what} found no read that covers the bytes up to ${end}.`)
+    }
+    latest = Math.max(latest, covering.at)
   }
   return latest
 }
@@ -207,6 +212,24 @@ function neededEnds(facts: Facts, seconds: number | null): number[] {
     end = Math.max(end, (table.offsets[i] ?? 0) + (table.sizes[i] ?? 0))
   }
   const needed = [end]
+  // The sound's frames from the cursor to the one that covers the target, which the feed waits for too.
+  const soundTrack = index.sound
+  if (soundTrack !== null) {
+    const firstSound =
+      seconds === null ? 0 : mp4Seek(index, seconds, index.sound?.header.id ?? null).soundFrame
+    const covering = Math.min(
+      soundTrack.table.count - 1,
+      frameAtOrAfter(soundTrack.table, soundTrack.timing, target),
+    )
+    let soundEnd = 0
+    for (let i = firstSound; i <= covering; i += 1) {
+      soundEnd = Math.max(
+        soundEnd,
+        (soundTrack.table.offsets[i] ?? 0) + (soundTrack.table.sizes[i] ?? 0),
+      )
+    }
+    if (soundEnd > 0) needed.push(soundEnd)
+  }
   if (seconds === null && facts.moovEnd !== null) needed.push(facts.moovEnd)
   return needed
 }
@@ -301,8 +324,8 @@ describe.skipIf(choice.length === 0)('the fast link: a start and a seek to a pic
       const play = begin(file.name, { autoplay: () => true })
       try {
         const { firstFrameMs, movingMs: startMs } = await startPicture(play, startedAt)
-        const startHeld = heldAt(reads, startedAt, neededEnds(facts, null))
-        const startDecoderMs = startHeld === null ? null : performance.now() - startHeld
+        const startHeld = heldAt(reads, startedAt, neededEnds(facts, null), 'the start')
+        const startDecoderMs = startHeld === null ? null : startedAt + startMs - startHeld
 
         // Let it play a moment so that the seek is a seek of a play, then jump past the middle.
         await until(play, 'the clock to move', 20_000, () => play.video.currentTime > 0.3)
@@ -317,8 +340,13 @@ describe.skipIf(choice.length === 0)('the fast link: a start and a seek to a pic
           target,
           "the seek's picture",
         )
-        const seekHeld = heldAt(reads, seekMark, neededEnds(facts, target))
-        const seekDecoderMs = seekHeld === null ? null : performance.now() - seekHeld
+        // A seek the window holds makes no read: the data was at the decoder already, and the whole seek is the measure.
+        const windowSeek = ofType(play.events, 'seek').findLast((event) => event.ms === null)
+        const seekHeld =
+          windowSeek?.inWindow === true
+            ? seekMark
+            : heldAt(reads, seekMark, neededEnds(facts, target), 'the seek')
+        const seekDecoderMs = seekHeld === null ? null : seekMark + seekMs - seekHeld
 
         // A little of what follows the seek, as a play: the clock goes on.
         await until(play, 'the clock to go on after the seek', 20_000, () => {
@@ -434,16 +462,16 @@ suite(AT_REST)('encryption at rest', () => {
 
     const play = begin(AT_REST, { autoplay: () => true })
     await until(play, 'the first picture', 20_000, () => play.video.readyState >= 2)
-    // The store holds the probe's offset once it has taken that many bytes of the file in order (a fast link, a whole file).
+    // The whole of the file is stored (it is small), so the block that holds the probe has been read and written: `storedBytes` counts the head and the tail first, which would pass the probe's offset too early.
     await until(play, 'the store to hold the probe', 20_000, () => {
-      return (play.stats.at(-1)?.storedBytes ?? 0) >= probe.offset + probe.bytes.length
+      return (play.stats.at(-1)?.storedBytes ?? 0) >= file.size
     })
     expect(play.stats.at(-1)?.backend).toBe('disk')
 
     // The play goes on while the file is read: the engine still holds the slots open.
     const slots = await slotFilesOf(play.playId)
     const total = slots.reduce((sum, bytes) => sum + bytes.length, 0)
-    expect(total, 'bytes at rest in the slot file').toBeGreaterThan(probe.offset)
+    expect(total, 'bytes at rest in the slot file').toBeGreaterThanOrEqual(file.size)
     for (const bytes of slots) expect(indexOfRun(bytes, probe.bytes)).toBe(-1)
     expect(play.resolved).toBe(false)
   })
@@ -502,7 +530,7 @@ suite(CACHED)('the HTTP cache stays clean', () => {
     const play = begin(CACHED, { autoplay: () => true })
     await until(play, 'the first picture', 20_000, () => play.video.readyState >= 2)
     await until(play, 'the store to hold the probe', 20_000, () => {
-      return (play.stats.at(-1)?.storedBytes ?? 0) >= probe.offset + probe.bytes.length
+      return (play.stats.at(-1)?.storedBytes ?? 0) >= played.size
     })
     play.controller.abort(new Error('the test closes the play'))
     await play.done.catch(() => undefined)

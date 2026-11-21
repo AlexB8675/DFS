@@ -1,10 +1,11 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { playwright } from '@vitest/browser-playwright'
 import type { BrowserCommand, BrowserInstanceOption } from 'vitest/node'
 import { defineConfig } from 'vitest/config'
 import { scanFolder } from './src/testing/profile-scan.ts'
+import { PROFILE_PREFIX, staleProfiles } from './src/testing/stale-profiles.ts'
 
 // The browser suites (DESIGN.md §10.4) run the store in real browsers, which have
 // the origin private file system and the Web Locks that it stands on. Chrome is the
@@ -41,10 +42,26 @@ const chromeChannel =
 // Chrome runs in a persistent profile of its own, a fresh temporary folder made for the run and deleted at its end
 // (never the user's Chrome profile), so that the HTTP cache check can look into the folder for the bytes of a file
 // (src/browser/plays.browser.test.ts; the page asks the scanProfile command below, as it cannot read its own profile).
+// The folders that earlier runs left (an interrupted run), this package's own and over 12 hours old, are removed first.
+function sweepStaleProfiles(): void {
+  try {
+    const entries = readdirSync(tmpdir())
+      .filter((name) => name.startsWith(PROFILE_PREFIX))
+      .map((name) => ({ name, modifiedMs: statSync(join(tmpdir(), name)).mtimeMs }))
+    for (const name of staleProfiles(entries, Date.now())) {
+      rmSync(join(tmpdir(), name), { recursive: true, force: true })
+    }
+  } catch {
+    // A folder that cannot be looked at or removed is left for the next run.
+  }
+}
+sweepStaleProfiles()
 const profileFolder = wanted.includes('chromium')
-  ? mkdtempSync(join(tmpdir(), 'dfs-player-chrome-profile-'))
+  ? mkdtempSync(join(tmpdir(), PROFILE_PREFIX))
   : null
 if (profileFolder !== null) {
+  // The teardown (src/testing/profile-teardown.ts) removes it when the run ends.
+  process.env.DFS_PLAYER_PROFILE = profileFolder
   process.once('exit', () => {
     try {
       // The folder holds the store's files of the plays (encrypted, the user's videos among them): it is removed at
@@ -99,7 +116,7 @@ export default defineConfig({
   test: {
     include: ['src/**/*.browser.test.ts'],
     // The corpus behind Range, over a network the tests shape (src/testing/play-server.ts).
-    globalSetup: ['src/testing/play-server.ts'],
+    globalSetup: ['src/testing/play-server.ts', 'src/testing/profile-teardown.ts'],
     // The origin private file system and the Web Locks belong to the origin, which all the files' pages share, so a file's tests don't run with another's.
     fileParallelism: false,
     testTimeout: 30_000,

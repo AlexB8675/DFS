@@ -4,7 +4,7 @@
 
 import type { TimelineEventInput } from '@dfs/shared'
 import { describe } from 'vitest'
-import { STUCK_MS } from '../limits.ts'
+import { STUCK_MS, WATCH_EVERY_MS } from '../limits.ts'
 import { PLAYS_DIRECTORY } from '../opfs.ts'
 import { playStreamed } from '../page/index.ts'
 import type { EngineStats } from '../page/index.ts'
@@ -89,7 +89,13 @@ export function activePlays(): readonly Play[] {
 
 /** The waits of a play that the engine left in silence (src/testing/freeze.ts), judged as of now. */
 export function silentWaits(play: Play): WaitSpan[] {
-  return silentFreezes(play.waits, play.stamped, performance.now() - play.startedAt, STUCK_MS)
+  // The watchdog's first act can come STUCK_MS plus a tick after the clock stops: that is the longest silent piece.
+  return silentFreezes(
+    play.waits,
+    play.stamped,
+    performance.now() - play.startedAt,
+    STUCK_MS + WATCH_EVERY_MS,
+  )
 }
 
 /** Starts a play of the named file, with its events and numbers kept. The engine's promise is not awaited. */
