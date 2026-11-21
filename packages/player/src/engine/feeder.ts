@@ -25,6 +25,7 @@ import type { ByteRange, Chunk, Cursor, FragmentTrack, SourceIndex } from '@dfs/
 import type { TimelineEventInput } from '@dfs/shared'
 import { clip } from '../downloader.ts'
 import {
+  BLOCK_BYTES,
   CHUNK_BYTES,
   HEAD_BYTES,
   MAX_CHUNK_BYTES,
@@ -262,10 +263,21 @@ export class Feeder {
     this.#soundRead = false
     this.#pictureFrom = null
     this.#fedEnd = { video: null, audio: null }
-    // The download follows the picture (R42): the sound's chunk may lie before the keyframe, far from the group, and is
-    // read by the feeder's own read like any range. The sound's place only when the picture has no frame left.
+    // The download follows the picture (R42), but a sound chunk that lies just before the picture's keyframe, within a
+    // block of it (an interleaved file), is the start of the one read that serves both (R44). A sound that lies far
+    // before it, or after it, is read by the feeder's own read like any range.
     const next = nextReads(index, this.#cursor)
-    const at = next.video ?? next.audio
+    const picture = next.video
+    const soundAt = next.audio
+    let at = picture ?? soundAt
+    if (
+      picture !== null &&
+      soundAt !== null &&
+      soundAt < picture &&
+      picture - soundAt <= BLOCK_BYTES
+    ) {
+      at = soundAt
+    }
     if (at !== null) this.#source.setPosition(at)
   }
 

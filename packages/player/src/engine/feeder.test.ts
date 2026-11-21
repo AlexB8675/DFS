@@ -28,7 +28,7 @@ import {
 import type { EbmlTrackSpec, FilePart, MovieFrame, TrackSpec } from '@dfs/mp4/testing'
 import type { TimelineEventInput } from '@dfs/shared'
 import { describe, expect, it } from 'vitest'
-import { CHUNK_BYTES, HEAD_BYTES, MAX_CHUNK_BYTES, TAIL_BYTES } from '../limits.ts'
+import { BLOCK_BYTES, CHUNK_BYTES, HEAD_BYTES, MAX_CHUNK_BYTES, TAIL_BYTES } from '../limits.ts'
 import { Feeder } from './feeder.ts'
 import type { Sink } from './feeder.ts'
 import type { ByteSource } from './source.ts'
@@ -574,15 +574,32 @@ describe('feeding an MP4 (§10.4)', () => {
 })
 
 describe('seeking an MP4 (§10.4)', () => {
+  it('positions the download at the picture keyframe when the sound lies before it by more than a block, or after it (R42, R44)', async () => {
+    for (const layout of ['audio-first', 'video-first'] as const) {
+      const built = interleaved(layout)
+      const { feeder, source } = await open(built.bytes)
+      await feeder.seek(2.5, new AbortController().signal)
+      const set = source.notes.filter((note) => note.op === 'setPosition')
+      const picture = built.video[60]?.offset ?? 0
+      const sound = built.audio[93]?.offset ?? 0
+      if (layout === 'audio-first') expect(picture - sound).toBeGreaterThan(BLOCK_BYTES)
+      else expect(sound).toBeGreaterThan(picture)
+      expect(set).toEqual([{ op: 'setPosition', offset: picture }])
+    }
+  })
+
   it('starts the picture at the keyframe and the sound at the frame that covers it, and moves the position', async () => {
     const built = interleaved()
     const { feeder, source } = await open(built.bytes)
     await feeder.seek(2.5, new AbortController().signal)
     const set = source.notes.filter((note) => note.op === 'setPosition')
-    // The download follows the picture (R42): the sound frame that covers 2.0 s lies before the keyframe, and the
-    // position is still the keyframe's. The sound's chunk is read by the feeder's own read.
-    expect(built.audio[93]?.offset ?? Infinity).toBeLessThan(built.video[60]?.offset ?? 0)
-    expect(set).toEqual([{ op: 'setPosition', offset: built.video[60]?.offset }])
+    // The sound frame that covers 2.0 s lies before the keyframe, within a block of it: the position is the sound's
+    // next read, so that the one read serves both (R44).
+    const sound = built.audio[93]?.offset ?? Infinity
+    const picture = built.video[60]?.offset ?? 0
+    expect(sound).toBeLessThan(picture)
+    expect(picture - sound).toBeLessThanOrEqual(BLOCK_BYTES)
+    expect(set).toEqual([{ op: 'setPosition', offset: sound }])
     const sink = new RecordingSink()
     await feedAll(feeder, sink, 3.5)
     const video = sink.appended('video')
