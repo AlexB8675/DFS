@@ -1,163 +1,31 @@
 // The engine's play in a real browser (DESIGN.md §10.4): the synthetic corpus, served by the play server,
 // goes through `playStreamed` (the downloader and its store in a real worker, the feeder, the decoder window
 // and the Media Source sink) into a `video` element, and the browser is asked what it shows. This is the play
-// from its start, or from a given time, to its end; seeks, holding and the watchdog are not in it. In this
-// part the engine never calls `play()`: the tests do. A file that is not served (no `corpus:make`) skips its
-// tests, with the reason.
+// from its start, or from a given time, to its end; the controls (seeks, holding, the watchdog) are in
+// controls.browser.test.ts. Here the engine is given no `autoplay`, so it never calls `play()`: the tests do.
+// A file that is not served (no `corpus:make`) skips its tests, with the reason.
 
-import type { TimelineEventInput } from '@dfs/shared'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { Downloader } from '../downloader.ts'
 import { CHUNK_BYTES, WINDOW_BYTES, WINDOW_FLOOR_BYTES } from '../limits.ts'
-import { PLAYS_DIRECTORY } from '../opfs.ts'
-import { MediaSourceSink, playStreamed } from '../page/index.ts'
-import type { EngineStats } from '../page/index.ts'
-import { clearLog, control, fileUrl, files, log, switchNetwork } from './server.ts'
-
-const synthetic = files().filter((file) => file.synthetic)
-
-/** The served synthetic file of that name, if the corpus was made. */
-function served(name: string): (typeof synthetic)[number] | undefined {
-  return synthetic.find((file) => file.name === name || file.name.endsWith(`/${name}`))
-}
-
-function suite(name: string): ReturnType<typeof describe.skipIf> {
-  return describe.skipIf(served(name) === undefined)
-}
-
-/** A worker that serves the store, as the app's own will. */
-function makeWorker(): Worker {
-  return new Worker(new URL('./store-worker.ts', import.meta.url), { type: 'module' })
-}
-
-/** Room enough for the disk store, whatever the machine has. */
-const roomy = (): Promise<{ quota: number; usage: number }> =>
-  Promise.resolve({ quota: 10 * 1024 ** 3, usage: 0 })
-
-interface Play {
-  video: HTMLVideoElement
-  playId: string
-  events: TimelineEventInput[]
-  stats: EngineStats[]
-  controller: AbortController
-  /** What the engine's promise gave: pending until the play ends. */
-  done: Promise<void>
-  /** Set once the promise rejects. */
-  rejection: { reason: unknown } | null
-  /** Set once the promise resolves. */
-  resolved: boolean
-}
-
-const plays: Play[] = []
-const frames = (video: HTMLVideoElement): number => video.getVideoPlaybackQuality().totalVideoFrames
+import { MediaSourceSink } from '../page/index.ts'
+import {
+  begin,
+  directoryExists,
+  endPlays,
+  frames,
+  ofType,
+  served,
+  suite,
+  synthetic,
+  until,
+} from './play-harness.ts'
+import { clearLog, control, log, switchNetwork } from './server.ts'
 
 afterEach(async () => {
   vi.restoreAllMocks()
-  await control({})
-  for (const play of plays.splice(0)) {
-    play.controller.abort(new Error('the test is over'))
-    await play.done.catch(() => undefined)
-    play.video.remove()
-  }
+  await endPlays()
 })
-
-/** Starts a play of the named file, with its events and numbers kept. The engine's promise is not awaited. */
-function begin(
-  name: string,
-  options: {
-    startAt?: number
-    windowBytes?: number
-    onEvent?: (event: TimelineEventInput, play: Play) => void
-  } = {},
-): Play {
-  const file = served(name)
-  if (file === undefined) throw new Error(`${name} is not served.`)
-  const video = document.createElement('video')
-  video.muted = true
-  document.body.append(video)
-  const controller = new AbortController()
-  const events: TimelineEventInput[] = []
-  const stats: EngineStats[] = []
-  const playId = crypto.randomUUID()
-  // eslint-disable-next-line prefer-const -- the event hook reads `play`, so it is declared before the call that makes the hook run.
-  let play: Play
-  const done = playStreamed({
-    video,
-    url: fileUrl(file.id),
-    playId,
-    makeWorker,
-    signal: controller.signal,
-    ...(options.startAt === undefined ? {} : { startAt: options.startAt }),
-    ...(options.windowBytes === undefined ? {} : { windowBytes: options.windowBytes }),
-    onEvent: (event) => {
-      events.push(event)
-      options.onEvent?.(event, play)
-    },
-    onStats: (numbers) => stats.push(numbers),
-    estimate: roomy,
-  })
-  play = {
-    video,
-    playId,
-    events,
-    stats,
-    controller,
-    done,
-    rejection: null,
-    resolved: false,
-  }
-  done.then(
-    () => {
-      play.resolved = true
-    },
-    (reason: unknown) => {
-      play.rejection = { reason }
-    },
-  )
-  plays.push(play)
-  return play
-}
-
-/** Waits until `done` holds; a play whose promise rejected or resolved meanwhile fails the wait. */
-async function until(play: Play, what: string, ms: number, done: () => boolean): Promise<void> {
-  const from = performance.now()
-  while (!done()) {
-    if (play.resolved) throw new Error(`The play ended while waiting for ${what}.`)
-    if (play.rejection !== null) {
-      throw new Error(`The play was rejected while waiting for ${what}.`, {
-        cause: play.rejection.reason,
-      })
-    }
-    if (performance.now() - from > ms) throw new Error(`Gave up waiting for ${what}.`)
-    await new Promise((resolve) => setTimeout(resolve, 25))
-  }
-}
-
-function ofType<T extends TimelineEventInput['type']>(
-  events: readonly TimelineEventInput[],
-  type: T,
-): Extract<TimelineEventInput, { type: T }>[] {
-  return events.filter((event): event is Extract<TimelineEventInput, { type: T }> => {
-    return event.type === type
-  })
-}
-
-function isNotFound(error: unknown): boolean {
-  return error instanceof DOMException && error.name === 'NotFoundError'
-}
-
-/** Whether the directory of a play is in the private file system. */
-async function directoryExists(playId: string): Promise<boolean> {
-  try {
-    const root = await navigator.storage.getDirectory()
-    const plays = await root.getDirectoryHandle(PLAYS_DIRECTORY)
-    await plays.getDirectoryHandle(playId)
-    return true
-  } catch (error) {
-    if (isNotFound(error)) return false
-    throw error
-  }
-}
 
 suite('h264-aac-faststart.mp4')('playStreamed: a play from its start', () => {
   test('shows a picture once the test plays it, and says how it went', async () => {

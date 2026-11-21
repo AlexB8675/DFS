@@ -1,0 +1,400 @@
+// The engine's controls in a real browser (DESIGN.md §10.4): seeks (in the window, outside it, during the
+// opening, and back after the end), the hold for the network, and the watchdog. The synthetic corpus, served by
+// the play server, goes through `playStreamed` into a `video` element; the server's log says which requests the
+// engine made, and its control channel slows the link or breaks a read. The plays of the first part are in
+// engine.browser.test.ts. A file that is not served (no `corpus:make`) skips its tests, with the reason.
+
+import { afterEach, expect, test, vi } from 'vitest'
+import { MediaSourceSink } from '../page/index.ts'
+import { SEEK_DEADLINE_MS, STUCK_MS } from '../limits.ts'
+import { begin, endPlays, frames, ofType, served, suite, until } from './play-harness.ts'
+import type { Play } from './play-harness.ts'
+import { clearLog, control, log } from './server.ts'
+
+const NAME = 'h264-aac-faststart.mp4'
+
+// Slow links make these plays take a while.
+vi.setConfig({ testTimeout: 90_000 })
+
+afterEach(async () => {
+  vi.restoreAllMocks()
+  await endPlays()
+})
+
+function pause(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** The end of the element's last buffered range, 0 when it has none. */
+function bufferedEnd(video: HTMLVideoElement): number {
+  const { buffered } = video
+  return buffered.length === 0 ? 0 : buffered.end(buffered.length - 1)
+}
+
+/** Whether the element has data at `at`. */
+function holds(video: HTMLVideoElement, at: number): boolean {
+  for (let i = 0; i < video.buffered.length; i += 1) {
+    if (video.buffered.start(i) <= at && at <= video.buffered.end(i)) return true
+  }
+  return false
+}
+
+/** The seeks that have shown their picture. */
+function shown(play: Play): { to: number; inWindow: boolean; ms: number | null }[] {
+  return ofType(play.events, 'seek').filter((event) => event.ms !== null)
+}
+
+async function firstPicture(play: Play): Promise<void> {
+  await until(play, 'the first picture', 40_000, () => play.video.readyState >= 2)
+}
+
+suite(NAME)('playStreamed: seeks', () => {
+  test('a seek inside the window sends no request, and tells its start and its picture', async () => {
+    // A slow link keeps a read open and the window short of the end of the file.
+    await control({ bandwidthBytesPerSecond: 300_000 })
+    const play = begin(NAME)
+    await firstPicture(play)
+    await until(play, '4 s buffered', 40_000, () => bufferedEnd(play.video) > 4)
+    await clearLog()
+    play.video.currentTime = 2
+    await until(play, 'the seek to show its picture', 20_000, () => shown(play).length > 0)
+    const seeks = ofType(play.events, 'seek')
+    expect(seeks).toHaveLength(2)
+    expect(seeks[0]?.to).toBeCloseTo(2, 2)
+    expect(seeks[0]).toMatchObject({ inWindow: true, ms: null })
+    expect(seeks[1]).toMatchObject({ inWindow: true })
+    expect(seeks[1]?.ms).toBeGreaterThanOrEqual(0)
+    expect(play.video.currentTime).toBeCloseTo(2, 1)
+    expect(await log()).toEqual([])
+    await until(play, 'the numbers', 5_000, () => play.stats.length > 0)
+    expect(play.stats.at(-1)?.seeks).toBe(0)
+    expect(ofType(play.events, 'error')).toEqual([])
+  })
+
+  test('a seek outside the window reads the store when it holds the place: no request', async () => {
+    // A window of 2 MiB holds about 5 s of this file, and the store the whole of it.
+    const size = served(NAME)?.size ?? 0
+    const play = begin(NAME, { windowBytes: 2 * 1024 * 1024 })
+    await firstPicture(play)
+    await until(
+      play,
+      'the file stored',
+      30_000,
+      () => (play.stats.at(-1)?.storedBytes ?? 0) >= size,
+    )
+    expect(holds(play.video, 10)).toBe(false)
+    await clearLog()
+    play.video.currentTime = 10
+    await until(play, 'the seek to show its picture', 20_000, () => shown(play).length > 0)
+    const seeks = ofType(play.events, 'seek')
+    expect(seeks[0]).toMatchObject({ inWindow: false, ms: null })
+    expect(seeks.at(-1)).toMatchObject({ inWindow: false })
+    expect(play.video.currentTime).toBeGreaterThanOrEqual(9.9)
+    expect(holds(play.video, play.video.currentTime)).toBe(true)
+    expect(await log()).toEqual([])
+    await until(play, 'the count', 5_000, () => play.stats.at(-1)?.seeks === 1)
+    expect(ofType(play.events, 'error')).toEqual([])
+  })
+
+  test('a seek outside what the store holds fetches from the place, keeping what is stored', async () => {
+    await control({ bandwidthBytesPerSecond: 300_000 })
+    const play = begin(NAME)
+    await firstPicture(play)
+    await clearLog()
+    play.video.currentTime = 8
+    await until(play, 'the seek to show its picture', 60_000, () => shown(play).length > 0)
+    expect(play.video.currentTime).toBeGreaterThanOrEqual(7.9)
+    const requests = await log()
+    const starts = requests.flatMap((entry) => {
+      const match = /bytes=(\d+)-/.exec(entry.range ?? '')
+      return match?.[1] === undefined ? [] : [Number(match[1])]
+    })
+    // The picture of 8 s lies about two thirds into the file.
+    expect(starts.some((start) => start > 2_500_000)).toBe(true)
+    expect(ofType(play.events, 'seek')[0]).toMatchObject({ inWindow: false, ms: null })
+    expect(shown(play)[0]?.ms).toBeGreaterThan(0)
+    expect(ofType(play.events, 'error')).toEqual([])
+  })
+
+  test('a seek made during the opening is kept, and lands at its target', async () => {
+    let sought = false
+    const play = begin(NAME, {
+      onEvent: (event, started) => {
+        if (event.type === 'append' && !sought) {
+          sought = true
+          started.video.currentTime = 6
+        }
+      },
+    })
+    await until(
+      play,
+      'the clock at 6 s with a picture',
+      30_000,
+      () => play.video.readyState >= 2 && play.video.currentTime >= 5.9,
+    )
+    expect(play.video.currentTime).toBeLessThan(7)
+    expect(holds(play.video, play.video.currentTime)).toBe(true)
+    await play.video.play()
+    await until(play, '6.5 s', 15_000, () => play.video.currentTime > 6.5)
+    expect(frames(play.video)).toBeGreaterThan(0)
+    const seeks = ofType(play.events, 'seek')
+    expect(seeks[0]?.to).toBeCloseTo(6, 1)
+    await until(play, 'its picture', 10_000, () => shown(play).length > 0)
+    expect(ofType(play.events, 'error')).toEqual([])
+  })
+
+  test('a seek that shows no picture by its deadline sends an error, refeeds, and still sends its time to picture', async () => {
+    await control({ bandwidthBytesPerSecond: 300_000 })
+    const play = begin(NAME)
+    await firstPicture(play)
+    // The seek makes two reads of its place (the download's onward read and the feed's own); both stall for good, and the ones after them go through.
+    await control({
+      bandwidthBytesPerSecond: 300_000,
+      faults: [
+        { kind: 'stall', afterBytes: 0, ms: null },
+        { kind: 'stall', afterBytes: 0, ms: null },
+      ],
+    })
+    await clearLog()
+    play.video.currentTime = 8
+    await until(play, 'the deadline error', SEEK_DEADLINE_MS + 20_000, () =>
+      ofType(play.events, 'error').some((event) => event.from === 'engine'),
+    )
+    const error = ofType(play.events, 'error').find((event) => event.from === 'engine')
+    expect(error?.message).toContain('8')
+    expect(error?.message).toContain(String(SEEK_DEADLINE_MS / 1000))
+    await until(play, 'the picture', 60_000, () => shown(play).length > 0)
+    expect(shown(play)[0]?.ms).toBeGreaterThanOrEqual(SEEK_DEADLINE_MS)
+    const refeeds = ofType(play.events, 'watchdog').filter((event) => event.action === 'refeed')
+    expect(refeeds.length).toBeGreaterThan(0)
+    // The error comes before the seek that tells its time, and the seek is told once.
+    const order = play.events.map((event) => event.type)
+    expect(order.indexOf('error')).toBeLessThan(
+      play.events.findIndex((event) => event.type === 'seek' && event.ms !== null),
+    )
+    expect(ofType(play.events, 'seek').filter((event) => event.ms !== null)).toHaveLength(1)
+    expect(play.video.currentTime).toBeGreaterThanOrEqual(7.9)
+  }, 120_000)
+
+  test('a seek back after the end reopens the stream and plays on', async () => {
+    const reopen = vi.spyOn(MediaSourceSink.prototype, 'reopen')
+    const play = begin(NAME, { windowBytes: 2 * 1024 * 1024, autoplay: () => true })
+    play.video.playbackRate = 4
+    await until(play, 'the end', 60_000, () => play.video.ended)
+    await until(
+      play,
+      'the phase',
+      5_000,
+      () => ofType(play.events, 'phase').at(-1)?.phase === 'ended',
+    )
+    // What was played has been removed from the window: 1 s is outside it.
+    expect(holds(play.video, 1)).toBe(false)
+    play.video.currentTime = 1
+    await until(
+      play,
+      'the play to go on from 1 s',
+      30_000,
+      () => !play.video.paused && !play.video.ended && play.video.currentTime > 2.5,
+    )
+    expect(reopen).toHaveBeenCalledTimes(1)
+    const last = ofType(play.events, 'seek').at(-1)
+    expect(last).toMatchObject({ inWindow: false })
+    expect(ofType(play.events, 'phase').map((event) => event.phase)).toContain('ended')
+    expect(ofType(play.events, 'error')).toEqual([])
+  })
+})
+
+suite(NAME)('playStreamed: holding', () => {
+  test('with autoplay the play is held on a slow link, and then plays by itself', async () => {
+    await control({ bandwidthBytesPerSecond: 200_000 })
+    const play = begin(NAME, { autoplay: () => true })
+    await until(play, 'the hold to begin', 40_000, () =>
+      ofType(play.events, 'hold').some((event) => event.on),
+    )
+    const first = ofType(play.events, 'hold')[0]
+    expect(first).toMatchObject({ on: true, reason: 'start' })
+    expect(play.video.paused).toBe(true)
+    await until(play, 'the hold to end', 90_000, () =>
+      ofType(play.events, 'hold').some((event) => !event.on),
+    )
+    await until(play, 'the clock to move', 30_000, () => play.video.currentTime > 1)
+    expect(play.video.paused).toBe(false)
+    expect(frames(play.video)).toBeGreaterThan(0)
+    await until(play, 'the numbers', 5_000, () => (play.stats.at(-1)?.holds ?? 0) >= 1)
+    expect(play.stats.at(-1)?.holdMs).toBeGreaterThan(0)
+    expect(ofType(play.events, 'error')).toEqual([])
+  }, 150_000)
+
+  test('without autoplay the engine never plays and never holds', async () => {
+    await control({ bandwidthBytesPerSecond: 300_000 })
+    const play = begin(NAME)
+    await firstPicture(play)
+    await pause(1_500)
+    expect(play.video.paused).toBe(true)
+    expect(play.video.currentTime).toBeLessThan(0.1)
+    expect(ofType(play.events, 'hold')).toEqual([])
+    expect(play.stats.at(-1)?.holding).toBe(false)
+  })
+
+  test('a stall after the play began holds it for the network, and plays on when it has enough', async () => {
+    await control({ bandwidthBytesPerSecond: 600_000 })
+    const play = begin(NAME, { autoplay: () => true })
+    await until(play, 'the play', 60_000, () => !play.video.paused && play.video.currentTime > 0.3)
+    // The link all but stops: the playhead soon reaches the end of what the store holds.
+    await control({ bandwidthBytesPerSecond: 15_000 })
+    await until(play, 'a hold for the stall', 60_000, () =>
+      ofType(play.events, 'hold').some((event) => event.on && event.reason === 'stall'),
+    )
+    expect(play.video.paused).toBe(true)
+    await control({ bandwidthBytesPerSecond: 3_000_000 })
+    await until(play, 'the hold to end', 60_000, () =>
+      ofType(play.events, 'hold').some((event) => !event.on && event.reason === null),
+    )
+    const at = play.video.currentTime
+    await until(play, 'the play to go on', 30_000, () => play.video.currentTime > at + 1)
+    expect(play.video.paused).toBe(false)
+    expect(ofType(play.events, 'error')).toEqual([])
+  }, 200_000)
+})
+
+/** The SourceBuffers that the engine makes, with a way to cut the same time out of all of them. */
+function captureBuffers(): { cutAll: (from: number, to: number) => Promise<void> } {
+  const made: SourceBuffer[] = []
+  // eslint-disable-next-line @typescript-eslint/unbound-method -- the original is called on the Media Source it was taken from, below.
+  const real = MediaSource.prototype.addSourceBuffer
+  vi.spyOn(MediaSource.prototype, 'addSourceBuffer').mockImplementation(function (
+    this: MediaSource,
+    type: string,
+  ) {
+    const buffer = real.call(this, type)
+    made.push(buffer)
+    return buffer
+  })
+  // The clock follows the sound when only the picture has a hole, so a hole that stops it is in both.
+  return {
+    cutAll: async (from, to) => {
+      await Promise.all(made.map((buffer) => cut(buffer, from, to)))
+    },
+  }
+}
+
+/** Removes the time from `from` to `to` of a SourceBuffer, once it is not busy, and waits for the removal to end. */
+async function cut(buffer: SourceBuffer, from: number, to: number): Promise<void> {
+  while (buffer.updating) await pause(10)
+  const ended = new Promise<void>((resolve) => {
+    buffer.addEventListener(
+      'updateend',
+      () => {
+        resolve()
+      },
+      { once: true },
+    )
+  })
+  buffer.remove(from, to)
+  await ended
+}
+
+suite(NAME)('playStreamed: the watchdog', () => {
+  test('steps over a small hole that stops the clock, and logs the gap', async () => {
+    const buffers = captureBuffers()
+    const play = begin(NAME)
+    await firstPicture(play)
+    await play.video.play()
+    await until(play, 'the clock', 15_000, () => play.video.currentTime > 0.5)
+    // A hole in both tracks a little ahead of the playhead (the browser takes the frames that need the removed ones with it).
+    await buffers.cutAll(3, 3.2)
+    const hole = (() => {
+      const { buffered } = play.video
+      return buffered.length >= 2 ? [buffered.end(0), buffered.start(1)] : null
+    })()
+    expect(hole).not.toBeNull()
+    const [from, to] = hole as [number, number]
+    expect(to - from).toBeLessThan(2)
+    await until(play, 'the clock at the hole', 15_000, () => play.video.currentTime >= from - 0.3)
+    const stoodFrom = performance.now()
+    await until(play, 'the gap to be stepped over', 30_000, () =>
+      ofType(play.events, 'watchdog').some((event) => event.action === 'gap'),
+    )
+    // The clock stood for the time the watchdog waits, so it was not the browser that stepped over.
+    expect(performance.now() - stoodFrom).toBeGreaterThan(STUCK_MS * 0.5)
+    const gap = ofType(play.events, 'watchdog').find((event) => event.action === 'gap')
+    expect(gap?.at).toBeGreaterThan(from - 0.5)
+    await until(play, 'the clock past the hole', 20_000, () => play.video.currentTime > to + 0.5)
+    expect(ofType(play.events, 'error')).toEqual([])
+  })
+
+  test('refeeds the window from the store when a hole is too big to step over', async () => {
+    const buffers = captureBuffers()
+    const play = begin(NAME)
+    await firstPicture(play)
+    await play.video.play()
+    await until(play, 'the clock', 15_000, () => play.video.currentTime > 0.5)
+    await buffers.cutAll(3, 9)
+    await until(play, 'the clock at the hole', 15_000, () => play.video.currentTime >= 2.5)
+    await until(play, 'a refeed', 30_000, () =>
+      ofType(play.events, 'watchdog').some((event) => event.action === 'refeed'),
+    )
+    const refeed = ofType(play.events, 'watchdog').find((event) => event.action === 'refeed')
+    expect(refeed?.at).toBeGreaterThan(2)
+    expect(refeed?.at).toBeLessThan(4)
+    await until(play, 'the clock past the hole', 30_000, () => play.video.currentTime > 9.5)
+    expect(ofType(play.events, 'watchdog').some((event) => event.action === 'gap')).toBe(false)
+    expect(ofType(play.events, 'error')).toEqual([])
+  })
+
+  test('reopens the decoder when a refeed does not move a stopped clock, and plays on', async () => {
+    const reopen = vi.spyOn(MediaSourceSink.prototype, 'reopen')
+    const play = begin(NAME)
+    await firstPicture(play)
+    await play.video.play()
+    await until(play, 'the clock', 15_000, () => play.video.currentTime > 1)
+    // A clock that does not move while the element plays and holds its data. A new Media Source gives the element its default rate again.
+    play.video.playbackRate = 0
+    await until(play, 'a reopen', 40_000, () =>
+      ofType(play.events, 'watchdog').some((event) => event.action === 'reopen'),
+    )
+    const actions = ofType(play.events, 'watchdog').map((event) => event.action)
+    expect(actions.indexOf('refeed')).toBeGreaterThanOrEqual(0)
+    expect(actions.indexOf('refeed')).toBeLessThan(actions.indexOf('reopen'))
+    const at = play.video.currentTime
+    await until(play, 'the clock to move again', 30_000, () => play.video.currentTime > at + 1)
+    expect(play.video.paused).toBe(false)
+    expect(reopen).toHaveBeenCalledTimes(1)
+    await until(play, 'the numbers', 5_000, () => play.stats.at(-1)?.reopens === 1)
+    expect(ofType(play.events, 'error')).toEqual([])
+  }, 90_000)
+
+  test('fails the play with the watchdog reason when nothing moves it, after the reopens it may make', async () => {
+    const play = begin(NAME)
+    await firstPicture(play)
+    await play.video.play()
+    await until(play, 'the clock', 15_000, () => play.video.currentTime > 1)
+    // The element's clock and its frame count are made to stand still, whatever it does.
+    const frozen = play.video.currentTime
+    const clock = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'currentTime')
+    Object.defineProperty(play.video, 'currentTime', {
+      configurable: true,
+      get: () => frozen,
+      set: (value: number) => {
+        clock?.set?.call(play.video, value)
+      },
+    })
+    play.video.getVideoPlaybackQuality = () =>
+      ({
+        totalVideoFrames: 7,
+        droppedVideoFrames: 0,
+        corruptedVideoFrames: 0,
+      }) as VideoPlaybackQuality
+    await until(play, 'the play to fail', 60_000, () =>
+      ofType(play.events, 'phase').some((event) => event.phase === 'failed'),
+    )
+    const actions = ofType(play.events, 'watchdog').map((event) => event.action)
+    expect(actions.filter((action) => action === 'reopen')).toHaveLength(3)
+    expect(actions.at(-1)).toBe('stuck')
+    const errors = ofType(play.events, 'error')
+    expect(errors).toHaveLength(1)
+    const stuck = ofType(play.events, 'watchdog').at(-1)
+    expect(errors[0]?.message).toBe(stuck?.detail)
+    expect(play.stats.at(-1)?.reopens).toBe(3)
+  }, 120_000)
+})

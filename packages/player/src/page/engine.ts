@@ -1,10 +1,15 @@
 // The engine's play (DESIGN.md §10.4; the iron-clad spec §4.8): ties the downloader and its store, the feeder,
-// the decoder window and the Media Source sink into one play of a file in a `video` element, from its start
-// or from a given time to its end. It opens the download, then the feeder and the sink together; feeds the
-// first fragments and puts the clock where every track has frames (the common start); and then feeds in a
-// loop of promises, never timers, as the window asks, removes what is played past the window behind, and
-// ends the stream once every fragment is in. In this part it never calls `play()`, never answers a seek, holds
-// no play for the network and has no watchdog: those are the controls, which come after it.
+// the decoder window and the Media Source sink into one play of a file in a `video` element, from its start or
+// from a given time to its end. It opens the download, then the feeder and the sink together; feeds the first
+// fragments and puts the clock where every track has frames (the common start); and then feeds in a loop of
+// promises, never timers, as the window asks, removes what is played past the window behind, and ends the
+// stream once every fragment is in.
+//
+// The controls are composed from modules of their own: the seeks' events and deadline (`seeks.ts`), the hold
+// for the network (`holding.ts`) and the watchdog's samples (`watching.ts`). They decide; this file applies.
+// One loop, the pump, is the only caller of the feeder, the window's reset and the sink's reopen. A seek
+// outside the window, a refeed and a reopen are requests: each aborts the feed in flight, and the pump serves
+// the latest at the top of its loop, so the feeder's cursor is never moved under a feed.
 //
 // A play is rejected only before its first frame (the common start is its mark), with the feeder's
 // `{ refusal, reason }` when the file cannot play, or the reason of whatever else failed or of the signal.
@@ -19,11 +24,13 @@ import { Feeder } from '../engine/feeder.ts'
 import type { Sink } from '../engine/feeder.ts'
 import { feedTargets } from '../engine/targets.ts'
 import type { ChosenTracks, EngineTrack } from '../engine/tracks.ts'
+import type { WatchAction } from '../engine/watchdog.ts'
 import { DecoderWindow } from '../engine/window.ts'
 import type { FedRun } from '../engine/window.ts'
 import {
   GAP_EDGE_SECONDS,
   POSITION_EVERY_MS,
+  SEEK_DEADLINE_MS,
   SOUND_WAIT_SECONDS,
   STATS_EVERY_MS,
   WATCH_EVERY_MS,
@@ -32,12 +39,13 @@ import {
 import { openDownload } from '../open-download.ts'
 import type { StorageEstimator, StoreWorker } from '../open.ts'
 import { ReadError } from '../read.ts'
+import { Holding } from './holding.ts'
+import { Seeks } from './seeks.ts'
 import { MediaSourceSink, SinkQuotaError } from './sink.ts'
+import { HAVE_FUTURE_DATA, aheadOf, isPaused } from './video.ts'
+import { Watching } from './watching.ts'
 
 type Kind = 'video' | 'audio'
-
-/** `HTMLMediaElement.HAVE_FUTURE_DATA`: the element has data past the clock. */
-const HAVE_FUTURE_DATA = 3
 
 /** The length of a frame that the engine takes when the picture's table cannot say: a Matroska file's, which has none. */
 const UNKNOWN_FRAME_SECONDS = 1 / 30
@@ -96,6 +104,12 @@ export interface PlayStreamedOptions {
   signal: AbortSignal
   /** Seconds into the file to begin at; 0 or missing is the start. */
   startAt?: number
+  /**
+   * Whether the engine should be playing now: read each time it would start or resume play (at the start, after a
+   * seek, when a hold for the network ends). Missing, the engine never calls `play()` for those, and never holds
+   * the play: the element is the viewer's. (A reopen of the decoder by the watchdog plays again if it was playing.)
+   */
+  autoplay?: () => boolean
   onEvent: (event: TimelineEventInput) => void
   onStats: (stats: EngineStats) => void
   fetch?: typeof fetch
@@ -103,6 +117,11 @@ export interface PlayStreamedOptions {
   /** For tests: the decoder window's starting limit in bytes; `WINDOW_BYTES` when missing. */
   windowBytes?: number
 }
+
+/** What the pump is asked to do, in the order of what each includes: a reopen covers a seek, and a seek covers a refeed. */
+type Request = { kind: 'refeed' } | { kind: 'seek' } | { kind: 'reopen' }
+
+const RANK: Record<Request['kind'], number> = { refeed: 1, seek: 2, reopen: 3 }
 
 function isRefusal(error: unknown): error is { refusal: string } {
   return typeof error === 'object' && error !== null && 'refusal' in error
@@ -134,22 +153,12 @@ function frameSeconds(track: EngineTrack): number {
   return UNKNOWN_FRAME_SECONDS
 }
 
-/** The seconds from `at` to the end of the range that holds it (a range's edge counts as holding it, a little short), or 0. */
-function aheadOf(buffered: TimeRanges, at: number): number {
-  for (let i = 0; i < buffered.length; i += 1) {
-    if (buffered.start(i) - GAP_EDGE_SECONDS <= at && at <= buffered.end(i)) {
-      return Math.max(0, buffered.end(i) - at)
-    }
-  }
-  return 0
-}
-
 class Play {
   readonly #options: PlayStreamedOptions
   readonly #video: HTMLVideoElement
   readonly #signal: AbortSignal
-  /** Aborts what the feed waits on: when the play is over, or fails. The controls will abort it for a seek. */
-  readonly #feedControl = new AbortController()
+  /** Aborts what the feed waits on: when the play is over or fails, and for a request (a seek, a refeed, a reopen), which starts the next feed with a new one. */
+  #feedControl = new AbortController()
   readonly #window: DecoderWindow
   #downloader: Downloader | null = null
   #feeder: Feeder | null = null
@@ -162,7 +171,7 @@ class Play {
   #started = false
   /** True once a feed answered `'ended'`: every fragment is appended. */
   #feedDone = false
-  /** True once the stream was ended: nothing is appended or removed after it. */
+  /** True once the stream was ended: nothing is appended or removed after it, until a request starts the feed again. */
   #ended = false
   #failed = false
   /** True from the abort of the signal: the engine says nothing more of its own. */
@@ -180,6 +189,17 @@ class Play {
   #quotaStalled = false
   /** Where the playhead was at such an error once the play had begun: the feed waits for it to move. */
   #stallAt: number | null = null
+  /** What the pump is asked to do next, if anything. */
+  #request: Request | null = null
+  /** The time of the viewer's latest seek during the opening, which the start is moved to. */
+  #userSeek: number | null = null
+  /** The time the engine itself moved the clock to, until the element's `seeking` for it has come: that seek is the engine's, not the viewer's. */
+  #ownSeek: number | null = null
+  /** Where the clock is expected to be before the first frame: a clock elsewhere is a seek of the viewer's that the element did not tell. */
+  #clockHint = 0
+  readonly #seeks: Seeks
+  readonly #holding: Holding
+  #watching: Watching | null = null
   readonly #stats: EngineStats = {
     phase: 'opening',
     codecs: [],
@@ -209,6 +229,28 @@ class Play {
     this.#video = options.video
     this.#signal = options.signal
     this.#window = new DecoderWindow(options.windowBytes)
+    this.#seeks = new Seeks(
+      options.video,
+      (event) => {
+        this.#say(event)
+      },
+      () => performance.now(),
+    )
+    this.#holding = new Holding({
+      video: options.video,
+      autoplay: options.autoplay,
+      downloader: () => this.#downloader,
+      feeder: () => this.#feeder,
+      feedDone: () => this.#feedDone,
+      say: (event) => {
+        this.#say(event)
+      },
+      stats: this.#stats,
+      changed: () => {
+        this.#publish()
+      },
+      now: () => performance.now(),
+    })
     const startAt = options.startAt
     this.#target = startAt !== undefined && Number.isFinite(startAt) && startAt > 0 ? startAt : 0
     const stop = (): void => {
@@ -280,11 +322,42 @@ class Play {
     for (const wake of this.#wakers.splice(0)) wake()
   }
 
-  /** Resolves at the next tick, `timeupdate`, `seeking`, `waiting` or abort. */
+  /** Resolves at the next tick, `timeupdate`, `seeking`, `waiting`, request or abort. */
   #nextWake(): Promise<void> {
     return new Promise<void>((resolve) => {
       this.#wakers.push(resolve)
     })
+  }
+
+  /** Puts the clock at `at` through the sink, and remembers that the `seeking` that follows is the engine's own. */
+  #moveTo(at: number): void {
+    this.#ownSeek = at
+    this.#clockHint = at
+    this.#sink?.seek(at)
+  }
+
+  /**
+   * Asks the pump for a seek, a refeed or a reopen: the feed in flight is aborted, and the pump serves the
+   * request, the strongest of those asked before it got to it. Does nothing once the play is over.
+   */
+  #post(request: Request): void {
+    if (this.#stopped || this.#failed) return
+    const pending = this.#request
+    if (pending === null || RANK[request.kind] >= RANK[pending.kind]) this.#request = request
+    this.#restartFeed()
+    this.#wake()
+  }
+
+  /** Whether a request waits for the pump (the compiler cannot see that an `await` lets one come). */
+  #requested(): boolean {
+    return this.#request !== null
+  }
+
+  /** Ends the feed in flight, as a restart and no failure, and gives the next one a new signal. */
+  #restartFeed(): void {
+    if (this.#stopped || this.#failed) return
+    this.#feedControl.abort(new DOMException('The feed was restarted.', 'AbortError'))
+    this.#feedControl = new AbortController()
   }
 
   /**
@@ -330,32 +403,72 @@ class Play {
     sink.setDuration(feeder.durationSeconds)
 
     const { video: picture, audio } = feeder.tracks
+    this.#watching = new Watching(this.#video, picture)
     this.#stats.codecs = [codecsOf(picture.mime)]
     this.#stats.supported[picture.mime] = true
     if (audio !== null) this.#stats.supported[audio.mime] = true
     this.#startTimers()
     this.#setPhase('buffering')
 
-    if (this.#target > 0) await feeder.seek(this.#target, this.#feedControl.signal)
-    // The first fragments: fed until every track that plays has data past the target, the file ends, or a feed makes no progress.
+    // The first fragments of the start. A seek of the viewer's meanwhile moves the start: the fragments fed for the old one stay in the buffer, but are cleared, and the feed begins again at the new one.
+    let target = this.#target
+    let first = true
     for (;;) {
-      const result = await this.#feedOnce()
-      if (result === 'ended' || this.#covers(sink)) break
-      if (result === 'idle') {
-        if (!this.#quotaStalled) break
-        await this.#nextWake()
+      const signal = this.#feedControl.signal
+      try {
+        if (target > 0 || !first) await feeder.seek(target, signal)
+        first = false
+        await this.#feedCovering(target, () => this.#userSeek !== null)
+      } catch (error) {
+        // A seek of the viewer's restarted the feed: that is no failure. Anything else is.
+        if (!isAbort(error) || this.#userSeek === null || this.#stopped) throw error
       }
+      this.#signal.throwIfAborted()
+      const sought = this.#openingSeek()
+      if (sought === null) break
+      target = sought
+      this.#resetFeed()
+      await this.#clearSink()
     }
-    this.#feedControl.signal.throwIfAborted()
-    this.#applyCommonStart(picture)
+    this.#target = target
+    this.#applyCommonStart(target)
     this.#started = true
     this.#givePosition()
+    this.#holding.begin('start')
     this.#publish()
   }
 
-  /** Whether every playing track has buffered data that ends past the target. */
-  #covers(sink: MediaSourceSink): boolean {
-    return this.#kinds.every((kind) => sink.buffered(kind).some(([, end]) => end > this.#target))
+  /** The target of a seek of the viewer's made during the opening, if there was one: told by the element, or seen as a clock that is not where the engine expects it. */
+  #openingSeek(): number | null {
+    const told = this.#userSeek
+    this.#userSeek = null
+    if (told !== null) return told
+    const now = this.#video.currentTime
+    if (Math.abs(now - this.#clockHint) <= 0.25) return null
+    this.#clockHint = now
+    this.#seeks.begin(now, false)
+    this.#stats.seeks += 1
+    return now
+  }
+
+  /** Feeds until every playing track has data past `target`, the feed ends, a feed makes no progress, or `interrupted`. */
+  async #feedCovering(target: number, interrupted: () => boolean): Promise<void> {
+    const sink = this.#sink
+    if (sink === null) throw new Error('The sink is not open.')
+    for (;;) {
+      const result = await this.#feedOnce()
+      if (interrupted()) return
+      if (result === 'ended' || this.#covers(sink, target)) return
+      if (result === 'idle') {
+        if (!this.#quotaStalled) return
+        await this.#nextWake()
+      }
+    }
+  }
+
+  /** Whether every playing track has buffered data that ends past `target`. */
+  #covers(sink: MediaSourceSink, target: number): boolean {
+    return this.#kinds.every((kind) => sink.buffered(kind).some(([, end]) => end > target))
   }
 
   /** The sink that the feeder gives its fragments to: it tells the window what was appended, and the timeline, and makes the sound decision's sentence. */
@@ -412,14 +525,16 @@ class Play {
   /**
    * The common start (DESIGN.md §10.4): the clock goes to the latest of the tracks' first buffered
    * starts at or after the target, so that a track that begins late (a sound shown 0.48 s in) does not
-   * leave the element waiting at a time it has no sound for. A move of more than a frame is logged.
+   * leave the element waiting at a time it has no sound for. A move of more than a frame is logged. It is
+   * the one start-gap policy: a start, a seek outside the window and a reopen all end in it.
    */
-  #applyCommonStart(picture: EngineTrack): void {
+  #applyCommonStart(target: number): void {
     const sink = this.#sink
-    if (sink === null) return
-    const target = this.#target
+    const feeder = this.#feeder
+    if (sink === null || feeder === null) return
+    const picture = feeder.tracks.video
     // A target past the end of the file (the feed ended before covering it): the play starts at the last frames there are.
-    const past = this.#feedDone && !this.#covers(sink)
+    const past = this.#feedDone && !this.#covers(sink, target)
     let start = past ? -Infinity : target
     for (const kind of this.#kinds) {
       const ranges = sink.buffered(kind)
@@ -441,7 +556,7 @@ class Play {
       })
     }
     if (Math.abs(this.#video.currentTime - start) > 1e-6) {
-      sink.seek(start)
+      this.#moveTo(start)
       if (Math.abs(this.#video.currentTime - start) > 1e-6) this.#pendingStart = start
     }
   }
@@ -452,24 +567,97 @@ class Play {
     if (offset !== null) this.#downloader?.setPosition(offset)
   }
 
+  /** Whether the decoder window holds the playhead at `at`: every playing track has buffered data there, with room ahead, or to the end of the file. */
+  #inWindow(at: number): boolean {
+    const sink = this.#sink
+    if (sink === null) return false
+    return this.#kinds.every((kind) =>
+      sink
+        .buffered(kind)
+        .some(
+          ([start, end]) =>
+            start - GAP_EDGE_SECONDS <= at && (at < end - GAP_EDGE_SECONDS || this.#feedDone),
+        ),
+    )
+  }
+
+  /** The element's `seeking`: a seek of the engine's own is passed over; the viewer's is told, and, outside the window, asked of the pump. */
+  #onSeeking(): void {
+    const video = this.#video
+    const at = video.currentTime
+    const own = this.#ownSeek
+    this.#ownSeek = null
+    this.#holding.moved()
+    if (own !== null && Math.abs(own - at) < 1e-3) {
+      this.#wake()
+      return
+    }
+    if (this.#stopped || this.#failed) return
+    this.#watching?.noteSeek()
+    // The playhead moved: what waited for it to move, no longer waits.
+    this.#pendingStart = null
+    this.#stallAt = null
+    this.#quotaStalled = false
+    this.#clockHint = at
+    if (!this.#started) {
+      // A seek during the opening is kept, and applied at the start.
+      this.#userSeek = at
+      this.#seeks.begin(at, false)
+      this.#stats.seeks += 1
+      this.#restartFeed()
+      this.#wake()
+      return
+    }
+    const inWindow = this.#inWindow(at)
+    this.#seeks.begin(at, inWindow)
+    this.#givePosition()
+    if (!inWindow) {
+      this.#stats.seeks += 1
+      this.#post({ kind: 'seek' })
+    }
+    this.#holding.check()
+    this.#wake()
+  }
+
   #startTimers(): void {
     this.#lastStatsAt = performance.now()
     const video = this.#video
+    const on = (name: string, listener: () => void): void => {
+      video.addEventListener(name, listener)
+      this.#listeners.push([name, listener])
+    }
     const wake = (): void => {
       this.#wake()
     }
-    for (const name of ['timeupdate', 'seeking', 'waiting']) {
-      video.addEventListener(name, wake)
-      this.#listeners.push([name, wake])
+    const picture = (): void => {
+      this.#seeks.check()
     }
+    on('timeupdate', wake)
+    on('seeking', () => {
+      this.#onSeeking()
+    })
+    on('waiting', () => {
+      this.#wake()
+      if (this.#started) this.#holding.stalled()
+    })
+    for (const name of ['timeupdate', 'seeked', 'playing', 'canplay', 'loadeddata']) {
+      on(name, picture)
+    }
+    on('pause', () => {
+      this.#holding.paused()
+    })
+    on('play', () => {
+      this.#holding.played()
+    })
     this.#timers.push(
       setInterval(() => {
         const sink = this.#sink
         if (sink !== null && !this.#ended) {
           for (const kind of this.#kinds) this.#window.sync(kind, sink.buffered(kind))
         }
-        // A play that has ended wakes only for a seek (the controls), not for a tick.
+        // A play that has ended wakes only for a request, not for a tick.
         if (!this.#ended) this.#wake()
+        if (this.#started && !this.#stopped && !this.#failed) this.#control()
       }, WATCH_EVERY_MS),
       setInterval(() => {
         const video = this.#video
@@ -493,6 +681,70 @@ class Play {
         this.#publish()
       }, STATS_EVERY_MS),
     )
+  }
+
+  /** What the tick does for the controls: the seek's picture and deadline, the hold's release, and the watchdog's sample. */
+  #control(): void {
+    this.#seeks.check()
+    const late = this.#seeks.overdue()
+    if (late !== null) {
+      const seconds = SEEK_DEADLINE_MS / 1000
+      this.#say({
+        type: 'error',
+        from: 'engine',
+        code: null,
+        message: `The seek to ${late.toFixed(1)} s showed no picture in ${seconds} s, so the window is fed again from there.`,
+      })
+      this.#say({
+        type: 'watchdog',
+        action: 'refeed',
+        at: this.#video.currentTime,
+        detail: `The seek to ${late.toFixed(1)} s passed its deadline of ${seconds} s.`,
+      })
+      this.#post({ kind: 'refeed' })
+    }
+    this.#holding.check()
+    const action = this.#watching?.sample(this.#holding.holding) ?? null
+    if (action !== null) this.#applyWatch(action)
+  }
+
+  /** Does what the watchdog says, and logs it. */
+  #applyWatch(action: WatchAction): void {
+    const at = this.#video.currentTime
+    switch (action.action) {
+      case 'gap':
+        this.#say({
+          type: 'watchdog',
+          action: 'gap',
+          at,
+          detail: `The clock stood still at ${at.toFixed(3)} s and the next frames are at ${action.to.toFixed(3)} s, so it steps there.`,
+        })
+        this.#moveTo(action.to)
+        break
+      case 'refeed':
+        this.#say({
+          type: 'watchdog',
+          action: 'refeed',
+          at,
+          detail: `The clock stood still at ${at.toFixed(3)} s, so the window is emptied and fed again from the store there.`,
+        })
+        this.#post({ kind: 'refeed' })
+        break
+      case 'reopen':
+        this.#say({
+          type: 'watchdog',
+          action: 'reopen',
+          at,
+          detail: `The clock stood still at ${at.toFixed(3)} s after a refeed, so Media Source is opened again there.`,
+        })
+        this.#stats.reopens += 1
+        this.#post({ kind: 'reopen' })
+        break
+      case 'stuck':
+        this.#say({ type: 'watchdog', action: 'stuck', at, detail: action.detail })
+        this.#fail(new Error(action.detail))
+        break
+    }
   }
 
   #stopTimers(): void {
@@ -529,11 +781,30 @@ class Play {
     return removed
   }
 
+  /** Empties the decoder's buffers: what they hold is not what the window will be fed with, once the feed is moved. */
+  async #clearSink(): Promise<void> {
+    const sink = this.#sink
+    if (sink === null) return
+    for (const kind of this.#kinds) await sink.remove(kind, Infinity)
+  }
+
+  /** Starts the feed afresh: the window holds nothing, nothing is ended, and what waited for the playhead or for room waits no more. */
+  #resetFeed(): void {
+    this.#window.reset()
+    this.#feedDone = false
+    this.#ended = false
+    // A quota stall is not cleared here: a refeed that meets the same refusal is the same stall, told once.
+    this.#stallAt = null
+    this.#pendingStart = null
+    if (this.#stats.phase === 'ended') this.#setPhase('buffering')
+  }
+
   /**
    * One step of the feed: removes what is due, then feeds to what the window wants, if it wants any.
    * Answers `'fed'` when it made progress (go on at once), `'idle'` when it has nothing to do or made
    * none (wait for the next wake), and `'ended'` when the file has no more fragments, all appended.
-   * A quota error is not an error: the window shrank, and what could be removed was.
+   * A quota error is not an error: the window shrank, and what could be removed was. A feed that a
+   * request restarted is `'idle'`: the pump serves the request next.
    */
   async #feedOnce(): Promise<'fed' | 'idle' | 'ended'> {
     const feeder = this.#feeder
@@ -571,26 +842,75 @@ class Play {
         if (this.#started) this.#stallAt = this.#video.currentTime
         return 'idle'
       }
-      // The end of a feed, whether the play is over or the sink was closed under it, is no failure.
-      if (isAbort(error) && !signal.aborted) return 'idle'
+      // The end of a feed, whether a request restarted it or the sink was closed or reopened under it, is no failure; the play's own end is thrown to the pump, which is stopping.
+      if (isAbort(error) && !this.#stopped && !this.#failed) return 'idle'
       throw error
     }
   }
 
-  /** The loop that feeds for the rest of the play. It ends when the play is over or has failed; a failure is told, not thrown. */
+  /** The loop that feeds for the rest of the play, and serves the requests. It ends when the play is over or has failed; a failure is told, not thrown. */
   async #pump(): Promise<void> {
     try {
       while (!this.#stopped && !this.#failed) {
+        if (this.#requested()) {
+          await this.#serve()
+          continue
+        }
         if (this.#feedDone) {
           if (!this.#ended) await this.#finish()
           else await this.#nextWake()
           continue
         }
         const result = await this.#feedOnce()
-        if (result === 'idle') await this.#nextWake()
+        if (result === 'idle' && !this.#requested()) await this.#nextWake()
       }
     } catch (error) {
       if (!this.#stopped && !this.#failed) this.#fail(error)
+    }
+  }
+
+  /**
+   * Serves the pending request. A seek outside the window empties the decoder's buffers and feeds from the
+   * target out of the store (the store keeps what it holds, and fetches only what it lacks); after the end, and
+   * for a reopen, Media Source is opened again at the playhead (a removal would open an ended one, and a
+   * reopen is the watchdog's last resort); a refeed empties the window's book and feeds from the playhead. The
+   * feed ends in the common start, and a seek in the hold. A newer request ends this one at once.
+   */
+  async #serve(): Promise<void> {
+    const request = this.#request
+    const sink = this.#sink
+    const feeder = this.#feeder
+    if (request === null || sink === null || feeder === null) return
+    this.#request = null
+    const video = this.#video
+    const signal = this.#feedControl.signal
+    try {
+      const at = video.currentTime
+      const wasPaused = isPaused(video)
+      const reopen = request.kind === 'reopen' || (request.kind === 'seek' && this.#ended)
+      if (reopen) {
+        this.#clockHint = at
+        this.#ownSeek = at
+        await sink.reopen(at, signal)
+      } else if (request.kind === 'seek') {
+        await this.#clearSink()
+      }
+      this.#resetFeed()
+      await feeder.seek(at, signal)
+      await this.#feedCovering(at, () => this.#requested())
+      if (this.#requested()) return
+      this.#signal.throwIfAborted()
+      this.#applyCommonStart(at)
+      this.#givePosition()
+      if (request.kind === 'seek') this.#holding.begin('seek')
+      else if (request.kind === 'reopen' && !wasPaused && isPaused(video)) {
+        // A new Media Source pauses the element: it plays again if it was playing.
+        video.play().catch(() => undefined)
+      }
+    } catch (error) {
+      // A newer request, or the end of the play, ends this one; anything else is the play's failure.
+      if (isAbort(error) || this.#stopped || this.#failed) return
+      throw error
     }
   }
 
@@ -612,6 +932,7 @@ class Play {
     this.#stats.error = message
     if (!isTold(error)) this.#say({ type: 'error', from: 'engine', code: null, message })
     this.#setPhase('failed')
+    this.#request = null
     this.#feedControl.abort(error)
     this.#stopTimers()
     this.#wake()
