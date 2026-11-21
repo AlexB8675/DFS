@@ -127,3 +127,6 @@ export const APPEND_WINDOW_PAD_SECONDS = 0.001
 
 /** How much picture a play's first feed waits through for a sound frame before it goes on with no sound: 3 s. The first feed's fragments are held until then (about 45 MB at 120 Mbit/s, only when no sound frame comes). */
 export const SOUND_WAIT_SECONDS = 3
+
+/** How near a buffered range's end the playhead counts as sitting at it, in seconds: 0.25. Chrome and Firefox stop about a frame before the end of a range. */
+export const GAP_EDGE_SECONDS = 0.25

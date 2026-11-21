@@ -9,6 +9,7 @@ import {
   ESTIMATE_MS,
   FEED_STEP_SECONDS,
   FRONTIER_BLOCKS,
+  GAP_EDGE_SECONDS,
   GAP_STEP_SECONDS,
   HEAD_BYTES,
   INDEX_CACHE_BYTES,
@@ -114,6 +115,7 @@ describe('the store and the downloader limits', () => {
     expect(WINDOW_MIN_AHEAD_SECONDS).toBe(1)
     expect(FEED_STEP_SECONDS).toBe(1)
     expect(GAP_STEP_SECONDS).toBe(2)
+    expect(GAP_EDGE_SECONDS).toBe(0.25)
   })
 
   it('reads 1 MiB at a cursor and doubles to 32 MiB, reads 1 MiB of the file end, and keeps 40 MiB of the index chunks', () => {
