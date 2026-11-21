@@ -165,4 +165,31 @@ describe('Holding', () => {
     expect(off?.aheadS).toBeCloseTo(1, 3)
     expect(off?.targetS).toBe(on?.targetS)
   })
+
+  // R41 item 5: while a hold is on it is checked every HOLD_CHECK_MS, so release does not wait for the tick.
+  test('a hold lets go within 100 ms of the rate becoming fast enough, with no tick', async () => {
+    const play = setup()
+    // Half a second of the video is stored, on a link slower than the video: held.
+    play.held.add({ start: 0, end: 500_000 })
+    play.holding.begin('start')
+    expect(play.holding.holding).toBe(true)
+    // The link turns out fast: the first frames are enough, and the hold lets go on its own check.
+    play.link.rate = 5_000_000
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(play.holding.holding).toBe(false)
+    expect(play.calls).toContain('play')
+    expect(holds(play.events).map((event) => event.on)).toEqual([true, false])
+  })
+
+  test('the check stops with the hold, and when the play is disposed during one', async () => {
+    const play = setup()
+    play.held.add({ start: 0, end: 500_000 })
+    play.holding.begin('start')
+    play.holding.dispose()
+    play.link.rate = 5_000_000
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    // Nothing checked it: it is still on, and nothing played.
+    expect(play.holding.holding).toBe(true)
+    expect(play.calls).not.toContain('play')
+  })
 })

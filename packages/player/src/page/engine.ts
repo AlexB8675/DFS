@@ -782,6 +782,7 @@ class Play {
 
   #stopTimers(): void {
     for (const timer of this.#timers.splice(0)) clearInterval(timer)
+    this.#holding.dispose()
     for (const [name, listener] of this.#listeners.splice(0)) {
       this.#video.removeEventListener(name, listener)
     }

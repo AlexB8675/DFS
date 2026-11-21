@@ -40,6 +40,9 @@ export const RATE_WINDOW_MS = 5_000
  */
 export const RATE_EARLY_MS = 250
 
+/** How often a hold is checked while it is on, so that it lets go soon after the rate covers the bit rate and does not wait for the engine's 500 ms tick. */
+export const HOLD_CHECK_MS = 50
+
 /** How often the `storeLevel` event is recorded while the play downloads: every 5 s, where one per block would fill the timeline. */
 export const LEVEL_EVERY_MS = 5_000
 

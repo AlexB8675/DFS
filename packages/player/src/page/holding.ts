@@ -11,6 +11,7 @@ import type { Downloader } from '../downloader.ts'
 import type { Feeder } from '../engine/feeder.ts'
 import { holdDecision } from '../engine/hold.ts'
 import type { HoldDecision, HoldReason } from '../engine/hold.ts'
+import { HOLD_CHECK_MS } from '../limits.ts'
 import type { RangeSet } from '../ranges.ts'
 
 /** What the play lets the hold read and say. */
@@ -52,6 +53,8 @@ export class Holding {
   /** What the rule last measured, which the `hold` events tell: the store's seconds ahead of the playhead, and the goal. */
   #aheadSeconds = 0
   #goalSeconds = 0
+  /** The check that runs every HOLD_CHECK_MS while a hold is on, and only then. */
+  #timer: ReturnType<typeof setInterval> | null = null
 
   constructor(world: HoldWorld) {
     this.#world = world
@@ -163,9 +166,22 @@ export class Holding {
     if (this.#holding) this.#leave()
   }
 
+  /** Stops the check of a hold that is on: the play is over. */
+  dispose(): void {
+    this.#stopTimer()
+  }
+
+  #stopTimer(): void {
+    if (this.#timer !== null) clearInterval(this.#timer)
+    this.#timer = null
+  }
+
   #enter(reason: HoldReason): void {
     const world = this.#world
     this.#holding = true
+    this.#timer ??= setInterval(() => {
+      this.check()
+    }, HOLD_CHECK_MS)
     this.#reason = reason
     this.#since = world.now()
     world.stats.holding = true
@@ -179,6 +195,7 @@ export class Holding {
 
   #leave(): void {
     const world = this.#world
+    this.#stopTimer()
     this.#holding = false
     world.stats.holding = false
     world.stats.holds += 1
