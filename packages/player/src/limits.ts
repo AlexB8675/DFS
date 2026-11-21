@@ -124,3 +124,6 @@ export const REOPENS_MAX = 3
 
 /** Added to a track's `appendWindowEnd`, in seconds, so that rounding never drops its last frame: 1 ms. */
 export const APPEND_WINDOW_PAD_SECONDS = 0.001
+
+/** How much picture a play's first feed waits through for a sound frame before it goes on with no sound: 3 s. The first feed's fragments are held until then (about 45 MB at 120 Mbit/s, only when no sound frame comes). */
+export const SOUND_WAIT_SECONDS = 3

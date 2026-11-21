@@ -26,6 +26,7 @@ import {
   RETRY_JITTER,
   RETRY_MAX_MS,
   SEEK_DEADLINE_MS,
+  SOUND_WAIT_SECONDS,
   START_GOAL_SECONDS,
   STALL_COVER_MS,
   STALL_GOAL_SECONDS,
@@ -133,6 +134,10 @@ describe('the store and the downloader limits', () => {
     expect(STUCK_MS).toBe(2_000)
     expect(WATCH_EVERY_MS).toBe(500)
     expect(REOPENS_MAX).toBe(3)
+  })
+
+  it('waits for a sound through 3 s of picture before the play goes on without one', () => {
+    expect(SOUND_WAIT_SECONDS).toBe(3)
   })
 
   it('pads the append window of a track by 1 ms', () => {
