@@ -35,6 +35,11 @@ export class Seeks {
     this.#now = now
   }
 
+  /** Whether a seek has no picture yet. */
+  get pending(): boolean {
+    return this.#pending !== null
+  }
+
   /** A seek to `to` (seconds) began: sent with no time, and watched for its picture. */
   begin(to: number, inWindow: boolean): void {
     this.#pending = {

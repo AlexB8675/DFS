@@ -637,7 +637,10 @@ class Play {
     // The intent before the seek is settled: playing, or held for a play that is wanted.
     const playing = !isPaused(video) || this.#holding.wantsPlay
     this.#seeks.begin(at, inWindow)
-    this.#givePosition()
+    // Within the window the playhead's own place is the position. Outside it the feeder's seek gives it, at the
+    // group of the target, which only the feeder knows: `Positions` still holds the old runs then, and gave
+    // the downloader a wrong offset first, and a second restart later.
+    if (inWindow) this.#givePosition()
     if (!inWindow) {
       this.#stats.seeks += 1
       this.#post({ kind: 'seek', to: at, told: true, seek: true, playing })
@@ -692,6 +695,9 @@ class Play {
           this.#started &&
           !video.paused &&
           !video.ended &&
+          // The clock is at a seek's target before the runs there are fed: its place is not known yet, and the
+          // feeder's seek has given the downloader the group's.
+          !this.#seeks.pending &&
           this.#downloader?.state() !== 'done'
         ) {
           this.#givePosition()
