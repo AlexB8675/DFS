@@ -3,16 +3,15 @@
 // ahead of the playhead, never the decoder window, so a window shrunk by quota errors cannot hold a play for
 // ever. The hold is the engine's own pause: while it holds, the element is paused, and when the rule lets go
 // the engine calls `play()`. Only a play that has an `autoplay` is held or played by the engine at all; with
-// none, the element is the viewer's. Nothing here feeds, and no timer runs: the play asks it to check on its tick.
+// none, the element is the viewer's. Only a wanted play is held: a seek made while paused never holds or plays.
+// Nothing here feeds, and no timer runs: the play asks it to check on its tick.
 
 import type { TimelineEventInput } from '@dfs/shared'
 import type { Downloader } from '../downloader.ts'
 import type { Feeder } from '../engine/feeder.ts'
 import { holdDecision } from '../engine/hold.ts'
 import type { HoldDecision, HoldReason } from '../engine/hold.ts'
-import { WINDOW_AHEAD_SECONDS } from '../limits.ts'
 import type { RangeSet } from '../ranges.ts'
-import { aheadOf } from './video.ts'
 
 /** What the play lets the hold read and say. */
 export interface HoldWorld {
@@ -48,10 +47,11 @@ export class Holding {
   #since = 0
   /** Whether the hold has paused the element: its `pause` event is then the hold's, not the viewer's. */
   #pausedByHold = false
-  /** Whether the play was playing when a stall began: only then does the end of the hold play it. */
-  #wasPlaying = false
   /** Where the clock was when the play started, resumed or was moved: a `waiting` before the clock has moved is the start's wait for its first frames, not a stall. */
   #anchor = 0
+  /** What the rule last measured, which the `hold` events tell: the store's seconds ahead of the playhead, and the goal. */
+  #aheadSeconds = 0
+  #goalSeconds = 0
 
   constructor(world: HoldWorld) {
     this.#world = world
@@ -66,15 +66,24 @@ export class Holding {
     return this.#holding
   }
 
+  /** True while a hold for a wanted play is on: a play that is not wanted is never held. */
+  get wantsPlay(): boolean {
+    return this.#holding
+  }
+
   /**
    * The rule's answer for the playhead now, or null when there is nothing to wait for: the duration is not
-   * known (play as soon as the common start is set), or the feed has ended (at the end the hold is not consulted).
+   * known (play as soon as the common start is set), the feed has ended (at the end the hold is not consulted),
+   * the download is done or has failed (nothing more will come, so waiting gains nothing), or the store holds
+   * every byte from the playhead's offset to the end of the file.
    */
   #decide(reason: HoldReason): HoldDecision | null {
     const { video } = this.#world
     const downloader = this.#world.downloader()
     const feeder = this.#world.feeder()
     if (downloader === null || feeder === null || this.#world.feedDone()) return null
+    const state = downloader.state()
+    if (state === 'done' || state === 'failed') return null
     const duration = feeder.durationSeconds
     if (duration === null || !(duration > 0)) return null
     const bitrate = downloader.fileSize / duration
@@ -84,9 +93,9 @@ export class Holding {
     const { store } = downloader
     const held = store.held()
     const ahead = offset === null ? 0 : held.heldFrom(offset)
+    if (offset !== null && ahead >= downloader.fileSize - offset) return null
     const behind = offset === null ? 0 : heldBefore(held, offset)
-    const state = downloader.state()
-    return holdDecision({
+    const decision = holdDecision({
       reason,
       heldAheadSeconds: ahead / bitrate,
       rateBytesPerSecond: state === 'reading' ? downloader.rate() : null,
@@ -95,32 +104,41 @@ export class Holding {
       storeAheadCapSeconds: (store.capBytes - Math.min(behind, store.capBytes / 2)) / bitrate,
       storeFull: state === 'full',
     })
+    this.#aheadSeconds = ahead / bitrate
+    this.#goalSeconds = decision.goalSeconds
+    return decision
   }
 
   /**
-   * The play starts or seeks (`start`, `seek`): holds while the rule says to wait, else plays. Does
-   * nothing for a play with no `autoplay`.
+   * The play starts (`start`: wanted when `autoplay()` says so) or a seek ends (`seek`: wanted when the play
+   * was playing, `playing`): holds while the rule says to wait, else plays. A play that is not wanted is never
+   * held, and a hold that is on is left with no play. Does nothing for a play with no `autoplay`.
    */
-  begin(reason: 'start' | 'seek'): void {
-    if (this.#world.autoplay === undefined) return
+  begin(reason: 'start' | 'seek', playing = true): void {
+    const { autoplay } = this.#world
+    if (autoplay === undefined) return
     this.moved()
+    const wanted = reason === 'start' ? autoplay() : playing
+    if (!wanted) {
+      if (this.#holding) this.#leave()
+      return
+    }
     if (this.#holding) this.#reason = reason
-    const decision = this.#decide(reason)
-    if (decision?.hold === true) {
-      if (!this.#holding) this.#enter(reason, !this.#world.video.paused)
+    if (this.#decide(reason)?.hold === true) {
+      if (!this.#holding) this.#enter(reason)
       return
     }
     if (this.#holding) this.#leave()
     this.#play()
   }
 
-  /** The element stalled (`waiting`) while playing: holds, and pauses it, when the rule says to wait. */
+  /** The element stalled (`waiting`) while playing: a wanted play, so it holds, and pauses, when the rule says to wait. */
   stalled(): void {
     const { video } = this.#world
     if (this.#world.autoplay === undefined || this.#holding) return
     if (video.paused || video.ended || video.seeking) return
     if (Math.abs(video.currentTime - this.#anchor) < STALL_AFTER_SECONDS) return
-    if (this.#decide('stall')?.hold === true) this.#enter('stall', true)
+    if (this.#decide('stall')?.hold === true) this.#enter('stall')
   }
 
   /** To be called on the tick: lets the hold go, and plays, when the rule no longer says to wait. */
@@ -137,9 +155,7 @@ export class Holding {
       this.#pausedByHold = false
       return
     }
-    if (!this.#holding) return
-    this.#wasPlaying = false
-    this.#leave()
+    if (this.#holding) this.#leave()
   }
 
   /** The element's `play` event: the viewer's play during a hold ends it (the engine's own play comes after the hold is left). */
@@ -147,12 +163,11 @@ export class Holding {
     if (this.#holding) this.#leave()
   }
 
-  #enter(reason: HoldReason, wasPlaying: boolean): void {
+  #enter(reason: HoldReason): void {
     const world = this.#world
     this.#holding = true
     this.#reason = reason
     this.#since = world.now()
-    this.#wasPlaying = wasPlaying
     world.stats.holding = true
     if (!world.video.paused) {
       this.#pausedByHold = true
@@ -172,23 +187,21 @@ export class Holding {
     world.changed()
   }
 
-  /** Plays, when the engine is asked to be playing and (after a stall) the play was playing; a refusal of the browser is not the play's failure. */
+  /** Plays a wanted play, unless `autoplay()` now says no (a slide swiped away during a hold); a refusal of the browser is not the play's failure. */
   #play(): void {
     const { video, autoplay } = this.#world
-    if (autoplay?.() !== true || !video.paused) return
-    if (this.#reason === 'stall' && !this.#wasPlaying) return
+    if (autoplay?.() === false || !video.paused) return
     this.moved()
     video.play().catch(() => undefined)
   }
 
   #report(on: boolean): void {
-    const { video } = this.#world
     this.#world.say({
       type: 'hold',
       on,
       reason: on ? this.#reason : null,
-      aheadS: aheadOf(video.buffered, video.currentTime),
-      targetS: WINDOW_AHEAD_SECONDS,
+      aheadS: Number.isFinite(this.#aheadSeconds) ? this.#aheadSeconds : 0,
+      targetS: Number.isFinite(this.#goalSeconds) ? this.#goalSeconds : 0,
     })
   }
 }

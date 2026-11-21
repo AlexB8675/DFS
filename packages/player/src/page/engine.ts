@@ -22,13 +22,15 @@ import { messageOf } from '../downloader.ts'
 import type { Downloader } from '../downloader.ts'
 import { Feeder } from '../engine/feeder.ts'
 import type { Sink } from '../engine/feeder.ts'
+import { holdsAt } from '../engine/holds-at.ts'
+import { mergeRequests } from '../engine/requests.ts'
+import type { Request } from '../engine/requests.ts'
 import { feedTargets } from '../engine/targets.ts'
 import type { ChosenTracks, EngineTrack } from '../engine/tracks.ts'
 import type { WatchAction } from '../engine/watchdog.ts'
 import { DecoderWindow } from '../engine/window.ts'
 import type { FedRun } from '../engine/window.ts'
 import {
-  GAP_EDGE_SECONDS,
   POSITION_EVERY_MS,
   SEEK_DEADLINE_MS,
   SOUND_WAIT_SECONDS,
@@ -42,7 +44,7 @@ import { ReadError } from '../read.ts'
 import { Holding } from './holding.ts'
 import { Seeks } from './seeks.ts'
 import { MediaSourceSink, SinkQuotaError } from './sink.ts'
-import { HAVE_FUTURE_DATA, aheadOf, isPaused } from './video.ts'
+import { HAVE_FUTURE_DATA, aheadOf, hasDataAt, isPaused } from './video.ts'
 import { Watching } from './watching.ts'
 
 type Kind = 'video' | 'audio'
@@ -118,11 +120,6 @@ export interface PlayStreamedOptions {
   windowBytes?: number
 }
 
-/** What the pump is asked to do, in the order of what each includes: a reopen covers a seek, and a seek covers a refeed. */
-type Request = { kind: 'refeed' } | { kind: 'seek' } | { kind: 'reopen' }
-
-const RANK: Record<Request['kind'], number> = { refeed: 1, seek: 2, reopen: 3 }
-
 function isRefusal(error: unknown): error is { refusal: string } {
   return typeof error === 'object' && error !== null && 'refusal' in error
 }
@@ -189,8 +186,12 @@ class Play {
   #quotaStalled = false
   /** Where the playhead was at such an error once the play had begun: the feed waits for it to move. */
   #stallAt: number | null = null
-  /** What the pump is asked to do next, if anything. */
+  /** What the pump is asked to do next, if anything: requests are merged, never dropped. */
   #request: Request | null = null
+  /** The request the pump is serving: merged back into the next when a newer one aborts it. */
+  #serving: Request | null = null
+  /** True while the pump awaits `feeder.feed`: a feed that waits for bytes. */
+  #feeding = false
   /** The time of the viewer's latest seek during the opening, which the start is moved to. */
   #userSeek: number | null = null
   /** The time the engine itself moved the clock to, until the element's `seeking` for it has come: that seek is the engine's, not the viewer's. */
@@ -342,8 +343,7 @@ class Play {
    */
   #post(request: Request): void {
     if (this.#stopped || this.#failed) return
-    const pending = this.#request
-    if (pending === null || RANK[request.kind] >= RANK[pending.kind]) this.#request = request
+    this.#request = mergeRequests(this.#request, request)
     this.#restartFeed()
     this.#wake()
   }
@@ -351,6 +351,27 @@ class Play {
   /** Whether a request waits for the pump (the compiler cannot see that an `await` lets one come). */
   #requested(): boolean {
     return this.#request !== null
+  }
+
+  /** The request that waits for the pump, read afresh (the compiler cannot see that an `await` lets one come). */
+  #waiting(): Request | null {
+    return this.#request
+  }
+
+  /** Whether a request waits or is being served: the feed is being moved, and the hold and the watchdog have nothing to say. */
+  #busy(): boolean {
+    return this.#request !== null || this.#serving !== null
+  }
+
+  /** A request for what is asked of the engine now, from the playhead's place and intent: what the watchdog and the deadline give. */
+  #own(kind: Request['kind']): Request {
+    return {
+      kind,
+      to: this.#at(),
+      told: false,
+      seek: false,
+      playing: !isPaused(this.#video) || this.#holding.wantsPlay,
+    }
   }
 
   /** Ends the feed in flight, as a restart and no failure, and gives the next one a new signal. */
@@ -427,8 +448,15 @@ class Play {
       const sought = this.#openingSeek()
       if (sought === null) break
       target = sought
+      this.#target = sought
       this.#resetFeed()
       await this.#clearSink()
+      // A newer seek during the clearing is taken before the old target is fed.
+      while (this.#userSeek !== null) {
+        target = this.#userSeek
+        this.#userSeek = null
+        this.#target = target
+      }
     }
     this.#target = target
     this.#applyCommonStart(target)
@@ -555,6 +583,8 @@ class Play {
         detail: `The tracks first have frames at ${start.toFixed(3)} s, so the play starts there and not at ${target.toFixed(3)} s.`,
       })
     }
+    // A start that is not the target (a sound late, a target past the end) is the seek's target now, so that it completes.
+    if (Math.abs(start - target) > 1e-6) this.#seeks.retarget(start)
     if (Math.abs(this.#video.currentTime - start) > 1e-6) {
       this.#moveTo(start)
       if (Math.abs(this.#video.currentTime - start) > 1e-6) this.#pendingStart = start
@@ -571,14 +601,7 @@ class Play {
   #inWindow(at: number): boolean {
     const sink = this.#sink
     if (sink === null) return false
-    return this.#kinds.every((kind) =>
-      sink
-        .buffered(kind)
-        .some(
-          ([start, end]) =>
-            start - GAP_EDGE_SECONDS <= at && (at < end - GAP_EDGE_SECONDS || this.#feedDone),
-        ),
-    )
+    return this.#kinds.every((kind) => holdsAt(sink.buffered(kind), at, this.#feedDone))
   }
 
   /** The element's `seeking`: a seek of the engine's own is passed over; the viewer's is told, and, outside the window, asked of the pump. */
@@ -594,6 +617,8 @@ class Play {
     }
     if (this.#stopped || this.#failed) return
     this.#watching?.noteSeek()
+    // A seek that waited for data is the old position's: the viewer has moved the clock since.
+    this.#sink?.cancelSeek()
     // The playhead moved: what waited for it to move, no longer waits.
     this.#pendingStart = null
     this.#stallAt = null
@@ -609,13 +634,15 @@ class Play {
       return
     }
     const inWindow = this.#inWindow(at)
+    // The intent before the seek is settled: playing, or held for a play that is wanted.
+    const playing = !isPaused(video) || this.#holding.wantsPlay
     this.#seeks.begin(at, inWindow)
     this.#givePosition()
     if (!inWindow) {
       this.#stats.seeks += 1
-      this.#post({ kind: 'seek' })
+      this.#post({ kind: 'seek', to: at, told: true, seek: true, playing })
     }
-    this.#holding.check()
+    if (!this.#busy()) this.#holding.check()
     this.#wake()
   }
 
@@ -693,18 +720,22 @@ class Play {
         type: 'error',
         from: 'engine',
         code: null,
-        message: `The seek to ${late.toFixed(1)} s showed no picture in ${seconds} s, so the window is fed again from there.`,
+        message: `The seek to ${late.toFixed(1)} s showed no picture in ${seconds} s.`,
       })
-      this.#say({
-        type: 'watchdog',
-        action: 'refeed',
-        at: this.#video.currentTime,
-        detail: `The seek to ${late.toFixed(1)} s passed its deadline of ${seconds} s.`,
-      })
-      this.#post({ kind: 'refeed' })
+      // A request that waits or is served is already feeding at its target: a refeed on top of it would only restart it.
+      if (!this.#busy()) {
+        this.#say({
+          type: 'watchdog',
+          action: 'refeed',
+          at: this.#video.currentTime,
+          detail: `The seek to ${late.toFixed(1)} s passed its deadline of ${seconds} s, so the window is fed again from the store there.`,
+        })
+        this.#post(this.#own('refeed'))
+      }
     }
-    this.#holding.check()
-    const action = this.#watching?.sample(this.#holding.holding) ?? null
+    // While the feed is being moved the hold has nothing to check, and the watchdog is told the play is held, so its clocks start afresh.
+    if (!this.#busy()) this.#holding.check()
+    const action = this.#watching?.sample(this.#holding.holding || this.#busy()) ?? null
     if (action !== null) this.#applyWatch(action)
   }
 
@@ -722,13 +753,15 @@ class Play {
         this.#moveTo(action.to)
         break
       case 'refeed':
+        // A feed that waits for bytes, with no data at the playhead, is not a stuck play: a refeed would only restart the wait.
+        if (this.#feeding && !hasDataAt(this.#video.buffered, at)) break
         this.#say({
           type: 'watchdog',
           action: 'refeed',
           at,
           detail: `The clock stood still at ${at.toFixed(3)} s, so the window is emptied and fed again from the store there.`,
         })
-        this.#post({ kind: 'refeed' })
+        this.#post(this.#own('refeed'))
         break
       case 'reopen':
         this.#say({
@@ -738,7 +771,7 @@ class Play {
           detail: `The clock stood still at ${at.toFixed(3)} s after a refeed, so Media Source is opened again there.`,
         })
         this.#stats.reopens += 1
-        this.#post({ kind: 'reopen' })
+        this.#post(this.#own('reopen'))
         break
       case 'stuck':
         this.#say({ type: 'watchdog', action: 'stuck', at, detail: action.detail })
@@ -785,7 +818,10 @@ class Play {
   async #clearSink(): Promise<void> {
     const sink = this.#sink
     if (sink === null) return
-    for (const kind of this.#kinds) await sink.remove(kind, Infinity)
+    // A kind with no buffer yet (before the first feed has given the sink its tracks) has nothing to clear.
+    for (const kind of this.#kinds) {
+      if (sink.buffered(kind).length > 0) await sink.remove(kind, Infinity)
+    }
   }
 
   /** Starts the feed afresh: the window holds nothing, nothing is ended, and what waited for the playhead or for room waits no more. */
@@ -825,7 +861,13 @@ class Play {
       // The least first, so that a track far ahead does not pull the other past its window in one call; the next only when that appended nothing.
       for (const until of untils) {
         const before = this.#appended
-        const result = await feeder.feed(until, this.#fragments, signal)
+        this.#feeding = true
+        let result: 'more' | 'ended'
+        try {
+          result = await feeder.feed(until, this.#fragments, signal)
+        } finally {
+          this.#feeding = false
+        }
         if (result === 'ended') {
           this.#feedDone = true
           return 'ended'
@@ -870,11 +912,13 @@ class Play {
   }
 
   /**
-   * Serves the pending request. A seek outside the window empties the decoder's buffers and feeds from the
-   * target out of the store (the store keeps what it holds, and fetches only what it lacks); after the end, and
-   * for a reopen, Media Source is opened again at the playhead (a removal would open an ended one, and a
-   * reopen is the watchdog's last resort); a refeed empties the window's book and feeds from the playhead. The
-   * feed ends in the common start, and a seek in the hold. A newer request ends this one at once.
+   * Serves the pending request, from the place it carries (`to`, never the clock read after a reopen). A seek
+   * or a refeed empties the decoder's buffers, as the window's book is emptied, and feeds from `to` out of the
+   * store (which keeps what it holds, and fetches only what it lacks); after the end, and for a reopen (the
+   * watchdog's last resort), Media Source is opened again instead (a removal would open an ended one). The feed
+   * ends in the common start; a seek's ends in the hold, and a play that was playing before a reopen plays
+   * again. A newer request ends this one at once, and this one is merged into it, so what it carried (a
+   * reopen, a seek's target and hold) is still served.
    */
   async #serve(): Promise<void> {
     const request = this.#request
@@ -882,35 +926,43 @@ class Play {
     const feeder = this.#feeder
     if (request === null || sink === null || feeder === null) return
     this.#request = null
+    this.#serving = request
     const video = this.#video
     const signal = this.#feedControl.signal
+    let completed = false
     try {
-      const at = video.currentTime
-      const wasPaused = isPaused(video)
-      const reopen = request.kind === 'reopen' || (request.kind === 'seek' && this.#ended)
+      const { to } = request
+      const reopen = request.kind === 'reopen' || this.#ended
       if (reopen) {
-        this.#clockHint = at
-        this.#ownSeek = at
-        await sink.reopen(at, signal)
-      } else if (request.kind === 'seek') {
+        this.#clockHint = to
+        this.#ownSeek = to
+        await sink.reopen(to, signal)
+      } else {
         await this.#clearSink()
       }
       this.#resetFeed()
-      await feeder.seek(at, signal)
-      await this.#feedCovering(at, () => this.#requested())
+      // A clock that is not at the target yet (a seek the sink deferred) leaves the playhead at the target for the feed.
+      if (Math.abs(video.currentTime - to) > 1e-6) this.#pendingStart = to
+      await feeder.seek(to, signal)
+      await this.#feedCovering(to, () => this.#requested())
       if (this.#requested()) return
       this.#signal.throwIfAborted()
-      this.#applyCommonStart(at)
+      this.#applyCommonStart(to)
       this.#givePosition()
-      if (request.kind === 'seek') this.#holding.begin('seek')
-      else if (request.kind === 'reopen' && !wasPaused && isPaused(video)) {
-        // A new Media Source pauses the element: it plays again if it was playing.
+      if (request.seek) this.#holding.begin('seek', request.playing)
+      // A new Media Source pauses the element: the engine gives back what it took, with or without an autoplay.
+      if (reopen && request.playing && !this.#holding.holding && isPaused(video)) {
         video.play().catch(() => undefined)
       }
+      completed = true
     } catch (error) {
       // A newer request, or the end of the play, ends this one; anything else is the play's failure.
       if (isAbort(error) || this.#stopped || this.#failed) return
       throw error
+    } finally {
+      this.#serving = null
+      const newer = this.#waiting()
+      if (!completed && newer !== null) this.#request = mergeRequests(request, newer)
     }
   }
 
@@ -921,6 +973,8 @@ class Play {
     // Set first, so that nothing is removed or fed while the stream ends: a removal would open it again.
     this.#ended = true
     await sink.end()
+    // A play that was stopped or failed meanwhile, or a request that waits, has the last word: no phase of an end that is not the play's.
+    if (this.#stopped || this.#failed || this.#requested()) return
     this.#setPhase('ended')
   }
 

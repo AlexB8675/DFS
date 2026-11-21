@@ -143,6 +143,28 @@ suite(NAME)('playStreamed: seeks', () => {
     expect(ofType(play.events, 'error')).toEqual([])
   })
 
+  test('a seek made before the sink has its tracks is kept too, and does not fail the play', async () => {
+    let sought = false
+    const play = begin(NAME, {
+      onEvent: (event, started) => {
+        // The phase `buffering` comes before the first feed, which is what gives the sink its tracks.
+        if (event.type === 'phase' && event.phase === 'buffering' && !sought) {
+          sought = true
+          started.video.currentTime = 6
+        }
+      },
+    })
+    await until(
+      play,
+      'the clock at 6 s with a picture',
+      30_000,
+      () => play.video.readyState >= 2 && play.video.currentTime >= 5.9,
+    )
+    expect(play.video.currentTime).toBeLessThan(7)
+    expect(ofType(play.events, 'error')).toEqual([])
+    expect(ofType(play.events, 'phase').some((event) => event.phase === 'failed')).toBe(false)
+  })
+
   test('a seek that shows no picture by its deadline sends an error, refeeds, and still sends its time to picture', async () => {
     await control({ bandwidthBytesPerSecond: 300_000 })
     const play = begin(NAME)
@@ -165,8 +187,8 @@ suite(NAME)('playStreamed: seeks', () => {
     expect(error?.message).toContain(String(SEEK_DEADLINE_MS / 1000))
     await until(play, 'the picture', 60_000, () => shown(play).length > 0)
     expect(shown(play)[0]?.ms).toBeGreaterThanOrEqual(SEEK_DEADLINE_MS)
-    const refeeds = ofType(play.events, 'watchdog').filter((event) => event.action === 'refeed')
-    expect(refeeds.length).toBeGreaterThan(0)
+    // The serve of the seek is already feeding at its target: the deadline posts no refeed on top of it.
+    expect(ofType(play.events, 'watchdog').filter((event) => event.action === 'refeed')).toEqual([])
     // The error comes before the seek that tells its time, and the seek is told once.
     const order = play.events.map((event) => event.type)
     expect(order.indexOf('error')).toBeLessThan(
@@ -176,7 +198,7 @@ suite(NAME)('playStreamed: seeks', () => {
     expect(play.video.currentTime).toBeGreaterThanOrEqual(7.9)
   }, 120_000)
 
-  test('a seek back after the end reopens the stream and plays on', async () => {
+  test('a seek back after the end reopens the stream, stays paused as it was, and plays on when the viewer plays', async () => {
     const reopen = vi.spyOn(MediaSourceSink.prototype, 'reopen')
     const play = begin(NAME, { windowBytes: 2 * 1024 * 1024, autoplay: () => true })
     play.video.playbackRate = 4
@@ -190,15 +212,22 @@ suite(NAME)('playStreamed: seeks', () => {
     // What was played has been removed from the window: 1 s is outside it.
     expect(holds(play.video, 1)).toBe(false)
     play.video.currentTime = 1
+    await until(play, 'the seek to show its picture', 30_000, () => shown(play).length > 0)
+    // A seek made while paused after the end stays paused, as in a native player; the viewer plays on.
+    expect(play.video.paused).toBe(true)
+    expect(play.video.currentTime).toBeCloseTo(1, 0)
+    await play.video.play()
     await until(
       play,
       'the play to go on from 1 s',
       30_000,
-      () => !play.video.paused && !play.video.ended && play.video.currentTime > 2.5,
+      () => !play.video.ended && play.video.currentTime > 2.5,
     )
     expect(reopen).toHaveBeenCalledTimes(1)
     const last = ofType(play.events, 'seek').at(-1)
     expect(last).toMatchObject({ inWindow: false })
+    // The seek tells its time to picture, though the count of frames restarted with the new Media Source.
+    expect(shown(play).at(-1)?.ms).not.toBeNull()
     expect(ofType(play.events, 'phase').map((event) => event.phase)).toContain('ended')
     expect(ofType(play.events, 'error')).toEqual([])
   })
@@ -273,25 +302,47 @@ function captureBuffers(): { cutAll: (from: number, to: number) => Promise<void>
   // The clock follows the sound when only the picture has a hole, so a hole that stops it is in both.
   return {
     cutAll: async (from, to) => {
-      await Promise.all(made.map((buffer) => cut(buffer, from, to)))
+      // One after the other: a removal on one buffer must not meet an append on the other.
+      for (const buffer of made) await cut(buffer, from, to, made)
     },
   }
 }
 
-/** Removes the time from `from` to `to` of a SourceBuffer, once it is not busy, and waits for the removal to end. */
-async function cut(buffer: SourceBuffer, from: number, to: number): Promise<void> {
-  while (buffer.updating) await pause(10)
-  const ended = new Promise<void>((resolve) => {
-    buffer.addEventListener(
-      'updateend',
-      () => {
-        resolve()
-      },
-      { once: true },
-    )
-  })
-  buffer.remove(from, to)
-  await ended
+/** Whether any of the SourceBuffers is busy. */
+function busy(buffers: readonly SourceBuffer[]): boolean {
+  return buffers.some((buffer) => buffer.updating)
+}
+
+/** Removes the time from `from` to `to` of a SourceBuffer, once none of the engine's buffers is busy, and waits for the removal to end; once more if the browser says it was busy after all. */
+async function cut(
+  buffer: SourceBuffer,
+  from: number,
+  to: number,
+  all: readonly SourceBuffer[],
+): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    while (busy(all)) await pause(10)
+    const ended = new Promise<void>((resolve) => {
+      buffer.addEventListener(
+        'updateend',
+        () => {
+          resolve()
+        },
+        { once: true },
+      )
+    })
+    try {
+      buffer.remove(from, to)
+    } catch (error) {
+      if (attempt === 0 && error instanceof DOMException && error.name === 'InvalidStateError') {
+        await pause(20)
+        continue
+      }
+      throw error
+    }
+    await ended
+    return
+  }
 }
 
 suite(NAME)('playStreamed: the watchdog', () => {
@@ -324,6 +375,7 @@ suite(NAME)('playStreamed: the watchdog', () => {
   })
 
   test('refeeds the window from the store when a hole is too big to step over', async () => {
+    const reopen = vi.spyOn(MediaSourceSink.prototype, 'reopen')
     const buffers = captureBuffers()
     const play = begin(NAME)
     await firstPicture(play)
@@ -338,13 +390,34 @@ suite(NAME)('playStreamed: the watchdog', () => {
     expect(refeed?.at).toBeGreaterThan(2)
     expect(refeed?.at).toBeLessThan(4)
     await until(play, 'the clock past the hole', 30_000, () => play.video.currentTime > 9.5)
+    // The file had ended: the refeed opens Media Source again (as a seek does), and is no reopen of the watchdog's.
+    expect(reopen).toHaveBeenCalledTimes(1)
+    expect(play.stats.at(-1)?.reopens).toBe(0)
     expect(ofType(play.events, 'watchdog').some((event) => event.action === 'gap')).toBe(false)
+    expect(ofType(play.events, 'error')).toEqual([])
+  })
+
+  test('does not refeed a play that waits for the network: a feed that waits for bytes is not a stuck play', async () => {
+    await control({ bandwidthBytesPerSecond: 600_000 })
+    const play = begin(NAME)
+    await firstPicture(play)
+    await play.video.play()
+    await until(play, 'the clock', 30_000, () => play.video.currentTime > 0.3)
+    // The link all but stops: the clock reaches the end of what is buffered and waits there for bytes.
+    await control({ bandwidthBytesPerSecond: 5_000 })
+    await until(play, 'the clock to starve', 60_000, () => play.video.readyState < 3)
+    await pause(STUCK_MS * 3)
+    expect(ofType(play.events, 'watchdog').filter((event) => event.action !== 'quota')).toEqual([])
+    await control({ bandwidthBytesPerSecond: 3_000_000 })
+    const at = play.video.currentTime
+    await until(play, 'the play to go on', 40_000, () => play.video.currentTime > at + 1)
     expect(ofType(play.events, 'error')).toEqual([])
   })
 
   test('reopens the decoder when a refeed does not move a stopped clock, and plays on', async () => {
     const reopen = vi.spyOn(MediaSourceSink.prototype, 'reopen')
-    const play = begin(NAME)
+    // A small window keeps the feed from the end of the file: a refeed after the end opens Media Source again itself, which this test is not about.
+    const play = begin(NAME, { windowBytes: 2 * 1024 * 1024 })
     await firstPicture(play)
     await play.video.play()
     await until(play, 'the clock', 15_000, () => play.video.currentTime > 1)

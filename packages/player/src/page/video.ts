@@ -33,3 +33,8 @@ export function framesShown(video: HTMLVideoElement): number {
 export function isPaused(video: HTMLVideoElement): boolean {
   return video.paused
 }
+
+/** Whether the ranges hold `at` with more than `GAP_EDGE_SECONDS` of data after it: the element has something to play. */
+export function hasDataAt(buffered: TimeRanges, at: number): boolean {
+  return rangesOf(buffered).some(([start, end]) => start <= at && end - at > GAP_EDGE_SECONDS)
+}

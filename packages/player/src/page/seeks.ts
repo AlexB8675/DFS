@@ -47,6 +47,11 @@ export class Seeks {
     this.#say({ type: 'seek', to, inWindow, ms: null })
   }
 
+  /** Moves the target of the seek that waits: the engine put the start elsewhere (a target past the end of the file, a start where every track has frames). */
+  retarget(to: number): void {
+    if (this.#pending !== null) this.#pending.to = to
+  }
+
   /**
    * Sends the seek's time to picture once the element shows it: it has stopped seeking, holds the picture at
    * its clock, and is past the target; a playing element must also have shown a frame since the seek began
@@ -58,7 +63,11 @@ export class Seeks {
     const video = this.#video
     if (video.seeking || video.readyState < HAVE_CURRENT_DATA) return
     if (video.currentTime < pending.to - 0.05) return
-    if (!video.paused && framesShown(video) <= pending.frames) return
+    const frames = framesShown(video)
+    // A lower count is a new element (a reopen): the new baseline, as in the watchdog.
+    if (frames < pending.frames) pending.frames = frames
+    // A hidden page shows no new frames, though it plays.
+    if (!video.paused && !document.hidden && frames <= pending.frames) return
     this.#pending = null
     this.#say({
       type: 'seek',

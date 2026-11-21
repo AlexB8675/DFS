@@ -282,6 +282,18 @@ suite('h264-aac.mkv')('a Matroska file through the sink', () => {
     expect(play.events).toEqual([])
   })
 
+  test('forgets a deferred seek when it is cancelled: an append that makes it seekable does not move the clock', async () => {
+    // With no known duration nothing is seekable until data is buffered, so the seek waits for an append.
+    const play = await start('h264-aac.mkv', null)
+    play.sink.seek(2)
+    play.sink.cancelSeek()
+    await play.feeder.feed(4, play.sink, play.signal)
+    expect(play.video.seekable.length).toBeGreaterThan(0)
+    expect(play.video.seekable.end(play.video.seekable.length - 1)).toBeGreaterThan(2)
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(play.video.currentTime).toBe(0)
+  })
+
   test('reopen at 2 s with no known duration plays on from there', async () => {
     const play = await start('h264-aac.mkv', null)
     await play.feeder.feed(4, play.sink, play.signal)

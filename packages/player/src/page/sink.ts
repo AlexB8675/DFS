@@ -225,6 +225,11 @@ export class MediaSourceSink implements Sink {
     this.#flushSeek()
   }
 
+  /** Forgets a seek that waits for data: the viewer has moved the clock since, and a late append must not move it back. */
+  cancelSeek(): void {
+    this.#pendingSeek = null
+  }
+
   #flushSeek(): void {
     const at = this.#pendingSeek
     if (at === null || this.#closed) return
@@ -262,6 +267,8 @@ export class MediaSourceSink implements Sink {
     if (this.#tracks === null) throw new Error('The sink has no tracks yet.')
     this.#generation += 1
     const generation = this.#generation
+    // A seek that waited for data belongs to the Media Source that is going away.
+    this.#pendingSeek = null
     this.#rebuilding = true
     this.#buffers = { video: null, audio: null }
     this.#tails = { video: Promise.resolve(), audio: Promise.resolve() }
