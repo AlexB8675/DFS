@@ -69,6 +69,8 @@ if (wanted.includes('firefox')) {
 export default defineConfig({
   test: {
     include: ['src/**/*.browser.test.ts'],
+    // The corpus behind Range, over a network the tests shape (src/testing/play-server.ts).
+    globalSetup: ['src/testing/play-server.ts'],
     // The origin private file system and the Web Locks belong to the origin, which all the files' pages share, so a file's tests don't run with another's.
     fileParallelism: false,
     testTimeout: 30_000,
