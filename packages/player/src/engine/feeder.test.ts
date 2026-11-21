@@ -5,6 +5,7 @@ import {
   box,
   cluster,
   concat,
+  ctts,
   cues,
   esds,
   fourcc,
@@ -66,8 +67,13 @@ class MemorySource implements ByteSource {
     )
   }
 
+  /** Answers a read in place of the file: a promise to give (a failure, a read that never ends), or nothing to let it through. */
+  intercept: ((range: ByteRange) => Promise<Uint8Array> | undefined) | null = null
+
   read(range: ByteRange, signal?: AbortSignal): Promise<Uint8Array> {
     this.notes.push({ op: 'read', start: range.start, end: range.end, signal })
+    const taken = this.intercept?.(range)
+    if (taken !== undefined) return taken
     if (signal?.aborted === true) return Promise.reject(signal.reason as Error)
     return Promise.resolve(this.bytes.subarray(range.start, Math.min(range.end, this.fileSize)))
   }
@@ -88,6 +94,8 @@ type SinkNote =
 
 class RecordingSink implements Sink {
   readonly notes: SinkNote[] = []
+  /** Called after each append is noted. */
+  afterAppend: (() => void) | null = null
 
   init(tracks: ChosenTracks): Promise<void> {
     this.notes.push({ op: 'init', tracks })
@@ -96,6 +104,7 @@ class RecordingSink implements Sink {
 
   append(kind: 'video' | 'audio', bytes: Uint8Array, run: FedRun): Promise<void> {
     this.notes.push({ op: 'append', kind, bytes, run })
+    this.afterAppend?.()
     return Promise.resolve()
   }
 
@@ -179,6 +188,8 @@ interface Media {
   size: (index: number) => number
   /** Every this many frames is a keyframe (a picture only). */
   keyEvery?: number
+  /** Each frame's composition offset in ticks (a picture only), 0 when not given. */
+  cts?: (index: number) => number
 }
 
 /** A frame's bytes: its track, its index, and a fill that tells it apart. */
@@ -239,6 +250,14 @@ function mp4File(options: {
         stsz(Array.from({ length: media.count }, (_, i) => media.size(i))),
         stsc([[1, 1]]),
         stco(at),
+        ...(media.cts === undefined
+          ? []
+          : [
+              ctts(
+                0,
+                Array.from({ length: media.count }, (_, i) => [1, media.cts?.(i) ?? 0] as const),
+              ),
+            ]),
         ...(keys
           ? [
               stss(
@@ -312,10 +331,17 @@ function interleaved(
 async function open(
   bytes: Uint8Array,
   isTypeSupported: (mime: string) => boolean = SUPPORTED,
+  options: { cacheBytes?: number; prepare?: (source: MemorySource) => void } = {},
 ): Promise<{ feeder: Feeder; source: MemorySource; events: TimelineEventInput[] }> {
   const source = new MemorySource(bytes)
+  options.prepare?.(source)
   const events: TimelineEventInput[] = []
-  const feeder = await Feeder.open(source, isTypeSupported, (event) => events.push(event))
+  const feeder = await Feeder.open(
+    source,
+    isTypeSupported,
+    (event) => events.push(event),
+    options.cacheBytes === undefined ? {} : { cacheBytes: options.cacheBytes },
+  )
   return { feeder, source, events }
 }
 
@@ -836,23 +862,184 @@ describe('seeking a Matroska file (§10.4)', () => {
     expect(source.reads.slice(before).filter(touchesCues)).toEqual([])
   })
 
-  it('gives no estimate when the file has no duration', async () => {
-    const file = matroskaMovie({
-      docType: 'webm',
-      scale: 1_000_000,
-      tracks: [WEBM_VIDEO],
-      clusters: [
-        { timestamp: 0, frames: [{ track: 1, time: 0, keyframe: true, data: VP9_KEY }] },
-        { timestamp: 1000, frames: [{ track: 1, time: 1000, keyframe: true, data: VP9_KEY }] },
-      ],
-    })
+  it('sets no estimate for a seek that the cache serves, only the position it ends at', async () => {
+    const file = withCues()
     const { feeder, source } = await open(file.bytes)
-    if (feeder.durationSeconds !== null) return
-    const opened = source.notes.length
-    await feeder.seek(0.5, new AbortController().signal)
-    const noted = source.notes.slice(opened)
-    // The first thing it notes is not a position set before reading.
-    expect(noted[0]?.op).not.toBe('setPosition')
+    const signal = new AbortController().signal
+    await feeder.seek(2, signal)
+    const before = source.notes.length
+    await feeder.seek(2, signal)
+    const noted = source.notes.slice(before)
+    // Nothing was read, and the only position is the one the seek ends at.
+    expect(noted.map((note) => note.op)).toEqual(['setPosition'])
+    expect(file.clusters).toContain(noted[0]?.op === 'setPosition' ? noted[0].offset : -1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// What the first review found (R29)
+
+describe('what opening and seeking hold (R29 a, e, j, k)', () => {
+  const livelock = (source: MemorySource): void => {
+    source.intercept = () =>
+      source.reads.length > 60 ? Promise.reject(new Error('read again and again')) : undefined
+  }
+
+  it('finishes an open that needs more than the cache holds, reading no range twice', async () => {
+    const file = withCues()
+    const { feeder, source } = await open(file.bytes, SUPPORTED, {
+      cacheBytes: 1_500_000,
+      prepare: livelock,
+    })
+    const signal = new AbortController().signal
+    await feeder.seek(2, signal)
+    await feeder.seek(0.5, signal)
+    const keys = source.reads.map((read) => `${read.start}-${read.end}`)
+    // The open's own chunks are never read twice, and the reads stay few.
+    expect(new Set(keys.slice(0, 3)).size).toBe(3)
+    expect(keys.length).toBeLessThan(30)
+  })
+
+  it('finishes a seek that needs more than the cache holds', async () => {
+    const { bytes } = webm({ seconds: 6, size: 400_000 })
+    const { feeder, source } = await open(bytes, SUPPORTED, {
+      cacheBytes: 1_100_000,
+      prepare: livelock,
+    })
+    await feeder.seek(4, new AbortController().signal)
+    expect(source.reads.length).toBeLessThan(40)
+  })
+
+  it('holds nothing of an MP4 after it is open, and something of a Matroska file', async () => {
+    const { feeder } = await open(interleaved().bytes)
+    expect(feeder.cachedBytes).toBe(0)
+    const matroska = await open(webm({ seconds: 2, size: 30_000 }).bytes)
+    expect(matroska.feeder.cachedBytes).toBeGreaterThan(0)
+  })
+
+  it('opens a faststart MP4 while the read of the tail never ends', async () => {
+    const built = mp4File({
+      video: { count: 40, timescale: 30000, duration: 1000, size: () => 100_000, keyEvery: 10 },
+    })
+    const size = built.bytes.length
+    expect(size).toBeGreaterThan(HEAD_BYTES + TAIL_BYTES)
+    const { feeder, source } = await open(built.bytes, SUPPORTED, {
+      prepare: (one) => {
+        one.intercept = (range) =>
+          range.start === size - TAIL_BYTES ? new Promise<Uint8Array>(() => undefined) : undefined
+      },
+    })
+    expect(feeder.index.container).toBe('mp4')
+    // The tail was still asked for at once.
+    expect(source.notes.filter((note) => note.op === 'fetchNow')).toHaveLength(2)
+  })
+})
+
+describe('the sound decision and what each feed reaches (R29 b, c)', () => {
+  it('plays the sound of a picture-first MP4 whose first megabyte of picture covers over three seconds', async () => {
+    const built = mp4File({
+      video: { count: 150, timescale: 30000, duration: 1000, size: () => 7000, keyEvery: 30 },
+      audio: { count: 235, timescale: 48000, duration: 1024, size: () => 300 },
+      layout: 'video-first',
+    })
+    const { feeder } = await open(built.bytes)
+    const sink = new RecordingSink()
+    await feedAll(feeder, sink, 2)
+    expect(sink.inits[0]?.audio).not.toBeNull()
+    expect(sink.appended('audio').length).toBeGreaterThan(0)
+  })
+
+  it('feeds every track to the target, and feeds the sound again when it is behind', async () => {
+    const built = mp4File({
+      video: { count: 150, timescale: 30000, duration: 1000, size: () => 15_000, keyEvery: 30 },
+      audio: { count: 235, timescale: 48000, duration: 1024, size: () => 40_000 },
+      layout: 'video-first',
+    })
+    const { feeder } = await open(built.bytes)
+    const sink = new RecordingSink()
+    expect(await feedAll(feeder, sink, 2)).toBe('more')
+    expect(sink.appended('video').at(-1)?.run.end).toBeGreaterThanOrEqual(2)
+    expect(sink.appended('audio').at(-1)?.run.end).toBeGreaterThanOrEqual(2)
+    expect(await feedAll(feeder, sink, 4)).toBe('more')
+    expect(sink.appended('audio').at(-1)?.run.end).toBeGreaterThanOrEqual(4)
+  })
+})
+
+/** A WebM of one cluster of ten pictures of 400 KB with no BlockDuration: a frame's bytes lie in the chunk before its table. */
+function straddling(): { bytes: Uint8Array; pictures: Uint8Array[] } {
+  const frames: MovieFrame[] = []
+  const pictures: Uint8Array[] = []
+  for (let i = 0; i < 10; i += 1) {
+    const data = pictureFrame(i, 400_000, i === 0)
+    pictures.push(data)
+    frames.push({ track: 1, time: Math.round((i * 1000) / 30), keyframe: i === 0, data })
+  }
+  const file = matroskaMovie({
+    docType: 'webm',
+    scale: 1_000_000,
+    duration: 400,
+    tracks: [WEBM_VIDEO],
+    clusters: [{ timestamp: 0, frames }],
+  })
+  return { bytes: file.bytes, pictures }
+}
+
+describe('what a chunk commits (R29 d, f, g)', () => {
+  it('loses no frame and leaves no gap in the sequence when a read of a span fails once', async () => {
+    const { bytes, pictures } = straddling()
+    const { feeder, source } = await open(bytes)
+    let furthest = 0
+    let failed = false
+    source.intercept = (range) => {
+      const back = range.start < furthest
+      furthest = Math.max(furthest, range.start)
+      if (!back || failed) return undefined
+      failed = true
+      return Promise.reject(new Error('the store failed'))
+    }
+    const sink = new RecordingSink()
+    const signal = new AbortController().signal
+    await expect(feedAll(feeder, sink, Infinity, signal)).rejects.toThrow('the store failed')
+    expect(await feedAll(feeder, sink, Infinity, signal)).toBe('ended')
+    const video = sink.appended('video')
+    expect(video.map(({ bytes: one }) => look(one).sequence)).toEqual(video.map((_, i) => i + 1))
+    const payload = concat(...video.map(({ bytes: one }) => look(one).payload))
+    expect(same(payload, concat(...pictures))).toBe(true)
+  })
+
+  it("keeps a track's fragments in decode order when a later run starts before an earlier one", async () => {
+    const built = mp4File({
+      video: {
+        count: 90,
+        timescale: 30000,
+        duration: 1000,
+        size: () => 1000,
+        keyEvery: 30,
+        // The first second is shown from 3 s on, the second from 1 s: its run starts below the one before.
+        cts: (i) => (i < 30 ? 90_000 : 0),
+      },
+    })
+    const { feeder } = await open(built.bytes)
+    const sink = new RecordingSink()
+    expect(await feedAll(feeder, sink)).toBe('ended')
+    const video = sink.appended('video')
+    expect(video.length).toBeGreaterThanOrEqual(3)
+    expect(video.map(({ bytes }) => look(bytes).sequence)).toEqual(video.map((_, i) => i + 1))
+    const decodes = video.map(({ bytes }) => look(bytes).decode)
+    expect(decodes).toEqual([...decodes].sort((a, b) => a - b))
+    expect(video[1]?.run.start).toBeLessThan(video[0]?.run.start ?? 0)
+  })
+
+  it('stops the held appends when the signal aborts during them', async () => {
+    const { bytes } = webm({ seconds: 6, size: 30_000, soundFrom: 5 })
+    const { feeder } = await open(bytes)
+    const sink = new RecordingSink()
+    const controller = new AbortController()
+    sink.afterAppend = () => {
+      controller.abort(new Error('stopped'))
+    }
+    await expect(feedAll(feeder, sink, Infinity, controller.signal)).rejects.toThrow('stopped')
+    expect(sink.appended()).toHaveLength(1)
   })
 })
 

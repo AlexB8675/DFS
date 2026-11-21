@@ -33,3 +33,12 @@ describe('the index cache', () => {
     expect(cache.chunks().map((one) => one.start)).toEqual([0, 2])
   })
 })
+
+describe('clearing the index cache', () => {
+  it('forgets the head and every other chunk', () => {
+    const cache = new IndexCache(chunk(0, 50), 100)
+    cache.add(chunk(1, 30))
+    cache.clear()
+    expect(cache.bytes).toBe(0)
+  })
+})

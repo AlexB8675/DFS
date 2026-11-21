@@ -7,7 +7,7 @@ import type { Chunk } from '@dfs/mp4'
 import { INDEX_CACHE_BYTES } from '../limits.ts'
 
 export class IndexCache {
-  readonly #head: Chunk
+  #head: Chunk
   readonly #limit: number
   /** Oldest first. */
   #rest: Chunk[] = []
@@ -24,6 +24,12 @@ export class IndexCache {
   add(chunk: Chunk): void {
     this.#rest.push(chunk)
     while (this.bytes > this.#limit && this.#rest.length > 1) this.#rest.shift()
+  }
+
+  /** Forgets everything, the head too: for a file whose seeks read no chunk. */
+  clear(): void {
+    this.#head = { start: 0, bytes: new Uint8Array(0) }
+    this.#rest = []
   }
 
   /** The chunks held, the head first, then the others oldest first. */

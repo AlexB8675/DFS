@@ -110,6 +110,8 @@ export class Feeder {
   #pending: Pending[] = []
   /** Whether a sound frame has come since the start or the last seek, and where the picture began. */
   #sawSound = false
+  /** Whether a read was made at the sound's next offset since the start or the last seek (R21c). */
+  #soundRead = false
   #pictureFrom: number | null = null
   /** Where each track's fed time ends, on the playback timeline, or null before it has fed any. */
   #fedEnd: Record<Kind, number | null> = { video: null, audio: null }
@@ -132,44 +134,60 @@ export class Feeder {
     this.#cursor = startCursor(index, tracks.video.soundId)
   }
 
+  /** How many bytes of the file's index the cache holds: none for an MP4 once it is open, for its seeks read no chunk. */
+  get cachedBytes(): number {
+    return this.#cache.bytes
+  }
+
   /**
-   * Opens the file: the head and the tail are asked for at once, then whatever else the reader
-   * needs is read through the source, and every chunk is kept in the index cache. Rejects with
-   * `{ refusal, reason }` (after logging the sentence) when the file can't be played; anything
-   * else, a failed read or an abort, rejects as it is.
+   * Opens the file: the head and the tail are asked for at once. The reader is given the head
+   * as soon as it is read, and the tail is waited for only when the reader's `need` asks for
+   * that range, so a file whose index is at its start does not wait for its end. Whatever else
+   * the reader needs is read through the source. Every chunk the open read is held in a list of
+   * its own until the reader is done, and only then goes to the index cache (which may evict,
+   * and the reader needs all it asked for). Rejects with `{ refusal, reason }` (after logging
+   * the sentence) when the file can't be played; anything else, a failed read or an abort,
+   * rejects as it is.
    */
   static async open(
     source: ByteSource,
     isTypeSupported: (mime: string) => boolean,
     onEvent: (event: TimelineEventInput) => void,
+    options: { cacheBytes?: number } = {},
   ): Promise<Feeder> {
     const size = source.fileSize
     const headRange: ByteRange = { start: 0, end: Math.min(HEAD_BYTES, size) }
     const tailStart = Math.max(HEAD_BYTES, size - TAIL_BYTES)
     const tailRange: ByteRange | null = tailStart < size ? { start: tailStart, end: size } : null
 
-    let head: Uint8Array = new Uint8Array(0)
-    let tail: Uint8Array | null = null
+    // A failure of an ask to fetch now shows in the read of the same range, if it is waited for.
+    const ignore = (): undefined => undefined
+    let headRead: Promise<Uint8Array> = Promise.resolve(new Uint8Array(0))
+    let tailRead: Promise<Uint8Array> | null = null
     if (size > 0) {
-      await Promise.all([
-        source.fetchNow(headRange),
-        ...(tailRange === null ? [] : [source.fetchNow(tailRange)]),
-      ])
-      ;[head, tail] = await Promise.all([
-        source.read(headRange),
-        tailRange === null ? null : source.read(tailRange),
-      ])
+      source.fetchNow(headRange).catch(ignore)
+      if (tailRange !== null) source.fetchNow(tailRange).catch(ignore)
+      headRead = source.read(headRange)
+      if (tailRange !== null) {
+        tailRead = source.read(tailRange)
+        tailRead.catch(ignore)
+      }
     }
-    const cache = new IndexCache({ start: 0, bytes: head })
-    if (tailRange !== null && tail !== null) cache.add({ start: tailRange.start, bytes: tail })
 
+    const held: Chunk[] = [{ start: 0, bytes: await headRead }]
+    let tailHeld = false
     let index: SourceIndex
     try {
-      let step = openSource(cache.chunks(), size)
+      let step = openSource(held, size)
       while ('need' in step) {
         const need = { start: step.need.start, end: Math.min(step.need.end, size) }
-        cache.add({ start: need.start, bytes: await source.read(need) })
-        step = openSource(cache.chunks(), size)
+        if (tailRange !== null && tailRead !== null && !tailHeld && need.start >= tailRange.start) {
+          held.push({ start: tailRange.start, bytes: await tailRead })
+          tailHeld = true
+        } else {
+          held.push({ start: need.start, bytes: await source.read(need) })
+        }
+        step = openSource(held, size)
       }
       index = step.done
     } catch (error) {
@@ -186,6 +204,11 @@ export class Feeder {
       // eslint-disable-next-line @typescript-eslint/only-throw-error -- the refusal is the plain value the engine reads.
       throw chosen
     }
+    const [head, ...rest] = held
+    const cache = new IndexCache(head ?? { start: 0, bytes: new Uint8Array(0) }, options.cacheBytes)
+    for (const chunk of rest) cache.add(chunk)
+    // An MP4's seek is made from its tables and reads no chunk: what was read for the index (a `moov` can be hundreds of megabytes) is let go.
+    if (index.container === 'mp4') cache.clear()
     return new Feeder(source, onEvent, cache, index, chosen)
   }
 
@@ -195,51 +218,65 @@ export class Feeder {
   }
 
   /**
-   * Moves reading to `seconds` (on the playback timeline): a Matroska file's position is first
-   * set to an estimate by time (when the file says its duration), then the reader's `need` reads
-   * go through the index cache and the source; an MP4's tables are held, so the cursor comes at
-   * once. The position then goes to where reading starts. A seek never discards what the source
-   * holds, and keeps the sequence numbers and the sound's decision. An abort rejects with the
-   * signal's reason, with no event.
+   * Moves reading to `seconds` (on the playback timeline). An MP4's tables are held, so the
+   * cursor comes at once. A Matroska seek that the cache cannot serve needs reads: its position
+   * is then first set to an estimate by time (when the file says its duration), and the reader's
+   * `need` reads go through the source. The chunks of a seek are held in a list of its own until
+   * the reader is done, then go to the index cache. The position then goes to where reading
+   * starts. A seek never discards what the source holds, and keeps the sequence numbers and the
+   * sound's decision. An abort rejects with the signal's reason, with no event, and leaves the
+   * feeder where it was.
    */
   async seek(seconds: number, signal: AbortSignal): Promise<void> {
     signal.throwIfAborted()
     const { index } = this
-    if (
-      index.container === 'matroska' &&
-      index.durationSeconds !== null &&
-      index.durationSeconds > 0 &&
-      Number.isFinite(seconds)
-    ) {
-      const { firstCluster, segment } = index
-      const estimate =
-        firstCluster + (seconds / index.durationSeconds) * (segment.end - firstCluster)
-      const last = Math.max(firstCluster, segment.end - 1)
-      this.#source.setPosition(Math.floor(Math.min(Math.max(estimate, firstCluster), last)))
-    }
-
     const sound = this.#soundId()
+    const held: Chunk[] = []
+    let estimated = false
     let step = seekCursor(index, seconds, sound, this.#cache.chunks())
     while ('need' in step) {
+      if (!estimated) {
+        estimated = true
+        this.#estimate(seconds)
+      }
       const need = { start: step.need.start, end: Math.min(step.need.end, this.#source.fileSize) }
-      this.#cache.add({ start: need.start, bytes: await this.#source.read(need, signal) })
-      step = seekCursor(index, seconds, sound, this.#cache.chunks())
+      held.push({ start: need.start, bytes: await this.#source.read(need, signal) })
+      step = seekCursor(index, seconds, sound, [...this.#cache.chunks(), ...held])
     }
+    for (const chunk of held) this.#cache.add(chunk)
     this.#cursor = step.done
     this.#pending = []
     this.#sawSound = false
+    this.#soundRead = false
     this.#pictureFrom = null
     this.#fedEnd = { video: null, audio: null }
     const at = nextRead(index, this.#cursor)
     if (at !== null) this.#source.setPosition(at)
   }
 
+  /** Sets the downloader's position to where `seconds` probably is in a Matroska file, by time, before the seek's reads; nothing when the file says no duration. */
+  #estimate(seconds: number): void {
+    const { index } = this
+    if (
+      index.container !== 'matroska' ||
+      index.durationSeconds === null ||
+      index.durationSeconds <= 0 ||
+      !Number.isFinite(seconds)
+    ) {
+      return
+    }
+    const { firstCluster, segment } = index
+    const estimate = firstCluster + (seconds / index.durationSeconds) * (segment.end - firstCluster)
+    const last = Math.max(firstCluster, segment.end - 1)
+    this.#source.setPosition(Math.floor(Math.min(Math.max(estimate, firstCluster), last)))
+  }
+
   /**
-   * Feeds fragments to the sink, in time order, until the picture's fed time reaches `until`
-   * (seconds on the playback timeline) or the file ends. Answers `'ended'` when no track has a
-   * frame left to read (the picture's alone, once the play has no sound), and `'more'` when it
-   * stopped at `until`. At the first feed of a play the fragments are held until it is known
-   * whether there is a sound (R21), so that feed may go past `until`.
+   * Feeds fragments to the sink, in time order, until every track that plays and has frames
+   * left has been fed to `until` (seconds on the playback timeline), or the file ends. Answers
+   * `'ended'` when no track has a frame left to read (the picture's alone, once the play has no
+   * sound), and `'more'` when it stopped at `until`. At the first feed of a play the fragments
+   * are held until it is known whether there is a sound (R21), so that feed may go past `until`.
    *
    * Every read gets the signal; an abort rejects with its reason and no event. A frame that no
    * chunk of 32 MiB completes rejects with an `Mp4Error` of `damaged` (R18), after an event.
@@ -248,20 +285,24 @@ export class Feeder {
     for (;;) {
       signal.throwIfAborted()
       const next = nextReads(this.index, this.#cursor)
+      await this.#settle(sink, next, signal)
       const picture = next.video
       const sound = this.#decision === 'none' || this.tracks.audio === null ? null : next.audio
-      const ended = picture === null && sound === null
-      await this.#settle(sink, ended)
-      if (ended) return 'ended'
+      if (picture === null && sound === null) return 'ended'
       if (this.#decision !== null && this.#reached(until, picture, sound)) return 'more'
-      await this.#readFrom(this.#turn(picture, sound), signal)
+      await this.#readFrom(this.#turn(picture, sound), sound, signal)
     }
   }
 
-  /** Whether the feed has done what `until` asks: the picture reached it, or, with the picture all fed, the sound did. */
+  /**
+   * Whether the feed has done what `until` asks: every track that plays and has frames left
+   * has fed to it. A Matroska file's clusters hold the tracks together, and its cursor cannot
+   * say that a sound has run out, so the picture alone speaks for it.
+   */
   #reached(until: number, picture: number | null, sound: number | null): boolean {
-    if (picture !== null) return (this.#fedEnd.video ?? -Infinity) >= until
-    return sound === null || (this.#fedEnd.audio ?? -Infinity) >= until
+    if (picture !== null && (this.#fedEnd.video ?? -Infinity) < until) return false
+    const counts = sound !== null && this.index.container === 'mp4'
+    return !counts || (this.#fedEnd.audio ?? -Infinity) >= until
   }
 
   /** The offset to read at: that of the track whose fed time ends earliest (the picture on a tie, R19). */
@@ -274,19 +315,26 @@ export class Feeder {
   }
 
   /** Reads a chunk at `at`, doubled while it completes no frame, and takes the frames it completes. */
-  async #readFrom(at: number, signal: AbortSignal): Promise<void> {
+  async #readFrom(at: number, soundNext: number | null, signal: AbortSignal): Promise<void> {
     const fileSize = this.#source.fileSize
+    const soundAt = soundNext !== null && at === soundNext
     let size = CHUNK_BYTES
     for (;;) {
       const range = { start: at, end: Math.min(at + size, fileSize) }
       const chunk: Chunk = { start: at, bytes: await this.#source.read(range, signal) }
-      const result = framesIn(this.index, this.#cursor, chunk)
+      let result: ReturnType<typeof framesIn>
+      try {
+        result = framesIn(this.index, this.#cursor, chunk)
+      } catch (error) {
+        if (error instanceof Mp4Error) send(this.#onEvent, error.message)
+        throw error
+      }
       if (
         result.frames.length > 0 ||
         result.skipped.length > 0 ||
         advanced(this.#cursor, result.cursor)
       ) {
-        await this.#take(result, chunk, signal)
+        await this.#take(result, chunk, soundAt, signal)
         return
       }
       this.#cursor = result.cursor
@@ -302,29 +350,30 @@ export class Feeder {
     }
   }
 
-  /** Logs the damage that was passed over, and makes a fragment of each run of the frames the chunk completed. */
+  /**
+   * Makes a fragment of each run of the frames the chunk completed, reading the span of a run
+   * that the chunk doesn't hold (R20), and only then commits: the cursor, the sequence numbers,
+   * the fragments, the fed times and the events of damage passed over, all in one step that
+   * waits for nothing, so an abort or a failed read leaves the feeder as it was and the chunk
+   * is read again.
+   */
   async #take(
     result: ReturnType<typeof framesIn>,
     chunk: Chunk,
+    soundAt: boolean,
     signal: AbortSignal,
   ): Promise<void> {
-    for (const stretch of result.skipped) {
-      send(
-        this.#onEvent,
-        `Passed over damaged bytes ${stretch.start} to ${stretch.end} of the file, and went on.`,
-      )
-    }
-    this.#cursor = result.cursor
-
     const { video, audio } = this.tracks
-    const runs: { engine: EngineTrack; frames: FragmentTrack; from: number; to: number }[] = []
+    const queues: Record<Kind, Pending[]> = { video: [], audio: [] }
+    const sequence = { ...this.#sequence }
+    let sawSound = false
     for (const frames of result.frames) {
       if (frames.table.count === 0) continue
       let engine: EngineTrack | null = null
       if (frames.header.id === video.track.header.id) engine = video
       else if (audio !== null && frames.header.id === audio.track.header.id) {
         // A sound's frames are never written once the play has none (R21b); they are counted until then.
-        this.#sawSound = true
+        sawSound = true
         if (this.#decision !== 'none') engine = audio
       }
       if (engine === null) continue
@@ -334,59 +383,92 @@ export class Feeder {
         frames.table.count,
         engine.kind === 'video',
       )) {
-        runs.push({ engine, frames, from, to })
+        const run = timesOf(engine, frames, from, to)
+        const span = byteSpan([{ table: frames.table, from, to }])
+        const held = span.start >= chunk.start && span.end <= chunk.start + chunk.bytes.length
+        // A frame of a Matroska table may lie in a chunk read earlier (R20): its span is read from the store.
+        const source: Chunk = held
+          ? chunk
+          : { start: span.start, bytes: await this.#source.read(span, signal) }
+        sequence[engine.kind] += 1
+        const bytes = fragment(frames, from, to, sequence[engine.kind], (offset, size) =>
+          source.bytes.subarray(offset - source.start, offset - source.start + size),
+        )
+        queues[engine.kind].push({
+          kind: engine.kind,
+          bytes,
+          run: { ...run, bytes: bytes.length },
+          offset: span.start,
+        })
       }
     }
-    // Both tracks' runs in the order of their times; a picture's before a sound's at the same time.
-    const timed = runs.map((run) => ({
-      ...run,
-      run: timesOf(run.engine, run.frames, run.from, run.to),
-    }))
-    timed.sort((a, b) => a.run.start - b.run.start)
+    // Each track's fragments stay in the order they were cut, which is decode order (a run may
+    // start before the one before it, where frames are reordered); the two are merged by start.
+    const merged: Pending[] = []
+    let v = 0
+    let a = 0
+    while (v < queues.video.length || a < queues.audio.length) {
+      const next = queues.video[v]
+      const other = queues.audio[a]
+      if (next !== undefined && (other === undefined || next.run.start <= other.run.start)) {
+        merged.push(next)
+        v += 1
+      } else if (other !== undefined) {
+        merged.push(other)
+        a += 1
+      }
+    }
 
-    for (const { engine, frames, from, to, run } of timed) {
-      const span = byteSpan([{ table: frames.table, from, to }])
-      const held = span.start >= chunk.start && span.end <= chunk.start + chunk.bytes.length
-      // A frame of a Matroska table may lie in a chunk read earlier (R20): its span is read from the store.
-      const source: Chunk = held
-        ? chunk
-        : { start: span.start, bytes: await this.#source.read(span, signal) }
-      this.#sequence[engine.kind] += 1
-      const bytes = fragment(frames, from, to, this.#sequence[engine.kind], (offset, size) =>
-        source.bytes.subarray(offset - source.start, offset - source.start + size),
+    // The commit: nothing below waits.
+    for (const stretch of result.skipped) {
+      send(
+        this.#onEvent,
+        `Passed over damaged bytes ${stretch.start} to ${stretch.end} of the file, and went on.`,
       )
-      this.#pending.push({
-        kind: engine.kind,
-        bytes,
-        run: { ...run, bytes: bytes.length },
-        offset: span.start,
-      })
-      this.#fedEnd[engine.kind] = Math.max(this.#fedEnd[engine.kind] ?? -Infinity, run.end)
-      if (engine.kind === 'video') {
-        this.#pictureFrom = Math.min(this.#pictureFrom ?? Infinity, run.start)
+    }
+    this.#cursor = result.cursor
+    this.#sequence.video = sequence.video
+    this.#sequence.audio = sequence.audio
+    if (sawSound) this.#sawSound = true
+    if (soundAt) this.#soundRead = true
+    for (const one of merged) {
+      this.#pending.push(one)
+      this.#fedEnd[one.kind] = Math.max(this.#fedEnd[one.kind] ?? -Infinity, one.run.end)
+      if (one.kind === 'video') {
+        this.#pictureFrom = Math.min(this.#pictureFrom ?? Infinity, one.run.start)
       }
     }
   }
 
   /**
-   * Decides whether the play has a sound, once (R21), and gives the fragments to the sink. A play
-   * with no sound track decides at once. Otherwise it waits for a sound frame (the play has a
-   * sound) or for `SOUND_WAIT_SECONDS` of picture without one, or the file's end (it has none).
-   * Fragments made before the decision are kept in order and appended after `init`.
+   * Decides whether the play has a sound, once (R21, R21c), and gives the fragments to the sink.
+   * - A play with no sound track decides none at once.
+   * - A sound frame decides sound.
+   * - A sound with no next offset at all (no frames, or the end) decides none.
+   * - Otherwise none is decided only when a read was made at the sound's next offset and the
+   *   picture has covered `SOUND_WAIT_SECONDS` since without a sound frame coming.
+   * Fragments made before the decision are kept in order and appended after `init`. An abort
+   * stops before `init` and before each append, and the fragments not yet appended stay held.
    */
-  async #settle(sink: Sink, ended: boolean): Promise<void> {
+  async #settle(
+    sink: Sink,
+    next: { video: number | null; audio: number | null },
+    signal: AbortSignal,
+  ): Promise<void> {
     if (this.#decision === null) {
       let decided: 'sound' | 'none' | null = null
       if (this.tracks.audio === null) decided = 'none'
       else if (this.#sawSound) decided = 'sound'
+      else if (next.audio === null) decided = 'none'
       else if (
-        ended ||
-        (this.#pictureFrom !== null &&
-          (this.#fedEnd.video ?? -Infinity) - this.#pictureFrom >= SOUND_WAIT_SECONDS)
+        this.#soundRead &&
+        this.#pictureFrom !== null &&
+        (this.#fedEnd.video ?? -Infinity) - this.#pictureFrom >= SOUND_WAIT_SECONDS
       ) {
         decided = 'none'
       }
       if (decided === null) return
+      signal.throwIfAborted()
       await sink.init({
         video: this.tracks.video,
         audio: decided === 'sound' ? this.tracks.audio : null,
@@ -394,6 +476,7 @@ export class Feeder {
       this.#decision = decided
     }
     for (let held = this.#pending[0]; held !== undefined; held = this.#pending[0]) {
+      signal.throwIfAborted()
       await sink.append(held.kind, held.bytes, held.run)
       this.#pending.shift()
       this.positions.add({ ...held.run, offset: held.offset })
