@@ -243,6 +243,7 @@ class Play {
       downloader: () => this.#downloader,
       feeder: () => this.#feeder,
       feedDone: () => this.#feedDone,
+      canCheck: () => !this.#busy() && !this.#stopped && !this.#failed,
       say: (event) => {
         this.#say(event)
       },

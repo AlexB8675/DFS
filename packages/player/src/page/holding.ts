@@ -4,7 +4,8 @@
 // ever. The hold is the engine's own pause: while it holds, the element is paused, and when the rule lets go
 // the engine calls `play()`. Only a play that has an `autoplay` is held or played by the engine at all; with
 // none, the element is the viewer's. Only a wanted play is held: a seek made while paused never holds or plays.
-// Nothing here feeds, and no timer runs: the play asks it to check on its tick.
+// Nothing here feeds. The play asks it to check on its tick, and while a hold is on a timer of its own checks too
+// (`HOLD_CHECK_MS`), when the engine says it can (`canCheck`: not busy, not stopped, not failed); `dispose` stops it.
 
 import type { TimelineEventInput } from '@dfs/shared'
 import type { Downloader } from '../downloader.ts'
@@ -23,6 +24,8 @@ export interface HoldWorld {
   feeder: () => Feeder | null
   /** True once the feed answered `'ended'`: every fragment is appended, and the hold is not consulted. */
   feedDone: () => boolean
+  /** Whether the engine can be checked for a release now: it is not busy with a request, and the play is neither stopped nor failed. The hold's own timer asks it. */
+  canCheck: () => boolean
   say: (event: TimelineEventInput) => void
   /** The numbers the hold keeps: whether it holds, how many holds ended, and for how long. */
   stats: { holding: boolean; holds: number; holdMs: number }
@@ -180,7 +183,7 @@ export class Holding {
     const world = this.#world
     this.#holding = true
     this.#timer ??= setInterval(() => {
-      this.check()
+      if (this.#world.canCheck()) this.check()
     }, HOLD_CHECK_MS)
     this.#reason = reason
     this.#since = world.now()

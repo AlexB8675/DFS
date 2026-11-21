@@ -17,6 +17,8 @@ interface Setup {
   calls: string[]
   link: { state: string; rate: number | null }
   want: { autoplay: boolean }
+  /** What the engine answers to `canCheck`. */
+  engine: { canCheck: boolean }
   stats: { holding: boolean; holds: number; holdMs: number }
 }
 
@@ -30,6 +32,7 @@ function setup(
   const video = { paused: true, ended: false, seeking: false, currentTime: options.at ?? 0 }
   const link = { state: 'reading', rate: 100_000 as number | null }
   const want = { autoplay: options.autoplay ?? true }
+  const engine = { canCheck: true }
   const stats = { holding: false, holds: 0, holdMs: 0 }
   const element = Object.assign(video, {
     buffered: { length: 0, start: () => 0, end: () => 0 },
@@ -57,12 +60,13 @@ function setup(
     downloader: () => downloader as never,
     feeder: () => feeder as never,
     feedDone: () => false,
+    canCheck: () => engine.canCheck,
     say: (event) => events.push(event),
     stats,
     changed: () => undefined,
     now: () => 0,
   })
-  return { holding, events, video, held, calls, link, want, stats }
+  return { holding, events, video, held, calls, link, want, engine, stats }
 }
 
 function holds(events: TimelineEventInput[]): Extract<TimelineEventInput, { type: 'hold' }>[] {
@@ -191,5 +195,21 @@ describe('Holding', () => {
     // Nothing checked it: it is still on, and nothing played.
     expect(play.holding.holding).toBe(true)
     expect(play.calls).not.toContain('play')
+  })
+
+  // R44 item 1: the timer's check obeys the engine (busy, stopped, failed), and does not run after dispose.
+  test('the timer does not release a hold while the engine says it cannot check', async () => {
+    const play = setup()
+    play.held.add({ start: 0, end: 500_000 })
+    play.holding.begin('start')
+    play.engine.canCheck = false
+    play.link.rate = 5_000_000
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    expect(play.holding.holding).toBe(true)
+    expect(play.calls).not.toContain('play')
+    // The engine can check again: the next check lets go.
+    play.engine.canCheck = true
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(play.holding.holding).toBe(false)
   })
 })
