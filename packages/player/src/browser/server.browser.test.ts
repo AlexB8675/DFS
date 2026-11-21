@@ -2,7 +2,7 @@
 // what a fetch can read of the server's answers depends on its CORS headers, which only a browser enforces.
 
 import { afterEach, describe, expect, test } from 'vitest'
-import { clearLog, control, fileUrl, files, log } from './server.ts'
+import { clearLog, control, fileUrl, files, log, switchNetwork } from './server.ts'
 
 afterEach(async () => {
   await control({})
@@ -43,10 +43,10 @@ suite('the play server, from the page', () => {
   test('a switch breaks the connection the page is reading and refuses it for a while', async () => {
     await control({ faults: [{ kind: 'stall', afterBytes: 100, ms: null }] })
     const open = await fetch(fileUrl(file?.id ?? ''), { headers: { Range: 'bytes=0-999' } })
-    const reading = open.arrayBuffer()
+    const broke = expect(open.arrayBuffer()).rejects.toThrow()
     await new Promise((resolve) => setTimeout(resolve, 100))
-    await control({ faults: [{ kind: 'switch', refuseMs: 500 }] })
-    await expect(reading).rejects.toThrow()
+    await switchNetwork(500)
+    await broke
     await expect(fetch(fileUrl(file?.id ?? ''))).rejects.toThrow()
     await new Promise((resolve) => setTimeout(resolve, 600))
     expect((await fetch(fileUrl(file?.id ?? ''), { headers: { Range: 'bytes=0-9' } })).status).toBe(

@@ -3,7 +3,7 @@
 // stream over the manifest's own path, so nothing is copied or kept. A test shapes the network
 // that the following requests see (a bandwidth shared by every open response, a latency before
 // the headers, and faults that apply once each, as in range-server.ts) through
-// `POST <base>/control`, and reads what the server saw from `GET <base>/log`. Vitest runs `setup`
+// `POST <controlBase>/control`, cuts and refuses the data connections with `POST <controlBase>/switch`, and reads what the server saw from `GET <controlBase>/log`. Vitest runs `setup`
 // as the browser config's `globalSetup`, which provides `playServer` for the tests to `inject`.
 // Everything is under `http://127.0.0.1:<port>/<token>`, a random token of each run, so that no
 // other page on the computer can read the files. For tests only (it uses `node:http`), so the
@@ -28,12 +28,18 @@ const CORS: Readonly<Record<string, string>> = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, HEAD, POST, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Range',
-  'Access-Control-Expose-Headers': 'Content-Range, Content-Length, ETag',
+  'Access-Control-Expose-Headers': 'Content-Range, Content-Length, ETag, Retry-After',
   'Access-Control-Max-Age': '600',
 }
 
-/** The largest read from a file at once, so that a shaped link is fed in pieces as small as a real one's. */
+/** The most that is read from a file, and sent, at once. */
 const PIECE_BYTES = 16 * 1024
+
+/** The least a shaped link is fed in at once, so that a very slow one is not fed a byte at a time. */
+const MIN_PIECE_BYTES = 256
+
+/** How far behind a late timer may let the link fall, in ms: a wake-up that comes late is made up for, but an idle link banks no more than this. */
+const LINK_SLACK_MS = 30
 
 /** The most a control request may weigh. */
 const CONTROL_LIMIT_BYTES = 1024 * 1024
@@ -51,13 +57,21 @@ interface Served {
 }
 
 /** Where a request's path points under the token, or null for a path the server does not have. */
-type Route = { kind: 'file'; id: string } | { kind: 'control' } | { kind: 'log' }
+type Route =
+  { kind: 'file'; id: string } | { kind: 'control' } | { kind: 'switch' } | { kind: 'log' }
 
 function route(url: string | undefined, token: string): Route | null {
-  const path = new URL(url ?? '/', 'http://localhost').pathname
-  const match = /^\/([^/]+)\/(control|log|file\/([^/]+))$/.exec(path)
+  let path: string
+  try {
+    path = new URL(url ?? '/', 'http://localhost').pathname
+  } catch {
+    // A request line that is not a URL is a path the server never had.
+    return null
+  }
+  const match = /^\/([^/]+)\/(control|switch|log|file\/([^/]+))$/.exec(path)
   if (match?.[1] !== token) return null
   if (match[2] === 'control') return { kind: 'control' }
+  if (match[2] === 'switch') return { kind: 'switch' }
   if (match[2] === 'log') return { kind: 'log' }
   return match[3] === undefined ? null : { kind: 'file', id: match[3] }
 }
@@ -128,28 +142,33 @@ function count(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0
 }
 
+/** A byte count: a safe integer from 0. */
+function bytes(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
 /** A fault as a control gave it, or why it is not one. */
 function faultOf(value: unknown): Fault | string {
   if (!isRecord(value)) return 'a fault is not an object'
   switch (value.kind) {
     case 'drop':
-      return count(value.afterBytes)
+      return bytes(value.afterBytes)
         ? { kind: 'drop', afterBytes: value.afterBytes }
-        : 'a drop needs afterBytes'
+        : 'a drop needs afterBytes, a safe integer from 0'
     case 'stall':
-      return count(value.afterBytes) && (value.ms === null || count(value.ms))
+      return bytes(value.afterBytes) && (value.ms === null || count(value.ms))
         ? { kind: 'stall', afterBytes: value.afterBytes, ms: value.ms }
-        : 'a stall needs afterBytes and ms (a number or null)'
-    case 'switch':
-      return count(value.refuseMs)
-        ? { kind: 'switch', refuseMs: value.refuseMs }
-        : 'a switch needs refuseMs'
+        : 'a stall needs afterBytes (a safe integer from 0) and ms (a number or null)'
     case 'status':
       return typeof value.status === 'number' &&
         Number.isInteger(value.status) &&
         value.status >= 200 &&
         value.status <= 599
-        ? { kind: 'status', status: value.status }
+        ? {
+            kind: 'status',
+            status: value.status,
+            ...(typeof value.retryAfter === 'string' ? { retryAfter: value.retryAfter } : {}),
+          }
         : 'a status fault needs a status from 200 to 599'
     default:
       return 'a fault has an unknown kind'
@@ -205,6 +224,10 @@ function bodyOf(req: IncomingMessage): Promise<string | null> {
     req.on('end', () => {
       resolve(Buffer.concat(parts).toString('utf8'))
     })
+    // A client that goes away part-way leaves a body that is not whole.
+    req.on('close', () => {
+      resolve(req.complete ? Buffer.concat(parts).toString('utf8') : null)
+    })
     req.on('error', () => {
       resolve(null)
     })
@@ -251,13 +274,25 @@ export async function startPlayServer(
   const log: LogEntry[] = []
   const sockets = new Set<Socket>()
 
-  /** Waits for the link to have room for `bytes` more, as a link shared by every response does. */
+  /** The size of the pieces a shaped link is fed in: about 50 ms of it, so that a slow link trickles as a real one does and does not go silent for seconds. */
+  function pieceBytes(): number {
+    if (bandwidth === null) return PIECE_BYTES
+    return Math.max(MIN_PIECE_BYTES, Math.min(PIECE_BYTES, Math.floor(bandwidth / 20)))
+  }
+
+  /**
+   * Pays for the bytes on the link before they are sent: waits until the link, which every open response shares, has
+   * carried them, so that a read of N bytes takes N over the bandwidth, the first piece included. A response that
+   * is over before it has sent them gives its budget back when no other response has taken a slot after it.
+   */
   async function take(res: ServerResponse, bytes: number): Promise<void> {
     if (bandwidth === null) return
     const now = performance.now()
-    const start = Math.max(linkFree, now)
-    linkFree = start + (bytes / bandwidth) * 1000
-    if (start > now) await pause(res, start - now)
+    const start = Math.max(linkFree, now - LINK_SLACK_MS)
+    const done = start + (bytes / bandwidth) * 1000
+    linkFree = done
+    if (done > now) await pause(res, done - now)
+    if (gone(res) && linkFree === done) linkFree = start
   }
 
   /** The body, from `start` to `end` inclusive, in pieces, over the shaped link, with the fault that this request was given. */
@@ -270,7 +305,7 @@ export async function startPlayServer(
     fault: Fault | undefined,
   ): Promise<void> {
     const length = end - start + 1
-    const stream = createReadStream(served.path, { start, end, highWaterMark: PIECE_BYTES })
+    const stream = createReadStream(served.path, { start, end, highWaterMark: pieceBytes() })
     // A fault at a body's end or past it never gets there: the body goes whole.
     const cutAt =
       (fault?.kind === 'drop' || fault?.kind === 'stall') && fault.afterBytes < length
@@ -288,6 +323,8 @@ export async function startPlayServer(
               // What was sent leaves before the connection is let go: a destroyed socket forgets what it has not sent.
               await lastWrite
               if (sent === 0) await new Promise((resolve) => setImmediate(resolve))
+              // A client that left meanwhile has made this an aborted response, not a dropped one.
+              if (gone(res)) return
               entry.outcome = 'dropped'
               res.destroy()
               return
@@ -295,7 +332,7 @@ export async function startPlayServer(
             if (fault.kind === 'stall') await pause(res, fault.ms)
           }
           if (gone(res)) return
-          let piece = bytes.length - offset
+          let piece = Math.min(bytes.length - offset, pieceBytes())
           if (cutAt !== null && sent < cutAt) piece = Math.min(piece, cutAt - sent)
           await take(res, piece)
           if (gone(res)) return
@@ -344,7 +381,10 @@ export async function startPlayServer(
       res.writeHead(status, { ...CORS, ...headers })
     }
     if (fault?.kind === 'status') {
-      settle(fault.status, { 'Content-Length': 0 })
+      settle(fault.status, {
+        'Content-Length': 0,
+        ...(fault.retryAfter === undefined ? {} : { 'Retry-After': fault.retryAfter }),
+      })
       entry.outcome = 'done'
       res.end()
       return
@@ -380,77 +420,97 @@ export async function startPlayServer(
   async function answerControl(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const text = await bodyOf(req)
     const net = text === null ? 'the control could not be read' : networkOf(text)
-    // The control's own connection is not one of the network's: it ends with this answer, so that none outlives it.
     if (typeof net === 'string') {
-      reply(res, 400, { 'Content-Type': 'text/plain', Connection: 'close' }, net)
+      reply(res, 400, { 'Content-Type': 'text/plain' }, net)
       return
     }
+    // A control replaces all of the network, a refusal that is going on included.
     bandwidth = net.bandwidthBytesPerSecond ?? null
     latencyMs = net.latencyMs ?? 0
     linkFree = 0
-    faults = []
-    for (const fault of net.faults ?? []) {
-      if (fault.kind !== 'switch') {
-        faults.push(fault)
-        continue
-      }
-      refuseUntil = Math.max(refuseUntil, Date.now() + fault.refuseMs)
-      for (const socket of sockets) if (socket !== req.socket) socket.destroy()
-    }
-    reply(res, 204, { Connection: 'close' })
+    faults = net.faults ?? []
+    refuseUntil = 0
+    reply(res, 204)
   }
 
-  const server = createServer((req, res) => {
-    req.on('error', () => undefined)
-    res.on('error', () => undefined)
-    const target = route(req.url, token)
-    if (target === null) {
-      reply(res, 404)
+  /** A network change: every open data connection is destroyed, and new ones are refused for `refuseMs`. The rest of the network stays. */
+  async function answerSwitch(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const text = await bodyOf(req)
+    let refuseMs: unknown
+    try {
+      refuseMs = text === null ? undefined : (JSON.parse(text) as Record<string, unknown>).refuseMs
+    } catch {
+      refuseMs = undefined
+    }
+    if (!count(refuseMs)) {
+      reply(res, 400, { 'Content-Type': 'text/plain' }, 'a switch needs refuseMs, a number from 0')
       return
     }
-    const allowed =
-      target.kind === 'file'
-        ? 'GET, HEAD, OPTIONS'
-        : target.kind === 'control'
-          ? 'POST, OPTIONS'
-          : 'GET, DELETE, OPTIONS'
-    if (req.method === 'OPTIONS') {
-      reply(res, 204)
-      return
-    }
-    if (!allowed.split(', ').includes(req.method ?? '')) {
-      reply(res, 405, { Allow: allowed })
-      return
-    }
-    if (target.kind === 'control') {
-      answerControl(req, res).catch(() => {
-        res.destroy()
-      })
-    } else if (target.kind === 'log') {
-      if (req.method === 'DELETE') {
-        log.length = 0
-        reply(res, 204)
-      } else {
-        reply(
-          res,
-          200,
-          { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
-          JSON.stringify(log),
-        )
-      }
-    } else {
-      const at = /^\d+$/.test(target.id) ? Number(target.id) : -1
-      const served = present[at]?.served
-      if (served === undefined) {
+    refuseUntil = Math.max(refuseUntil, Date.now() + refuseMs)
+    for (const socket of sockets) socket.destroy()
+    reply(res, 204)
+  }
+
+  /** What each plane answers: the data plane only files, the control plane only the control, the switch and the log. */
+  function handler(plane: 'data' | 'control') {
+    return (req: IncomingMessage, res: ServerResponse): void => {
+      req.on('error', () => undefined)
+      res.on('error', () => undefined)
+      const target = route(req.url, token)
+      if (target === null || (target.kind === 'file') !== (plane === 'data')) {
         reply(res, 404)
         return
       }
-      answerFile(req, res, target.id, served).catch(() => {
+      const allowed =
+        target.kind === 'file'
+          ? 'GET, HEAD, OPTIONS'
+          : target.kind === 'log'
+            ? 'GET, DELETE, OPTIONS'
+            : 'POST, OPTIONS'
+      if (req.method === 'OPTIONS') {
+        reply(res, 204)
+        return
+      }
+      if (!allowed.split(', ').includes(req.method ?? '')) {
+        reply(res, 405, { Allow: allowed })
+        return
+      }
+      const fail = (): void => {
         res.destroy()
-      })
+      }
+      if (target.kind === 'control') {
+        answerControl(req, res).catch(fail)
+      } else if (target.kind === 'switch') {
+        answerSwitch(req, res).catch(fail)
+      } else if (target.kind === 'log') {
+        if (req.method === 'DELETE') {
+          log.length = 0
+          reply(res, 204)
+        } else {
+          reply(
+            res,
+            200,
+            { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+            JSON.stringify(log),
+          )
+        }
+      } else {
+        const at = /^\d+$/.test(target.id) ? Number(target.id) : -1
+        const served = present[at]?.served
+        if (served === undefined) {
+          reply(res, 404)
+          return
+        }
+        answerFile(req, res, target.id, served).catch(fail)
+      }
     }
-  })
-  server.on('connection', (socket) => {
+  }
+
+  // The control plane has a listener of its own, so that a network change, which cuts every data
+  // connection and refuses new ones, never cuts the test's way of resetting and reading the server.
+  const data = createServer(handler('data'))
+  const control = createServer(handler('control'))
+  data.on('connection', (socket) => {
     if (Date.now() < refuseUntil) {
       log.push({ id: null, range: null, status: 0, bytesSent: 0, outcome: 'refused' })
       socket.destroy()
@@ -459,26 +519,38 @@ export async function startPlayServer(
     sockets.add(socket)
     socket.once('close', () => sockets.delete(socket))
   })
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(0, '127.0.0.1', () => {
-      server.off('error', reject)
-      resolve()
-    })
-  })
-  const { port } = server.address() as AddressInfo
+  const listening = [data, control].map(
+    (server) =>
+      new Promise<number>((resolve, reject) => {
+        server.once('error', reject)
+        server.listen(0, '127.0.0.1', () => {
+          server.off('error', reject)
+          resolve((server.address() as AddressInfo).port)
+        })
+      }),
+  )
+  const [dataPort, controlPort] = await Promise.all(listening)
 
   let closing: Promise<void> | null = null
   return {
-    info: { base: `http://127.0.0.1:${port}/${token}`, files },
+    info: {
+      base: `http://127.0.0.1:${dataPort}/${token}`,
+      controlBase: `http://127.0.0.1:${controlPort}/${token}`,
+      files,
+    },
     close() {
-      closing ??= new Promise<void>((resolve) => {
-        server.close(() => {
-          resolve()
-        })
-        // A player leaves its connections open, and a response may be stalled for ever.
-        server.closeAllConnections()
-      })
+      closing ??= Promise.all(
+        [data, control].map(
+          (server) =>
+            new Promise<void>((resolve) => {
+              server.close(() => {
+                resolve()
+              })
+              // A player leaves its connections open, and a response may be stalled for ever.
+              server.closeAllConnections()
+            }),
+        ),
+      ).then(() => undefined)
       return closing
     },
   }
@@ -491,7 +563,7 @@ export async function startPlayServer(
 export default async function setup(project: TestProject): Promise<() => Promise<void>> {
   const entries = loadManifest()
   if (entries.length === 0) {
-    project.provide('playServer', { base: '', files: [] })
+    project.provide('playServer', { base: '', controlBase: '', files: [] })
     return () => Promise.resolve()
   }
   const server = await startPlayServer(entries)

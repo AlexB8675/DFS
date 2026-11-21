@@ -1,4 +1,5 @@
 import { readFileSync, statSync } from 'node:fs'
+import { connect } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
 import { isSynthetic, loadManifest } from '@dfs/mp4/testing/node'
 import type { ManifestEntry } from '@dfs/mp4/testing/node'
@@ -38,15 +39,24 @@ function biggest(server: PlayServer): { id: string; size: number } {
 }
 
 async function control(server: PlayServer, net: Network): Promise<void> {
-  const response = await fetch(`${server.info.base}/control`, {
+  const response = await fetch(`${server.info.controlBase}/control`, {
     method: 'POST',
     body: JSON.stringify(net),
   })
   expect(response.status).toBe(204)
 }
 
+/** A network change: every open data connection is broken, and new ones are refused for `refuseMs`. */
+async function switchNetwork(server: PlayServer, refuseMs: number): Promise<void> {
+  const response = await fetch(`${server.info.controlBase}/switch`, {
+    method: 'POST',
+    body: JSON.stringify({ refuseMs }),
+  })
+  expect(response.status).toBe(204)
+}
+
 async function logOf(server: PlayServer): Promise<LogEntry[]> {
-  return (await (await fetch(`${server.info.base}/log`)).json()) as LogEntry[]
+  return (await (await fetch(`${server.info.controlBase}/log`)).json()) as LogEntry[]
 }
 
 /** Reads a response's body to its end and says how many bytes came, or that the connection broke. */
@@ -219,7 +229,7 @@ suite('the play server', () => {
         '{"faults":[{"kind":"melt"}]}',
         '{"faults":[{"kind":"drop"}]}',
       ]) {
-        const response = await fetch(`${server.info.base}/control`, { method: 'POST', body })
+        const response = await fetch(`${server.info.controlBase}/control`, { method: 'POST', body })
         expect(response.status, body).toBe(400)
       }
     })
@@ -288,27 +298,42 @@ suite('the play server', () => {
       const response = await fetch(`${server.info.base}/file/${file.id}`, {
         headers: { Range: 'bytes=0-199999' },
       })
-      expect(await readSome(response, 50_000)).toBe(50_000)
-      await later(300)
-      const [stalled] = await logOf(server)
-      expect(stalled).toMatchObject({ bytesSent: 50_000 })
+      const reader = (response.body as ReadableStream<Uint8Array>).getReader()
+      let total = 0
+      while (total < 50_000) total += ((await reader.read()).value ?? new Uint8Array()).length
+      expect(total).toBe(50_000)
+      // Another read stays pending across the wait.
+      let settled = false
+      const more = reader.read().then(
+        () => {
+          settled = true
+        },
+        () => {
+          settled = true
+        },
+      )
+      await later(400)
+      expect(settled).toBe(false)
+      expect((await logOf(server))[0]).toMatchObject({ bytesSent: 50_000, outcome: 'open' })
       // The client leaves, and the stall ends with it.
+      await reader.cancel()
+      await more
       await later(100)
       expect((await logOf(server))[0]?.outcome).toBe('aborted')
     })
 
-    it('breaks every open connection at once on a switch, and refuses new ones for the time', async () => {
+    it('breaks every open data connection at once on a switch, and refuses new ones for the time', async () => {
       const server = await serve()
       const file = biggest(server)
       await control(server, { faults: [{ kind: 'stall', afterBytes: 20_000, ms: null }] })
       const open = await fetch(`${server.info.base}/file/${file.id}`, {
         headers: { Range: 'bytes=0-199999' },
       })
-      const reading = (async () => (await open.arrayBuffer()).byteLength)()
+      const broke = expect(open.arrayBuffer()).rejects.toThrow()
       await later(100)
       const switched = performance.now()
-      await control(server, { faults: [{ kind: 'switch', refuseMs: 700 }] })
-      await expect(reading).rejects.toThrow()
+      await switchNetwork(server, 700)
+      await broke
       await expect(
         fetch(`${server.info.base}/file/0`, { headers: { Range: 'bytes=0-9' } }),
       ).rejects.toThrow()
@@ -320,6 +345,135 @@ suite('the play server', () => {
       const outcomes = (await logOf(server)).map((entry) => entry.outcome)
       expect(outcomes).toContain('aborted')
       expect(outcomes).toContain('refused')
+    })
+
+    it('keeps the control plane up through a refusal: log, control and reset work, and only data is logged refused', async () => {
+      const server = await serve()
+      await switchNetwork(server, 1500)
+      await expect(fetch(`${server.info.base}/file/0`)).rejects.toThrow()
+      expect(await logOf(server)).toEqual([
+        { id: null, range: null, status: 0, bytesSent: 0, outcome: 'refused' },
+      ])
+      const cleared = await fetch(`${server.info.controlBase}/log`, { method: 'DELETE' })
+      expect(cleared.status).toBe(204)
+      expect(await logOf(server)).toEqual([])
+      await control(server, {})
+    })
+
+    it('ends the refusal when control replaces the network', async () => {
+      const server = await serve()
+      await switchNetwork(server, 60_000)
+      await expect(fetch(`${server.info.base}/file/0`)).rejects.toThrow()
+      await control(server, {})
+      const back = await fetch(`${server.info.base}/file/0`, { headers: { Range: 'bytes=0-9' } })
+      expect(back.status).toBe(206)
+      await back.arrayBuffer()
+    })
+
+    it('keeps the bandwidth, the latency and the queued faults through a switch', async () => {
+      const server = await serve()
+      const file = biggest(server)
+      await control(server, {
+        bandwidthBytesPerSecond: 1_000_000,
+        latencyMs: 200,
+        faults: [{ kind: 'status', status: 503 }],
+      })
+      await switchNetwork(server, 100)
+      await later(150)
+      const started = performance.now()
+      const failed = await fetch(`${server.info.base}/file/${file.id}`, {
+        headers: { Range: 'bytes=0-9' },
+      })
+      expect(failed.status).toBe(503)
+      expect(performance.now() - started).toBeGreaterThanOrEqual(180)
+      const read = await fetch(`${server.info.base}/file/${file.id}`, {
+        headers: { Range: 'bytes=0-999999' },
+      })
+      expect(await drain(read)).toBe(1_000_000)
+      expect(performance.now() - started).toBeGreaterThan(1000)
+    })
+
+    it('turns away an afterBytes that is not a safe integer from 0', async () => {
+      const server = await serve()
+      for (const afterBytes of ['1.5', '-1', '1e300', '"7"', 'null']) {
+        for (const kind of ['drop', 'stall']) {
+          const body = `{"faults":[{"kind":"${kind}","afterBytes":${afterBytes},"ms":10}]}`
+          const response = await fetch(`${server.info.controlBase}/control`, {
+            method: 'POST',
+            body,
+          })
+          expect(response.status, body).toBe(400)
+        }
+      }
+    })
+
+    it('sends Retry-After with a status fault, and lets the page read it', async () => {
+      const server = await serve()
+      await control(server, { faults: [{ kind: 'status', status: 429, retryAfter: '7' }] })
+      const response = await fetch(`${server.info.base}/file/0`, {
+        headers: { Range: 'bytes=0-9' },
+      })
+      expect(response.status).toBe(429)
+      expect(response.headers.get('retry-after')).toBe('7')
+      expect(response.headers.get('access-control-expose-headers')).toContain('Retry-After')
+    })
+
+    it('answers a path that is not a URL with a 404, and goes on serving', async () => {
+      const server = await serve()
+      const { hostname, port } = new URL(server.info.base)
+      const reply = await new Promise<string>((resolve) => {
+        const socket = connect(Number(port), hostname, () => {
+          socket.write('GET // HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n')
+        })
+        let text = ''
+        socket.on('data', (part) => {
+          text += String(part)
+        })
+        socket.on('close', () => {
+          resolve(text)
+        })
+      })
+      expect(reply).toMatch(/^HTTP\/1\.1 404 /)
+      const next = await fetch(`${server.info.base}/file/0`, { headers: { Range: 'bytes=0-9' } })
+      expect(next.status).toBe(206)
+    })
+
+    it('paces a slow link by what it can carry: 32 KiB at 64 KiB/s takes about half a second', async () => {
+      const server = await serve()
+      const file = biggest(server)
+      await control(server, { bandwidthBytesPerSecond: 65_536 })
+      const started = performance.now()
+      const response = await fetch(`${server.info.base}/file/${file.id}`, {
+        headers: { Range: 'bytes=0-32767' },
+      })
+      expect(await drain(response)).toBe(32_768)
+      const seconds = (performance.now() - started) / 1000
+      expect(seconds).toBeGreaterThan(0.4)
+      expect(seconds).toBeLessThan(0.6)
+    })
+
+    it('trickles a very slow link, with no gap between pieces above half a second', async () => {
+      const server = await serve()
+      const file = biggest(server)
+      await control(server, { bandwidthBytesPerSecond: 2000 })
+      const response = await fetch(`${server.info.base}/file/${file.id}`, {
+        headers: { Range: 'bytes=0-1499' },
+      })
+      const started = performance.now()
+      let last = started
+      let widest = 0
+      let total = 0
+      for await (const piece of response.body as AsyncIterable<Uint8Array>) {
+        const now = performance.now()
+        widest = Math.max(widest, now - last)
+        last = now
+        total += piece.length
+      }
+      expect(total).toBe(1500)
+      expect(widest).toBeLessThan(500)
+      // The first piece is paid for too: 1500 bytes at 2000 B/s take three quarters of a second.
+      expect(last - started).toBeGreaterThan(600)
+      expect(last - started).toBeLessThan(950)
     })
   })
 
@@ -347,7 +501,7 @@ suite('the play server', () => {
         },
         { id: file?.id, range: null, status: 200, bytesSent: file?.size, outcome: 'done' },
       ])
-      expect((await fetch(`${server.info.base}/log`, { method: 'DELETE' })).status).toBe(204)
+      expect((await fetch(`${server.info.controlBase}/log`, { method: 'DELETE' })).status).toBe(204)
       expect(await logOf(server)).toEqual([])
     })
 
@@ -381,14 +535,16 @@ suite('the play server', () => {
       const server = await serve()
       const file = server.info.files[0]
       const origin = new URL(server.info.base).origin
+      const controlOrigin = new URL(server.info.controlBase).origin
       const token = new URL(server.info.base).pathname
       expect(token).toMatch(/^\/[0-9a-f]{32}$/)
       expect((await fetch(`${origin}/file/${file?.id}`)).status).toBe(404)
       expect((await fetch(`${origin}/wrong${token}/file/${file?.id}`)).status).toBe(404)
       expect((await fetch(`${origin}/not-the-token/file/${file?.id}`)).status).toBe(404)
-      expect((await fetch(`${origin}/not-the-token/log`)).status).toBe(404)
+      expect((await fetch(`${controlOrigin}/not-the-token/log`)).status).toBe(404)
       expect(
-        (await fetch(`${origin}/not-the-token/control`, { method: 'POST', body: '{}' })).status,
+        (await fetch(`${controlOrigin}/not-the-token/control`, { method: 'POST', body: '{}' }))
+          .status,
       ).toBe(404)
     })
 
@@ -407,7 +563,7 @@ suite('the play server', () => {
       })
       expect(response.headers.get('access-control-allow-origin')).toBe('*')
       expect(response.headers.get('access-control-expose-headers')).toBe(
-        'Content-Range, Content-Length, ETag',
+        'Content-Range, Content-Length, ETag, Retry-After',
       )
       await response.arrayBuffer()
     })
@@ -422,7 +578,7 @@ suite('the play server', () => {
       expect(response.headers.get('access-control-allow-origin')).toBe('*')
       expect(response.headers.get('access-control-allow-headers')).toBe('Range')
       expect(response.headers.get('access-control-expose-headers')).toBe(
-        'Content-Range, Content-Length, ETag',
+        'Content-Range, Content-Length, ETag, Retry-After',
       )
       const methods = response.headers.get('access-control-allow-methods') ?? ''
       for (const method of ['GET', 'POST', 'DELETE']) expect(methods).toContain(method)
