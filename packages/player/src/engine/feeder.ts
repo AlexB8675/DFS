@@ -140,76 +140,81 @@ export class Feeder {
   }
 
   /**
-   * Opens the file: the head and the tail are asked for at once. The reader is given the head
-   * as soon as it is read, and the tail is waited for only when the reader's `need` asks for
-   * that range, so a file whose index is at its start does not wait for its end. Whatever else
-   * the reader needs is read through the source. Every chunk the open read is held in a list of
+   * Opens the file: the head and the tail are asked for at once (`fetchNow`). The reader is
+   * given the head as soon as it is read, and every range it then needs is one plain read
+   * through the source, which serves it from the store or from the read in flight, so a file
+   * whose index is at its start does not wait for its end. The tail's prefetch carries a signal
+   * of its own, aborted when the open ends (used or not) and when `options.signal` aborts, so
+   * nothing is left waiting on the downloader. Every chunk the open read is held in a list of
    * its own until the reader is done, and only then goes to the index cache (which may evict,
    * and the reader needs all it asked for). Rejects with `{ refusal, reason }` (after logging
-   * the sentence) when the file can't be played; anything else, a failed read or an abort,
-   * rejects as it is.
+   * the sentence) when the file can't be played; anything else, a failed read or an abort (the
+   * signal's reason, with no event), rejects as it is.
    */
   static async open(
     source: ByteSource,
     isTypeSupported: (mime: string) => boolean,
     onEvent: (event: TimelineEventInput) => void,
-    options: { cacheBytes?: number } = {},
+    options: { cacheBytes?: number; signal?: AbortSignal } = {},
   ): Promise<Feeder> {
+    const { signal } = options
     const size = source.fileSize
     const headRange: ByteRange = { start: 0, end: Math.min(HEAD_BYTES, size) }
     const tailStart = Math.max(HEAD_BYTES, size - TAIL_BYTES)
     const tailRange: ByteRange | null = tailStart < size ? { start: tailStart, end: size } : null
 
-    // A failure of an ask to fetch now shows in the read of the same range, if it is waited for.
-    const ignore = (): undefined => undefined
-    let headRead: Promise<Uint8Array> = Promise.resolve(new Uint8Array(0))
-    let tailRead: Promise<Uint8Array> | null = null
-    if (size > 0) {
-      source.fetchNow(headRange).catch(ignore)
-      if (tailRange !== null) source.fetchNow(tailRange).catch(ignore)
-      headRead = source.read(headRange)
-      if (tailRange !== null) {
-        tailRead = source.read(tailRange)
-        tailRead.catch(ignore)
-      }
+    const tail = new AbortController()
+    const callOff = (): void => {
+      tail.abort(signal?.reason)
     }
-
-    const held: Chunk[] = [{ start: 0, bytes: await headRead }]
-    let tailHeld = false
-    let index: SourceIndex
+    signal?.addEventListener('abort', callOff, { once: true })
     try {
-      let step = openSource(held, size)
-      while ('need' in step) {
-        const need = { start: step.need.start, end: Math.min(step.need.end, size) }
-        if (tailRange !== null && tailRead !== null && !tailHeld && need.start >= tailRange.start) {
-          held.push({ start: tailRange.start, bytes: await tailRead })
-          tailHeld = true
-        } else {
-          held.push({ start: need.start, bytes: await source.read(need) })
-        }
-        step = openSource(held, size)
+      signal?.throwIfAborted()
+      // A failure of an ask to fetch now shows in the reads that need the range, if any does.
+      const ignore = (): undefined => undefined
+      if (size > 0) {
+        source.fetchNow(headRange, signal).catch(ignore)
+        if (tailRange !== null) source.fetchNow(tailRange, tail.signal).catch(ignore)
       }
-      index = step.done
-    } catch (error) {
-      if (!(error instanceof Mp4Error)) throw error
-      send(onEvent, error.message)
-      const refusal: EngineRefusal = { refusal: error.message, reason: error.reason }
-      // eslint-disable-next-line @typescript-eslint/only-throw-error -- the refusal is the plain value the engine reads.
-      throw refusal
-    }
+      const held: Chunk[] = [
+        { start: 0, bytes: size > 0 ? await source.read(headRange, signal) : new Uint8Array(0) },
+      ]
+      let index: SourceIndex
+      try {
+        let step = openSource(held, size)
+        while ('need' in step) {
+          const need = { start: step.need.start, end: Math.min(step.need.end, size) }
+          held.push({ start: need.start, bytes: await source.read(need, signal) })
+          step = openSource(held, size)
+        }
+        index = step.done
+      } catch (error) {
+        if (!(error instanceof Mp4Error)) throw error
+        send(onEvent, error.message)
+        const refusal: EngineRefusal = { refusal: error.message, reason: error.reason }
+        // eslint-disable-next-line @typescript-eslint/only-throw-error -- the refusal is the plain value the engine reads.
+        throw refusal
+      }
 
-    const chosen = chooseEngineTracks(index, isTypeSupported)
-    if ('refusal' in chosen) {
-      send(onEvent, chosen.refusal)
-      // eslint-disable-next-line @typescript-eslint/only-throw-error -- the refusal is the plain value the engine reads.
-      throw chosen
+      const chosen = chooseEngineTracks(index, isTypeSupported)
+      if ('refusal' in chosen) {
+        send(onEvent, chosen.refusal)
+        // eslint-disable-next-line @typescript-eslint/only-throw-error -- the refusal is the plain value the engine reads.
+        throw chosen
+      }
+      const [head, ...rest] = held
+      const cache = new IndexCache(
+        head ?? { start: 0, bytes: new Uint8Array(0) },
+        options.cacheBytes,
+      )
+      for (const chunk of rest) cache.add(chunk)
+      // An MP4's seek is made from its tables and reads no chunk: what was read for the index (a `moov` can be hundreds of megabytes) is let go.
+      if (index.container === 'mp4') cache.clear()
+      return new Feeder(source, onEvent, cache, index, chosen)
+    } finally {
+      signal?.removeEventListener('abort', callOff)
+      tail.abort()
     }
-    const [head, ...rest] = held
-    const cache = new IndexCache(head ?? { start: 0, bytes: new Uint8Array(0) }, options.cacheBytes)
-    for (const chunk of rest) cache.add(chunk)
-    // An MP4's seek is made from its tables and reads no chunk: what was read for the index (a `moov` can be hundreds of megabytes) is let go.
-    if (index.container === 'mp4') cache.clear()
-    return new Feeder(source, onEvent, cache, index, chosen)
   }
 
   /** The id of the sound that is read: the chosen one until the first feed has decided for none. */
@@ -233,17 +238,25 @@ export class Feeder {
     const sound = this.#soundId()
     const held: Chunk[] = []
     let estimated = false
-    let step = seekCursor(index, seconds, sound, this.#cache.chunks())
-    while ('need' in step) {
-      if (!estimated) {
-        estimated = true
-        this.#estimate(seconds)
+    let step: ReturnType<typeof seekCursor>
+    // What the seek read goes to the cache whether it finishes or is cut short: the next one needs it too.
+    try {
+      step = seekCursor(index, seconds, sound, this.#cache.chunks())
+      while ('need' in step) {
+        if (!estimated) {
+          estimated = true
+          this.#estimate(seconds)
+        }
+        const need = {
+          start: step.need.start,
+          end: Math.min(step.need.end, this.#source.fileSize),
+        }
+        held.push({ start: need.start, bytes: await this.#source.read(need, signal) })
+        step = seekCursor(index, seconds, sound, [...this.#cache.chunks(), ...held])
       }
-      const need = { start: step.need.start, end: Math.min(step.need.end, this.#source.fileSize) }
-      held.push({ start: need.start, bytes: await this.#source.read(need, signal) })
-      step = seekCursor(index, seconds, sound, [...this.#cache.chunks(), ...held])
+    } finally {
+      for (const chunk of held) this.#cache.add(chunk)
     }
-    for (const chunk of held) this.#cache.add(chunk)
     this.#cursor = step.done
     this.#pending = []
     this.#sawSound = false

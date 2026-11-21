@@ -45,7 +45,7 @@ const MIB = 1024 * 1024
 // What stands in for the store and for the SourceBuffers
 
 type Note =
-  | { op: 'fetchNow'; start: number; end: number }
+  | { op: 'fetchNow'; start: number; end: number; signal: AbortSignal | undefined }
   | { op: 'read'; start: number; end: number; signal: AbortSignal | undefined }
   | { op: 'setPosition'; offset: number }
 
@@ -78,8 +78,8 @@ class MemorySource implements ByteSource {
     return Promise.resolve(this.bytes.subarray(range.start, Math.min(range.end, this.fileSize)))
   }
 
-  fetchNow(range: ByteRange): Promise<void> {
-    this.notes.push({ op: 'fetchNow', start: range.start, end: range.end })
+  fetchNow(range: ByteRange, signal?: AbortSignal): Promise<void> {
+    this.notes.push({ op: 'fetchNow', start: range.start, end: range.end, signal })
     return Promise.resolve()
   }
 
@@ -367,10 +367,13 @@ describe('opening a file', () => {
     expect(built.bytes.length).toBeGreaterThan(HEAD_BYTES + TAIL_BYTES)
     const { feeder, source } = await open(built.bytes)
     const size = built.bytes.length
-    expect(source.reads).toEqual([
-      { start: 0, end: HEAD_BYTES },
-      { start: size - TAIL_BYTES, end: size },
-    ])
+    // The tail is asked for at once (fetchNow), and the reader's need for the moov is one plain read of it.
+    expect(source.reads).toHaveLength(2)
+    expect(source.reads[0]).toEqual({ start: 0, end: HEAD_BYTES })
+    expect(source.reads[1]?.end).toBe(size)
+    expect(source.reads[1]?.start).toBeGreaterThanOrEqual(size - TAIL_BYTES)
+    const fetched = source.notes.flatMap((note) => (note.op === 'fetchNow' ? [note] : []))
+    expect(fetched.map((note) => note.start)).toEqual([0, size - TAIL_BYTES])
     // Both are asked for before either is waited for.
     const firstRead = source.notes.findIndex((note) => note.op === 'read')
     expect(source.notes.slice(0, firstRead).map((note) => note.op)).toEqual([
@@ -382,7 +385,7 @@ describe('opening a file', () => {
     expect(feeder.tracks.audio).toBeNull()
   })
 
-  it('reads one more only when the moov is over a megabyte', async () => {
+  it('reads the moov over a megabyte as one read that overlaps the tail', async () => {
     // Over 140 000 frames of one byte each: a moov of 1.1 MB at the end, behind 3 MiB of padding.
     const built = mp4File({
       video: { count: 140_000, timescale: 30000, duration: 1000, size: () => 1, keyEvery: 30 },
@@ -390,8 +393,9 @@ describe('opening a file', () => {
       padding: 3 * MIB,
     })
     const { source } = await open(built.bytes)
-    expect(source.reads).toHaveLength(3)
+    expect(source.reads).toHaveLength(2)
     expect(source.reads[0]).toEqual({ start: 0, end: HEAD_BYTES })
+    expect(source.reads[1]?.start).toBeLessThan(built.bytes.length - TAIL_BYTES)
   })
 
   it('reads a small file whole as its head, with no tail beyond it', async () => {
@@ -885,7 +889,36 @@ describe('what opening and seeking hold (R29 a, e, j, k)', () => {
       source.reads.length > 60 ? Promise.reject(new Error('read again and again')) : undefined
   }
 
-  it('finishes an open that needs more than the cache holds, reading no range twice', async () => {
+  it('finishes an open that needs two reads that together exceed the cache, reading each range once', async () => {
+    // The first keyframe is 2.5 MB: opening reads on from the head, and what it read does not fit the cache.
+    const file = matroskaMovie({
+      docType: 'webm',
+      scale: 1_000_000,
+      duration: 2000,
+      tracks: [WEBM_VIDEO],
+      clusters: [
+        {
+          timestamp: 0,
+          frames: [{ track: 1, time: 0, keyframe: true, data: pictureFrame(0, 2_500_000, true) }],
+        },
+        {
+          timestamp: 1000,
+          frames: [
+            { track: 1, time: 1000, keyframe: true, data: pictureFrame(1, 2_500_000, true) },
+          ],
+        },
+      ],
+    })
+    const { source } = await open(file.bytes, SUPPORTED, {
+      cacheBytes: 1_500_000,
+      prepare: livelock,
+    })
+    const keys = source.reads.map((read) => `${read.start}-${read.end}`)
+    expect(source.reads.length).toBeGreaterThanOrEqual(3)
+    expect(new Set(keys).size).toBe(keys.length)
+  })
+
+  it('finishes a seek over what the cache holds, with the seeks after it served from it', async () => {
     const file = withCues()
     const { feeder, source } = await open(file.bytes, SUPPORTED, {
       cacheBytes: 1_500_000,
@@ -894,10 +927,7 @@ describe('what opening and seeking hold (R29 a, e, j, k)', () => {
     const signal = new AbortController().signal
     await feeder.seek(2, signal)
     await feeder.seek(0.5, signal)
-    const keys = source.reads.map((read) => `${read.start}-${read.end}`)
-    // The open's own chunks are never read twice, and the reads stay few.
-    expect(new Set(keys.slice(0, 3)).size).toBe(3)
-    expect(keys.length).toBeLessThan(30)
+    expect(source.reads.length).toBeLessThan(30)
   })
 
   it('finishes a seek that needs more than the cache holds', async () => {
@@ -1040,6 +1070,72 @@ describe('what a chunk commits (R29 d, f, g)', () => {
     }
     await expect(feedAll(feeder, sink, Infinity, controller.signal)).rejects.toThrow('stopped')
     expect(sink.appended()).toHaveLength(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// What the second review found (R30)
+
+describe('the tail and the signal of an open (R30 1, 2, 3)', () => {
+  it('calls the tail off when the open ends, though it was never used', async () => {
+    const built = mp4File({
+      video: { count: 40, timescale: 30000, duration: 1000, size: () => 100_000, keyEvery: 10 },
+    })
+    const { source } = await open(built.bytes)
+    const tail = source.notes.find((note) => note.op === 'fetchNow' && note.start > 0)
+    expect(tail?.op === 'fetchNow' ? tail.signal : undefined).toBeDefined()
+    expect(tail?.op === 'fetchNow' ? tail.signal?.aborted : false).toBe(true)
+    // And it was never read: nothing is left waiting for it.
+    expect(source.reads).toEqual([{ start: 0, end: HEAD_BYTES }])
+  })
+
+  it('rejects an open aborted while it reads, with the signal reason and no event', async () => {
+    const built = mp4File({
+      video: { count: 40, timescale: 30000, duration: 1000, size: () => 100_000, keyEvery: 10 },
+      moov: 'end',
+    })
+    const source = new MemorySource(built.bytes)
+    const controller = new AbortController()
+    source.intercept = (range) => {
+      if (range.start === 0) return undefined
+      controller.abort(new Error('closed'))
+      return Promise.reject(controller.signal.reason as Error)
+    }
+    const events: TimelineEventInput[] = []
+    const failed = await Feeder.open(source, SUPPORTED, (event) => events.push(event), {
+      signal: controller.signal,
+    }).catch((error: unknown) => error)
+    expect(failed).toEqual(new Error('closed'))
+    expect(events).toEqual([])
+    const tail = source.notes.find((note) => note.op === 'fetchNow' && note.start > 0)
+    expect(tail?.op === 'fetchNow' ? tail.signal?.aborted : false).toBe(true)
+    // The signal went to every read.
+    for (const note of source.notes) {
+      if (note.op === 'read') expect(note.signal).toBe(controller.signal)
+    }
+  })
+
+  it('keeps what an aborted seek read, so the next seek does not read it again', async () => {
+    const { bytes } = webm({ seconds: 6, size: 400_000 })
+    const { feeder, source } = await open(bytes)
+    const controller = new AbortController()
+    const before = source.reads.length
+    let count = 0
+    source.intercept = () => {
+      count += 1
+      if (count === 2) controller.abort(new Error('moved on'))
+      return undefined
+    }
+    await expect(feeder.seek(4, controller.signal)).rejects.toThrow('moved on')
+    const read = source.reads.slice(before)
+    // The first read was held, and the second was the one cut short.
+    expect(read.length).toBe(2)
+    source.intercept = null
+    const between = source.reads.length
+    await feeder.seek(4, new AbortController().signal)
+    const again = source.reads.slice(between).map((one) => `${one.start}-${one.end}`)
+    const first1 = read[0]
+    expect(again).not.toContain(`${first1?.start}-${first1?.end}`)
   })
 })
 

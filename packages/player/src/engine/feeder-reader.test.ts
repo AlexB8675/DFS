@@ -33,6 +33,30 @@ vi.mock('@dfs/mp4', async (importOriginal) => {
 
 const VP9_KEY = Uint8Array.of(0x82, 0x49, 0x83, 0x42, 0x00)
 
+/** Clusters of over a megabyte each, so that a seek has to read: the head holds only the first. */
+function bigFile(): Uint8Array {
+  const frame = (): Uint8Array =>
+    new Uint8Array(1_200_000).fill(3).map((v, i) => (i < 5 ? (VP9_KEY[i] ?? v) : v))
+  return matroskaMovie({
+    docType: 'webm',
+    scale: 1_000_000,
+    duration: 4000,
+    tracks: [
+      {
+        number: 1,
+        type: 1,
+        codecId: 'V_VP9',
+        defaultDuration: 33_333_333,
+        video: { pixelWidth: 320, pixelHeight: 240 },
+      },
+    ],
+    clusters: [0, 1, 2, 3].map((second) => ({
+      timestamp: second * 1000,
+      frames: [{ track: 1, time: second * 1000, keyframe: true, data: frame() }],
+    })),
+  }).bytes
+}
+
 function file(): Uint8Array {
   return matroskaMovie({
     docType: 'webm',
@@ -56,6 +80,7 @@ function file(): Uint8Array {
 
 class Source implements ByteSource {
   readonly positions: number[] = []
+  readonly reads: { start: number; end: number }[] = []
   readonly bytes: Uint8Array
   constructor(bytes: Uint8Array) {
     this.bytes = bytes
@@ -64,6 +89,7 @@ class Source implements ByteSource {
     return this.bytes.length
   }
   read(range: { start: number; end: number }): Promise<Uint8Array> {
+    this.reads.push(range)
     return Promise.resolve(this.bytes.subarray(range.start, range.end))
   }
   fetchNow(): Promise<void> {
@@ -80,16 +106,19 @@ beforeEach(() => {
 })
 
 describe('the feeder over an index with no duration (R29 i)', () => {
-  it('has a null duration and sets only the position a seek ends at', async () => {
+  it('has a null duration, and a seek that reads sets only the position it ends at', async () => {
     control.noDuration = true
-    const source = new Source(file())
+    const source = new Source(bigFile())
     const feeder = await Feeder.open(
       source,
       () => true,
       () => undefined,
     )
     expect(feeder.durationSeconds).toBeNull()
-    await feeder.seek(1, new AbortController().signal)
+    const before = source.reads.length
+    await feeder.seek(2, new AbortController().signal)
+    // The seek did read, so the estimate would have been set had there been a duration.
+    expect(source.reads.length).toBeGreaterThan(before)
     expect(source.positions).toHaveLength(1)
   })
 })
