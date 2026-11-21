@@ -268,6 +268,7 @@ function build(options: {
   random?: () => number
   now?: () => number
   head?: HeadRead
+  holdOnward?: boolean
   onEvent?: (event: TimelineEventInput) => void
 }): Rig {
   const events: TimelineEventInput[] = []
@@ -284,6 +285,7 @@ function build(options: {
     random: options.random ?? (() => 0.5),
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.head === undefined ? {} : { head: options.head }),
+    ...(options.holdOnward === undefined ? {} : { holdOnward: options.holdOnward }),
     ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
   })
   downloaders.push(downloader)
@@ -4045,5 +4047,45 @@ describe('Downloader: the store view', () => {
     for (const name of ['write', 'read', 'setPosition', 'close', 'fileSize']) {
       expect(view[name]).toBeUndefined()
     }
+  })
+})
+
+// R41 item 7: the engine holds the onward reads back until the index is open (the head's own read and the priority
+// reads go on), and then releases them.
+describe('Downloader: the onward reads held back until released', () => {
+  const size = 8 * MIB
+
+  it('opens no onward read while held, serves a priority read, and opens the onward read when released', async () => {
+    const store = memoryStore(size)
+    const stub = stubNetwork((call) => pipeFor(call, size))
+    const rig = build({
+      url: 'http://stub.invalid/file',
+      store,
+      fetch: stub.fetch,
+      holdOnward: true,
+    })
+    rig.downloader.start()
+    await settle()
+    expect(stub.pipes).toHaveLength(0)
+    expect(rig.downloader.state()).toBe('waiting')
+
+    // A priority read (the feeder's tail and index reads) works before the release.
+    const held = rig.downloader.fetchNow({ start: size - 1000, end: size })
+    await until(() => stub.pipes.length === 1)
+    stub.pipes[0]?.push(size - 1000, size)
+    await held
+    expect(store.held().heldFrom(size - 1000)).toBe(1000)
+    // The end of that read opened no onward read either.
+    await settle()
+    expect(stub.pipes).toHaveLength(1)
+
+    rig.downloader.releaseOnward()
+    await until(() => stub.pipes.length === 2)
+    expect(stub.calls[1]?.from).toBe(0)
+    expect(rig.downloader.state()).toBe('reading')
+    // A second release changes nothing.
+    rig.downloader.releaseOnward()
+    await settle()
+    expect(stub.pipes).toHaveLength(2)
   })
 })

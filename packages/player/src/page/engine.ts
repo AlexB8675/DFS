@@ -395,6 +395,8 @@ class Play {
       makeWorker: options.makeWorker,
       onEvent: this.#emit,
       signal: this.#signal,
+      // The index comes first: the onward reads begin once the feeder has it (below), so that its bytes do not share the link with a read that the start cannot use yet.
+      holdOnward: true,
       ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
       ...(options.estimate === undefined ? {} : { estimate: options.estimate }),
     })
@@ -439,6 +441,8 @@ class Play {
       try {
         if (target > 0 || !first) await feeder.seek(target, signal)
         first = false
+        // The index is read and the position is the start's: the eager reading begins.
+        downloader.releaseOnward()
         await this.#feedCovering(target, () => this.#userSeek !== null)
       } catch (error) {
         // A seek of the viewer's restarted the feed: that is no failure. Anything else is.

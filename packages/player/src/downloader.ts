@@ -138,6 +138,8 @@ export interface DownloaderOptions {
   now?: () => number
   /** The play's head read, if `openDownload` opened it before the store: the first onward read, which `start` takes over. */
   head?: HeadRead
+  /** The onward reads wait for `releaseOnward` (the engine releases them once the index is open, so that the index's own bytes do not share the link with a read the start cannot use yet). The head read and the priority reads are not held. */
+  holdOnward?: boolean
 }
 
 /**
@@ -316,6 +318,8 @@ export class Downloader {
   #state: DownloaderState = 'waiting'
   #failure: ReadError | null = null
   #started = false
+  /** True until `releaseOnward`, when the options held the onward reads back. */
+  #onwardHeld: boolean
   #closed = false
   #closing: Promise<void> | null = null
   /** Where the play is: the onward read begins at the first gap at or after it. */
@@ -351,6 +355,7 @@ export class Downloader {
     this.#random = options.random ?? Math.random
     this.#now = options.now ?? (() => performance.now())
     this.#head = options.head ?? null
+    this.#onwardHeld = options.holdOnward ?? false
     this.#meter = options.head?.meter ?? new RateMeter()
     this.#nextId = (options.head?.id ?? 0) + 1
   }
@@ -400,6 +405,13 @@ export class Downloader {
     this.#head = null
     if (head === null) this.#openNext()
     else this.#adopt(head)
+  }
+
+  /** Lets the onward reads begin, if they were held back: the choice of what to read is made at once. It does nothing a second time. */
+  releaseOnward(): void {
+    if (!this.#onwardHeld) return
+    this.#onwardHeld = false
+    if (this.#started && !this.#closed) this.#reconsider()
   }
 
   /** Takes over the head read as the first onward read: its request and its first byte were sent when it was made, and its body is taken as the other reads' are. */
@@ -686,6 +698,10 @@ export class Downloader {
     // Before the start nothing is read onward, whatever a priority read ends with.
     if (!this.#started || this.#closed) return
     if (this.#state === 'failed' || this.#state === 'full') return
+    if (this.#onwardHeld) {
+      if (!this.#hasOnward()) this.#setState('waiting')
+      return
+    }
     if (this.#pause !== null) {
       if (!this.#hasOnward()) this.#setState('waiting')
       return

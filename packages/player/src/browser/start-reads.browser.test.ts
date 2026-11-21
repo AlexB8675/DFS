@@ -3,6 +3,7 @@
 
 import { mp4Next, mp4Seek } from '@dfs/mp4'
 import { afterEach, describe, expect, test, vi } from 'vitest'
+import { TAIL_BYTES } from '../limits.ts'
 import { begin, endPlays, ofType, served, suite, until } from './play-harness.ts'
 import { factsOf } from './plays-support.ts'
 import { control, files } from './server.ts'
@@ -11,6 +12,37 @@ vi.setConfig({ testTimeout: 90_000 })
 
 afterEach(async () => {
   await endPlays()
+})
+
+const HEAD = 1024 * 1024
+
+const END = 'h264-aac-end.mp4'
+
+suite(END)('the index comes first', () => {
+  test('before the feeder has opened, no read is made but the head, the tail and the index', async () => {
+    const file = served(END)
+    if (file === undefined) return
+    const play = begin(END)
+    await until(play, 'the first picture', 20_000, () => play.video.readyState >= 2)
+    const opened = play.events.findIndex(
+      (event) => event.type === 'phase' && event.phase === 'buffering',
+    )
+    expect(opened).toBeGreaterThan(0)
+    const before = ofType(play.events.slice(0, opened), 'request')
+    expect(before.length).toBeGreaterThan(0)
+    for (const request of before) {
+      const isHead = request.from === 0 && request.to === HEAD - 1
+      const isTail = request.from >= file.size - 2 * TAIL_BYTES
+      expect(
+        isHead || isTail,
+        `the request from ${request.from} to ${request.to} before the feeder opened`,
+      ).toBe(true)
+    }
+    // The onward reading begins after: it goes on from the head's end.
+    await until(play, 'the onward read', 10_000, () => {
+      return ofType(play.events, 'request').some((request) => request.from === HEAD)
+    })
+  })
 })
 
 const SEEKED = 'h264-aac-faststart.mp4'

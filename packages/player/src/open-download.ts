@@ -40,6 +40,8 @@ export interface OpenDownloadOptions {
   random?: () => number
   /** The clock, in milliseconds, which the rate is measured by; `performance.now` when it is missing. */
   now?: () => number
+  /** Holds the onward reads back after the head, until the caller releases them with `releaseOnward` (the engine does once the index is open). */
+  holdOnward?: boolean
   /** Ends the opening: the head is let go of, and the promise is rejected with the signal's reason. */
   signal?: AbortSignal
 }
@@ -276,6 +278,7 @@ export async function openDownload(options: OpenDownloadOptions): Promise<Downlo
       now,
       ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
       head: { id, controller, to: HEAD_BYTES - 1, body: buffer, meter },
+      ...(options.holdOnward === undefined ? {} : { holdOnward: options.holdOnward }),
     })
     downloader.start()
     return downloader
