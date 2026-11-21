@@ -44,23 +44,23 @@ describe('Positions', () => {
     expect(soundFirst.offsetAt(0.5)).toBe(800_000)
   })
 
-  it('answers the nearest picture run at or before a time that only the sound covers, and null before any', () => {
+  it('answers the nearest picture run at or before a time that only the sound covers, and the first run before any', () => {
     const positions = new Positions()
     positions.add(run('audio', 0, 4, 40))
     positions.add(run('video', 0.033, 1, 300))
     positions.add(run('video', 1.5, 2, 700))
-    // The picture's first frame is shown at 0.033 s: nothing of the picture is before 0.
-    expect(positions.offsetAt(0)).toBeNull()
+    // The picture's first frame is shown at 0.033 s: a clock a hair before it is read at the first run (R42).
+    expect(positions.offsetAt(0)).toBe(300)
     // In a gap of the picture that the sound covers: the picture run before it.
     expect(positions.offsetAt(1.2)).toBe(300)
     expect(positions.offsetAt(3)).toBe(700)
   })
 
-  it('answers the nearest run at or before a time that none covers, and null before them all', () => {
+  it('answers the nearest run at or before a time that none covers, and the nearest after one before them all', () => {
     const positions = new Positions()
     positions.add(run('video', 2, 3, 2000))
     positions.add(run('video', 5, 6, 5000))
-    expect(positions.offsetAt(1)).toBeNull()
+    expect(positions.offsetAt(1)).toBe(2000)
     // In the gap: the run before it.
     expect(positions.offsetAt(4)).toBe(2000)
     // After the last.
@@ -76,6 +76,16 @@ describe('Positions', () => {
     expect(positions.offsetAt(10)).toBe(250)
   })
 
+  it('takes, before every run, the least offset of the picture run that starts nearest after the time, and no sound run', () => {
+    const positions = new Positions()
+    positions.add(run('audio', 0, 4, 40))
+    positions.add(run('video', 0.0704, 1, 900))
+    positions.add(run('video', 0.0704, 1, 800))
+    positions.add(run('video', 1, 2, 100))
+    expect(positions.offsetAt(0.07039)).toBe(800)
+    expect(new Positions().offsetAt(0)).toBeNull()
+  })
+
   it('forgets everything on clear', () => {
     const positions = new Positions()
     positions.add(run('video', 0, 1, 1000))
@@ -89,9 +99,9 @@ describe('Positions', () => {
     const positions = new Positions()
     const total = POSITIONS_MAX + 10
     for (let at = 0; at < total; at++) positions.add(run('video', at, at + 1, at * 10))
-    // The first ten are gone: the nearest at or before them is nothing.
-    expect(positions.offsetAt(0.5)).toBeNull()
-    expect(positions.offsetAt(9.5)).toBeNull()
+    // The first ten are gone: before the oldest that is left, the answer is the oldest's (R42).
+    expect(positions.offsetAt(0.5)).toBe(100)
+    expect(positions.offsetAt(9.5)).toBe(100)
     expect(positions.offsetAt(10.5)).toBe(100)
     expect(positions.offsetAt(total - 0.5)).toBe((total - 1) * 10)
   })

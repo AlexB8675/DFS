@@ -29,17 +29,27 @@ export class Positions {
    * The source offset of the picture at `seconds`: the least offset of the picture's
    * runs that cover the time (from a run's start up to, and not including, its end).
    * When none does, the offset of the picture run that ends nearest at or before it
-   * (the least of those that end together), and null when none does, as when nothing
-   * was fed. The sound's runs are kept but never answered: the picture holds nearly
+   * (the least of those that end together); before every run (a clock a hair before the
+   * first frame is shown), the least offset of the run that starts nearest after it; null
+   * only when no picture run was fed. The sound's runs are kept but never answered: the picture holds nearly
    * all the bytes of a file, so the download follows it, and the sound's offset would
    * put the position in the wrong place in a file that lays the sound first or apart.
    */
   offsetAt(seconds: number): number | null {
     let covering: number | null = null
     let before: { end: number; offset: number } | null = null
+    let after: { start: number; offset: number } | null = null
     for (const run of this.#runs) {
       if (run.kind !== 'video') continue
-      if (run.start <= seconds && seconds < run.end) {
+      if (run.start > seconds) {
+        if (
+          after === null ||
+          run.start < after.start ||
+          (run.start === after.start && run.offset < after.offset)
+        ) {
+          after = { start: run.start, offset: run.offset }
+        }
+      } else if (run.start <= seconds && seconds < run.end) {
         if (covering === null || run.offset < covering) covering = run.offset
       } else if (run.end <= seconds) {
         if (
@@ -51,7 +61,7 @@ export class Positions {
         }
       }
     }
-    return covering ?? before?.offset ?? null
+    return covering ?? before?.offset ?? after?.offset ?? null
   }
 
   /** Forgets every run. */
