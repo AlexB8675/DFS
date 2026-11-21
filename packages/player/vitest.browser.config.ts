@@ -60,8 +60,10 @@ const profileFolder = wanted.includes('chromium')
   ? mkdtempSync(join(tmpdir(), PROFILE_PREFIX))
   : null
 if (profileFolder !== null) {
-  // The teardown (src/testing/profile-teardown.ts) removes it when the run ends.
-  process.env.DFS_PLAYER_PROFILE = profileFolder
+  // Removed when the run ends, by the exit handler and not by a `globalSetup` teardown: the teardown runs while Chrome
+  // is still open, and a profile that is removed under a running Chrome is written again and left behind (measured:
+  // three teardown versions left the folder, the exit handler alone leaves none). A folder that is left anyway is
+  // swept by the next run, above.
   process.once('exit', () => {
     try {
       // The folder holds the store's files of the plays (encrypted, the user's videos among them): it is removed at
@@ -116,7 +118,7 @@ export default defineConfig({
   test: {
     include: ['src/**/*.browser.test.ts'],
     // The corpus behind Range, over a network the tests shape (src/testing/play-server.ts).
-    globalSetup: ['src/testing/play-server.ts', 'src/testing/profile-teardown.ts'],
+    globalSetup: ['src/testing/play-server.ts'],
     // The origin private file system and the Web Locks belong to the origin, which all the files' pages share, so a file's tests don't run with another's.
     fileParallelism: false,
     testTimeout: 30_000,
