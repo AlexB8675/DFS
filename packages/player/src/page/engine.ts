@@ -17,6 +17,7 @@ import { messageOf } from '../downloader.ts'
 import type { Downloader } from '../downloader.ts'
 import { Feeder } from '../engine/feeder.ts'
 import type { Sink } from '../engine/feeder.ts'
+import { feedTargets } from '../engine/targets.ts'
 import type { ChosenTracks, EngineTrack } from '../engine/tracks.ts'
 import { DecoderWindow } from '../engine/window.ts'
 import type { FedRun } from '../engine/window.ts'
@@ -549,12 +550,7 @@ class Play {
       }
       if (await this.#removeDue()) this.#quotaStalled = false
       const at = this.#at()
-      const untils: number[] = []
-      for (const kind of this.#kinds) {
-        const wanted = this.#window.wants(kind, at)
-        if (wanted !== null && !untils.includes(wanted.until)) untils.push(wanted.until)
-      }
-      untils.sort((a, b) => a - b)
+      const untils = feedTargets(this.#kinds.map((kind) => this.#window.wants(kind, at)))
       // The least first, so that a track far ahead does not pull the other past its window in one call; the next only when that appended nothing.
       for (const until of untils) {
         const before = this.#appended
