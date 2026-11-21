@@ -33,6 +33,13 @@ export const RETRY_JITTER = 0.2
 /** The span of the measured rate: the last 5 s of receiving. */
 export const RATE_WINDOW_MS = 5_000
 
+/**
+ * How long after its first byte the downloader answers a rate: a quarter of a second, not a whole one, so that on a fast
+ * link the start hold lets go as soon as the rate covers the bit rate (spec goal 2). An early estimate that is low (a
+ * slow start) only holds the play longer, which is the safe side.
+ */
+export const RATE_EARLY_MS = 250
+
 /** How often the `storeLevel` event is recorded while the play downloads: every 5 s, where one per block would fill the timeline. */
 export const LEVEL_EVERY_MS = 5_000
 

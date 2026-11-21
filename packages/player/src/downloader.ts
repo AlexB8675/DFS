@@ -37,6 +37,7 @@ import {
   BLOCK_BYTES,
   COVER_AHEAD_MS,
   LEVEL_EVERY_MS,
+  RATE_EARLY_MS,
   RATE_WINDOW_MS,
   RETRY_BASE_MS,
   RETRY_JITTER,
@@ -162,9 +163,6 @@ const ONWARD_READS = 2
 /** How many times `read` asks for a range and finds it gone, before it gives up. */
 const READ_ROUNDS = 3
 
-/** The least time of receiving that has a rate. */
-const RATE_AFTER_MS = 1000
-
 /** What a read is for: an onward read follows the position; a priority read is for a range that someone waits for. */
 type ReadKind = 'onward' | 'priority'
 
@@ -281,13 +279,13 @@ export class RateMeter {
 
   /**
    * The bytes per second received over the last RATE_WINDOW_MS, or over the time since the
-   * first byte when that is less than a window; null until a second of receiving has
+   * first byte when that is less than a window; null until RATE_EARLY_MS of receiving has
    * passed. A play that has received nothing for a whole window has a rate of 0.
    */
   rate(now: number): number | null {
     if (this.#first === null) return null
     const since = now - this.#first
-    if (since < RATE_AFTER_MS) return null
+    if (since < RATE_EARLY_MS) return null
     this.#forget(now)
     let bytes = 0
     for (const sample of this.#samples) bytes += sample.bytes
@@ -388,7 +386,7 @@ export class Downloader {
 
   /**
    * The bytes per second received by all the reads over the last RATE_WINDOW_MS (or over
-   * the time since the first byte, while that is less); null before a second of receiving.
+   * the time since the first byte, while that is less); null before RATE_EARLY_MS of receiving.
    */
   rate(): number | null {
     return this.#meter.rate(this.#now())

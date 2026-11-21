@@ -20,6 +20,7 @@ import {
   POSITION_EVERY_MS,
   QUOTA_SHRINK,
   QUOTA_SHARE,
+  RATE_EARLY_MS,
   RATE_WINDOW_MS,
   REMOVE_PAD_SECONDS,
   READ_IDLE_MS,
@@ -74,6 +75,7 @@ describe('the store and the downloader limits', () => {
 
   it('measures the rate over 5 s and reports the store level every 5 s', () => {
     expect(RATE_WINDOW_MS).toBe(5_000)
+    expect(RATE_EARLY_MS).toBe(250)
     expect(LEVEL_EVERY_MS).toBe(5_000)
   })
 

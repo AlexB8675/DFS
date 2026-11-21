@@ -8,6 +8,7 @@ import { StoreError } from './errors.ts'
 import {
   BLOCK_BYTES,
   LEVEL_EVERY_MS,
+  RATE_EARLY_MS,
   READ_IDLE_MS,
   RETRY_BASE_MS,
   RETRY_MAX_MS,
@@ -3306,9 +3307,11 @@ describe('Downloader: the rate', () => {
     clock = 100
     stub.pipes[0]?.push(0, 100 * 1024)
     await until(() => store.held().heldFrom(0) === 100 * 1024)
-    // The first byte came at 100 ms: less than a second of receiving is no rate.
-    clock = 1099
+    // The first byte came at 100 ms: less than RATE_EARLY_MS of receiving is no rate, and then it is the bytes over the time.
+    clock = 100 + RATE_EARLY_MS - 1
     expect(rig.downloader.rate()).toBeNull()
+    clock = 100 + RATE_EARLY_MS
+    expect(rig.downloader.rate()).toBe((100 * 1024) / (RATE_EARLY_MS / 1000))
     clock = 1100
     expect(rig.downloader.rate()).toBe(100 * 1024)
 
@@ -3353,7 +3356,7 @@ describe('Downloader: the rate', () => {
     expect(rig.downloader.rate()).toBe(2000)
   })
 
-  it('is the speed of a throttled server: unknown in the first second, and within a quarter of it after three', async () => {
+  it('is the speed of a throttled server: unknown in the first quarter second, and within a quarter of it after three', async () => {
     vi.useRealTimers()
     const size = 8 * MIB
     // 64 KiB every 62 ms is a MiB a second.
@@ -3362,7 +3365,7 @@ describe('Downloader: the rate', () => {
     expect(rig.downloader.rate()).toBeNull()
 
     rig.downloader.start()
-    await sleep(500)
+    await sleep(100)
     expect(rig.downloader.rate()).toBeNull()
     await sleep(2800)
 
@@ -3824,7 +3827,7 @@ describe('Downloader: a read that goes quiet', () => {
 
     it('reaches a block while the rate is not known yet', async () => {
       const { rig, stub, clock } = await measured(100 * KIB)
-      clock.now = 600
+      clock.now = RATE_EARLY_MS - 1
       expect(rig.downloader.rate()).toBeNull()
 
       expect(await opensARead(rig, stub, 100 * KIB + BLOCK_BYTES)).toBe(false)
