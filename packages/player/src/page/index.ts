@@ -2,3 +2,5 @@
 // `src/engine/`; nothing there imports from here, and `src/index.ts` never exports it.
 
 export { MediaSourceSink, SinkQuotaError } from './sink.ts'
+export { playStreamed } from './engine.ts'
+export type { EngineStats } from './engine.ts'

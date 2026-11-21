@@ -252,6 +252,15 @@ suite('h264-aac-faststart.mp4')('an MP4 through the sink', () => {
       expect(play.events).toEqual([])
     })
 
+    test('setDuration gives the duration that init sets, when the sink was opened without one', async () => {
+      const play = await start('h264-aac-faststart.mp4', null)
+      const duration = play.feeder.durationSeconds
+      expect(duration).not.toBeNull()
+      play.sink.setDuration(duration)
+      await play.sink.init(play.feeder.tracks)
+      expect(play.video.duration).toBeCloseTo(duration ?? 0, 1)
+    })
+
     test('open stops when its signal aborts', async () => {
       const video = document.createElement('video')
       const controller = new AbortController()

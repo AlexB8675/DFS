@@ -113,6 +113,9 @@ export const STALL_GOAL_SECONDS = 4
 /** How long a seek may wait for its picture: 10 s. A seek with none by then is logged and refed by the watchdog. */
 export const SEEK_DEADLINE_MS = 10_000
 
+/** How often the engine gives the page its numbers: every 500 ms. */
+export const STATS_EVERY_MS = 500
+
 /** How long a clock or frame count that has not moved, while playing with data at the playhead, is taken as stuck: 2 s. */
 export const STUCK_MS = 2_000
 

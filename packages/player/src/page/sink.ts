@@ -33,7 +33,7 @@ type Cancel = (reason: Error) => void
 
 export class MediaSourceSink implements Sink {
   readonly #video: HTMLVideoElement
-  readonly #durationSeconds: number | null
+  #durationSeconds: number | null
   #mediaSource: MediaSource | null = null
   #tracks: ChosenTracks | null = null
   #buffers: Record<Kind, SourceBuffer | null> = { video: null, audio: null }
@@ -51,6 +51,11 @@ export class MediaSourceSink implements Sink {
 
   private constructor(video: HTMLVideoElement, durationSeconds: number | null) {
     this.#video = video
+    this.#durationSeconds = durationSeconds
+  }
+
+  /** Sets the duration that `init` (and a reopen) gives the Media Source, for a sink opened before the file's duration was known; `null` is none. It does not change a Media Source that is built already. */
+  setDuration(durationSeconds: number | null): void {
     this.#durationSeconds = durationSeconds
   }
 

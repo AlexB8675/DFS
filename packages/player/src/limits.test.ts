@@ -30,6 +30,7 @@ import {
   SEEK_DEADLINE_MS,
   SOUND_WAIT_SECONDS,
   START_GOAL_SECONDS,
+  STATS_EVERY_MS,
   STALL_COVER_MS,
   STALL_GOAL_SECONDS,
   STUCK_MS,
@@ -145,6 +146,10 @@ describe('the store and the downloader limits', () => {
 
   it('pads the append window of a track by 1 ms', () => {
     expect(APPEND_WINDOW_PAD_SECONDS).toBe(0.001)
+  })
+
+  it('gives the play numbers to the page every 500 ms', () => {
+    expect(STATS_EVERY_MS).toBe(500)
   })
 
   it('pads the end of a removal from a SourceBuffer by 1 ms', () => {
