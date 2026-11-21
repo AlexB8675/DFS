@@ -4,7 +4,7 @@
 
 export * from './blocks.ts'
 export { Downloader, pageConnectivity } from './downloader.ts'
-export type { Connectivity, DownloaderOptions, DownloaderState } from './downloader.ts'
+export type { Connectivity, DownloaderOptions, DownloaderState, StoreView } from './downloader.ts'
 export { chooseEngineTracks } from './engine/tracks.ts'
 export type { ChosenTracks, EngineRefusal, EngineTrack } from './engine/tracks.ts'
 export { holdDecision } from './engine/hold.ts'

@@ -4016,3 +4016,31 @@ describe('clip and messageOf', () => {
     expect(messageOf(42)).toBe('42')
   })
 })
+
+describe('Downloader: the store view', () => {
+  it('shows the backend, the cap, what is held and the stats of its store, and is the store as it is now', async () => {
+    const size = 4 * MIB
+    const store = memoryStore(size, 8 * MIB)
+    const rig = build({ url: 'http://stub.invalid/file', store })
+    const { store: view } = rig.downloader
+
+    expect(view.backend).toBe('memory')
+    expect(view.capBytes).toBe(store.capBytes)
+    expect(view.held().ranges()).toEqual([])
+    expect(view.stats().storedBytes).toBe(0)
+
+    await store.write(0, bytesOf(0, MIB))
+    expect(view.held().ranges()).toEqual([{ start: 0, end: MIB }])
+    expect(view.stats().storedBytes).toBe(MIB)
+    expect(view.stats().backend).toBe('memory')
+  })
+
+  it('has no way to write, read, move the position or close the store', () => {
+    const store = memoryStore(MIB)
+    const rig = build({ url: 'http://stub.invalid/file', store })
+    const view = rig.downloader.store as unknown as Record<string, unknown>
+    for (const name of ['write', 'read', 'setPosition', 'close', 'fileSize']) {
+      expect(view[name]).toBeUndefined()
+    }
+  })
+})

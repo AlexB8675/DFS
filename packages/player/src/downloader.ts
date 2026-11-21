@@ -46,6 +46,9 @@ import {
 import { ReadError, openRead } from './read.ts'
 import type { PlayStore, WriteOutcome } from './store.ts'
 
+/** What the engine may see of a play's store: its backend, its cap, what it holds and its figures. It can't write, read, move the position or close it. */
+export type StoreView = Pick<PlayStore, 'backend' | 'capBytes' | 'held' | 'stats'>
+
 /** What the downloader asks of the page's connection: whether it is up, and to be told when it comes back. */
 export interface Connectivity {
   /** Whether the browser says that it is online. */
@@ -357,6 +360,21 @@ export class Downloader {
   /** The size of the file, which is the store's. */
   get fileSize(): number {
     return this.#store.fileSize
+  }
+
+  /** A read-only view of the store: its backend, its cap, what it holds and its figures, as they are when asked. */
+  get store(): StoreView {
+    const store = this.#store
+    return {
+      get backend() {
+        return store.backend
+      },
+      get capBytes() {
+        return store.capBytes
+      },
+      held: () => store.held(),
+      stats: () => store.stats(),
+    }
   }
 
   state(): DownloaderState {
