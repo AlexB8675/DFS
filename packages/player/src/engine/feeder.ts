@@ -15,7 +15,6 @@ import {
   fragment,
   fragmentRuns,
   framesIn,
-  nextRead,
   nextReads,
   openSource,
   presentationSeconds,
@@ -263,7 +262,10 @@ export class Feeder {
     this.#soundRead = false
     this.#pictureFrom = null
     this.#fedEnd = { video: null, audio: null }
-    const at = nextRead(index, this.#cursor)
+    // The download follows the picture (R42): the sound's chunk may lie before the keyframe, far from the group, and is
+    // read by the feeder's own read like any range. The sound's place only when the picture has no frame left.
+    const next = nextReads(index, this.#cursor)
+    const at = next.video ?? next.audio
     if (at !== null) this.#source.setPosition(at)
   }
 

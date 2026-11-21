@@ -579,9 +579,10 @@ describe('seeking an MP4 (§10.4)', () => {
     const { feeder, source } = await open(built.bytes)
     await feeder.seek(2.5, new AbortController().signal)
     const set = source.notes.filter((note) => note.op === 'setPosition')
-    // Reading goes on at the least of the two: the sound frame that covers 2.0 s lies before the keyframe.
-    const least = Math.min(built.video[60]?.offset ?? Infinity, built.audio[93]?.offset ?? Infinity)
-    expect(set).toEqual([{ op: 'setPosition', offset: least }])
+    // The download follows the picture (R42): the sound frame that covers 2.0 s lies before the keyframe, and the
+    // position is still the keyframe's. The sound's chunk is read by the feeder's own read.
+    expect(built.audio[93]?.offset ?? Infinity).toBeLessThan(built.video[60]?.offset ?? 0)
+    expect(set).toEqual([{ op: 'setPosition', offset: built.video[60]?.offset }])
     const sink = new RecordingSink()
     await feedAll(feeder, sink, 3.5)
     const video = sink.appended('video')

@@ -1,7 +1,7 @@
 // What the engine asks of the server, in what order (DESIGN.md §10.4; R41 items 6 and 7): the index comes first,
 // and a seek outside the window opens one read, at the group's offset.
 
-import { mp4Next, mp4Seek } from '@dfs/mp4'
+import { mp4Nexts, mp4Seek } from '@dfs/mp4'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { TAIL_BYTES } from '../limits.ts'
 import { begin, endPlays, ofType, served, suite, until } from './play-harness.ts'
@@ -55,7 +55,7 @@ suite(SEEKED)('a seek outside the window', () => {
     if (facts.index.container !== 'mp4') throw new Error('this test wants an MP4')
     const target = 8
     const cursor = mp4Seek(facts.index, target, facts.index.sound?.header.id ?? null)
-    const expected = mp4Next(facts.index, cursor)
+    const expected = mp4Nexts(facts.index, cursor).video
     expect(expected).not.toBeNull()
 
     await control({ bandwidthBytesPerSecond: 300_000 })
@@ -88,7 +88,7 @@ describe.skipIf(far === undefined)(
       if (facts.index.container !== 'mp4') throw new Error('this test wants an MP4')
       const target = 4.673
       const cursor = mp4Seek(facts.index, target, facts.index.sound?.header.id ?? null)
-      const expected = mp4Next(facts.index, cursor)
+      const expected = mp4Nexts(facts.index, cursor).video
 
       await control({ bandwidthBytesPerSecond: 30_000_000, latencyMs: 20 })
       const play = begin(FAR, { autoplay: () => true })
