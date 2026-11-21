@@ -18,6 +18,7 @@ function rig(maxFrameSeconds: number | null = null) {
     ended: false,
     buffered: [[0, 20]],
     holding: false,
+    hidden: false,
   }
   return {
     tick(ms: number, patch: Partial<WatchSample> = {}) {
@@ -169,5 +170,126 @@ describe('Watchdog', () => {
     expect(r.tick(STUCK_MS, patch)).toEqual({ action: 'reopen' })
     expect(r.tick(STUCK_MS, patch)).toEqual({ action: 'reopen' })
     expect(r.tick(STUCK_MS, patch)?.action).toBe('stuck')
+  })
+  it.each([
+    ['a lone range', [[0, 20]]],
+    [
+      'a gap wider than the step',
+      [
+        [0, 20],
+        [23, 40],
+      ],
+    ],
+  ] as [string, [number, number][]][])(
+    'refeeds again and again, never reopening, at the end of %s',
+    (_name, buffered) => {
+      const r = rig()
+      const patch = { at: 19.9, buffered }
+      expect(freeze(r, patch)).toEqual({ action: 'refeed' })
+      for (let i = 0; i < REOPENS_MAX + 2; i++) {
+        expect(r.tick(STUCK_MS, patch)).toEqual({ action: 'refeed' })
+      }
+    },
+  )
+
+  it('keeps the gap rung for when a target appears', () => {
+    const r = rig()
+    const at = 19.9
+    expect(freeze(r, { at, buffered: [[0, 20]] })).toEqual({ action: 'refeed' })
+    expect(
+      r.tick(STUCK_MS, {
+        at,
+        buffered: [
+          [0, 20],
+          [20.3, 40],
+        ],
+      }),
+    ).toEqual({
+      action: 'gap',
+      to: 20.3,
+    })
+    expect(
+      r.tick(STUCK_MS, {
+        at,
+        buffered: [
+          [0, 20],
+          [20.3, 40],
+        ],
+      }),
+    ).toEqual({
+      action: 'refeed',
+    })
+  })
+
+  it('walks the whole ladder through the engine own seeks and reopens', () => {
+    const r = rig()
+    expect(freeze(r)).toEqual({ action: 'refeed' })
+    let frames = 100
+    for (let i = 0; i < REOPENS_MAX; i++) {
+      expect(r.tick(STUCK_MS, { frames })).toEqual({ action: 'reopen' })
+      // The engine reopens: the element seeks, its frame count starts again.
+      for (let k = 0; k < 3; k++) expect(r.tick(100, { seeking: true })).toBeNull()
+      frames = 0
+      expect(r.tick(100, { frames })).toBeNull()
+      expect(r.tick(STUCK_MS - 200, { frames })).toBeNull()
+    }
+    expect(r.tick(200, { frames })?.action).toBe('stuck')
+  })
+
+  it('refeeds after a gap whose seek the engine made', () => {
+    const r = rig()
+    const buffered: [number, number][] = [
+      [0, 20],
+      [20.3, 40],
+    ]
+    expect(freeze(r, { at: 19.9, buffered })).toEqual({ action: 'gap', to: 20.3 })
+    for (let k = 0; k < 3; k++)
+      expect(r.tick(100, { at: 20.3, seeking: true, buffered })).toBeNull()
+    const landed = { at: 20.3, buffered }
+    expect(r.tick(100, landed)).toBeNull()
+    expect(r.tick(STUCK_MS, landed)).toEqual({ action: 'refeed' })
+  })
+
+  it('does not call a hidden tab with a moving clock a frozen picture', () => {
+    const r = rig(0.04)
+    let at = 10
+    for (let i = 0; i < 20; i++) expect(r.tick(500, { at: (at += 0.5), hidden: true })).toBeNull()
+  })
+
+  it('still catches a frozen clock in a hidden tab', () => {
+    const r = rig(0.04)
+    expect(freeze(r, { hidden: true })).toEqual({ action: 'refeed' })
+  })
+
+  it('does not call a forward jump of the clock a frozen picture before STUCK_MS of frames standing', () => {
+    const r = rig(0.04)
+    expect(r.tick(0, { at: 10 })).toBeNull()
+    expect(r.tick(500, { at: 10 })).toBeNull()
+    expect(r.tick(500, { at: 20 })).toBeNull()
+  })
+
+  it('restarts its count when the clock goes backward', () => {
+    const r = rig()
+    expect(r.tick(0, { at: 10 })).toBeNull()
+    expect(r.tick(1900, { at: 10 })).toBeNull()
+    expect(r.tick(100, { at: 5 })).toBeNull()
+    expect(r.tick(STUCK_MS - 500, { at: 5 })).toBeNull()
+    expect(r.tick(500, { at: 5 })).toEqual({ action: 'refeed' })
+  })
+
+  it('still catches a frozen clock after now() goes back', () => {
+    const r = rig()
+    expect(r.tick(0)).toBeNull()
+    expect(r.tick(500)).toBeNull()
+    expect(r.tick(-5000)).toBeNull()
+    expect(r.tick(STUCK_MS - 500)).toBeNull()
+    expect(r.tick(500)).toEqual({ action: 'refeed' })
+  })
+
+  it('names the ready state in the stuck detail', () => {
+    const r = rig()
+    let last = freeze(r, { readyState: 3 })
+    for (let i = 0; i < REOPENS_MAX + 1; i++) last = r.tick(STUCK_MS, { readyState: 3 })
+    expect(last?.action === 'stuck' && last.detail).toContain('ready state 3')
   })
 })

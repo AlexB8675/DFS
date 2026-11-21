@@ -13,12 +13,15 @@ export interface WatchSample {
   frames: number
   readyState: number
   paused: boolean
+  /** True while the element seeks, or when a seek began since the previous sample (the engine sets it). */
   seeking: boolean
   ended: boolean
   /** The element's buffered ranges, in seconds. */
   buffered: [number, number][]
   /** True while the hold rule is holding the play. */
   holding: boolean
+  /** The page's `document.hidden`: a hidden tab's picture stops while its sound plays on. */
+  hidden: boolean
 }
 
 export type WatchAction =
@@ -58,6 +61,7 @@ export class Watchdog {
   private refed = false
   private lastStepAt: number | null = null
 
+  /** `now` must be monotonic, as `performance.now`. */
   constructor(now: () => number, maxFrameSeconds: number | null) {
     this.now = now
     this.maxFrameSeconds = maxFrameSeconds
@@ -66,35 +70,47 @@ export class Watchdog {
   observe(sample: WatchSample): WatchAction | null {
     const t = this.now()
     const playing = !sample.paused && !sample.seeking && !sample.holding && !sample.ended
-    const slept = this.lastSampleAt !== null && t - this.lastSampleAt > STUCK_MS * 2
-    const first = this.lastSampleAt === null
+    const last = this.lastSampleAt
+    const first = last === null
+    // A sleep, or a clock that went back, or a clock jumped back by a seek
+    // missed between samples: the count starts afresh.
+    const discontinuity = !first && (t < last || t - last > STUCK_MS * 2 || sample.at < this.clock)
     this.lastSampleAt = t
 
-    if (!playing || slept || first) {
+    if (!playing || first || discontinuity) {
       this.restart(sample, t)
       return null
     }
 
+    const pictureRuleOn = this.maxFrameSeconds !== null && !sample.hidden
+    let moved = false
     if (sample.at !== this.clock) {
+      moved = !pictureRuleOn
       this.clock = sample.at
       this.clockSince = t
     }
     if (sample.frames !== this.frames) {
+      // A lower count is a new element (a reopen): a new baseline, not movement.
+      moved = moved || sample.frames > this.frames
       this.frames = sample.frames
       this.framesSince = t
       this.frameClock = sample.at
     }
+    if (sample.hidden) this.frameClock = sample.at
 
-    const clockFrozen = t - this.clockSince >= STUCK_MS && t - this.framesSince >= STUCK_MS
-    const pictureFrozen =
-      this.maxFrameSeconds !== null &&
-      sample.at - this.frameClock > this.maxFrameSeconds + STUCK_MS / 1000
-    if (!clockFrozen && !pictureFrozen) {
+    if (moved) {
       this.gapTried = false
       this.refed = false
       this.lastStepAt = null
       return null
     }
+
+    const clockFrozen = t - this.clockSince >= STUCK_MS && t - this.framesSince >= STUCK_MS
+    const pictureFrozen =
+      pictureRuleOn &&
+      t - this.framesSince >= STUCK_MS &&
+      sample.at - this.frameClock > this.maxFrameSeconds + STUCK_MS / 1000
+    if (!clockFrozen && !pictureFrozen) return null
 
     if (this.lastStepAt !== null && t - this.lastStepAt < STUCK_MS) return null
     this.lastStepAt = t
@@ -106,16 +122,19 @@ export class Watchdog {
       : `The picture stood still for ${seconds(sample.at - this.frameClock)} s of the video while the clock moved, up to ${seconds(sample.at)} s`
     return {
       action: 'stuck',
-      detail: `${what}, after ${this.reopens} reopens of the decoder.`,
+      detail: `${what}, with the element at ready state ${sample.readyState}, after ${this.reopens} reopens of the decoder.`,
     }
   }
 
   /** The next rung of the ladder, or null when the ladder is spent. */
   private nextRung(sample: WatchSample): WatchAction | null {
     if (!this.gapTried) {
-      this.gapTried = true
       const to = gapTarget(sample)
-      if (to !== null) return { action: 'gap', to }
+      if (to !== null) {
+        this.gapTried = true
+        this.refed = false
+        return { action: 'gap', to }
+      }
     }
     if (!holdsData(sample) || !this.refed) {
       this.refed = holdsData(sample)
@@ -128,22 +147,26 @@ export class Watchdog {
     return null
   }
 
-  /** Starts counting afresh from this sample: the play is not playing, or slept. */
+  /**
+   * Starts counting the clocks afresh from this sample: the play is not playing,
+   * or slept, or jumped. The ladder stays where it is: the engine's own actions
+   * make such samples, and only a play that moves goes back to the first rung.
+   */
   private restart(sample: WatchSample, t: number): void {
     this.clock = sample.at
     this.clockSince = t
     this.frames = sample.frames
     this.framesSince = t
     this.frameClock = sample.at
-    this.gapTried = false
-    this.refed = false
     this.lastStepAt = null
   }
 }
 
-/** True when a buffered range holds the playhead with data after it. */
+/** True when a buffered range holds the playhead with more than GAP_EDGE_SECONDS of data after it. */
 function holdsData(sample: WatchSample): boolean {
-  return sample.buffered.some(([start, end]) => start <= sample.at && sample.at < end)
+  return sample.buffered.some(
+    ([start, end]) => start <= sample.at && end - sample.at > GAP_EDGE_SECONDS,
+  )
 }
 
 /**
