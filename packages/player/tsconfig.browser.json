@@ -5,5 +5,5 @@
     "lib": ["ES2024", "DOM", "DOM.Iterable", "WebWorker"],
     "types": []
   },
-  "include": ["src/browser", "src/worker.ts", "src/testing/provided.ts"]
+  "include": ["src/browser", "src/page", "src/worker.ts", "src/testing/provided.ts"]
 }

@@ -21,6 +21,7 @@ import {
   QUOTA_SHRINK,
   QUOTA_SHARE,
   RATE_WINDOW_MS,
+  REMOVE_PAD_SECONDS,
   READ_IDLE_MS,
   REOPENS_MAX,
   RETRY_BASE_MS,
@@ -144,5 +145,9 @@ describe('the store and the downloader limits', () => {
 
   it('pads the append window of a track by 1 ms', () => {
     expect(APPEND_WINDOW_PAD_SECONDS).toBe(0.001)
+  })
+
+  it('pads the end of a removal from a SourceBuffer by 1 ms', () => {
+    expect(REMOVE_PAD_SECONDS).toBe(0.001)
   })
 })

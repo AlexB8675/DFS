@@ -130,3 +130,6 @@ export const SOUND_WAIT_SECONDS = 3
 
 /** How near a buffered range's end the playhead counts as sitting at it, in seconds: 0.25. Chrome and Firefox stop about a frame before the end of a range. */
 export const GAP_EDGE_SECONDS = 0.25
+
+/** Taken off the end of a removal from a SourceBuffer, in seconds, so that rounding never removes the keyframe of the group being played (carry from R23): 1 ms. */
+export const REMOVE_PAD_SECONDS = 0.001
