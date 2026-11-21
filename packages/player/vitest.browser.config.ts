@@ -1,6 +1,10 @@
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { playwright } from '@vitest/browser-playwright'
-import type { BrowserInstanceOption } from 'vitest/node'
+import type { BrowserCommand, BrowserInstanceOption } from 'vitest/node'
 import { defineConfig } from 'vitest/config'
+import { scanFolder } from './src/testing/profile-scan.ts'
 
 // The browser suites (DESIGN.md §10.4) run the store in real browsers, which have
 // the origin private file system and the Web Locks that it stands on. Chrome is the
@@ -34,11 +38,36 @@ const chromeChannel =
       ? undefined
       : channelValue
 
+// Chrome runs in a persistent profile of its own, a fresh temporary folder made for the run and deleted at its end
+// (never the user's Chrome profile), so that the HTTP cache check can look into the folder for the bytes of a file
+// (src/browser/plays.browser.test.ts; the page asks the scanProfile command below, as it cannot read its own profile).
+const profileFolder = wanted.includes('chromium')
+  ? mkdtempSync(join(tmpdir(), 'dfs-player-chrome-profile-'))
+  : null
+if (profileFolder !== null) {
+  process.once('exit', () => {
+    try {
+      // The folder holds the store's files of the plays (encrypted, the user's videos among them): it is removed at
+      // the end of the run, retrying for a moment while the browser lets go of its files.
+      rmSync(profileFolder, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 })
+    } catch {
+      // A browser that is still closing may keep a file for a moment; the system's temporary folder is cleaned in time.
+    }
+  })
+}
+
+/** The profile folder's count of the files that hold a run of bytes (given in hex); null for a browser that has no folder of its own. */
+const scanProfile: BrowserCommand<[hex: string]> = (context, hex) => {
+  if (profileFolder === null || context.project.config.browser.name !== 'chromium') return null
+  return scanFolder(profileFolder, Uint8Array.from(Buffer.from(hex, 'hex')))
+}
+
 const instances: BrowserInstanceOption[] = []
 if (wanted.includes('chromium')) {
   instances.push({
     browser: 'chromium',
     provider: playwright({
+      ...(profileFolder === null ? {} : { persistentContext: profileFolder }),
       // The installed Google Chrome, unless another channel is named: nothing is
       // downloaded for it. A page that plays without a click is allowed to, as the
       // media tests have no user to give one.
@@ -78,7 +107,10 @@ export default defineConfig({
     browser: {
       enabled: true,
       headless: process.env.DFS_HEADED !== '1',
+      // A failure's screenshot of a play would be a frame of the user's video saved in the repo's folder.
+      screenshotFailures: false,
       instances,
+      commands: { scanProfile },
     },
   },
 })

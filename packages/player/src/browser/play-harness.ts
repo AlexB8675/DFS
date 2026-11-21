@@ -4,9 +4,12 @@
 
 import type { TimelineEventInput } from '@dfs/shared'
 import { describe } from 'vitest'
+import { STUCK_MS } from '../limits.ts'
 import { PLAYS_DIRECTORY } from '../opfs.ts'
 import { playStreamed } from '../page/index.ts'
 import type { EngineStats } from '../page/index.ts'
+import { silentFreezes } from '../testing/freeze.ts'
+import type { Stamped, WaitSpan } from '../testing/freeze.ts'
 import { control, fileUrl, files } from './server.ts'
 
 export const synthetic = files().filter((file) => file.synthetic)
@@ -33,6 +36,12 @@ export interface Play {
   video: HTMLVideoElement
   playId: string
   events: TimelineEventInput[]
+  /** The events again, each with when it was seen: milliseconds after the play began (`startedAt`), on `performance.now()`'s clock. */
+  stamped: Stamped[]
+  /** The element's `waiting` stretches, on the same clock: one is open (`to` null) while the element waits. */
+  waits: WaitSpan[]
+  /** `performance.now()` when the play began. */
+  startedAt: number
   stats: EngineStats[]
   controller: AbortController
   /** What the engine's promise gave: pending until the play ends. */
@@ -58,6 +67,31 @@ export async function endPlays(): Promise<void> {
   }
 }
 
+/** The element's own sense of waiting: it begins at `waiting`, and ends when the element can play again, plays, pauses or ends. */
+function watchWaits(play: Play): void {
+  const now = (): number => performance.now() - play.startedAt
+  play.video.addEventListener('waiting', () => {
+    // None yet, or the last one is over: a new one begins. One that is open goes on.
+    if (play.waits.at(-1)?.to !== null) play.waits.push({ from: now(), to: null })
+  })
+  for (const name of ['playing', 'canplay', 'ended', 'emptied', 'pause']) {
+    play.video.addEventListener(name, () => {
+      const last = play.waits.at(-1)
+      if (last?.to === null) last.to = now()
+    })
+  }
+}
+
+/** The plays that were begun and not yet ended. */
+export function activePlays(): readonly Play[] {
+  return plays
+}
+
+/** The waits of a play that the engine left in silence (src/testing/freeze.ts), judged as of now. */
+export function silentWaits(play: Play): WaitSpan[] {
+  return silentFreezes(play.waits, play.stamped, performance.now() - play.startedAt, STUCK_MS)
+}
+
 /** Starts a play of the named file, with its events and numbers kept. The engine's promise is not awaited. */
 export function begin(
   name: string,
@@ -68,13 +102,18 @@ export function begin(
     onEvent?: (event: TimelineEventInput, play: Play) => void
   } = {},
 ): Play {
-  const file = served(name)
+  // Any file of the corpus plays, the user's included (read in place by the server); `served` is the synthetic ones only.
+  const file = files().find(
+    (candidate) => candidate.name === name || candidate.name.endsWith(`/${name}`),
+  )
   if (file === undefined) throw new Error(`${name} is not served.`)
   const video = document.createElement('video')
   video.muted = true
   document.body.append(video)
   const controller = new AbortController()
+  const startedAt = performance.now()
   const events: TimelineEventInput[] = []
+  const stamped: Stamped[] = []
   const stats: EngineStats[] = []
   const playId = crypto.randomUUID()
   // eslint-disable-next-line prefer-const -- the event hook reads `play`, so it is declared before the call that makes the hook run.
@@ -90,6 +129,7 @@ export function begin(
     ...(options.autoplay === undefined ? {} : { autoplay: options.autoplay }),
     onEvent: (event) => {
       events.push(event)
+      stamped.push({ at: performance.now() - startedAt, event })
       options.onEvent?.(event, play)
     },
     onStats: (numbers) => stats.push(numbers),
@@ -99,12 +139,16 @@ export function begin(
     video,
     playId,
     events,
+    stamped,
+    waits: [],
+    startedAt,
     stats,
     controller,
     done,
     rejection: null,
     resolved: false,
   }
+  watchWaits(play)
   done.then(
     () => {
       play.resolved = true

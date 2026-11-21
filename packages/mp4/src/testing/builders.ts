@@ -9,3 +9,7 @@ export * from './build.ts'
 export * from './ebml.ts'
 export type { MovieSpec, TrackSpec } from './build.ts'
 export type { MovieSpec as EbmlMovieSpec, TrackSpec as EbmlTrackSpec } from './ebml.ts'
+
+// The choice of the corpus's files to play, which the browser suites of the packages that play files all make.
+export { filesToPlay } from '../browser/choice.ts'
+export type { Candidate } from '../browser/choice.ts'

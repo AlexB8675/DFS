@@ -14,7 +14,13 @@ import { createReadStream, statSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AddressInfo, Socket } from 'node:net'
-import { isSynthetic, loadManifest, parseRange, uniqueTitles } from '@dfs/mp4/testing/node'
+import {
+  isSynthetic,
+  loadManifest,
+  parseRange,
+  playsAll,
+  uniqueTitles,
+} from '@dfs/mp4/testing/node'
 import type { ManifestEntry } from '@dfs/mp4/testing/node'
 import type { TestProject } from 'vitest/node'
 import type { Fault, LogEntry, Network, PlayFile, PlayServerInfo } from './provided.ts'
@@ -557,11 +563,13 @@ export async function startPlayServer(
 }
 
 /**
- * Vitest's `globalSetup`: starts the server over the manifest, provides `playServer`, and closes the server at the
+ * Vitest's `globalSetup`: starts the server over the manifest, provides `playServer` and `playAll` (whether
+ * `DFS_CORPUS_ALL=1` asks for every file that is expected to play, as `@dfs/mp4`'s suites do), and closes the server at the
  * end. With no corpus file there is nothing to serve: no server is started, and `files` is empty.
  */
 export default async function setup(project: TestProject): Promise<() => Promise<void>> {
   const entries = loadManifest()
+  project.provide('playAll', playsAll(process.env))
   if (entries.length === 0) {
     project.provide('playServer', { base: '', controlBase: '', files: [] })
     return () => Promise.resolve()

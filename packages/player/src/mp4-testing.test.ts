@@ -22,3 +22,20 @@ describe('what @dfs/mp4 gives the player', () => {
     expect(fragmentRuns(table, 0, 2, false)).toEqual([[0, 2]])
   })
 })
+
+// The plays suite chooses its files with `filesToPlay` and reads the choice's widening from `playsAll`, both
+// from @dfs/mp4 and with no copy of them here.
+describe('what @dfs/mp4 gives the plays suite', () => {
+  it('has filesToPlay under @dfs/mp4/testing', async () => {
+    const { filesToPlay } = await import('@dfs/mp4/testing')
+    const made = { name: 'a.mp4', size: 1, synthetic: true, expect: 'plays' as const }
+    const refused = { name: 'b.mp4', size: 1, synthetic: true, expect: { refused: 'damaged' } }
+    expect(filesToPlay([refused, made], false)).toEqual([made])
+  })
+
+  it('has playsAll under @dfs/mp4/testing/node', async () => {
+    const { playsAll } = await import('@dfs/mp4/testing/node')
+    expect(playsAll({ DFS_CORPUS_ALL: '1' })).toBe(true)
+    expect(playsAll({})).toBe(false)
+  })
+})

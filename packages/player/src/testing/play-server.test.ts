@@ -1,6 +1,6 @@
 import { readFileSync, statSync } from 'node:fs'
 import { connect } from 'node:net'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { isSynthetic, loadManifest } from '@dfs/mp4/testing/node'
 import type { ManifestEntry } from '@dfs/mp4/testing/node'
 import { startPlayServer } from './play-server.ts'
@@ -583,5 +583,35 @@ suite('the play server', () => {
       const methods = response.headers.get('access-control-allow-methods') ?? ''
       for (const method of ['GET', 'POST', 'DELETE']) expect(methods).toContain(method)
     })
+  })
+})
+
+describe("setup (the suites' globalSetup)", () => {
+  /** Runs the setup against a project that only records what it provides, and then closes it. */
+  async function provided(): Promise<Record<string, unknown>> {
+    const values: Record<string, unknown> = {}
+    const project = {
+      provide: (key: string, value: unknown) => {
+        values[key] = value
+      },
+    }
+    const { default: setup } = await import('./play-server.ts')
+    const close = await setup(project as unknown as Parameters<typeof setup>[0])
+    await close()
+    return values
+  }
+
+  it('provides playAll as false, unless DFS_CORPUS_ALL asks for every file', async () => {
+    vi.stubEnv('DFS_CORPUS_ALL', '')
+    expect((await provided()).playAll).toBe(false)
+  })
+
+  it('provides playAll as true when DFS_CORPUS_ALL is 1', async () => {
+    vi.stubEnv('DFS_CORPUS_ALL', '1')
+    expect((await provided()).playAll).toBe(true)
+  })
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
   })
 })

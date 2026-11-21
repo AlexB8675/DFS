@@ -59,3 +59,8 @@ export async function log(): Promise<LogEntry[]> {
 export async function clearLog(): Promise<void> {
   check(await fetch(`${inject('playServer').controlBase}/log`, { method: 'DELETE' }), 'a log clear')
 }
+
+/** Whether every file that is expected to play is to be played (`DFS_CORPUS_ALL=1`), and not the sample of the user's. */
+export function playAll(): boolean {
+  return inject('playAll')
+}

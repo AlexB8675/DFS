@@ -4,4 +4,4 @@
 
 export { containerOf, isSynthetic, loadManifest, syntheticDir, uniqueTitles } from './corpus.ts'
 export type { ManifestEntry } from './corpus.ts'
-export { parseRange } from './serve.ts'
+export { parseRange, playsAll } from './serve.ts'

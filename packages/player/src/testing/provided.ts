@@ -56,5 +56,23 @@ export interface PlayServerInfo {
 declare module 'vitest' {
   export interface ProvidedContext {
     playServer: PlayServerInfo
+    /** Whether every file that is expected to play is to be played (`DFS_CORPUS_ALL=1`), and not the sample of the user's. */
+    playAll: boolean
+  }
+}
+
+/** What a look into the browser's profile folder found (src/testing/profile-scan.ts): the files it read, those that hold the run, and those it could not read (a browser keeps some locked). */
+export interface Scan {
+  scanned: number
+  holding: number
+  unreadable: number
+  /** The paths, relative to the profile folder, of the files that hold the run: names only. */
+  where: string[]
+}
+
+declare module 'vitest/browser' {
+  export interface BrowserCommands {
+    /** Counts the files of the browser's profile folder that hold the run of bytes given as hex: the Node side's, for the HTTP cache check. Null when the browser has no profile folder of its own (it is not Chrome's persistent context). */
+    scanProfile: (hex: string) => Promise<Scan | null>
   }
 }
