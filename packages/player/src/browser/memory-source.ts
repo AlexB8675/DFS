@@ -15,8 +15,9 @@ export class MemorySource implements ByteSource {
     return this.bytes.length
   }
 
+  // An aborted signal gives a rejected promise, never a throw.
   read(range: ByteRange, signal?: AbortSignal): Promise<Uint8Array> {
-    signal?.throwIfAborted()
+    if (signal?.aborted === true) return Promise.reject(signal.reason as Error)
     return Promise.resolve(this.bytes.subarray(range.start, Math.min(range.end, this.bytes.length)))
   }
 

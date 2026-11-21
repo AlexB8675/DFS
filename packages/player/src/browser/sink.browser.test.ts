@@ -8,6 +8,7 @@ import type { TimelineEventInput } from '@dfs/shared'
 import { afterEach, describe, expect, test } from 'vitest'
 import { Feeder } from '../engine/feeder.ts'
 import type { EngineTrack } from '../engine/tracks.ts'
+import type { FedRun } from '../engine/window.ts'
 import { MediaSourceSink, SinkQuotaError } from '../page/index.ts'
 import { fetchMemorySource } from './memory-source.ts'
 import type { MemorySource } from './memory-source.ts'
@@ -37,7 +38,7 @@ interface Play {
   signal: AbortSignal
 }
 
-async function start(name: string): Promise<Play> {
+async function start(name: string, duration?: null): Promise<Play> {
   const file = served(name)
   if (file === undefined) throw new Error(`${name} is not served.`)
   const source = await fetchMemorySource(fileUrl(file.id))
@@ -51,7 +52,10 @@ async function start(name: string): Promise<Play> {
   video.muted = true
   document.body.append(video)
   videos.push(video)
-  const sink = await MediaSourceSink.open(video, feeder.durationSeconds)
+  const sink = await MediaSourceSink.open(
+    video,
+    duration === undefined ? feeder.durationSeconds : duration,
+  )
   sinks.push(sink)
   return { video, source, feeder, sink, events, signal: new AbortController().signal }
 }
@@ -75,6 +79,45 @@ function framesEnd(track: EngineTrack): number {
     )
   }
   return end
+}
+
+/** Gives the sink the picture alone with no append window, and makes copies of its fragment, the nth `n` times as late. */
+async function pictureCopies(
+  play: Play,
+): Promise<{ copy: (n: number) => { bytes: Uint8Array; run: FedRun }; span: number }> {
+  const { video } = play.feeder.tracks
+  const picture = video.track as PlayTrack
+  const open: EngineTrack = {
+    ...video,
+    track: { ...picture, timing: { ...picture.timing, endSeconds: null } },
+  }
+  await play.sink.init({ video: open, audio: null })
+  const { table } = picture
+  const span = framesEnd(video)
+  const ticks = Math.ceil(span * table.timescale)
+  return {
+    span,
+    copy: (n) => {
+      const shifted = { ...table, dts: table.dts.map((dts) => dts + n * ticks) }
+      const bytes = fragment(
+        { header: picture.header, table: shifted },
+        0,
+        table.count,
+        n + 1,
+        (offset, size) => play.source.bytes.subarray(offset, offset + size),
+      )
+      return {
+        bytes,
+        run: {
+          kind: 'video',
+          start: n * span,
+          end: (n + 1) * span,
+          bytes: bytes.length,
+          keyframe: true,
+        },
+      }
+    },
+  }
 }
 
 function suite(name: string): ReturnType<typeof describe.skipIf> {
@@ -122,43 +165,19 @@ suite('h264-aac-faststart.mp4')('an MP4 through the sink', () => {
     expect(first?.[1]).toBeGreaterThan(11)
   })
 
-  test('reports a quota error as a SinkQuotaError', async (context) => {
+  test('reports a quota error as a SinkQuotaError', { timeout: 90_000 }, async (context) => {
     const play = await start('h264-aac-faststart.mp4')
-    const { video } = play.feeder.tracks
-    const picture = video.track as PlayTrack
-    // The track with no append window, so that copies of it at later times are kept.
-    const open: EngineTrack = {
-      ...video,
-      track: { ...picture, timing: { ...picture.timing, endSeconds: null } },
-    }
-    await play.sink.init({ video: open, audio: null })
-    const { table } = picture
-    const span = framesEnd(video)
-    const ticks = Math.ceil(span * table.timescale)
+    const { copy } = await pictureCopies(play)
     let sent = 0
     const started = performance.now()
-    for (let copy = 0; ; copy += 1) {
+    for (let n = 0; ; n += 1) {
       if (sent > 400 * 1024 * 1024 || performance.now() - started > 60_000) {
         context.skip(
           `This browser took ${Math.round(sent / (1024 * 1024))} MB with no quota error.`,
         )
         return
       }
-      const shifted = { ...table, dts: table.dts.map((dts) => dts + copy * ticks) }
-      const bytes = fragment(
-        { header: picture.header, table: shifted },
-        0,
-        table.count,
-        copy + 1,
-        (offset, size) => play.source.bytes.subarray(offset, offset + size),
-      )
-      const run = {
-        kind: 'video' as const,
-        start: copy * span,
-        end: (copy + 1) * span,
-        bytes: bytes.length,
-        keyframe: true,
-      }
+      const { bytes, run } = copy(n)
       try {
         await play.sink.append('video', bytes, run)
       } catch (error) {
@@ -169,6 +188,76 @@ suite('h264-aac-faststart.mp4')('an MP4 through the sink', () => {
       }
       sent += bytes.length
     }
+  })
+
+  describe('its lifecycle', () => {
+    function aborted(result: PromiseSettledResult<void>): boolean {
+      return (
+        result.status === 'rejected' &&
+        result.reason instanceof DOMException &&
+        result.reason.name === 'AbortError'
+      )
+    }
+
+    test('appends queued before a reopen reject with AbortError, and the new buffers take later ones', async () => {
+      const play = await start('h264-aac-faststart.mp4')
+      const { copy } = await pictureCopies(play)
+      const queued = [0, 1, 2, 3].map((n) => {
+        const { bytes, run } = copy(n)
+        return play.sink.append('video', bytes, run)
+      })
+      const reopened = play.sink.reopen(0)
+      expect(play.sink.buffered('video')).toEqual([])
+      expect((await Promise.allSettled(queued)).every(aborted)).toBe(true)
+      await reopened
+      const { bytes, run } = copy(0)
+      await play.sink.append('video', bytes, run)
+      expect(play.sink.buffered('video')[0]?.[0]).toBeCloseTo(0, 1)
+    })
+
+    test('after close every queued and later operation rejects, and buffered says nothing', async () => {
+      const play = await start('h264-aac-faststart.mp4')
+      const { copy } = await pictureCopies(play)
+      const queued = [0, 1].map((n) => {
+        const { bytes, run } = copy(n)
+        return play.sink.append('video', bytes, run)
+      })
+      play.sink.close()
+      const later = copy(2)
+      const settled = await Promise.allSettled([
+        ...queued,
+        play.sink.append('video', later.bytes, later.run),
+        play.sink.remove('video', 4),
+      ])
+      expect(settled.every(aborted)).toBe(true)
+      expect(play.sink.buffered('video')).toEqual([])
+      await expect(play.sink.reopen(0)).rejects.toThrow()
+      await expect(play.sink.init(play.feeder.tracks)).rejects.toThrow()
+    })
+
+    test('init is for once', async () => {
+      const play = await start('h264-aac-faststart.mp4')
+      await play.sink.init(play.feeder.tracks)
+      await expect(play.sink.init(play.feeder.tracks)).rejects.toThrow()
+    })
+
+    test('an append started just before end completes, and the stream ends', async () => {
+      const play = await start('h264-aac-faststart.mp4')
+      const { copy } = await pictureCopies(play)
+      const { bytes, run } = copy(0)
+      const appended = play.sink.append('video', bytes, run)
+      await play.sink.end()
+      await appended
+      expect(play.video.duration).toBeGreaterThan(11)
+      expect(play.events).toEqual([])
+    })
+
+    test('open stops when its signal aborts', async () => {
+      const video = document.createElement('video')
+      const controller = new AbortController()
+      controller.abort(new Error('stop'))
+      await expect(MediaSourceSink.open(video, null, controller.signal)).rejects.toThrow('stop')
+    })
   })
 })
 
@@ -182,6 +271,18 @@ suite('h264-aac.mkv')('a Matroska file through the sink', () => {
     await until('the end', 20_000, () => play.video.ended)
     expect(play.video.duration).toBeGreaterThan(11.9)
     expect(play.events).toEqual([])
+  })
+
+  test('reopen at 2 s with no known duration plays on from there', async () => {
+    const play = await start('h264-aac.mkv', null)
+    await play.feeder.feed(4, play.sink, play.signal)
+    await play.sink.reopen(2)
+    await play.feeder.seek(2, play.signal)
+    expect(await play.feeder.feed(Infinity, play.sink, play.signal)).toBe('ended')
+    await play.sink.end()
+    await play.video.play()
+    await until('2.5 s', 10_000, () => play.video.currentTime > 2.5)
+    expect(play.video.error).toBeNull()
   })
 })
 
