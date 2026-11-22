@@ -456,8 +456,10 @@ export function playbackNotices(input: {
   /** What the video needs, in bits a second. */
   bitRate: number | null
   signals: PlaybackSignals
+  /** The streaming engine's own slow-video signal while it plays; null for Safari's own player, which the element's waits stand for. */
+  engine: { slow: boolean; rate: number | null } | null
 }): PlaybackNotice[] {
-  const { unplayable, playerName, decoding, picture, bitRate, signals } = input
+  const { unplayable, playerName, decoding, picture, bitRate, signals, engine } = input
   const notices: PlaybackNotice[] = []
   if (unplayable) {
     const { sound, pictureSubtitles, otherSounds } = unplayable
@@ -495,13 +497,19 @@ export function playbackNotices(input: {
       })
     }
   }
-  const arrival = signals.arrivalBitsPerSecond
-  if (
-    bitRate &&
-    arrival !== null &&
-    signals.waitingForMs > SLOW_AFTER_MS &&
-    arrival < bitRate * SLOW_SHARE
-  ) {
+  // The engine holds with the element paused, so its waits say nothing: its own signal decides.
+  const arrival = engine
+    ? engine.rate === null
+      ? null
+      : engine.rate * 8
+    : signals.arrivalBitsPerSecond
+  const slow = engine
+    ? engine.slow
+    : arrival !== null &&
+      signals.waitingForMs > SLOW_AFTER_MS &&
+      bitRate !== null &&
+      arrival < bitRate * SLOW_SHARE
+  if (bitRate && arrival !== null && slow) {
     const why =
       signals.waitingOn === 'connection'
         ? ' The server has it ready and waits on this device to take it.'

@@ -69,6 +69,7 @@ function notices(overrides: Partial<Parameters<typeof playbackNotices>[0]>) {
     picture: AV1,
     bitRate: INFO.bitRate,
     signals: QUIET,
+    engine: null,
     ...overrides,
   }).map((notice) => notice.text)
 }
@@ -100,6 +101,7 @@ describe('the player’s warnings', () => {
         picture: AV1,
         bitRate: null,
         signals: QUIET,
+        engine: null,
       })
     expect(said({ sound: 'AC‑3', pictureSubtitles: false, otherSounds: 0 })).toEqual([
       {
@@ -148,6 +150,7 @@ describe('the player’s warnings', () => {
       picture: AV1,
       bitRate: INFO.bitRate,
       signals: QUIET,
+      engine: null,
     })
     expect(shown).toEqual([
       {
@@ -175,6 +178,23 @@ describe('the player’s warnings', () => {
     expect(notices({ signals: { ...slow, waitingForMs: 2000 } })).toEqual([])
     // Arriving fast enough, the wait is something else.
     expect(notices({ signals: { ...slow, arrivalBitsPerSecond: 30_000_000 } })).toEqual([])
+  })
+
+  it('warns of a slow video from the engine’s signal while it holds, with the element paused', () => {
+    const shown = notices({
+      bitRate: 120_000_000,
+      signals: { ...QUIET, waitingForMs: 0 },
+      engine: { slow: true, rate: 5_000_000 },
+    })
+    expect(shown).toHaveLength(1)
+    expect(shown[0]).toContain('arrives at 40 Mbit/s and needs 120 Mbit/s')
+  })
+
+  it('gives no slow warning when the engine says the link keeps up', () => {
+    // The element's own waits are not asked while the engine plays.
+    const waiting = { ...QUIET, waitingForMs: 9000, arrivalBitsPerSecond: 1_000_000 }
+    expect(notices({ signals: waiting, engine: { slow: false, rate: 50_000_000 } })).toEqual([])
+    expect(notices({ engine: { slow: true, rate: null } })).toEqual([])
   })
 
   it('says when the device drops many frames', () => {

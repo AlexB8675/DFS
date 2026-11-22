@@ -418,6 +418,7 @@ export default function VideoView({
     picture: info ? playedStreams(info).video : null,
     bitRate: info?.bitRate ?? null,
     signals,
+    engine: null,
   })
   const shownNotices = stopped ? [] : notices.filter((notice) => !dismissed.has(notice.key))
   // Those that fade go a while after it plays: a video held for Play keeps them until then.
