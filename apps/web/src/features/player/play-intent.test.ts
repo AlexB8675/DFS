@@ -51,3 +51,51 @@ describe('PlayIntent', () => {
     expect(intent.toggle(false, true)).toBe('play')
   })
 })
+
+describe('PlayIntent listeners', () => {
+  function watched() {
+    const intent = new PlayIntent()
+    const told: boolean[] = []
+    intent.subscribe(() => told.push(intent.wanted))
+    return { intent, told }
+  }
+
+  it('tells a pause, a play, a restart and a played, when wanted changes', () => {
+    const { intent, told } = watched()
+    intent.pause()
+    intent.play(false)
+    intent.pause()
+    intent.restart()
+    intent.pause()
+    intent.played()
+    expect(told).toEqual([false, true, false, true, false, true])
+  })
+
+  it('tells a toggle that changes wanted, in a hold and out of one', () => {
+    const { intent, told } = watched()
+    intent.toggle(true, true)
+    intent.toggle(true, true)
+    intent.toggle(false, false)
+    intent.toggle(false, true)
+    expect(told).toEqual([false, true, false, true])
+  })
+
+  it('tells nothing when wanted stays as it was', () => {
+    const { intent, told } = watched()
+    intent.play(false)
+    intent.restart()
+    intent.played()
+    intent.toggle(false, true)
+    intent.play(true)
+    expect(told).toEqual([])
+  })
+
+  it('stops telling a listener that unsubscribed', () => {
+    const intent = new PlayIntent()
+    let count = 0
+    const off = intent.subscribe(() => count++)
+    off()
+    intent.pause()
+    expect(count).toBe(0)
+  })
+})

@@ -91,6 +91,8 @@ export interface EngineStats {
   error: string | null
   /** Why the play failed: `read` when the server refused a read for good (a fatal `ReadError`), `play` for any other failure, null while it hasn't failed. */
   failedOn: 'read' | 'play' | null
+  /** Whether the play has shown its first frame: a failure before it rejects `playStreamed`, a failure after it is in the stats. */
+  begun: boolean
   backend: 'disk' | 'memory'
   /** The bytes the store holds. */
   storedBytes: number
@@ -232,6 +234,7 @@ class Play {
     segments: 0,
     error: null,
     failedOn: null,
+    begun: false,
     backend: 'memory',
     storedBytes: 0,
     evictedBytes: 0,
@@ -1119,6 +1122,13 @@ class Play {
     this.#setPhase('failed')
   }
 
+  /** The open has resolved: the first frame is shown, and a failure from here is told in the stats, not by a rejection. */
+  began(): void {
+    if (this.#stopped) return
+    this.#stats.begun = true
+    this.#publish()
+  }
+
   /** The play's life after its first frame, until the signal aborts. Resolves once everything is closed. */
   async run(): Promise<void> {
     const pump = this.#pump()
@@ -1163,6 +1173,7 @@ export async function playStreamed(options: PlayStreamedOptions): Promise<void> 
   const play = new Play(options)
   try {
     await play.open()
+    play.began()
   } catch (error) {
     play.rejected(error)
     await play.close()

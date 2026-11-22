@@ -20,6 +20,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type PointerEvent,
   type ReactNode,
   type Ref,
@@ -251,23 +252,18 @@ export default function VideoView({
   // so the element's `paused` can't say it. A new start wants a play again. `wanted` mirrors the
   // intent for what renders.
   const intent = useRef(new PlayIntent())
-  const [wanted, setWanted] = useState(true)
-  const [wantedKey, setWantedKey] = useState(sourceKey)
-  if (wantedKey !== sourceKey) {
-    setWantedKey(sourceKey)
-    setWanted(true)
-  }
-  // A slide left is a play not wanted: the mirror follows the intent (set below, in an effect).
-  if (!active && wanted) setWanted(false)
-  useEffect(() => {
-    intent.current.restart()
-  }, [sourceKey])
+  const wanted = useSyncExternalStore(intent.current.subscribe, () => intent.current.wanted)
   // The engine plays by this, each time it would start or resume: read when it asks, so `active`
   // is the latest (a ref, as an Effect Event can't be passed to the hook).
   const activeNow = useRef(active)
   useEffect(() => {
     activeNow.current = active
   })
+  // A new start wants a play, unless the slide is left: then nothing is wanted until the viewer plays.
+  useEffect(() => {
+    if (activeNow.current) intent.current.restart()
+    else intent.current.pause()
+  }, [sourceKey])
   const wantsPlay = useCallback(() => activeNow.current && intent.current.wanted, [])
   const { stats: bufferedStats } = useBufferedPlay({
     video,
@@ -278,10 +274,13 @@ export default function VideoView({
     startAt: source?.startAt ?? 0,
     autoplay: wantsPlay,
     // Before its first frame: another player is offered, not another way in the page. A read the
-    // server refused for good is for `handleError` to settle (the file replaced, gone), which the
-    // failed phase of the stats runs.
+    // server refused for good is for `handleError` to settle (the file replaced, gone). Every
+    // failure before the first frame comes here alone, and the stats' failed phase does not (`begun`).
     onFailed: (failure) => {
-      if (failure.read) return
+      if (failure.read) {
+        void handleError()
+        return
+      }
       setProblem({ kind: 'unsupported', detail: failure.message, reason: failure.reason })
     },
     // What the engine does goes to the play's timeline (§16).
@@ -307,7 +306,7 @@ export default function VideoView({
 
   // After its first frame, a failed own-buffer play leaves the element as it is, with no error of
   // its own: a read that broke off, the file replaced. It is a failed play all the same.
-  const playFailed = bufferedStats?.phase === 'failed'
+  const playFailed = bufferedStats?.phase === 'failed' && bufferedStats.begun
   const surfaceFailure = useEffectEvent(() => {
     void handleError()
   })
@@ -597,14 +596,12 @@ export default function VideoView({
   const playByViewer = useCallback(() => {
     const element = videoRef.current
     const act = intent.current.play(holdingNow())
-    setWanted(intent.current.wanted)
     if (element && act === 'play') void element.play().catch(() => undefined)
   }, [holdingNow])
 
   /** The viewer pauses: a hold that ends does not play. */
   const pauseByViewer = useCallback(() => {
     intent.current.pause()
-    setWanted(false)
     videoRef.current?.pause()
   }, [])
 
@@ -620,7 +617,6 @@ export default function VideoView({
     const element = videoRef.current
     if (!element) return
     const act = intent.current.toggle(holdingNow(), element.paused || element.ended)
-    setWanted(intent.current.wanted)
     if (act === 'play') void element.play().catch(() => undefined)
     else if (act === 'pause') element.pause()
   }, [holdingNow])
@@ -631,7 +627,6 @@ export default function VideoView({
     if (!video) return
     const onPlay = () => {
       intent.current.played()
-      setWanted(true)
     }
     video.addEventListener('play', onPlay)
     return () => {

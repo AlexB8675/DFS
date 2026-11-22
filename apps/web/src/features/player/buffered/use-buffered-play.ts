@@ -1,7 +1,8 @@
 import { playStreamed, type EngineStats } from '@dfs/player/page'
 import type { TimelineEventInput } from '@dfs/shared'
-import { useEffect, useEffectEvent, useState } from 'react'
+import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import { makeStoreWorker } from '../play-store'
+import { afterPrevious } from './after-previous'
 import { failureOf, type PlayFailure } from './play-failure'
 
 /** The stats of one play, with what the play was started with. */
@@ -34,6 +35,8 @@ export function useBufferedPlay(input: {
 }): { stats: EngineStats | null } {
   const { video, url, playId, enabled, startAt } = input
   const [latest, setLatest] = useState<PlayStats | null>(null)
+  // The previous play's end, which a new one on the element waits for (it never rejects).
+  const previous = useRef<Promise<void>>(Promise.resolve())
 
   // The latest `autoplay`, `onFailed` and `onEvent`, which the play reads when it needs them.
   const wantsPlay = useEffectEvent(() => input.autoplay())
@@ -49,26 +52,30 @@ export function useBufferedPlay(input: {
     const controller = new AbortController()
     const { signal } = controller
 
-    playStreamed({
-      video,
-      url,
-      playId,
-      makeWorker: makeStoreWorker,
-      signal,
-      startAt,
-      autoplay: () => wantsPlay(),
-      // Nothing after the play is over: a read it aborted ends in silence, and a new play's
-      // events are not mixed with its.
-      onEvent: (event) => {
-        if (!signal.aborted) record(event)
-      },
-      onStats: (stats) => {
-        if (!signal.aborted) setLatest({ video, url, startAt, stats })
-      },
-    }).catch((error: unknown) => {
-      // It rejects only before the first frame, and a viewer who leaves is no failure.
-      if (!signal.aborted) failed(failureOf(error))
-    })
+    // A play that is closing would clear the source of the one that follows it on the element,
+    // so the new play starts when the old one has settled (§10.4).
+    previous.current = afterPrevious(previous.current, signal, () =>
+      playStreamed({
+        video,
+        url,
+        playId,
+        makeWorker: makeStoreWorker,
+        signal,
+        startAt,
+        autoplay: () => wantsPlay(),
+        // Nothing after the play is over: a read it aborted ends in silence, and a new play's
+        // events are not mixed with its.
+        onEvent: (event) => {
+          if (!signal.aborted) record(event)
+        },
+        onStats: (stats) => {
+          if (!signal.aborted) setLatest({ video, url, startAt, stats })
+        },
+      }).catch((error: unknown) => {
+        // It rejects only before the first frame, and a viewer who leaves is no failure.
+        if (!signal.aborted) failed(failureOf(error))
+      }),
+    )
 
     // Leaving stops the play (the engine closes its store) and lets go of a `blob:` source.
     return () => {

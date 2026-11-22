@@ -434,7 +434,7 @@ suite('h264-aac-faststart.mp4')('playStreamed: a play from its start', () => {
     await control({ bandwidthBytesPerSecond: 200_000 })
     const play = begin('h264-aac-faststart.mp4')
     await until(play, 'the first picture', 20_000, () => play.video.readyState >= 2)
-    expect(play.stats.at(-1)?.failedOn).toBeNull()
+    expect(play.stats.at(-1)).toMatchObject({ failedOn: null, begun: true })
     await control({
       bandwidthBytesPerSecond: 200_000,
       faults: [
@@ -450,7 +450,7 @@ suite('h264-aac-faststart.mp4')('playStreamed: a play from its start', () => {
       () => ofType(play.events, 'phase').at(-1)?.phase === 'failed',
     )
     await until(play, 'the numbers', 5_000, () => play.stats.at(-1)?.phase === 'failed')
-    expect(play.stats.at(-1)).toMatchObject({ phase: 'failed', failedOn: 'read' })
+    expect(play.stats.at(-1)).toMatchObject({ phase: 'failed', failedOn: 'read', begun: true })
   })
 
   test('measures the keyframe gap from the frame table, as the suite does from the index', async () => {
@@ -591,7 +591,11 @@ async function expectRefusal(name: string, reason: string): Promise<void> {
   expect(frames(play.video)).toBe(0)
   expect(play.video.getAttribute('src')).toBeNull()
   expect(ofType(play.events, 'phase').at(-1)?.phase).toBe('failed')
-  expect(play.stats.at(-1)).toMatchObject({ phase: 'failed', failedOn: 'play' })
+  expect(play.stats.at(-1)).toMatchObject({
+    phase: 'failed',
+    failedOn: 'play',
+    begun: false,
+  })
   const deadline = performance.now() + 5_000
   while (await directoryExists(play.playId)) {
     if (performance.now() > deadline) throw new Error('the play left its directory')
@@ -604,7 +608,7 @@ suite('h264-aac-faststart.mp4')('playStreamed: a file the server refuses at the 
     await control({ faults: [{ kind: 'status', status: 404 }] })
     const play = begin('h264-aac-faststart.mp4')
     await expect(play.done).rejects.toMatchObject({ name: 'ReadError', fatal: true })
-    expect(play.stats.at(-1)).toMatchObject({ phase: 'failed', failedOn: 'read' })
+    expect(play.stats.at(-1)).toMatchObject({ phase: 'failed', failedOn: 'read', begun: false })
   })
 })
 

@@ -22,6 +22,7 @@ function stats(overrides: Partial<EngineStats> = {}): EngineStats {
     segments: 3,
     error: null,
     failedOn: null,
+    begun: true,
     backend: 'memory',
     storedBytes: 1000,
     evictedBytes: 0,
