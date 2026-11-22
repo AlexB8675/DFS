@@ -23,7 +23,7 @@ import type { Downloader } from '../downloader.ts'
 import { Feeder } from '../engine/feeder.ts'
 import type { Sink } from '../engine/feeder.ts'
 import { slowWhile } from '../engine/hold.ts'
-import { holdsAt } from '../engine/holds-at.ts'
+import { holdingRange, holdsAt } from '../engine/holds-at.ts'
 import { mergeRequests } from '../engine/requests.ts'
 import type { Request } from '../engine/requests.ts'
 import { feedTargets } from '../engine/targets.ts'
@@ -637,9 +637,7 @@ class Play {
     if (sink === null || feeder === null) return
     let start = target
     for (const kind of this.#kinds) {
-      const range = sink
-        .buffered(kind)
-        .find((candidate) => holdsAt([candidate], target, this.#feedDone))
+      const range = holdingRange(sink.buffered(kind), target, this.#feedDone)
       if (range !== undefined) start = Math.max(start, range[0])
     }
     if (start - target <= 1e-6) return

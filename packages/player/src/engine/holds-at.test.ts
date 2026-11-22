@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { GAP_EDGE_SECONDS } from '../limits.ts'
-import { holdsAt } from './holds-at.ts'
+import { holdingRange, holdsAt } from './holds-at.ts'
 
 // Whether a track's buffered ranges hold a playhead (DESIGN.md §10.4): the rule for a seek being inside the window.
 
@@ -53,5 +53,27 @@ describe('holdsAt', () => {
 
   it('holds nothing when there are no ranges', () => {
     expect(holdsAt([], 1, true)).toBe(false)
+  })
+})
+
+describe('holdingRange', () => {
+  const ranges: [number, number][] = [
+    [0, 10],
+    [10.15, 20],
+  ]
+
+  it('after the end, gives the next range for a target in the gap just past a range, not the range before it (F4)', () => {
+    expect(holdingRange(ranges, 10.05, true)).toEqual([10.15, 20])
+  })
+
+  it('keeps the end tolerance for the last range only (F4)', () => {
+    expect(holdingRange(ranges, 20 + GAP_EDGE_SECONDS / 2, true)).toEqual([10.15, 20])
+    expect(holdingRange(ranges, 20 + GAP_EDGE_SECONDS * 2, true)).toBeUndefined()
+    expect(holdingRange(ranges, 20, false)).toBeUndefined()
+  })
+
+  it('agrees with holdsAt', () => {
+    expect(holdingRange([[0, 10]], 4, false)).toEqual([0, 10])
+    expect(holdingRange([], 4, true)).toBeUndefined()
   })
 })
