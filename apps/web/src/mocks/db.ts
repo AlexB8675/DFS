@@ -280,7 +280,7 @@ export class MockAlreadyUploaded extends MockApiError {
   }
 }
 
-const STATE_VERSION = 18
+const STATE_VERSION = 19
 const STORAGE_KEY = 'dfs.mock-db'
 /** `STAGING_MAX_BYTES`: the mock's staging, and the most a file may be (D38). */
 export const STAGING_MAX_BYTES = 100 * 1024 ** 3

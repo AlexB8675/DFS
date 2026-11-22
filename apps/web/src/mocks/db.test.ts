@@ -332,6 +332,18 @@ describe('mock API database', () => {
     expect(media.info?.container).toBe('matroska,webm')
   })
 
+  it('gives the AC-3 sound only to the demo’s own drone footage', async () => {
+    const { sampleMediaInfo } = await import('./media')
+    const soundOf = (name: string) =>
+      sampleMediaInfo('video', name).streams.find((stream) => stream.type === 'audio')
+
+    for (const name of ['movie.mkv', 'Renamed.MKV', 'clip.webm']) {
+      expect(sampleMediaInfo('video', name).container).toBe('matroska,webm')
+      expect(soundOf(name)?.codec).toBe('aac')
+    }
+    expect(soundOf('Drone footage – coast.mkv')?.codec).toBe('ac3')
+  })
+
   describe('accounts and sign-in (§7.1)', () => {
     it('signs in with a username and password, and answers alike for a wrong one or an unknown user', () => {
       db.signOut()

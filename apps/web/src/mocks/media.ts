@@ -3,8 +3,9 @@ import { splitExtension, type MediaInfo, type MediaKind, type MediaStream } from
 // Media info the mock makes up per file (§6.7), as the media service would
 // find it: a video is H.264 and AAC at 1080p with chapters and Italian
 // subtitles inside, as the sample every video plays; but an AVI is MPEG-4
-// Part 2, which browsers can't play, and an MKV's sound Dolby Digital,
-// which most can't, so the player's reasons show too. Audio is the sample
+// Part 2, which browsers can't play, and the demo's drone footage's sound
+// Dolby Digital, which most can't, so the player's reasons show too; any other
+// MKV or WebM is Matroska with the sample's streams. Audio is the sample
 // MP3 every audio file plays, with a cover, its title and track number from
 // its name (`03 - Northbound.flac`) and its album from its folder's.
 
@@ -36,6 +37,9 @@ const NO_TAGS: MediaInfo['tags'] = {
   disc: null,
   year: null,
 }
+
+/** The one demo file whose sound is Dolby Digital, to show the player's reason. */
+const DOLBY_DEMO = 'Drone footage – coast.mkv'
 
 /** The subtitles inside the demo's videos, as the media service extracts them. */
 export const SAMPLE_SUBTITLES = [
@@ -86,8 +90,7 @@ export function sampleMediaInfo(
       hasCover: true,
     }
   }
-  const { base, extension: ending } = splitExtension(name)
-  const extension = ending.toLowerCase()
+  const extension = splitExtension(name).extension.toLowerCase()
   const matroska = extension === '.mkv' || extension === '.webm'
   return {
     kind,
@@ -123,14 +126,13 @@ export function sampleMediaInfo(
         channelLayout: 'stereo',
         sampleRate: 48_000,
         language: 'eng',
-        ...(extension === '.mkv' &&
-          base !== 'Sample clip' && {
-            codec: 'ac3',
-            codecString: 'ac-3',
-            profile: null,
-            channels: 6,
-            channelLayout: '5.1(side)',
-          }),
+        ...(name === DOLBY_DEMO && {
+          codec: 'ac3',
+          codecString: 'ac-3',
+          profile: null,
+          channels: 6,
+          channelLayout: '5.1(side)',
+        }),
       },
       {
         ...STREAM,
