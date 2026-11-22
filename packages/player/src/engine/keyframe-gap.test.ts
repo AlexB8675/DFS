@@ -87,6 +87,10 @@ describe('keyframeGapSeconds', () => {
     // Frames every 0.5 s, keyframes at 0, 2 s and 6 s, the last frame ending at 8 s.
     expect(keyframeGapSeconds(mp4Track(500, 16, [0, 4, 12]))).toBe(4)
   })
+  it('counts the stretch from the last keyframe to the end of the last frame', () => {
+    // Keyframes at 0 and 2 s, the last frame ending at 8 s: the tail, 6 s, is the longest.
+    expect(keyframeGapSeconds(mp4Track(500, 16, [0, 4]))).toBe(6)
+  })
   it('is 0 for a Matroska track, which keeps no frame table', () => {
     expect(keyframeGapSeconds(matroskaTrack())).toBe(0)
   })

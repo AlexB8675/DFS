@@ -23,6 +23,7 @@ import type { Downloader } from '../downloader.ts'
 import { Feeder } from '../engine/feeder.ts'
 import type { Sink } from '../engine/feeder.ts'
 import { slowWhile } from '../engine/hold.ts'
+import { failedOnOf } from '../engine/failed-on.ts'
 import { keyframeGapSeconds } from '../engine/keyframe-gap.ts'
 import { holdingRange, holdsAt } from '../engine/holds-at.ts'
 import { mergeRequests } from '../engine/requests.ts'
@@ -88,7 +89,7 @@ export interface EngineStats {
   /** Fragments appended. */
   segments: number
   error: string | null
-  /** Why the play failed: `read` when the server refused a read for good (a `ReadError`), `play` for any other failure, null while it hasn't failed. */
+  /** Why the play failed: `read` when the server refused a read for good (a fatal `ReadError`), `play` for any other failure, null while it hasn't failed. */
   failedOn: 'read' | 'play' | null
   backend: 'disk' | 'memory'
   /** The bytes the store holds. */
@@ -118,7 +119,7 @@ export interface PlayStreamedOptions {
   /**
    * Whether the engine should be playing now: read each time it would start or resume play (at the start, after a
    * seek, when a hold for the network ends). Missing, the engine never calls `play()` for those, and never holds
-   * the play: the element is the viewer's. (A reopen of the decoder by the watchdog plays again if it was playing.)
+   * the play: the element is the viewer's. (A reopen of the decoder by the watchdog plays again if it was playing and `autoplay`, when given, still says yes.)
    */
   autoplay?: () => boolean
   onEvent: (event: TimelineEventInput) => void
@@ -1093,7 +1094,7 @@ class Play {
     this.#failed = true
     const message = messageOf(error)
     this.#stats.error = message
-    this.#stats.failedOn = error instanceof ReadError ? 'read' : 'play'
+    this.#stats.failedOn = failedOnOf(error)
     if (!isTold(error)) this.#say({ type: 'error', from: 'engine', code: null, message })
     this.#setPhase('failed')
     this.#request = null
@@ -1114,7 +1115,7 @@ class Play {
     const message = isRefusal(error) ? messageOf(new Error(error.refusal)) : messageOf(error)
     if (!isTold(error)) this.#say({ type: 'error', from: 'engine', code: null, message })
     this.#stats.error = message
-    this.#stats.failedOn = error instanceof ReadError ? 'read' : 'play'
+    this.#stats.failedOn = failedOnOf(error)
     this.#setPhase('failed')
   }
 

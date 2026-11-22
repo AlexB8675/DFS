@@ -591,12 +591,22 @@ async function expectRefusal(name: string, reason: string): Promise<void> {
   expect(frames(play.video)).toBe(0)
   expect(play.video.getAttribute('src')).toBeNull()
   expect(ofType(play.events, 'phase').at(-1)?.phase).toBe('failed')
+  expect(play.stats.at(-1)).toMatchObject({ phase: 'failed', failedOn: 'play' })
   const deadline = performance.now() + 5_000
   while (await directoryExists(play.playId)) {
     if (performance.now() > deadline) throw new Error('the play left its directory')
     await new Promise((resolve) => setTimeout(resolve, 50))
   }
 }
+
+suite('h264-aac-faststart.mp4')('playStreamed: a file the server refuses at the open', () => {
+  test('rejects with the read, and the numbers say it failed on the read', async () => {
+    await control({ faults: [{ kind: 'status', status: 404 }] })
+    const play = begin('h264-aac-faststart.mp4')
+    await expect(play.done).rejects.toMatchObject({ name: 'ReadError', fatal: true })
+    expect(play.stats.at(-1)).toMatchObject({ phase: 'failed', failedOn: 'read' })
+  })
+})
 
 describe('playStreamed: a file that cannot play', () => {
   // The manifest says which files the reader refuses, and why.
