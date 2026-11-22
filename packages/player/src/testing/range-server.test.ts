@@ -105,12 +105,15 @@ describe('byteAt', () => {
     }
   })
 
-  it('fills 64 MiB in well under a second', () => {
+  // A guard against a generator slow enough to stall the suites that serve large files, not a
+  // benchmark: an idle machine fills 64 MiB in well under a second, and turbo's parallel load has
+  // been seen to take 1.7 s, so the bound leaves room for a busy machine.
+  it('fills 64 MiB in a few seconds, even on a busy machine', () => {
     const bytes = new Uint8Array(64 * 1024 * 1024)
     const started = performance.now()
     for (let offset = 0; offset < bytes.length; offset += 1) bytes[offset] = byteAt(9, offset)
     const took = performance.now() - started
-    expect(took).toBeLessThan(1500)
+    expect(took).toBeLessThan(5000)
   })
 })
 
