@@ -104,7 +104,7 @@ export class Holding {
     const decision = holdDecision({
       reason,
       heldAheadSeconds: ahead / bitrate,
-      rateBytesPerSecond: state === 'reading' ? downloader.rate() : null,
+      rateBytesPerSecond: state === 'reading' || state === 'waiting' ? downloader.rate() : null,
       bitrateBytesPerSecond: bitrate,
       remainingSeconds: duration - at,
       storeAheadCapSeconds: (store.capBytes - Math.min(behind, store.capBytes / 2)) / bitrate,

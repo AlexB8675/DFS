@@ -171,6 +171,19 @@ describe('Holding', () => {
     expect(off?.targetS).toBe(on?.targetS)
   })
 
+  // B2: the downloader that waits (its reads end and open again) still has a rate, and the hold goes by it as for `reading` (R47).
+  test('a hold decided while the downloader waits on a slow link keeps the slow goal, not the 2 s goal', () => {
+    const play = setup()
+    play.link.state = 'waiting'
+    // 2.5 s of the video is stored: over the 2 s goal of an unknown rate, under what a link of a tenth of the bit rate needs.
+    play.held.add({ start: 0, end: 2_500_000 })
+    play.holding.begin('start')
+    expect(play.holding.holding).toBe(true)
+    const on = holds(play.events)[0]
+    expect(on).toMatchObject({ on: true, reason: 'start' })
+    expect(on?.targetS).toBeGreaterThan(2.5)
+  })
+
   // R41 item 5: while a hold is on it is checked every HOLD_CHECK_MS, so release does not wait for the tick.
   test('a hold lets go within 100 ms of the rate becoming fast enough, with no tick', async () => {
     const play = setup()
