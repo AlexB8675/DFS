@@ -1228,7 +1228,7 @@ function Trouble({
         {detail && <p className="font-mono text-xs text-muted-foreground">{detail}</p>}
       </EmptyHeader>
       {(children ?? onDownload) && (
-        <EmptyContent className="flex-row justify-center">
+        <EmptyContent className="flex-row flex-wrap justify-center">
           {children}
           {onDownload && (
             <Button variant={children ? 'outline' : 'default'} onClick={onDownload}>
