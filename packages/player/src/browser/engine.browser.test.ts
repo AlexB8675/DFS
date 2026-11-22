@@ -8,6 +8,7 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { Downloader } from '../downloader.ts'
 import { CHUNK_BYTES, WINDOW_BYTES, WINDOW_FLOOR_BYTES } from '../limits.ts'
+import { DecoderWindow } from '../engine/window.ts'
 import { MediaSourceSink } from '../page/index.ts'
 import {
   begin,
@@ -219,6 +220,67 @@ suite('h264-aac-faststart.mp4')('playStreamed: a play from its start', () => {
         20_000,
         () => play.video.currentTime > 4,
       )
+      expect(ofType(play.events, 'error')).toEqual([])
+    } finally {
+      SourceBuffer.prototype.appendBuffer = real
+    }
+  })
+
+  test('shrinks the window once for a stall of several refusals, and logs the limit it has (A2)', async () => {
+    // The window holds little of a small file, and a window that holds less than its limit is cut to the floor at once.
+    // So that the stall starts above the floor, the window is made to hold 30 MiB more than it does.
+    const extra = 30 * 1024 * 1024
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- the original is called on the window it was taken from, below.
+    const realBytes = DecoderWindow.prototype.bytes
+    vi.spyOn(DecoderWindow.prototype, 'bytes').mockImplementation(function (this: DecoderWindow) {
+      return realBytes.call(this) + extra
+    })
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- the original is called on the window it was taken from, below.
+    const realQuota = DecoderWindow.prototype.quota
+    const limits: number[] = []
+    vi.spyOn(DecoderWindow.prototype, 'quota').mockImplementation(function (this: DecoderWindow) {
+      const limit = realQuota.call(this)
+      limits.push(limit)
+      return limit
+    })
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- the original is called on the buffer it was taken from, below.
+    const real = SourceBuffer.prototype.appendBuffer
+    let fragments = 0
+    let refused = 0
+    SourceBuffer.prototype.appendBuffer = function (this: SourceBuffer, source: BufferSource) {
+      const head = ArrayBuffer.isView(source)
+        ? new Uint8Array(source.buffer, source.byteOffset, source.byteLength)
+        : new Uint8Array(source)
+      if (String.fromCharCode(...head.subarray(4, 8)) !== 'ftyp') {
+        fragments += 1
+        if (fragments > 4 && refused < 6) {
+          refused += 1
+          throw new DOMException('The buffer is full.', 'QuotaExceededError')
+        }
+      }
+      real.call(this, source)
+    }
+    try {
+      const play = begin('h264-aac-faststart.mp4')
+      await until(play, 'the first picture', 15_000, () => play.video.readyState >= 2)
+      await play.video.play()
+      await until(play, 'the browser to refuse several times', 15_000, () => refused >= 3)
+      await until(play, 'the clock to go on', 20_000, () => play.video.currentTime > 4)
+      // A stall ends when something is mended (a removal), and the next refusal is a new stall: each stall shrinks the
+      // window once and is logged once, with the limit it has. The refusals that follow in the same stall shrink nothing.
+      const stalls = ofType(play.events, 'quota')
+      const logged = ofType(play.events, 'watchdog').filter((event) => event.action === 'quota')
+      expect(refused).toBe(6)
+      expect(stalls.length).toBeGreaterThan(0)
+      expect(stalls.length).toBeLessThan(refused)
+      expect(play.stats.at(-1)?.quotaErrors).toBe(stalls.length)
+      expect(limits).toHaveLength(stalls.length)
+      expect(logged.map((event) => event.detail)).toEqual(
+        limits.map((limit) => `The window now holds at most ${limit} bytes.`),
+      )
+      // The first stall starts above the floor: 0.75 of what the window held (30 MiB and a little), not the floor.
+      expect(limits[0]).toBeGreaterThan(WINDOW_FLOOR_BYTES)
+      expect(limits[0]).toBeLessThanOrEqual(Math.floor(0.75 * (extra + 8 * 1024 * 1024)))
       expect(ofType(play.events, 'error')).toEqual([])
     } finally {
       SourceBuffer.prototype.appendBuffer = real

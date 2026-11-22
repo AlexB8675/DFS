@@ -556,10 +556,10 @@ class Play {
 
   /** A quota error: logged, and the window shrinks. The fragment stays with the feeder, to be appended again. */
   #quota(kind: Kind, pendingBytes: number): void {
-    const limit = this.#window.quota()
-    // A refusal that follows another with nothing mended between is the same stall, and is told once.
+    // A refusal that follows another with nothing mended between is the same stall: it shrinks the window once and is told once.
     if (this.#quotaStalled) return
     this.#quotaStalled = true
+    const limit = this.#window.quota()
     this.#stats.quotaErrors += 1
     this.#say({ type: 'quota', track: kind, pendingBytes })
     this.#say({
