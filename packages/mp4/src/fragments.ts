@@ -20,7 +20,10 @@ export interface RunTable {
  * never fired there: keyframes sat inside runs, almost no run was flagged as
  * beginning at one, and the decoder window, which cuts only at such a run, could
  * not trim the picture behind the playhead. A file of very short groups gets
- * small fragments, which Media Source takes. A sound's frames all are keyframes,
+ * small fragments, which Media Source takes. A keyframe whose previous frame is a
+ * keyframe too begins nothing (R54): a track of which every frame is one (a picture
+ * with no sync table) is cut by the second only, and each of its runs still begins at
+ * a keyframe. A sound's frames all are keyframes,
  * and cut nothing: pass `atKeyframes` false.
  */
 export function fragmentRuns(
@@ -35,7 +38,8 @@ export function fragmentRuns(
   let covered = 0
   for (let i = from; i < to; i += 1) {
     const ticks = table.durations[i] ?? 0
-    const cut = covered + ticks > limit || (atKeyframes && table.sync[i] === 1)
+    const cut =
+      covered + ticks > limit || (atKeyframes && table.sync[i] === 1 && table.sync[i - 1] === 0)
     if (i > start && cut) {
       runs.push([start, i])
       start = i

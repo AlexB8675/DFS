@@ -68,9 +68,9 @@ describe('fragmentRuns', () => {
 
   it('cuts at a keyframe inside a stretch shorter than half a second', () => {
     // Frames of 30 fps read a chunk at a time (two of them) hold 0.067 s, with a keyframe inside: it begins a run.
-    expect(fragmentRuns(table(frames(4, 33), [0, 1]), 0, 4, true)).toEqual([
-      [0, 1],
-      [1, 4],
+    expect(fragmentRuns(table(frames(4, 33), [0, 2]), 0, 4, true)).toEqual([
+      [0, 2],
+      [2, 4],
     ])
     // The first frame of the stretch is never cut before, keyframe or not.
     expect(fragmentRuns(table(frames(3, 33), [0]), 0, 3, true)).toEqual([[0, 3]])
@@ -101,5 +101,22 @@ describe('fragmentRuns', () => {
     // 48 000 ticks a second and 1024 a frame: 46 frames cover 0.981 s, and a 47th would pass the second.
     const runs = fragmentRuns(table(frames(100, 1024), [], 48000), 0, 100, false)
     expect(runs.map(([from, to]) => to - from)).toEqual([46, 46, 8])
+  })
+
+  it('cuts an all-keyframe stretch of two seconds by the second, not at every frame, with atKeyframes on (R54)', () => {
+    // 20 frames of 0.1 s, every one a keyframe: a picture with no sync table.
+    const every = Array.from({ length: 20 }, (_, at) => at)
+    expect(fragmentRuns(table(frames(20), every), 0, 20, true)).toEqual([
+      [0, 10],
+      [10, 20],
+    ])
+  })
+
+  it('cuts at a keyframe only where the frame before it is not one', () => {
+    // A run of two keyframes (0 and 1), then three frames, a keyframe at 5 and another at 6.
+    expect(fragmentRuns(table(frames(9), [0, 1, 5, 6]), 0, 9, true)).toEqual([
+      [0, 5],
+      [5, 9],
+    ])
   })
 })
