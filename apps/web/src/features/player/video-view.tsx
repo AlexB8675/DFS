@@ -1,4 +1,4 @@
-import type { PlayProblemKind, TimelineEventInput } from '@dfs/shared'
+import type { TimelineEventInput } from '@dfs/shared'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Cpu,
@@ -54,6 +54,7 @@ import {
 import { currentDevice } from './external-players'
 import { playerAction, stepSpeed, type PlayerAction } from './keys'
 import { OpenInMenu } from './open-in-menu'
+import { elsewhereText, problemKind, problemText, refusalText, type Problem } from './problems'
 import { usePlayerPreferences } from './preferences'
 import {
   defaultSubtitle,
@@ -97,27 +98,6 @@ interface VideoViewProps {
   /** A swipe on a touch screen: 1 for the next file, -1 for the previous. */
   onSwipe: (direction: 1 | -1) => void
 }
-
-/** What stands in the way of playing. */
-type Problem =
-  /** The browser can't decode the picture (from the media info). */
-  | { kind: 'codec'; codec: string }
-  /** The browser couldn't open the file (the buffered play, before its first frame, too), or decode it. */
-  | { kind: 'unsupported' | 'decode'; detail: string }
-  /**
-   * The page doesn't play it (`pagePlay`, §10.4, D45): the file's kind, its picture or its
-   * first sound track (the `codec`), or this browser. Derived from the decision, not stored,
-   * and with no element, so nothing is played or reported.
-   */
-  | {
-      kind: 'elsewhere'
-      reason: 'format' | 'picture' | 'sound' | 'browser'
-      codec: string | null
-    }
-  /** A read of the file failed while it played. */
-  | { kind: 'network' }
-  /** The file has another version since it started. */
-  | { kind: 'replaced'; versionId: string }
 
 /** What the element plays: a version, from a time, and how many times it was started. */
 interface Source {
@@ -267,7 +247,7 @@ export default function VideoView({
     autoplay: active,
     // Before its first frame: another player is offered, not another way in the page.
     onFailed: (message) => {
-      setProblem({ kind: 'unsupported', detail: message })
+      setProblem({ kind: 'unsupported', detail: message, reason: null })
     },
     // What the engine does goes to the play's timeline (§16).
     onEvent: (event) => {
@@ -759,7 +739,7 @@ export default function VideoView({
     // No error of the element's own: the own buffer's play failed, on a read, most often.
     if (!error || error.code === MediaError.MEDIA_ERR_NETWORK) setProblem({ kind: 'network' })
     else if (error.code === MediaError.MEDIA_ERR_DECODE) setProblem({ kind: 'decode', detail })
-    else setProblem({ kind: 'unsupported', detail })
+    else setProblem({ kind: 'unsupported', detail, reason: null })
   }
 
   /** Pauses it: as it goes on in another player (§6.7). */
@@ -1088,43 +1068,6 @@ function answeredEvent(what: 'playback' | 'media', error: Error | null): Timelin
   }
 }
 
-/** Why it doesn't play, in a few words, for the play's report. */
-function problemText(problem: Problem): string {
-  switch (problem.kind) {
-    case 'codec':
-      return `can’t decode ${problem.codec} video`
-    case 'unsupported':
-    case 'decode':
-      return `${problem.kind}: ${problem.detail}`
-    case 'network':
-      return 'a read failed while playing'
-    case 'replaced':
-      return 'replaced while playing'
-    case 'elsewhere':
-      // Nothing is followed, so nothing is reported with it: this only completes the switch.
-      return `not played in the page: ${problem.reason}`
-  }
-}
-
-/** What kind of failure it is, for the graphs (§16). */
-function problemKind(problem: Problem): PlayProblemKind {
-  switch (problem.kind) {
-    case 'codec':
-      return 'codec'
-    case 'unsupported':
-    case 'decode':
-      return 'file'
-    case 'network':
-      return 'read'
-    case 'replaced':
-      return 'other'
-    case 'elsewhere':
-      // Never reported (see `problemText`); a codec's, a file's or the browser's, all the same.
-      if (problem.reason === 'picture' || problem.reason === 'sound') return 'codec'
-      return problem.reason === 'format' ? 'file' : 'other'
-  }
-}
-
 /** In the middle: the spinner while it waits, a play button while it is paused. */
 function Center({
   loading,
@@ -1193,14 +1136,30 @@ function ProblemPanel({
         </Trouble>
       )
     }
-    case 'unsupported':
+    case 'unsupported': {
+      const { title, description } = refusalText(problem.reason)
       return (
         <Trouble
-          title="This video can’t play here"
-          description="This browser can’t open this file. Open it in another player, VLC say, or download it."
+          title={title}
+          description={description}
           detail={problem.detail}
           onDownload={onDownload}
         >
+          {external}
+        </Trouble>
+      )
+    }
+    case 'stopped':
+      return (
+        <Trouble
+          title="This video stopped playing"
+          description="It can’t go on in this browser. Try again, open it in another player, or download it."
+          detail={problem.detail}
+          onDownload={onDownload}
+        >
+          <Button onClick={onRetry}>
+            <RotateCcw /> Try again
+          </Button>
           {external}
         </Trouble>
       )
@@ -1243,43 +1202,6 @@ function ProblemPanel({
           </Button>
         </Trouble>
       )
-  }
-}
-
-/** What the panel says of a video the page doesn't play (§10.4, D45), and why. */
-function elsewhereText({ reason, codec }: Extract<Problem, { kind: 'elsewhere' }>): {
-  title: string
-  description: string
-} {
-  const format = {
-    title: 'This video can’t play here',
-    description:
-      'This browser can’t play this kind of file in the page. Open it in another player, or download it.',
-  }
-  switch (reason) {
-    case 'format':
-      return format
-    case 'picture':
-      // `pagePlay` always names the codec of a picture it refuses; with none, the 'format' wording.
-      return codec === null
-        ? format
-        : {
-            title: format.title,
-            description: `This browser can’t play ${codecLabel(codec)} video. Open it in another player, or download it.`,
-          }
-    case 'sound':
-      // The same for the sound.
-      return codec === null
-        ? format
-        : {
-            title: 'This video’s sound can’t play here',
-            description: `This browser can’t play its ${codecLabel(codec)} sound. Open it in another player, which plays all of it, or download it.`,
-          }
-    case 'browser':
-      return {
-        title: format.title,
-        description: 'This browser can’t stream videos. Open it in another player, or download it.',
-      }
   }
 }
 
