@@ -42,6 +42,8 @@ import { cn } from '@/lib/utils'
 import { contentUrl, mediaQuery, playbackQuery } from './api'
 import { bufferedPlayAvailable, mayPlayBuffered, pagePlay, type PagePlay } from './buffered/choice'
 import { useBufferedPlay } from './buffered/use-buffered-play'
+import { PlayIntent } from './play-intent'
+import { reportLab } from './report-lab'
 import { browserCanPlayType, codecLabel, playability, playedStreams, unplayableOf } from './codecs'
 import { audioTracksOf, chooseAudioTrack } from './audio-tracks'
 import { Controls, type Chapter } from './controls'
@@ -54,7 +56,14 @@ import {
 import { currentDevice } from './external-players'
 import { playerAction, stepSpeed, type PlayerAction } from './keys'
 import { OpenInMenu } from './open-in-menu'
-import { elsewhereText, problemKind, problemText, refusalText, type Problem } from './problems'
+import {
+  elsewhereText,
+  failureProblem,
+  problemKind,
+  problemText,
+  refusalText,
+  type Problem,
+} from './problems'
 import { usePlayerPreferences } from './preferences'
 import {
   defaultSubtitle,
@@ -238,16 +247,42 @@ export default function VideoView({
   const buffered = how?.play === 'buffered'
   /** An iPhone or iPad plays it, in Safari's own player, by the file's address. */
   const native = how?.play === 'native'
+  // What the viewer means the play to do (§10.4): the engine pauses the element while it holds,
+  // so the element's `paused` can't say it. A new start wants a play again. `wanted` mirrors the
+  // intent for what renders.
+  const intent = useRef(new PlayIntent())
+  const [wanted, setWanted] = useState(true)
+  const [wantedKey, setWantedKey] = useState(sourceKey)
+  if (wantedKey !== sourceKey) {
+    setWantedKey(sourceKey)
+    setWanted(true)
+  }
+  // A slide left is a play not wanted: the mirror follows the intent (set below, in an effect).
+  if (!active && wanted) setWanted(false)
+  useEffect(() => {
+    intent.current.restart()
+  }, [sourceKey])
+  // The engine plays by this, each time it would start or resume: read when it asks, so `active`
+  // is the latest (a ref, as an Effect Event can't be passed to the hook).
+  const activeNow = useRef(active)
+  useEffect(() => {
+    activeNow.current = active
+  })
+  const wantsPlay = useCallback(() => activeNow.current && intent.current.wanted, [])
   const { stats: bufferedStats } = useBufferedPlay({
     video,
     url: source ? contentUrl(place, source.versionId, 0, timeline?.playId) : '',
+    playId: timeline?.playId ?? null,
     // Not once a problem is shown: a play that failed is over, and `startAt` moves with it.
     enabled: buffered && problem === null,
     startAt: source?.startAt ?? 0,
-    autoplay: active,
-    // Before its first frame: another player is offered, not another way in the page.
-    onFailed: (message) => {
-      setProblem({ kind: 'unsupported', detail: message, reason: null })
+    autoplay: wantsPlay,
+    // Before its first frame: another player is offered, not another way in the page. A read the
+    // server refused for good is for `handleError` to settle (the file replaced, gone), which the
+    // failed phase of the stats runs.
+    onFailed: (failure) => {
+      if (failure.read) return
+      setProblem({ kind: 'unsupported', detail: failure.message, reason: failure.reason })
     },
     // What the engine does goes to the play's timeline (§16).
     onEvent: (event) => {
@@ -305,6 +340,9 @@ export default function VideoView({
   const shown: Problem | null =
     problem ?? elsewhereProblem ?? (pictureFails ? { kind: 'codec', codec: pictureFails } : null)
   const stopped = shown !== null
+  // A wanted play that the engine holds shows as playing, though the element is paused.
+  const heldPlay = bufferedStats?.holding === true && wanted
+  const shownPaused = state.paused && !heldPlay
   const visible = awake || state.paused || menuOpen
 
   // How it played, for the play's report (§10.4): read when the report goes, so kept in a ref.
@@ -317,20 +355,7 @@ export default function VideoView({
     if (player === 'native') return '{"player":"native"}'
     // Elsewhere nothing plays, and no element follows it: nothing to say.
     if (player !== 'buffered') return undefined
-    return JSON.stringify({
-      player: 'buffered',
-      phase: stats?.phase,
-      bytesReceived: stats?.bytesReceived,
-      readingMs: stats?.readingMs,
-      heldMs: stats?.heldMs,
-      holdMs: stats?.holdMs,
-      holds: stats?.holds,
-      seeks: stats?.seeks,
-      targetAheadSeconds: stats?.targetAheadSeconds,
-      keyframeGapSeconds: stats?.keyframeGapSeconds,
-      quotaErrors: stats?.quotaErrors,
-      reopens: stats?.reopens,
-    })
+    return reportLab(stats)
   }, [])
 
   // The play's timeline (§16). What happened before it existed is recorded when it does: each of
@@ -418,7 +443,8 @@ export default function VideoView({
     picture: info ? playedStreams(info).video : null,
     bitRate: info?.bitRate ?? null,
     signals,
-    engine: null,
+    engine:
+      buffered && bufferedStats ? { slow: bufferedStats.slow, rate: bufferedStats.rate } : null,
   })
   const shownNotices = stopped ? [] : notices.filter((notice) => !dismissed.has(notice.key))
   // Those that fade go a while after it plays: a video held for Play keeps them until then.
@@ -553,10 +579,6 @@ export default function VideoView({
     }
   }, [])
 
-  useEffect(() => {
-    if (!active) videoRef.current?.pause()
-  }, [active])
-
   // A video opened pauses the audio bar (§10.4).
   useEffect(() => {
     pauseAudio()
@@ -569,12 +591,53 @@ export default function VideoView({
     element.currentTime = Math.min(Math.max(0, seconds), end)
   }, [])
 
+  const holdingNow = useCallback(() => played.current.stats?.holding === true, [])
+
+  /** The viewer plays: not into a hold, which plays when it ends, as the play is wanted. */
+  const playByViewer = useCallback(() => {
+    const element = videoRef.current
+    const act = intent.current.play(holdingNow())
+    setWanted(intent.current.wanted)
+    if (element && act === 'play') void element.play().catch(() => undefined)
+  }, [holdingNow])
+
+  /** The viewer pauses: a hold that ends does not play. */
+  const pauseByViewer = useCallback(() => {
+    intent.current.pause()
+    setWanted(false)
+    videoRef.current?.pause()
+  }, [])
+
+  // Leaving the slide is a pause (§10.4).
+  useEffect(() => {
+    if (active) return
+    intent.current.pause()
+    videoRef.current?.pause()
+  }, [active])
+
+  // During a hold the engine has the element paused, so the toggle reads the intent (§10.4).
   const togglePlay = useCallback(() => {
     const element = videoRef.current
     if (!element) return
-    if (element.paused || element.ended) void element.play().catch(() => undefined)
-    else element.pause()
-  }, [])
+    const act = intent.current.toggle(holdingNow(), element.paused || element.ended)
+    setWanted(intent.current.wanted)
+    if (act === 'play') void element.play().catch(() => undefined)
+    else if (act === 'pause') element.pause()
+  }, [holdingNow])
+
+  // A play from outside the page's controls (Picture-in-Picture's button, a browser's own) is a
+  // play the viewer wants. A pause event is not synced: the engine pauses it for holds and reopens.
+  useEffect(() => {
+    if (!video) return
+    const onPlay = () => {
+      intent.current.played()
+      setWanted(true)
+    }
+    video.addEventListener('play', onPlay)
+    return () => {
+      video.removeEventListener('play', onPlay)
+    }
+  }, [video])
 
   const toggleFullscreen = useCallback(() => {
     if (document.fullscreenElement) {
@@ -673,9 +736,9 @@ export default function VideoView({
         run(action)
         return true
       },
-      pause,
+      pause: pauseByViewer,
     }),
-    [run, stopped],
+    [run, stopped, pauseByViewer],
   )
 
   // Media keys and the system's controls (the lock screen, notifications).
@@ -684,8 +747,8 @@ export default function VideoView({
     if (!session || !video) return
     session.metadata = new MediaMetadata({ title: name })
     const handlers: [MediaSessionAction, MediaSessionActionHandler][] = [
-      ['play', () => void videoRef.current?.play().catch(() => undefined)],
-      ['pause', () => videoRef.current?.pause()],
+      ['play', playByViewer],
+      ['pause', pauseByViewer],
       [
         'seekbackward',
         (details) => {
@@ -710,7 +773,7 @@ export default function VideoView({
       session.metadata = null
       for (const [action] of handlers) setActionHandler(session, action, null)
     }
-  }, [name, seek, video])
+  }, [name, seek, video, playByViewer, pauseByViewer])
 
   /**
    * A failed play: the file replaced meanwhile (the element can't tell a
@@ -722,6 +785,7 @@ export default function VideoView({
     const playing = source
     if (!playing) return
     const startAt = element?.currentTime ?? playing.startAt
+    const stats = played.current.stats
     const fresh = await queryClient
       .query({ ...playbackQuery(place), staleTime: 0 })
       .catch((reason: unknown) => (reason instanceof ApiError ? reason : null))
@@ -736,22 +800,20 @@ export default function VideoView({
       return
     }
     setSource({ ...playing, startAt })
-    const detail = error?.message ?? ''
-    // No error of the element's own: the own buffer's play failed, on a read, most often.
-    if (!error || error.code === MediaError.MEDIA_ERR_NETWORK) setProblem({ kind: 'network' })
-    else if (error.code === MediaError.MEDIA_ERR_DECODE) setProblem({ kind: 'decode', detail })
-    else setProblem({ kind: 'unsupported', detail, reason: null })
-  }
-
-  /** Pauses it: as it goes on in another player (§6.7). */
-  function pause() {
-    videoRef.current?.pause()
+    // The element's own error when it has one, else the engine's: a read the server refused for
+    // good is the network panel, and any other failure is the stopped one (§4.8).
+    setProblem(
+      failureProblem({
+        elementError: error && { code: error.code, message: error.message },
+        engine: stats && { failedOn: stats.failedOn, error: stats.error },
+      }),
+    )
   }
 
   /** Open in…, over the player: the players that play it on this device (§6.7). */
   function openIn(button: ReactNode) {
     return (
-      <OpenInMenu place={place} name={name} kind="video" container={root} onChosen={pause}>
+      <OpenInMenu place={place} name={name} kind="video" container={root} onChosen={pauseByViewer}>
         {button}
       </OpenInMenu>
     )
@@ -931,7 +993,7 @@ export default function VideoView({
       {!shown && (
         <Center
           loading={decided === null || starting || state.waiting || bufferedStats?.holding === true}
-          paused={state.paused && decided !== null && !starting}
+          paused={shownPaused && decided !== null && !starting}
           ended={state.ended}
           onPlay={togglePlay}
         />
@@ -971,7 +1033,7 @@ export default function VideoView({
               onClick={() => {
                 seek(resumeAt)
                 setResumeAt(null)
-                void videoRef.current?.play().catch(() => undefined)
+                playByViewer()
                 wake()
               }}
             >
@@ -1031,6 +1093,7 @@ export default function VideoView({
           fullscreen={fullscreen}
           canFullscreen={document.fullscreenEnabled || hasNativeFullscreen(video)}
           canPictureInPicture={document.pictureInPictureEnabled}
+          heldPlay={heldPlay}
           onTogglePlay={togglePlay}
           onSeek={seek}
           onVolume={setVolume}

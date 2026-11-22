@@ -60,6 +60,8 @@ interface ControlsProps {
   fullscreen: boolean
   canFullscreen: boolean
   canPictureInPicture: boolean
+  /** A wanted play that the engine holds: the button shows Pause, though the element is paused. */
+  heldPlay: boolean
   onTogglePlay: () => void
   onSeek: (seconds: number) => void
   onVolume: (volume: number, muted: boolean) => void
@@ -87,6 +89,7 @@ export function Controls({
   fullscreen,
   canFullscreen,
   canPictureInPicture,
+  heldPlay,
   onTogglePlay,
   onSeek,
   onVolume,
@@ -99,6 +102,7 @@ export function Controls({
   subtitles,
 }: ControlsProps) {
   const state = useMediaState(video, visible)
+  const paused = state.paused && !heldPlay
   /**
    * Where the seek bar is dragged to, ahead of the video; held where it was
    * let go until the video's state changes, since it still says the old time.
@@ -210,8 +214,8 @@ export function Controls({
         />
       </div>
       <div className="flex items-center gap-0.5 sm:gap-1">
-        <ControlButton label={state.paused ? 'Play (k)' : 'Pause (k)'} onClick={onTogglePlay}>
-          {state.paused ? <Play className="fill-current" /> : <Pause className="fill-current" />}
+        <ControlButton label={paused ? 'Play (k)' : 'Pause (k)'} onClick={onTogglePlay}>
+          {paused ? <Play className="fill-current" /> : <Pause className="fill-current" />}
         </ControlButton>
         <ControlButton
           label={quiet ? 'Unmute (m)' : 'Mute (m)'}
