@@ -277,6 +277,8 @@ export function createSeed(version: number): MockState {
   // Beside it, with its name: the player offers them (§10.4).
   file(videos, 'Wedding highlights.it.srt', 2 * KB, { age: 200 * DAY })
   file(videos, 'Family dinner.mp4', 1.1 * GB, { age: 33 * DAY })
+  // Matroska inside, the sample remuxed: the page plays it through the engine (§10.4).
+  file(videos, 'Sample clip.mkv', 140 * KB, { age: 2 * DAY })
   file(videos, 'Drone footage – coast.mkv', 11.8 * GB, { age: 40 * MINUTE, syncState: 'syncing' })
   file(videos, 'Old camcorder tape 1998.avi', 2.1 * GB, { age: 500 * DAY })
   file(videos, 'Screen recording 2026-09-28.mov', 640 * MB, { age: 5 * DAY, syncState: 'failed' })

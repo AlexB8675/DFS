@@ -1,11 +1,12 @@
 import { splitExtension } from '@dfs/shared'
 import sampleAudioUrl from './sample-audio.mp3?url'
 import sampleCoverUrl from './sample-cover.jpg?url'
+import sampleMatroskaUrl from './sample-video.mkv?url'
 import sampleVideoUrl from './sample-video.mp4?url'
 
 // What the demo's files hold, made up per file, so previews (§10.3) and the
 // player (§10.4) have something to show: the mock keeps no bytes but those
-// uploaded to it, and one sample video (make-sample-video.sh), loaded when
+// uploaded to it, and one sample video, in MP4 and in Matroska (make-sample-video.sh), loaded when
 // the mock starts.
 
 export interface SampleFile {
@@ -99,6 +100,7 @@ const logs = new Map<string, string>()
 const LOG_LIMIT = 8 * 1024 * 1024
 
 let sampleVideoBytes: Uint8Array | null = null
+let sampleMatroskaBytes: Uint8Array | null = null
 let sampleAudioBytes: Uint8Array | null = null
 let sampleCoverBytes: Uint8Array | null = null
 
@@ -111,10 +113,13 @@ export async function loadSampleMedia(): Promise<void> {
     const response = await fetch(url)
     return response.ok ? new Uint8Array(await response.arrayBuffer()) : null
   }
-  const [video, audio, cover] = await Promise.all(
-    [sampleVideoUrl, sampleAudioUrl, sampleCoverUrl].map((url) => load(url).catch(() => null)),
+  const [video, matroska, audio, cover] = await Promise.all(
+    [sampleVideoUrl, sampleMatroskaUrl, sampleAudioUrl, sampleCoverUrl].map((url) =>
+      load(url).catch(() => null),
+    ),
   )
   sampleVideoBytes = video ?? null
+  sampleMatroskaBytes = matroska ?? null
   sampleAudioBytes = audio ?? null
   sampleCoverBytes = cover ?? null
 }
@@ -122,6 +127,11 @@ export async function loadSampleMedia(): Promise<void> {
 /** What every video in the demo plays: 12 s of a test picture and a beep. */
 export function sampleVideo(): Uint8Array | null {
   return sampleVideoBytes
+}
+
+/** The same video remuxed into Matroska, what every `.mkv` and `.webm` in the demo plays. */
+export function sampleMatroska(): Uint8Array | null {
+  return sampleMatroskaBytes
 }
 
 /** What every audio file in the demo plays: 10 s of a chord (`make-sample-audio.sh`). */

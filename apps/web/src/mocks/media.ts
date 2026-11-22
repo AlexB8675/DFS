@@ -86,10 +86,12 @@ export function sampleMediaInfo(
       hasCover: true,
     }
   }
-  const extension = splitExtension(name).extension.toLowerCase()
+  const { base, extension: ending } = splitExtension(name)
+  const extension = ending.toLowerCase()
+  const matroska = extension === '.mkv' || extension === '.webm'
   return {
     kind,
-    container: 'mov,mp4,m4a,3gp,3g2,mj2',
+    container: matroska ? 'matroska,webm' : 'mov,mp4,m4a,3gp,3g2,mj2',
     durationMs: 12_000,
     bitRate: 2_500_000,
     streams: [
@@ -121,13 +123,14 @@ export function sampleMediaInfo(
         channelLayout: 'stereo',
         sampleRate: 48_000,
         language: 'eng',
-        ...(extension === '.mkv' && {
-          codec: 'ac3',
-          codecString: 'ac-3',
-          profile: null,
-          channels: 6,
-          channelLayout: '5.1(side)',
-        }),
+        ...(extension === '.mkv' &&
+          base !== 'Sample clip' && {
+            codec: 'ac3',
+            codecString: 'ac-3',
+            profile: null,
+            channels: 6,
+            channelLayout: '5.1(side)',
+          }),
       },
       {
         ...STREAM,

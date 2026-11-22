@@ -78,6 +78,7 @@ import {
   sampleAudio,
   sampleCover,
   sampleImage,
+  sampleMatroska,
   samplePdf,
   sampleText,
   sampleVideo,
@@ -2048,8 +2049,9 @@ function mockContent(
 ): Pick<MockFileContent, 'mimeType' | 'body'> {
   const kind =
     fileCategory(node.name, mimeType) === 'image' ? 'image' : previewKind(node.name, mimeType)
-  const video = kind === 'video' ? sampleVideo() : null
-  if (video) return { mimeType: 'video/mp4', body: video }
+  const matroska = /\.(mkv|webm)$/i.test(node.name)
+  const video = kind === 'video' ? (matroska ? sampleMatroska() : sampleVideo()) : null
+  if (video) return { mimeType: matroska ? 'video/x-matroska' : 'video/mp4', body: video }
   const audio = mediaKind(node.name, mimeType) === 'audio' ? sampleAudio() : null
   if (audio) return { mimeType: 'audio/mpeg', body: audio }
   const sample =

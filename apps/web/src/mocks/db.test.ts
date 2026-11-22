@@ -309,6 +309,29 @@ describe('mock API database', () => {
     })
   })
 
+  it('serves a Matroska video in the demo Matroska’s bytes, with its container named', async () => {
+    // The browser fetches the samples; here they come inlined, by the same fetch.
+    const { default: matroskaInline } = await import('./sample-video.mkv?inline')
+    const { default: mp4Inline } = await import('./sample-video.mp4?inline')
+    const { loadSampleMedia } = await import('./samples')
+    const fetchOf = globalThis.fetch.bind(globalThis)
+    vi.stubGlobal('fetch', (url: string) =>
+      fetchOf(url.endsWith('.mkv') ? matroskaInline : url.endsWith('.mp4') ? mp4Inline : url),
+    )
+    try {
+      await loadSampleMedia()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+
+    const clip = child(child(rootId(), 'Videos').id, 'Sample clip.mkv')
+    const content = db.fileContent(clip.id)
+    expect([...content.body.slice(0, 4)]).toEqual([0x1a, 0x45, 0xdf, 0xa3])
+
+    const media = db.media({ token: null, id: clip.id })
+    expect(media.info?.container).toBe('matroska,webm')
+  })
+
   describe('accounts and sign-in (§7.1)', () => {
     it('signs in with a username and password, and answers alike for a wrong one or an unknown user', () => {
       db.signOut()

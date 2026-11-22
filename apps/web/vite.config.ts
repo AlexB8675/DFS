@@ -19,6 +19,8 @@ export default defineConfig(({ command, mode }) => {
       pdfjsAssets(),
       useMocks && msw({ mode: 'worker-only' }),
     ],
+    // The demo's Matroska sample (src/mocks) is an asset, as its MP4 is.
+    assetsInclude: ['**/*.mkv'],
     resolve: {
       alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
     },
