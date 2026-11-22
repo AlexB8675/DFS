@@ -5,7 +5,7 @@ import {
   decodingConfiguration,
   formatBitRate,
   playbackNotices,
-  reportLab,
+  boundedLab,
   waitingForData,
   type PlaybackSignals,
 } from './diagnostics'
@@ -190,6 +190,22 @@ describe('the player’s warnings', () => {
     expect(shown[0]).toContain('arrives at 40 Mbit/s and needs 120 Mbit/s')
   })
 
+  it('gives no slow warning when the arrival is not below what the video needs, whatever the engine says', () => {
+    // The engine judges against its own estimate; the text compares with the media info.
+    expect(notices({ bitRate: 24_000_000, engine: { slow: true, rate: 3_125_000 } })).toEqual([])
+  })
+
+  it('leaves out the side the server waited on while the engine plays, which nobody measured', () => {
+    const shown = notices({
+      bitRate: 120_000_000,
+      signals: { ...QUIET, waitingOn: 'connection' },
+      engine: { slow: true, rate: 5_000_000 },
+    })
+    expect(shown).toEqual([
+      'Loading slowly: the video arrives at 40 Mbit/s and needs 120 Mbit/s, so it stops to load.',
+    ])
+  })
+
   it('gives no slow warning when the engine says the link keeps up', () => {
     // The element's own waits are not asked while the engine plays.
     const waiting = { ...QUIET, waitingForMs: 9000, arrivalBitsPerSecond: 1_000_000 }
@@ -237,14 +253,14 @@ describe('telling a wait for data from other waits', () => {
 
 describe('the report’s line on how it played', () => {
   it('passes the player’s line through, up to the most the report holds', () => {
-    expect(reportLab(() => '{"player":"direct"}')).toBe('{"player":"direct"}')
-    expect(reportLab(() => 'x'.repeat(2000))).toBe('x'.repeat(2000))
+    expect(boundedLab(() => '{"player":"direct"}')).toBe('{"player":"direct"}')
+    expect(boundedLab(() => 'x'.repeat(2000))).toBe('x'.repeat(2000))
   })
 
   it('leaves it out when there is none, or it is too long', () => {
-    expect(reportLab(undefined)).toBeUndefined()
-    expect(reportLab(() => undefined)).toBeUndefined()
-    expect(reportLab(() => 'x'.repeat(2001))).toBeUndefined()
+    expect(boundedLab(undefined)).toBeUndefined()
+    expect(boundedLab(() => undefined)).toBeUndefined()
+    expect(boundedLab(() => 'x'.repeat(2001))).toBeUndefined()
   })
 })
 

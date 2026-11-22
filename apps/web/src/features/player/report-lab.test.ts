@@ -37,24 +37,51 @@ describe('the play report’s lab for a buffered play', () => {
     const lab: unknown = JSON.parse(
       reportLab(
         stats({
+          phase: 'buffering',
+          bytesReceived: 11,
+          readingMs: 12,
+          heldMs: 13,
+          holdMs: 14,
+          holds: 15,
+          seeks: 16,
+          targetAheadSeconds: 17,
+          keyframeGapSeconds: 18,
+          quotaErrors: 19,
+          reopens: 20,
           backend: 'disk',
           storedBytes: 5_000_000,
+          evictedBytes: 21,
           rate: 1234.6,
           slow: true,
-          failedOn: null,
+          failedOn: 'read',
         }),
       ),
     )
-    expect(lab).toMatchObject({
+    expect(lab).toEqual({
       player: 'buffered',
       phase: 'buffering',
+      bytesReceived: 11,
+      readingMs: 12,
+      heldMs: 13,
+      holdMs: 14,
+      holds: 15,
+      seeks: 16,
+      targetAheadSeconds: 17,
+      keyframeGapSeconds: 18,
+      quotaErrors: 19,
+      reopens: 20,
       backend: 'disk',
       storedBytes: 5_000_000,
+      evictedBytes: 21,
       rate: 1235,
       slow: true,
-      failedOn: null,
+      failedOn: 'read',
     })
-    expect(lab).toHaveProperty('keyframeGapSeconds')
+  })
+
+  it('keeps a rate that is not known yet as null', () => {
+    const lab = JSON.parse(reportLab(stats({ rate: null }))) as Record<string, unknown>
+    expect(lab.rate).toBeNull()
   })
 
   it('stays within the report’s 2000 characters at the largest values', () => {

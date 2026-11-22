@@ -121,7 +121,7 @@ export interface Arrival {
 const LAB_MAX_LENGTH = 2000
 
 /** The report's `lab` line (§10.4): the player's own, left out when it gives none or too long a one. */
-export function reportLab(read: (() => string | undefined) | undefined): string | undefined {
+export function boundedLab(read: (() => string | undefined) | undefined): string | undefined {
   const lab = read?.()
   return lab !== undefined && lab.length <= LAB_MAX_LENGTH ? lab : undefined
 }
@@ -309,7 +309,7 @@ export function usePlaybackStats(
       const error = video.error
         ? video.error.message || `media error ${String(video.error.code)}`
         : null
-      const labLine = reportLab(lab)
+      const labLine = boundedLab(lab)
       const body: PlaybackReport = {
         versionId,
         outcome:
@@ -503,15 +503,18 @@ export function playbackNotices(input: {
       ? null
       : engine.rate * 8
     : signals.arrivalBitsPerSecond
+  // The engine judges against its own estimate, the text against the media info: both must agree.
   const slow = engine
-    ? engine.slow
+    ? engine.slow && arrival !== null && bitRate !== null && arrival < bitRate
     : arrival !== null &&
       signals.waitingForMs > SLOW_AFTER_MS &&
       bitRate !== null &&
       arrival < bitRate * SLOW_SHARE
   if (bitRate && arrival !== null && slow) {
-    const why =
-      signals.waitingOn === 'connection'
+    // While the engine plays the element is paused and the delivery poll stale: no side to name.
+    const why = engine
+      ? ''
+      : signals.waitingOn === 'connection'
         ? ' The server has it ready and waits on this device to take it.'
         : signals.waitingOn === 'storage'
           ? ' The server waits on storage to read it.'
