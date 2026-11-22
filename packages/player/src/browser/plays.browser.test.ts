@@ -71,6 +71,15 @@ afterEach(async () => {
   expect(silent, 'waits longer than STUCK_MS with no watchdog event and no hold').toEqual([])
 })
 
+/** The downloader of the play being measured, seen at its first read: the store that the seek's bytes are looked for in. */
+let lastDownloader: Downloader | null = null
+
+/** Whether the store holds the byte before `end` now: the answer is taken as a snapshot at the seek's mark. */
+function heldSnapshot(): (end: number) => boolean {
+  const held = lastDownloader?.store.held()
+  return (end) => held?.has({ start: end - 1, end }) ?? false
+}
+
 /** Records when each read of the downloader resolves, for the time from the store's holding the keyframe's bytes to the picture. */
 function recordReads(): ReadStamp[] {
   const reads: ReadStamp[] = []
@@ -81,6 +90,8 @@ function recordReads(): ReadStamp[] {
     range: ByteRange,
     signal?: AbortSignal,
   ) {
+    // eslint-disable-next-line @typescript-eslint/no-this-alias -- the spy keeps the downloader that the measure looks into.
+    lastDownloader = this
     const bytes = await real.call(this, range, signal)
     reads.push({ start: range.start, end: range.end, at: performance.now() })
     return bytes
@@ -188,12 +199,19 @@ describe.skipIf(choice.length === 0)('the fast link: a start and a seek to a pic
       const play = begin(file.name, { autoplay: () => true })
       try {
         const { firstFrameMs, movingMs: startMs } = await startPicture(play, startedAt)
-        const startHeld = heldAt(reads, startedAt, neededEnds(facts, null), 'the start')
+        const startHeld = heldAt(
+          reads,
+          startedAt,
+          neededEnds(facts, null),
+          'the start',
+          () => false,
+        )
         const startDecoderMs = startHeld === null ? null : startedAt + startMs - startHeld
 
         // Let it play a moment so that the seek is a seek of a play, then jump past the middle.
         await until(play, 'the clock to move', 20_000, () => play.video.currentTime > 0.3)
         const target = seekTarget(duration)
+        const heldBeforeSeek = heldSnapshot()
         const seekMark = performance.now()
         const framesBefore = frames(play.video)
         play.video.currentTime = target
@@ -209,7 +227,7 @@ describe.skipIf(choice.length === 0)('the fast link: a start and a seek to a pic
         const seekHeld =
           windowSeek?.inWindow === true
             ? seekMark
-            : heldAt(reads, seekMark, neededEnds(facts, target), 'the seek')
+            : heldAt(reads, seekMark, neededEnds(facts, target), 'the seek', heldBeforeSeek)
         const seekDecoderMs = seekHeld === null ? null : seekMark + seekMs - seekHeld
 
         // A little of what follows the seek, as a play: the clock goes on.

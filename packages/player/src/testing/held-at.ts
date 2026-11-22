@@ -15,12 +15,16 @@ export interface ReadStamp {
  * when every needed byte is, the time is the whole seek, from `mark` (R50). A byte that no read covers at all is a
  * fault of the measure, and fails the test naming it: it is never taken as held. Null when there is nothing to say a
  * moment by (Matroska, whose index keeps no frame table).
+ *
+ * `heldAtMark(end)` says whether the store held the byte before `end` when the seek began: the onward download writes
+ * the store without a `read`, so a byte it brought is in no read of the list, and only the store knows it was there.
  */
 export function heldAt(
   reads: readonly ReadStamp[],
   mark: number,
   needed: readonly number[],
   what: string,
+  heldAtMark: (end: number) => boolean,
 ): number | null {
   if (needed.length === 0) return null
   let latest = mark
@@ -29,7 +33,7 @@ export function heldAt(
     const after = reads.find((read) => read.at >= mark && covers(read))
     if (after !== undefined) {
       latest = Math.max(latest, after.at)
-    } else if (!reads.some((read) => read.at < mark && covers(read))) {
+    } else if (!heldAtMark(end) && !reads.some((read) => read.at < mark && covers(read))) {
       throw new Error(`The measure of ${what} found no read that covers the bytes up to ${end}.`)
     }
   }
