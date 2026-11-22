@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { START_GOAL_SECONDS, STALL_GOAL_SECONDS } from '../limits.ts'
-import { holdDecision } from './hold.ts'
+import { holdDecision, isSlow } from './hold.ts'
 import type { HoldInput } from './hold.ts'
 
 // The hold rule (DESIGN.md §10.4): when a play may start, or start again after a
@@ -177,5 +177,17 @@ describe('holdDecision', () => {
     )
     expect(fast.goalSeconds).toBe(STALL_GOAL_SECONDS)
     expect(holdDecision(input({ remainingSeconds: Infinity })).goalSeconds).toBe(START_GOAL_SECONDS)
+  })
+})
+
+describe('isSlow', () => {
+  it('is a known rate under the bit rate, and nothing else', () => {
+    expect(isSlow(BITRATE - 1, BITRATE)).toBe(true)
+    expect(isSlow(BITRATE, BITRATE)).toBe(false)
+    expect(isSlow(null, BITRATE)).toBe(false)
+    expect(isSlow(0, BITRATE)).toBe(false)
+    expect(isSlow(Number.NaN, BITRATE)).toBe(false)
+    expect(isSlow(100, 0)).toBe(false)
+    expect(isSlow(100, Number.NaN)).toBe(false)
   })
 })

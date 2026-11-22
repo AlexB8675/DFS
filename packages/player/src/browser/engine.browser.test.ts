@@ -78,6 +78,23 @@ suite('h264-aac-faststart.mp4')('playStreamed: a play from its start', () => {
     expect(sizes.every((offset) => Number.isInteger(offset) && offset >= 0)).toBe(true)
   })
 
+  test('says slow once the measured rate is under the bit rate, never before a rate is known', async () => {
+    // 150 KB/s is far under this file's bit rate (about 5 MB over its length).
+    await control({ bandwidthBytesPerSecond: 150_000 })
+    const play = begin('h264-aac-faststart.mp4')
+    await until(play, 'the first picture', 15_000, () => play.video.readyState >= 2)
+    await until(play, 'a slow rate', 15_000, () => play.stats.at(-1)?.slow === true)
+    expect(play.stats.every((numbers) => !numbers.slow || numbers.rate !== null)).toBe(true)
+    expect(play.stats.at(-1)?.rate).toBeLessThan(500_000)
+  })
+
+  test('does not say slow on a link that is faster than the bit rate', async () => {
+    const play = begin('h264-aac-faststart.mp4')
+    await until(play, 'the first picture', 15_000, () => play.video.readyState >= 2)
+    await until(play, 'a rate', 15_000, () => play.stats.at(-1)?.rate !== null)
+    expect(play.stats.some((numbers) => numbers.slow)).toBe(false)
+  })
+
   test('removes what is played past the window behind, and keeps its bytes bounded', async () => {
     // A link slower than the file's pace keeps the feed behind the end while the playhead goes by the bound.
     await control({ bandwidthBytesPerSecond: 250_000 })

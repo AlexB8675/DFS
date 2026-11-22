@@ -43,6 +43,12 @@ function clamp(value: number, low: number, high: number): number {
   return Math.min(Math.max(value, low), high)
 }
 
+/** Whether a link is slower than the video: a known rate under the bit rate. A rate of 0 is the downloader gone quiet, and a bit rate that can't be compared makes the rate unknown, so neither is slow. */
+export function isSlow(rate: number | null, bitrate: number): boolean {
+  const bitrateOk = Number.isFinite(bitrate) && bitrate > 0
+  return bitrateOk && rate !== null && Number.isFinite(rate) && rate > 0 && rate < bitrate
+}
+
 /**
  * A start or a seek on a link that keeps up plays at the first frames; on an
  * unknown link it holds for the start goal. A stall holds for the stall goal. On
@@ -59,7 +65,7 @@ export function holdDecision(input: HoldInput): HoldDecision {
   const bitrateOk = Number.isFinite(bitrateBytesPerSecond) && bitrateBytesPerSecond > 0
   const known = bitrateOk && rate !== null && Number.isFinite(rate) && rate > 0
   const fast = known && rate >= bitrateBytesPerSecond * KEEPS_UP
-  const slow = known && rate < bitrateBytesPerSecond
+  const slow = isSlow(rate, bitrateBytesPerSecond)
   const floor = reason === 'stall' ? STALL_GOAL_SECONDS : START_GOAL_SECONDS
 
   // At the end there is nothing to wait for.
@@ -74,7 +80,7 @@ export function holdDecision(input: HoldInput): HoldDecision {
     // Between the bit rate and its multiple the floor applies, with the cap's share.
     if (known && !fast) goalSeconds = Math.min(remaining, clamp(0, floor, cap * CAP_SHARE))
   } else {
-    const needed = remaining * (1 - rate / bitrateBytesPerSecond)
+    const needed = remaining * (1 - (rate ?? 0) / bitrateBytesPerSecond)
     goalSeconds = Math.min(remaining, clamp(needed, floor, cap * CAP_SHARE))
   }
   goalSeconds = Math.max(0, goalSeconds)
