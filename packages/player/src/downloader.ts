@@ -346,8 +346,8 @@ export class Downloader {
   #recheck: { timer: ReturnType<typeof setTimeout>; at: number } | null = null
   /** The writes that succeeded, in all: a change of the store's frontier that lifts a refusal's gate. */
   #writes = 0
-  /** The range that the frontier rule refused last, until the position moves, a write succeeds, or FRONTIER_RETRY_MS passes (R54). */
-  #refusal: { from: number; writes: number; timer: ReturnType<typeof setTimeout> } | null = null
+  /** The ranges that the frontier rule refused, by their `from`: each is kept until the position moves, a write succeeds, or FRONTIER_RETRY_MS passes (R54). */
+  #refusals = new Map<number, { writes: number; timer: ReturnType<typeof setTimeout> }>()
   /** Where the onward reads would go on if the store had room: the first gap at or after the position when it filled. A read that opens anywhere else, once there is room, is a seek. */
   #stoppedAt = 0
 
@@ -632,31 +632,33 @@ export class Downloader {
   /**
    * The store refused a write at `from` by its frontier rule: that range is not opened again until the position
    * moves, a write succeeds (the frontier changed) or FRONTIER_RETRY_MS has passed, when everything is considered again.
+   * Each offset has its own refusal, so one refused read does not free another's range.
    */
   #refuseFrontier(from: number): void {
-    this.#liftRefusal()
+    const old = this.#refusals.get(from)
+    if (old !== undefined) clearTimeout(old.timer)
     const timer = setTimeout(() => {
-      this.#refusal = null
+      this.#refusals.delete(from)
       this.#reconsider()
     }, FRONTIER_RETRY_MS)
-    this.#refusal = { from, writes: this.#writes, timer }
+    this.#refusals.set(from, { writes: this.#writes, timer })
   }
 
   /** Whether a read at `from` is held back by a refusal that nothing has lifted. */
   #refused(from: number): boolean {
-    const refusal = this.#refusal
-    if (refusal === null) return false
-    if (refusal.writes !== this.#writes) {
-      this.#liftRefusal()
-      return false
+    // A write that landed lifts the refusals made before it; one made since stays.
+    for (const [offset, refusal] of this.#refusals) {
+      if (refusal.writes === this.#writes) continue
+      clearTimeout(refusal.timer)
+      this.#refusals.delete(offset)
     }
-    return refusal.from === from
+    return this.#refusals.has(from)
   }
 
+  /** Lifts every refusal and its timer. */
   #liftRefusal(): void {
-    if (this.#refusal === null) return
-    clearTimeout(this.#refusal.timer)
-    this.#refusal = null
+    for (const refusal of this.#refusals.values()) clearTimeout(refusal.timer)
+    this.#refusals.clear()
   }
 
   /** Whether `read` is open: a read that was let go of is not, and what it meets after that is not the play's concern. */

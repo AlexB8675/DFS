@@ -811,6 +811,26 @@ describe('Downloader: failures and retries', () => {
       expect(await firstMismatch(store, { start: 0, end: size })).toBe(-1)
     })
 
+    it('keeps a refusal for each offset: two refused reads are neither opened again before FRONTIER_RETRY_MS, but both after (B1)', async () => {
+      const { stub, store, rig } = await refused()
+      expect(stub.pipes).toHaveLength(1)
+      // A priority read farther on is refused too, with no write landing and no position move between.
+      store.failNextWrite = new FrontierFullError('the frontier holds blocks nearer the position')
+      void rig.downloader.fetchNow({ start: MIB, end: MIB + 1024 }).catch(() => undefined)
+      await until(() => stub.pipes.length === 2)
+      stub.pipes[1]?.push(MIB, MIB + 1024)
+      await until(() => ofType(rig.events, 'requestEnd').length === 2)
+      await settle()
+      expect(stub.pipes).toHaveLength(2)
+      await vi.advanceTimersByTimeAsync(FRONTIER_RETRY_MS - 1)
+      await settle()
+      expect(stub.pipes).toHaveLength(2)
+      await vi.advanceTimersByTimeAsync(1)
+      await until(() => stub.pipes.length === 3)
+      // Both ranges may be asked for again: the first refusal's timer ends, and the read it opens covers the second's range too.
+      expect(stub.calls[2]?.range).toBe('bytes=0-')
+    })
+
     it('opens the read again when the position is told', async () => {
       const { stub, rig } = await refused()
       expect(stub.pipes).toHaveLength(1)
