@@ -89,6 +89,8 @@ export interface EngineStats {
   backend: 'disk' | 'memory'
   /** The bytes the store holds. */
   storedBytes: number
+  /** The bytes the store has evicted from its slots, in all: stored data that was lost (a frontier block let go of is not counted, R49). */
+  evictedBytes: number
   /** The bytes the decoder window holds. */
   windowBytes: number
   /** The downloader's measured rate in bytes a second, null before it knows one. */
@@ -224,6 +226,7 @@ class Play {
     error: null,
     backend: 'memory',
     storedBytes: 0,
+    evictedBytes: 0,
     windowBytes: 0,
     rate: null,
     slow: false,
@@ -291,6 +294,7 @@ class Play {
       const held = store.held()
       stats.backend = store.backend
       stats.storedBytes = store.stats().storedBytes
+      stats.evictedBytes = store.stats().evictedBytes
       stats.bytesReceived = held.bytes() + store.stats().evictedBytes
       stats.rate = downloader.rate()
       const duration = this.#feeder?.durationSeconds ?? null

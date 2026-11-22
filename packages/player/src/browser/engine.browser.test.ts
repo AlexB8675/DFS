@@ -65,6 +65,15 @@ suite('h264-aac-faststart.mp4')('playStreamed: a play from its start', () => {
     )
   })
 
+  test('says how many bytes the store has evicted, none for a file that fits (R49)', async () => {
+    const play = begin('h264-aac-faststart.mp4')
+    await until(play, 'the first picture', 15_000, () => play.video.readyState >= 2)
+    await until(play, 'a stats snapshot after the store opened', 15_000, () => {
+      return play.stats.some((numbers) => numbers.storedBytes > 0)
+    })
+    expect(play.stats.every((numbers) => numbers.evictedBytes === 0)).toBe(true)
+  })
+
   test('gives the downloader the playhead while it plays', async () => {
     // A slow link keeps the download reading: the position is not given once the download is done (the file is held whole).
     await control({ bandwidthBytesPerSecond: 250_000 })
