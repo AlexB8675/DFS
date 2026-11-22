@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { heldAt } from './held-at.ts'
+import { heldAt, neededVideoEnd } from './held-at.ts'
 
 // The moment the store held the bytes a picture needs, from the reads that resolved (DESIGN.md §10.4, R50).
 
@@ -59,5 +59,38 @@ describe('heldAt', () => {
     expect(() => heldAt([], 100, [3000, 5000], 'a seek', held)).toThrow(
       'The measure of a seek found no read that covers the bytes up to 5000.',
     )
+  })
+})
+
+describe('neededVideoEnd', () => {
+  const ends = [100, 200, 300, 400, 500]
+
+  it('ends at the latest frame that was covered when the picture showed: its reorder frames, not yet read, were not needed (R51)', () => {
+    // The picture showed (frame 1) before the read of the frames after it brought them.
+    const covered = (end: number): boolean => end <= 200
+    expect(neededVideoEnd(ends, 1, covered, 'a seek')).toBe(200)
+  })
+
+  it('takes in the reorder frames that were covered, up to the latest of them', () => {
+    const covered = (end: number): boolean => end <= 400
+    expect(neededVideoEnd(ends, 1, covered, 'a seek')).toBe(400)
+  })
+
+  it('is the largest end among the frames up to the latest covered one, whatever their order in the file', () => {
+    expect(neededVideoEnd([300, 100, 200], 0, (end) => end !== 200, 'a seek')).toBe(300)
+  })
+
+  it('fails naming the bytes when not even the shown frame was covered', () => {
+    const covered = (end: number): boolean => end <= 100
+    expect(() => neededVideoEnd(ends, 1, covered, 'a seek')).toThrow(
+      'The measure of a seek found no read that covers the bytes up to 200.',
+    )
+  })
+})
+
+describe('neededVideoEnd, the shown frame', () => {
+  it('fails when the shown frame was not covered, though a frame after it was', () => {
+    const covered = (end: number): boolean => end !== 200
+    expect(() => neededVideoEnd([100, 200, 300], 1, covered, 'a seek')).toThrow('up to 200.')
   })
 })

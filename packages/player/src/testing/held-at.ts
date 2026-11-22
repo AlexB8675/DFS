@@ -39,3 +39,29 @@ export function heldAt(
   }
   return latest
 }
+
+/**
+ * The end (exclusive) of the bytes the picture needed of the frames that the measure looks at: `frameEnds` are the
+ * ends of the frames from the first to `shown` plus the reorder frames, in the file's order, and `shownAt` is the
+ * place of `shown` among them. `covered(end)` says whether the byte before `end` was in the store when the picture
+ * showed (a read that resolved by then brought it, or the store held it at the mark). The picture showed without
+ * the frames that nothing had brought, so they were not needed: the end is the largest among the frames up to the
+ * latest covered one. Not even `shown` covered is a fault of the measure, and fails naming the bytes (R51).
+ */
+export function neededVideoEnd(
+  frameEnds: readonly number[],
+  shownAt: number,
+  covered: (end: number) => boolean,
+  what: string,
+): number {
+  let latest = -1
+  for (let i = 0; i < frameEnds.length; i += 1) {
+    if (covered(frameEnds[i] ?? 0)) latest = i
+  }
+  if (latest < shownAt || !covered(frameEnds[shownAt] ?? 0)) {
+    throw new Error(
+      `The measure of ${what} found no read that covers the bytes up to ${frameEnds[shownAt] ?? 0}.`,
+    )
+  }
+  return Math.max(...frameEnds.slice(0, latest + 1))
+}

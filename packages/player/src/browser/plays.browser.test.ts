@@ -16,7 +16,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import { Downloader } from '../downloader.ts'
 import type { ByteRange } from '@dfs/mp4'
 import { indexOfRun } from '../testing/contains.ts'
-import { heldAt } from '../testing/held-at.ts'
+import { heldAt, neededVideoEnd } from '../testing/held-at.ts'
 import type { ReadStamp } from '../testing/held-at.ts'
 import { PLAYS_DIRECTORY } from '../opfs.ts'
 import {
@@ -128,26 +128,35 @@ async function pictureAfter(
 /** How many frames after the first one shown that the picture's frames may reach, for the frames that are decoded before it and shown after: a B-frame pyramid is never deeper. */
 const REORDER_FRAMES = 8
 
+/** What the picture of a start or a seek needs of the store: the video's frame ends, and the other offsets. */
+interface Needed {
+  /** The end (exclusive) of each frame from the keyframe to `shown` plus the reorder frames. */
+  frameEnds: number[]
+  /** The place of the first frame shown at the target among `frameEnds`. */
+  shownAt: number
+  /** The sound's end and, for a start, the index's (the moov), which the engine needs before it can feed a frame. */
+  others: number[]
+}
+
 /**
- * The offsets (each the end of a frame, exclusive) that the store must hold for the picture of a start (`seconds`
- * null) or of a seek to `seconds`: the frames from the keyframe to the first one shown at the target, and the
- * index (the moov) for a start, which the engine needs before it can feed a frame. None for Matroska, whose index
- * keeps no frame table.
+ * The bytes that the store must hold for the picture of a start (`seconds` null) or of a seek to `seconds`: the
+ * frames from the keyframe to the first one shown at the target (and the reorder frames after it), the sound that
+ * covers the target, and the index for a start. None for Matroska, whose index keeps no frame table.
  */
-function neededEnds(facts: Facts, seconds: number | null): number[] {
+function neededOf(facts: Facts, seconds: number | null): Needed | null {
   const { index } = facts
-  if (index.container !== 'mp4') return []
+  if (index.container !== 'mp4') return null
   const { table, timing } = index.video
   const first =
     seconds === null ? 0 : mp4Seek(index, seconds, index.sound?.header.id ?? null).videoFrame
   const target = seconds ?? presentationSeconds(table, timing, 0)
   let shown = first
   while (shown < table.count - 1 && presentationSeconds(table, timing, shown) < target) shown += 1
-  let end = 0
+  const frameEnds: number[] = []
   for (let i = first; i <= Math.min(table.count - 1, shown + REORDER_FRAMES); i += 1) {
-    end = Math.max(end, (table.offsets[i] ?? 0) + (table.sizes[i] ?? 0))
+    frameEnds.push((table.offsets[i] ?? 0) + (table.sizes[i] ?? 0))
   }
-  const needed = [end]
+  const others: number[] = []
   // The sound's frames from the cursor to the one that covers the target, which the feed waits for too.
   const soundTrack = index.sound
   if (soundTrack !== null) {
@@ -164,10 +173,39 @@ function neededEnds(facts: Facts, seconds: number | null): number[] {
         (soundTrack.table.offsets[i] ?? 0) + (soundTrack.table.sizes[i] ?? 0),
       )
     }
-    if (soundEnd > 0) needed.push(soundEnd)
+    if (soundEnd > 0) others.push(soundEnd)
   }
-  if (seconds === null && facts.moovEnd !== null) needed.push(facts.moovEnd)
-  return needed
+  if (seconds === null && facts.moovEnd !== null) others.push(facts.moovEnd)
+  return { frameEnds, shownAt: shown - first, others }
+}
+
+/**
+ * The time, in ms, from the store's holding the bytes the picture needed to the picture (`pictureAt`), or null when
+ * there is nothing to say it by. The bytes are those of the frames that some read resolved by `pictureAt` brought, or
+ * the store held at the mark (`neededVideoEnd`), and the sound and the index. A fault of the measure fails only a
+ * file that is held to it (`strict`: the sparse ones); for the others it is told in the report and never fails
+ * their test (R51).
+ */
+function decoderTime(
+  reads: readonly ReadStamp[],
+  mark: number,
+  pictureAt: number,
+  needed: Needed | null,
+  what: string,
+  heldAtMark: (end: number) => boolean,
+  strict: boolean,
+): { ms: number | null; fault: string | null } {
+  if (needed === null) return { ms: null, fault: null }
+  try {
+    const covered = (end: number): boolean =>
+      heldAtMark(end) || reads.some((r) => r.at <= pictureAt && r.start < end && end <= r.end)
+    const video = neededVideoEnd(needed.frameEnds, needed.shownAt, covered, what)
+    const held = heldAt(reads, mark, [video, ...needed.others], what, heldAtMark)
+    return { ms: held === null ? null : pictureAt - held, fault: null }
+  } catch (error) {
+    if (strict) throw error
+    return { ms: null, fault: error instanceof Error ? error.message : String(error) }
+  }
 }
 
 /** The target of the seek: past the middle of the file, and with room after it for the little that is played. */
@@ -199,14 +237,16 @@ describe.skipIf(choice.length === 0)('the fast link: a start and a seek to a pic
       const play = begin(file.name, { autoplay: () => true })
       try {
         const { firstFrameMs, movingMs: startMs } = await startPicture(play, startedAt)
-        const startHeld = heldAt(
+        const startMeasure = decoderTime(
           reads,
           startedAt,
-          neededEnds(facts, null),
+          startedAt + startMs,
+          neededOf(facts, null),
           'the start',
           () => false,
+          !dense,
         )
-        const startDecoderMs = startHeld === null ? null : startedAt + startMs - startHeld
+        const startDecoderMs = startMeasure.ms
 
         // Let it play a moment so that the seek is a seek of a play, then jump past the middle.
         await until(play, 'the clock to move', 20_000, () => play.video.currentTime > 0.3)
@@ -224,11 +264,19 @@ describe.skipIf(choice.length === 0)('the fast link: a start and a seek to a pic
         )
         // A seek the window holds makes no read: the data was at the decoder already, and the whole seek is the measure.
         const windowSeek = ofType(play.events, 'seek').findLast((event) => event.ms === null)
-        const seekHeld =
+        const seekMeasure =
           windowSeek?.inWindow === true
-            ? seekMark
-            : heldAt(reads, seekMark, neededEnds(facts, target), 'the seek', heldBeforeSeek)
-        const seekDecoderMs = seekHeld === null ? null : seekMark + seekMs - seekHeld
+            ? { ms: seekMs, fault: null }
+            : decoderTime(
+                reads,
+                seekMark,
+                seekMark + seekMs,
+                neededOf(facts, target),
+                'the seek',
+                heldBeforeSeek,
+                !dense,
+              )
+        const seekDecoderMs = seekMeasure.ms
 
         // A little of what follows the seek, as a play: the clock goes on.
         await until(play, 'the clock to go on after the seek', 20_000, () => {
@@ -265,6 +313,7 @@ describe.skipIf(choice.length === 0)('the fast link: a start and a seek to a pic
           seekEngineMs: seekDone?.ms ?? null,
           seekInWindow: seekDone?.inWindow ?? null,
           seekTo: target,
+          measureFaults: [startMeasure.fault, seekMeasure.fault].filter((fault) => fault !== null),
         })
         expect(ofType(play.events, 'error')).toEqual([])
         expect(play.video.error).toBeNull()
