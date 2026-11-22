@@ -503,14 +503,27 @@ class Play {
   async #feedCovering(target: number, interrupted: () => boolean): Promise<void> {
     const sink = this.#sink
     if (sink === null) throw new Error('The sink is not open.')
+    // True after a quota stall that nothing mended: the feed starts at the keyframe at or before the target, so
+    // nothing behind it can be removed, and no later wait can free room. It is tried once more, at the next wake.
+    let refused = false
     for (;;) {
       const result = await this.#feedOnce()
       if (interrupted()) return
       if (result === 'ended' || this.#covers(sink, target)) return
-      if (result === 'idle') {
-        if (!this.#quotaStalled) return
-        await this.#nextWake()
+      if (result === 'fed') {
+        refused = false
+        continue
       }
+      if (!this.#quotaStalled) return
+      if (refused) {
+        throw new Error(
+          "A group of pictures of this file is larger than the browser's buffer, so it cannot be played here.",
+        )
+      }
+      refused = true
+      await this.#nextWake()
+      // The retry must really try: a playhead that has not moved would make the feed wait for it.
+      this.#stallAt = null
     }
   }
 

@@ -287,6 +287,69 @@ suite('h264-aac-faststart.mp4')('playStreamed: a play from its start', () => {
     }
   })
 
+  /** Makes the browser refuse every fragment (an init segment starts with `ftyp`) while `refusing.on`; the original is put back by the returned function. */
+  function refuseFragments(): { refusing: { on: boolean }; restore: () => void } {
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- the original is called on the buffer it was taken from, below.
+    const real = SourceBuffer.prototype.appendBuffer
+    const refusing = { on: true }
+    SourceBuffer.prototype.appendBuffer = function (this: SourceBuffer, source: BufferSource) {
+      const head = ArrayBuffer.isView(source)
+        ? new Uint8Array(source.buffer, source.byteOffset, source.byteLength)
+        : new Uint8Array(source)
+      if (refusing.on && String.fromCharCode(...head.subarray(4, 8)) !== 'ftyp') {
+        throw new DOMException('The buffer is full.', 'QuotaExceededError')
+      }
+      real.call(this, source)
+    }
+    return {
+      refusing,
+      restore: () => {
+        SourceBuffer.prototype.appendBuffer = real
+      },
+    }
+  }
+
+  test('an opening whose cover meets a quota error that nothing can mend fails the play (A3)', async () => {
+    const { restore } = refuseFragments()
+    try {
+      const play = begin('h264-aac-faststart.mp4')
+      const from = performance.now()
+      while (play.rejection === null && performance.now() - from < 4_000) {
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+      expect(play.rejection).not.toBeNull()
+      const errors = ofType(play.events, 'error')
+      expect(errors).toHaveLength(1)
+      expect(errors[0]?.message).toMatch(/group of pictures.*larger than the browser's buffer/)
+      expect(ofType(play.events, 'phase').at(-1)?.phase).toBe('failed')
+    } finally {
+      restore()
+    }
+  })
+
+  test('a seek outside the window whose cover meets a quota error that nothing can mend fails the play (A3)', async () => {
+    const { refusing, restore } = refuseFragments()
+    refusing.on = false
+    try {
+      // A window of 2 MiB holds about 5 s of this file: 10 s is outside it.
+      const play = begin('h264-aac-faststart.mp4', { windowBytes: 2 * 1024 * 1024 })
+      await until(play, 'the first picture', 15_000, () => play.video.readyState >= 2)
+      refusing.on = true
+      play.video.currentTime = 10
+      await until(
+        play,
+        'the play to fail',
+        4_000,
+        () => ofType(play.events, 'phase').at(-1)?.phase === 'failed',
+      )
+      const errors = ofType(play.events, 'error')
+      expect(errors).toHaveLength(1)
+      expect(errors[0]?.message).toMatch(/group of pictures.*larger than the browser's buffer/)
+    } finally {
+      restore()
+    }
+  })
+
   test('a failure after the first picture sends one error, stops the download and reads nothing more', async () => {
     // A slow link keeps the read open. A network change breaks it; the read is then dropped once, and then refused for good (404).
     await control({ bandwidthBytesPerSecond: 200_000 })
