@@ -16,7 +16,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import { Downloader } from '../downloader.ts'
 import type { ByteRange } from '@dfs/mp4'
 import { indexOfRun } from '../testing/contains.ts'
-import { heldAt, neededVideoEnd } from '../testing/held-at.ts'
+import { heldAt, neededVideoEnd, seekHeldToSecond } from '../testing/held-at.ts'
 import type { ReadStamp } from '../testing/held-at.ts'
 import { PLAYS_DIRECTORY } from '../opfs.ts'
 import {
@@ -34,6 +34,7 @@ import {
 } from './play-harness.ts'
 import type { Play } from './play-harness.ts'
 import {
+  FAST_BYTES_PER_SECOND,
   factsOf,
   fastLink,
   fetchRange,
@@ -132,6 +133,8 @@ const REORDER_FRAMES = 8
 interface Needed {
   /** The end (exclusive) of each frame from the keyframe to `shown` plus the reorder frames. */
   frameEnds: number[]
+  /** The bytes from the keyframe to the end of the last frame the measure looks at. */
+  groupBytes: number
   /** The place of the first frame shown at the target among `frameEnds`. */
   shownAt: number
   /** The sound's end and, for a start, the index's (the moov), which the engine needs before it can feed a frame. */
@@ -176,7 +179,13 @@ function neededOf(facts: Facts, seconds: number | null): Needed | null {
     if (soundEnd > 0) others.push(soundEnd)
   }
   if (seconds === null && facts.moovEnd !== null) others.push(facts.moovEnd)
-  return { frameEnds, shownAt: shown - first, others }
+  const firstOffset = table.offsets[first] ?? 0
+  return {
+    frameEnds,
+    groupBytes: Math.max(0, ...frameEnds) - firstOffset,
+    shownAt: shown - first,
+    others,
+  }
 }
 
 /**
@@ -264,6 +273,15 @@ describe.skipIf(choice.length === 0)('the fast link: a start and a seek to a pic
         )
         // A seek the window holds makes no read: the data was at the decoder already, and the whole seek is the measure.
         const windowSeek = ofType(play.events, 'seek').findLast((event) => event.ms === null)
+        const seekNeeded = neededOf(facts, target)
+        // A dense seek whose bytes cannot cross the link in half a second is held to its data-to-decoder time (R52).
+        const seekToSecond =
+          dense &&
+          (seekNeeded === null ||
+            seekHeldToSecond(
+              seekNeeded.groupBytes,
+              link.bandwidthBytesPerSecond ?? FAST_BYTES_PER_SECOND,
+            ))
         const seekMeasure =
           windowSeek?.inWindow === true
             ? { ms: seekMs, fault: null }
@@ -271,10 +289,10 @@ describe.skipIf(choice.length === 0)('the fast link: a start and a seek to a pic
                 reads,
                 seekMark,
                 seekMark + seekMs,
-                neededOf(facts, target),
+                seekNeeded,
                 'the seek',
                 heldBeforeSeek,
-                !dense,
+                !seekToSecond,
               )
         const seekDecoderMs = seekMeasure.ms
 
@@ -297,6 +315,8 @@ describe.skipIf(choice.length === 0)('the fast link: a start and a seek to a pic
           container: facts.index.container,
           keyframeGapSeconds: facts.keyframeGap,
           dense,
+          seekToSecond,
+          groupBytes: seekNeeded?.groupBytes ?? null,
           linkBytesPerSecond: link.bandwidthBytesPerSecond,
           bitrateBytesPerSecond: Math.round(file.size / duration),
           maxWindowBytes: Math.round(
@@ -318,21 +338,19 @@ describe.skipIf(choice.length === 0)('the fast link: a start and a seek to a pic
         expect(ofType(play.events, 'error')).toEqual([])
         expect(play.video.error).toBeNull()
 
-        if (dense) {
-          expect(startMs, `the start of ${file.name}`).toBeLessThan(PICTURE_MS)
-          expect(seekMs, `the seek of ${file.name}`).toBeLessThan(PICTURE_MS)
-        } else {
-          // Sparser than DENSE_KEYFRAME_SECONDS (or no table to tell): the times are logged above, and what is held
-          // to a second is the time from the store's holding the keyframe's bytes to the picture.
-          if (startDecoderMs !== null)
-            expect(startDecoderMs, `the start of ${file.name}, data to decoder`).toBeLessThan(
-              PICTURE_MS,
-            )
-          if (seekDecoderMs !== null)
-            expect(seekDecoderMs, `the seek of ${file.name}, data to decoder`).toBeLessThan(
-              PICTURE_MS,
-            )
-        }
+        if (dense) expect(startMs, `the start of ${file.name}`).toBeLessThan(PICTURE_MS)
+        if (seekToSecond) expect(seekMs, `the seek of ${file.name}`).toBeLessThan(PICTURE_MS)
+        // What is not held to a second (a start or a seek of a file sparser than DENSE_KEYFRAME_SECONDS, or of a group
+        // that cannot cross the link in half a second) is logged above, and held to the time from the store's holding
+        // the bytes to the picture.
+        if (!dense && startDecoderMs !== null)
+          expect(startDecoderMs, `the start of ${file.name}, data to decoder`).toBeLessThan(
+            PICTURE_MS,
+          )
+        if (!seekToSecond && seekDecoderMs !== null)
+          expect(seekDecoderMs, `the seek of ${file.name}, data to decoder`).toBeLessThan(
+            PICTURE_MS,
+          )
       } catch (error) {
         report({
           test: 'timeline',

@@ -65,3 +65,16 @@ export function neededVideoEnd(
   }
   return Math.max(...frameEnds.slice(0, latest + 1))
 }
+
+/** How long, in seconds, the bytes of a seek's picture may take on the test's link for the seek to be held to the one-second goal (R52). */
+export const SEEK_TRANSFER_SECONDS = 0.5
+
+/**
+ * Whether a dense file's seek is held to the second: the bytes from its keyframe to the shown frame plus its reorder
+ * frames cross the link (`bandwidthBytesPerSecond`) in at most {@link SEEK_TRANSFER_SECONDS}. Goal 2's second is the
+ * engine's overhead plus a transfer a good link makes quickly; a group that takes the whole second on the wire is held
+ * to its data-to-decoder time instead (R52).
+ */
+export function seekHeldToSecond(groupBytes: number, bandwidthBytesPerSecond: number): boolean {
+  return groupBytes / bandwidthBytesPerSecond <= SEEK_TRANSFER_SECONDS
+}

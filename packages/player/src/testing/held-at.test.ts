@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { heldAt, neededVideoEnd } from './held-at.ts'
+import { heldAt, neededVideoEnd, seekHeldToSecond } from './held-at.ts'
 
 // The moment the store held the bytes a picture needs, from the reads that resolved (DESIGN.md §10.4, R50).
 
@@ -92,5 +92,22 @@ describe('neededVideoEnd, the shown frame', () => {
   it('fails when the shown frame was not covered, though a frame after it was', () => {
     const covered = (end: number): boolean => end !== 200
     expect(() => neededVideoEnd([100, 200, 300], 1, covered, 'a seek')).toThrow('up to 200.')
+  })
+})
+
+describe('seekHeldToSecond', () => {
+  it('holds a seek to the second when its bytes cross the link in half a second or less', () => {
+    expect(seekHeldToSecond(15_000_000, 31_400_000)).toBe(true)
+    expect(seekHeldToSecond(10_000_000, 20_000_000)).toBe(true)
+  })
+
+  it('does not when the bytes need more than half a second on the link', () => {
+    // A 30 MB group on a 31.4 MB/s link: 0.95 s on the wire alone.
+    expect(seekHeldToSecond(30_000_000, 31_400_000)).toBe(false)
+    expect(seekHeldToSecond(10_000_001, 20_000_000)).toBe(false)
+  })
+
+  it('holds a seek that has no bytes to cross', () => {
+    expect(seekHeldToSecond(0, 12_500_000)).toBe(true)
   })
 })
