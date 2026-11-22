@@ -30,6 +30,8 @@ export interface ManifestEntry {
   path: string
   expect: 'plays' | { refused: Mp4Refusal }
   codecs?: { video?: string; audio?: string }
+  /** The file's tracks end far apart (a sound that stops long before the picture): it plays only to the shorter track's end, so the suites that play files through take it out of their sample. */
+  uneven?: true
 }
 
 const REFUSALS: readonly string[] = [
@@ -54,7 +56,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function entryOf(value: unknown, at: number): ManifestEntry {
   const bad = (what: string): Error => new Error(`Entry ${at} of ${manifestPath} ${what}.`)
   if (!isRecord(value)) throw bad('is not an object')
-  const { path, expect, codecs } = value
+  const { path, expect, codecs, uneven } = value
   if (typeof path !== 'string' || path === '') throw bad('has no path')
   let wanted: ManifestEntry['expect']
   if (expect === 'plays') {
@@ -68,7 +70,7 @@ function entryOf(value: unknown, at: number): ManifestEntry {
   } else {
     throw bad(`has an expectation that is neither 'plays' nor { refused: <reason> }`)
   }
-  const entry: ManifestEntry = { path, expect: wanted }
+  const entry: ManifestEntry = { path, expect: wanted, ...(uneven === true ? { uneven } : {}) }
   if (codecs !== undefined) {
     if (!isRecord(codecs)) throw bad('has codecs that are not an object')
     const { video, audio } = codecs

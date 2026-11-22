@@ -40,6 +40,8 @@ export interface PlayFile {
   name: string
   /** Whether `corpus:make` made it, as against one of the user's videos, which are read in place. */
   synthetic: boolean
+  /** Its tracks end far apart: it plays only to the shorter track's end. */
+  uneven?: true
   size: number
   expect: 'plays' | { refused: string }
 }

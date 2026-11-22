@@ -19,6 +19,11 @@ function rig(maxFrameSeconds: number | null = null) {
     buffered: [[0, 20]],
     holding: false,
     hidden: false,
+    feeding: false,
+    trackEnds: [
+      { name: 'picture', end: 20 },
+      { name: 'sound', end: 20 },
+    ],
   }
   return {
     tick(ms: number, patch: Partial<WatchSample> = {}) {
@@ -102,9 +107,28 @@ describe('Watchdog', () => {
     expect(GAP_EDGE_SECONDS).toBeLessThan(10)
   })
 
-  it('refeeds again and again when the data is missing, never reopening', () => {
+  it('refeeds once when the data is missing, then reports stuck, naming the track that ends at the playhead (A1)', () => {
     const r = rig()
-    const patch = { buffered: [] as [number, number][] }
+    const patch = {
+      buffered: [] as [number, number][],
+      trackEnds: [
+        { name: 'picture', end: 30 },
+        { name: 'sound', end: 10 },
+      ],
+    }
+    expect(freeze(r, patch)).toEqual({ action: 'refeed' })
+    const last = r.tick(STUCK_MS, patch)
+    expect(last?.action).toBe('stuck')
+    if (last?.action === 'stuck') {
+      expect(last.detail).toContain('sound')
+      expect(last.detail).toContain('10.0')
+      expect(last.detail).not.toContain('picture')
+    }
+  })
+
+  it('refeeds again and again while a feed waits for bytes, never reporting stuck (R39)', () => {
+    const r = rig()
+    const patch = { buffered: [] as [number, number][], feeding: true }
     expect(freeze(r, patch)).toEqual({ action: 'refeed' })
     for (let i = 0; i < REOPENS_MAX + 2; i++) {
       expect(r.tick(STUCK_MS, patch)).toEqual({ action: 'refeed' })
@@ -181,14 +205,12 @@ describe('Watchdog', () => {
       ],
     ],
   ] as [string, [number, number][]][])(
-    'refeeds again and again, never reopening, at the end of %s',
+    'refeeds once, never reopening, then reports stuck, at the end of %s (A1)',
     (_name, buffered) => {
       const r = rig()
       const patch = { at: 19.9, buffered }
       expect(freeze(r, patch)).toEqual({ action: 'refeed' })
-      for (let i = 0; i < REOPENS_MAX + 2; i++) {
-        expect(r.tick(STUCK_MS, patch)).toEqual({ action: 'refeed' })
-      }
+      expect(r.tick(STUCK_MS, patch)?.action).toBe('stuck')
     },
   )
 

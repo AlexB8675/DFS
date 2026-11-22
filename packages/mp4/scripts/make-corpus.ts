@@ -116,12 +116,16 @@ interface SpecBase {
   patch?: (path: string) => void
   /** A check of the made file that ffprobe has no word for, throwing what is wrong. */
   verify?: (path: string) => void
+  /** The tracks end far apart: the suites that play files through leave the file out of their sample (`ManifestEntry.uneven`). */
+  uneven?: true
 }
 
 /** A file ffmpeg writes. */
 interface MadeSpec extends SpecBase {
   /** ffmpeg's arguments between the inputs' options and the output file. */
   args: string[]
+  /** The file's length in seconds when it is not `SECONDS`: the `-t` of its output. */
+  seconds?: number
 }
 
 /** A file that is the rewrite of another spec's file, which comes before it in the list: ffmpeg has no option to write it. Its streams must be the source's too. */
@@ -684,6 +688,47 @@ const SPECS: Spec[] = [
       const sound = readIndex(path, size).tracks.find((track) => track.kind === 'audio')
       if (sound?.edits?.[0]?.mediaTime !== -1) {
         throw new Error(`The sound has no leading empty edit: ${JSON.stringify(sound?.edits)}`)
+      }
+    },
+  },
+  {
+    // The sound is 10 s long and the picture 50 s (with noise laid on it, so that 30 s of it are some megabytes and a feed to the window's reach
+    // does not take the whole file in its reads): the sound ends 40 s before the picture, more than the decoder window holds ahead (30 s), so the
+    // feed cannot reach the end of the file while the clock waits at the sound's end. The engine plays it as far as
+    // the sound goes and then fails with `stuck` (a known limit, DESIGN.md §10.4).
+    name: 'short-sound.mp4',
+    layout: 'ftyp free mdat moov',
+    streams: ['h264', 'aac'],
+    args: [
+      '-f',
+      'lavfi',
+      '-i',
+      'testsrc2=size=640x360:rate=30:duration=50,noise=alls=16:allf=t+u',
+      '-f',
+      'lavfi',
+      '-i',
+      'sine=frequency=440:sample_rate=48000:duration=10',
+      ...H264,
+      ...AAC,
+      '-f',
+      'mp4',
+    ],
+    seconds: 50,
+    expect: 'plays',
+    codecs: { video: 'avc1.64', audio: 'mp4a.40.2' },
+    uneven: true,
+    verify: (path) => {
+      const size = statSync(path).size
+      const tracks = readIndex(path, size).tracks
+      const sound = tracks.find((track) => track.kind === 'audio')
+      const picture = tracks.find((track) => track.kind === 'video')
+      if (sound === undefined || picture === undefined) throw new Error('The file lacks a track.')
+      const soundSeconds = sound.durationTicks / sound.timescale
+      const pictureSeconds = picture.durationTicks / picture.timescale
+      if (pictureSeconds - soundSeconds < 35) {
+        throw new Error(
+          `The sound is ${soundSeconds.toFixed(1)} s and the picture ${pictureSeconds.toFixed(1)} s: the sound must end more than 35 s before the picture.`,
+        )
       }
     },
   },
@@ -1436,7 +1481,7 @@ async function main(): Promise<void> {
           'error',
           ...spec.args,
           '-t',
-          String(SECONDS),
+          String(spec.seconds ?? SECONDS),
           partial,
         ])
       }
@@ -1461,6 +1506,7 @@ async function main(): Promise<void> {
       path,
       expect: spec.expect,
       ...(spec.codecs ? { codecs: spec.codecs } : {}),
+      ...(spec.uneven ? { uneven: true as const } : {}),
     })
   }
   await writeManifest(mergeEntries(readManifest(), entries, true))

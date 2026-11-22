@@ -34,8 +34,15 @@ export class Watching {
     this.#seekSince = true
   }
 
-  /** Reads the element and asks the watchdog; `holding` is whether the hold rule is holding the play. */
-  sample(holding: boolean): WatchAction | null {
+  /**
+   * Reads the element and asks the watchdog; `holding` is whether the hold rule is holding the play, `feeding`
+   * whether a feed is under way, and `trackEnds` where each playing track's buffer ends at the playhead.
+   */
+  sample(
+    holding: boolean,
+    feeding: boolean,
+    trackEnds: { name: string; end: number | null }[],
+  ): WatchAction | null {
     const video = this.#video
     const seeking = video.seeking || this.#seekSince
     this.#seekSince = false
@@ -49,6 +56,8 @@ export class Watching {
       buffered: rangesOf(video.buffered),
       holding,
       hidden: document.hidden,
+      feeding,
+      trackEnds,
     })
   }
 }

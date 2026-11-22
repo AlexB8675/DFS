@@ -14,6 +14,8 @@ export interface Candidate {
   name: string
   size: number
   synthetic: boolean
+  /** Its tracks end far apart, so it plays only to the shorter track's end: it is not played through. */
+  uneven?: true
   expect: 'plays' | { refused: string }
 }
 
@@ -42,7 +44,7 @@ function byName(a: Candidate, b: Candidate): number {
  * names; the order the files are given in makes no difference.
  */
 export function filesToPlay<T extends Candidate>(files: readonly T[], all: boolean): T[] {
-  const playing = files.filter((file) => file.expect === 'plays')
+  const playing = files.filter((file) => file.expect === 'plays' && file.uneven !== true)
   const made = playing.filter((file) => file.synthetic).sort(byName)
   const users = playing.filter((file) => !file.synthetic).sort(byName)
   if (all || users.length <= SAMPLE) return [...made, ...users]

@@ -761,8 +761,27 @@ class Play {
     }
     // While the feed is being moved the hold has nothing to check, and the watchdog is told the play is held, so its clocks start afresh.
     if (!this.#busy()) this.#holding.check()
-    const action = this.#watching?.sample(this.#holding.holding || this.#busy()) ?? null
+    const action =
+      this.#watching?.sample(
+        this.#holding.holding || this.#busy(),
+        this.#feeding,
+        this.#trackEnds(),
+      ) ?? null
     if (action !== null) this.#applyWatch(action)
+  }
+
+  /** Where each playing track's buffer ends at the playhead (the end of the last range that starts at or before it); null for a track with none there. */
+  #trackEnds(): { name: string; end: number | null }[] {
+    const sink = this.#sink
+    if (sink === null) return []
+    const at = this.#video.currentTime
+    return this.#kinds.map((kind) => {
+      const before = sink.buffered(kind).filter(([start]) => start <= at)
+      return {
+        name: kind === 'audio' ? 'sound' : 'picture',
+        end: before.length === 0 ? null : Math.max(...before.map(([, end]) => end)),
+      }
+    })
   }
 
   /** Does what the watchdog says, and logs it. */

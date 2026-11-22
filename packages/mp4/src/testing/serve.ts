@@ -216,6 +216,7 @@ export async function startCorpusServer(entries: readonly ManifestEntry[]): Prom
         expect: entry.expect,
         size,
         synthetic: isSynthetic(entry.path),
+        ...(entry.uneven === true ? { uneven: true as const } : {}),
         container,
       })),
     },

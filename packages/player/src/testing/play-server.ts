@@ -265,6 +265,7 @@ export async function startPlayServer(
     id: String(at),
     name: titles[at] ?? '',
     synthetic: isSynthetic(entry.path),
+    ...(entry.uneven === true ? { uneven: true as const } : {}),
     size: served.size,
     expect: entry.expect,
   }))

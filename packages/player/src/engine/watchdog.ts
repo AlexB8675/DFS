@@ -22,6 +22,10 @@ export interface WatchSample {
   holding: boolean
   /** The page's `document.hidden`: a hidden tab's picture stops while its sound plays on. */
   hidden: boolean
+  /** True while a feed is under way, so possibly waiting for bytes (the engine skips a refeed then, R39). */
+  feeding: boolean
+  /** Where each playing track's buffer ends at or before the playhead, in seconds; null when it has none there. */
+  trackEnds: { name: string; end: number | null }[]
 }
 
 export type WatchAction =
@@ -41,7 +45,9 @@ function seconds(value: number): string {
  * STUCK_MS of media with no new frame. Frames moving while the clock stands is a
  * decoder catching up. Once stuck, one rung of the ladder is given each STUCK_MS:
  * a step over a small gap, a refeed, a reopen (data at the playhead, at most
- * REOPENS_MAX per play), then `stuck`. When the play moves, the ladder starts
+ * REOPENS_MAX per play), then `stuck`. A refeed that ends with no data at the
+ * playhead, while no feed waits for bytes, is futile (a track that ends or has a
+ * hole there): the next rung is `stuck`, naming that track (A1). When the play moves, the ladder starts
  * again; the reopens used are never given back.
  */
 export class Watchdog {
@@ -117,6 +123,7 @@ export class Watchdog {
 
     const next = this.nextRung(sample)
     if (next !== null) return next
+    if (!holdsData(sample)) return { action: 'stuck', detail: endedDetail(sample) }
     const what = clockFrozen
       ? `The clock and the picture stood still at ${seconds(sample.at)} s for ${seconds((t - this.clockSince) / 1000)} s`
       : `The picture stood still for ${seconds(sample.at - this.frameClock)} s of the video while the clock moved, up to ${seconds(sample.at)} s`
@@ -136,8 +143,16 @@ export class Watchdog {
         return { action: 'gap', to }
       }
     }
-    if (!holdsData(sample) || !this.refed) {
-      this.refed = holdsData(sample)
+    if (!holdsData(sample)) {
+      // A feed that waits for bytes has no data yet: the engine skips the refeed, and the wait is not futile.
+      if (sample.feeding) return { action: 'refeed' }
+      // One refeed has been tried and there is still none: no further refeed can help.
+      if (this.refed) return null
+      this.refed = true
+      return { action: 'refeed' }
+    }
+    if (!this.refed) {
+      this.refed = true
       return { action: 'refeed' }
     }
     if (this.reopens < REOPENS_MAX) {
@@ -160,6 +175,20 @@ export class Watchdog {
     this.frameClock = sample.at
     this.lastStepAt = null
   }
+}
+
+/** The sentence of a play whose buffers hold no data at the playhead after a refeed: it names the track whose buffer ends there. */
+function endedDetail(sample: WatchSample): string {
+  const ended = sample.trackEnds
+    .filter(({ end }) => end === null || end <= sample.at + GAP_EDGE_SECONDS)
+    .sort((a, b) => (a.end ?? -Infinity) - (b.end ?? -Infinity))[0]
+  const where =
+    ended === undefined
+      ? 'No track has data at the playhead'
+      : ended.end === null
+        ? `The ${ended.name} has no data at the playhead`
+        : `The ${ended.name}'s buffer ends at ${seconds(ended.end)} s`
+  return `${where}, the clock stood still at ${seconds(sample.at)} s, and a refeed did not bring more, with the element at ready state ${sample.readyState}.`
 }
 
 /** True when a buffered range holds the playhead with more than GAP_EDGE_SECONDS of data after it. */

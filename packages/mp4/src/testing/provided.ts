@@ -14,6 +14,8 @@ export interface CorpusFile {
   size: number
   /** Whether `corpus:make` made it, as against one of the user's videos, which are read in place. */
   synthetic: boolean
+  /** Its tracks end far apart: it plays only to the shorter track's end. */
+  uneven?: true
   /** Matroska when the file starts with EBML's magic number, else an MP4: a file that is neither is for the MP4 suites to turn away, as they always did, and is not called Matroska. */
   container: Container
 }

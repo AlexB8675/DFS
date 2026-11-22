@@ -25,6 +25,15 @@ function twenty(): Candidate[] {
 const names = (files: readonly Candidate[]): string[] => files.map((file) => file.name)
 
 describe('filesToPlay', () => {
+  it('leaves out a file whose tracks end far apart, which plays only to the shorter end', () => {
+    const files: Candidate[] = [
+      synthetic('a.mp4'),
+      { ...synthetic('short-sound.mp4'), uneven: true },
+    ]
+    expect(names(filesToPlay(files, false))).toEqual(['a.mp4'])
+    expect(names(filesToPlay(files, true))).toEqual(['a.mp4'])
+  })
+
   it('plays every synthetic file expected to play, and none that is expected to be refused', () => {
     const files: Candidate[] = [
       synthetic('b.mp4'),

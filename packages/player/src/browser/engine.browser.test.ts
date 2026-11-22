@@ -424,3 +424,28 @@ suite('h264-aac.mkv')('playStreamed: a Matroska file', () => {
     expect(ofType(play.events, 'error')).toEqual([])
   })
 })
+
+// A sound that ends 40 s before the picture, more than the window holds ahead (A1): the feed cannot reach the end of the
+// file, so Media Source never ends, and the element waits at the sound's end. One refeed cannot help; the play fails with a reason.
+suite('short-sound.mp4')('playStreamed: a sound that ends long before the picture', () => {
+  test('fails with stuck, naming the sound, after at most one refeed', async () => {
+    const play = begin('short-sound.mp4', { startAt: 8, autoplay: () => true })
+    await until(
+      play,
+      'the play to fail',
+      15_000,
+      () => ofType(play.events, 'phase').at(-1)?.phase === 'failed',
+    )
+    const dog = ofType(play.events, 'watchdog')
+    const stuck = dog.filter((event) => event.action === 'stuck')
+    expect(stuck).toHaveLength(1)
+    expect(stuck[0]?.detail).toContain('sound')
+    expect(stuck[0]?.detail).not.toContain('picture')
+    expect(dog.filter((event) => event.action === 'refeed').length).toBeLessThanOrEqual(1)
+    expect(dog.filter((event) => event.action === 'reopen')).toEqual([])
+    expect(ofType(play.events, 'error')).toHaveLength(1)
+    // The sound's end, 10 s into the file: the clock got there and stood.
+    expect(play.video.currentTime).toBeGreaterThan(9)
+    expect(play.video.currentTime).toBeLessThan(11)
+  })
+})
