@@ -40,6 +40,14 @@ export const RATE_WINDOW_MS = 5_000
  */
 export const RATE_EARLY_MS = 250
 
+/**
+ * The share of the measured rate that the slow hold counts on: it works out what the rest of the video will take
+ * from 0.95 of the rate, so that noise in the measure and a variable bit rate do not leave the release at the exact
+ * break-even point, in proportion to what remains. A slightly longer hold on a slow link is the cost, which the
+ * user's rule (bandwidth is cheap if it prevents a stall) accepts.
+ */
+export const SLOW_RATE_SHARE = 0.95
+
 /** How often a hold is checked while it is on, so that it lets go soon after the rate covers the bit rate and does not wait for the engine's 500 ms tick. */
 export const HOLD_CHECK_MS = 50
 

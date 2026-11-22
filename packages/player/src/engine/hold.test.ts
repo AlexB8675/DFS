@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CHUNK_BYTES, START_GOAL_SECONDS, STALL_GOAL_SECONDS } from '../limits.ts'
+import { CHUNK_BYTES, SLOW_RATE_SHARE, START_GOAL_SECONDS, STALL_GOAL_SECONDS } from '../limits.ts'
 import { holdDecision, isSlow } from './hold.ts'
 import type { HoldInput } from './hold.ts'
 
@@ -56,7 +56,7 @@ describe('holdDecision', () => {
     const d = holdDecision(input({ rateBytesPerSecond: BITRATE * 0.75, remainingSeconds: 60 }))
     expect(d.slow).toBe(true)
     expect(d.hold).toBe(true)
-    expect(d.goalSeconds).toBeCloseTo(15 + MARGIN)
+    expect(d.goalSeconds).toBeCloseTo(60 * (1 - SLOW_RATE_SHARE * 0.75) + MARGIN)
     expect(d.goalSeconds).toBeGreaterThan(START_GOAL_SECONDS)
   })
 
@@ -66,9 +66,13 @@ describe('holdDecision', () => {
       remainingSeconds: 60,
       storeAheadCapSeconds: 100,
     }
-    expect(holdDecision(input(half)).goalSeconds).toBeCloseTo(30 + MARGIN)
+    expect(holdDecision(input(half)).goalSeconds).toBeCloseTo(
+      60 * (1 - SLOW_RATE_SHARE * 0.5) + MARGIN,
+    )
     expect(holdDecision(input({ ...half, storeAheadCapSeconds: 20 })).goalSeconds).toBeCloseTo(18)
-    expect(holdDecision(input({ ...half, reason: 'stall' })).goalSeconds).toBeCloseTo(30 + MARGIN)
+    expect(holdDecision(input({ ...half, reason: 'stall' })).goalSeconds).toBeCloseTo(
+      60 * (1 - SLOW_RATE_SHARE * 0.5) + MARGIN,
+    )
   })
 
   it('applies the floor when the need is under it', () => {
