@@ -123,7 +123,8 @@ describe('Holding', () => {
     expect(holds(play.events)[0]).toMatchObject({ on: true, reason: 'start' })
     expect(play.calls).toEqual([])
     play.want.autoplay = false
-    play.held.add({ start: 0, end: 9_000_000 })
+    // The slow goal keeps a read of margin and is capped by what remains, so the whole clip is what lets go.
+    play.held.add({ start: 0, end: 10_000_000 })
     play.holding.check()
     expect(holds(play.events)[1]).toMatchObject({ on: false })
     expect(play.calls).toEqual([])

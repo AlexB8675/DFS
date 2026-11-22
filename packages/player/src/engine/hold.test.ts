@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { START_GOAL_SECONDS, STALL_GOAL_SECONDS } from '../limits.ts'
+import { CHUNK_BYTES, START_GOAL_SECONDS, STALL_GOAL_SECONDS } from '../limits.ts'
 import { holdDecision, isSlow } from './hold.ts'
 import type { HoldInput } from './hold.ts'
 
@@ -7,6 +7,9 @@ import type { HoldInput } from './hold.ts'
 // seek or a stall, measured on what the store holds.
 
 const BITRATE = 1_000_000
+
+// The slow goal keeps one read of the feeder's as margin, in seconds of the video (R45).
+const MARGIN = CHUNK_BYTES / BITRATE
 
 function input(over: Partial<HoldInput>): HoldInput {
   return {
@@ -53,7 +56,7 @@ describe('holdDecision', () => {
     const d = holdDecision(input({ rateBytesPerSecond: BITRATE * 0.75, remainingSeconds: 60 }))
     expect(d.slow).toBe(true)
     expect(d.hold).toBe(true)
-    expect(d.goalSeconds).toBeCloseTo(15)
+    expect(d.goalSeconds).toBeCloseTo(15 + MARGIN)
     expect(d.goalSeconds).toBeGreaterThan(START_GOAL_SECONDS)
   })
 
@@ -63,19 +66,19 @@ describe('holdDecision', () => {
       remainingSeconds: 60,
       storeAheadCapSeconds: 100,
     }
-    expect(holdDecision(input(half)).goalSeconds).toBeCloseTo(30)
+    expect(holdDecision(input(half)).goalSeconds).toBeCloseTo(30 + MARGIN)
     expect(holdDecision(input({ ...half, storeAheadCapSeconds: 20 })).goalSeconds).toBeCloseTo(18)
-    expect(holdDecision(input({ ...half, reason: 'stall' })).goalSeconds).toBeCloseTo(30)
+    expect(holdDecision(input({ ...half, reason: 'stall' })).goalSeconds).toBeCloseTo(30 + MARGIN)
   })
 
   it('applies the floor when the need is under it', () => {
     const slowStart = holdDecision(
-      input({ rateBytesPerSecond: BITRATE * 0.9, remainingSeconds: 10 }),
+      input({ rateBytesPerSecond: BITRATE * 0.9, remainingSeconds: 5 }),
     )
     expect(slowStart.goalSeconds).toBe(START_GOAL_SECONDS)
     expect(slowStart.slow).toBe(true)
     const slowStall = holdDecision(
-      input({ reason: 'stall', rateBytesPerSecond: BITRATE * 0.9, remainingSeconds: 10 }),
+      input({ reason: 'stall', rateBytesPerSecond: BITRATE * 0.9, remainingSeconds: 5 }),
     )
     expect(slowStall.goalSeconds).toBe(STALL_GOAL_SECONDS)
   })

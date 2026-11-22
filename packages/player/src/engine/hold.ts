@@ -4,7 +4,7 @@
 // hold a play forever. The old engine's `bufferingGoal` is its model. It uses no
 // DOM type and no timer.
 
-import { START_GOAL_SECONDS, STALL_GOAL_SECONDS } from '../limits.ts'
+import { CHUNK_BYTES, START_GOAL_SECONDS, STALL_GOAL_SECONDS } from '../limits.ts'
 
 /** A link at this multiple of the bit rate keeps up, with room to spare. */
 const KEEPS_UP = 1.1
@@ -81,7 +81,9 @@ export function holdDecision(input: HoldInput): HoldDecision {
     if (known && !fast) goalSeconds = Math.min(remaining, clamp(0, floor, cap * CAP_SHARE))
   } else {
     const needed = remaining * (1 - (rate ?? 0) / bitrateBytesPerSecond)
-    goalSeconds = Math.min(remaining, clamp(needed, floor, cap * CAP_SHARE))
+    // The feeder takes whole reads of CHUNK_BYTES, so the read in progress is store-ahead it cannot use yet: one read's margin keeps the release off the exact break-even point.
+    const margin = CHUNK_BYTES / bitrateBytesPerSecond
+    goalSeconds = Math.min(remaining, clamp(needed + margin, floor, cap * CAP_SHARE))
   }
   goalSeconds = Math.max(0, goalSeconds)
   return { hold: !input.storeFull && heldAheadSeconds < goalSeconds, goalSeconds, slow }
