@@ -49,6 +49,14 @@ export function isSlow(rate: number | null, bitrate: number): boolean {
   return bitrateOk && rate !== null && Number.isFinite(rate) && rate > 0 && rate < bitrate
 }
 
+/** The downloader's states that the slow signal is read in: `reading`, and `waiting` (a retry between reads, when the rate that was measured still stands). */
+export type SlowState = 'reading' | 'full' | 'waiting' | 'done' | 'failed'
+
+/** The slow-video signal of the engine's numbers: true while the downloader reads or waits, once a rate is known, and the rate is under the bit rate; false when it is `done`, `full` or `failed`. */
+export function slowWhile(state: SlowState, rate: number | null, bitrate: number): boolean {
+  return (state === 'reading' || state === 'waiting') && isSlow(rate, bitrate)
+}
+
 /**
  * A start or a seek on a link that keeps up plays at the first frames; on an
  * unknown link it holds for the start goal. A stall holds for the stall goal. On

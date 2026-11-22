@@ -22,7 +22,7 @@ import { messageOf } from '../downloader.ts'
 import type { Downloader } from '../downloader.ts'
 import { Feeder } from '../engine/feeder.ts'
 import type { Sink } from '../engine/feeder.ts'
-import { isSlow } from '../engine/hold.ts'
+import { slowWhile } from '../engine/hold.ts'
 import { holdsAt } from '../engine/holds-at.ts'
 import { mergeRequests } from '../engine/requests.ts'
 import type { Request } from '../engine/requests.ts'
@@ -93,7 +93,7 @@ export interface EngineStats {
   windowBytes: number
   /** The downloader's measured rate in bytes a second, null before it knows one. */
   rate: number | null
-  /** The slow-video signal: the downloader's measured rate is known and below the file's bit rate (its size over its length). False while the rate or the length is unknown. */
+  /** The slow-video signal: the downloader's measured rate is known and below the file's bit rate (its size over its length). Worked out while the downloader is `reading` or `waiting` (so that it does not flicker in a retry), once a rate is known; false when it is `done`, `full` or `failed`, or the rate or the length is unknown. */
   slow: boolean
 }
 
@@ -297,8 +297,7 @@ class Play {
       stats.slow =
         duration !== null &&
         duration > 0 &&
-        downloader.state() === 'reading' &&
-        isSlow(stats.rate, downloader.fileSize / duration)
+        slowWhile(downloader.state(), stats.rate, downloader.fileSize / duration)
     }
     stats.windowBytes = this.#window.bytes()
     stats.aheadSeconds = aheadOf(this.#video.buffered, this.#video.currentTime)

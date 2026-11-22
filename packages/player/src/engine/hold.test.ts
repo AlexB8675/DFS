@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { CHUNK_BYTES, SLOW_RATE_SHARE, START_GOAL_SECONDS, STALL_GOAL_SECONDS } from '../limits.ts'
-import { holdDecision, isSlow } from './hold.ts'
+import { holdDecision, isSlow, slowWhile } from './hold.ts'
 import type { HoldInput } from './hold.ts'
 
 // The hold rule (DESIGN.md §10.4): when a play may start, or start again after a
@@ -196,5 +196,20 @@ describe('isSlow', () => {
     expect(isSlow(Number.NaN, BITRATE)).toBe(false)
     expect(isSlow(100, 0)).toBe(false)
     expect(isSlow(100, Number.NaN)).toBe(false)
+  })
+})
+
+describe('slowWhile', () => {
+  it('is slow while the downloader reads or waits to retry, once the rate is known', () => {
+    expect(slowWhile('reading', BITRATE / 2, BITRATE)).toBe(true)
+    expect(slowWhile('waiting', BITRATE / 2, BITRATE)).toBe(true)
+  })
+
+  it('is not slow when the downloader is done, full or failed, or the rate is unknown', () => {
+    for (const state of ['done', 'full', 'failed'] as const) {
+      expect(slowWhile(state, BITRATE / 2, BITRATE)).toBe(false)
+    }
+    expect(slowWhile('reading', null, BITRATE)).toBe(false)
+    expect(slowWhile('reading', BITRATE * 2, BITRATE)).toBe(false)
   })
 })
