@@ -15,6 +15,7 @@ function rig(maxFrameSeconds: number | null = null) {
     readyState: 2,
     paused: false,
     seeking: false,
+    seeked: false,
     ended: false,
     buffered: [[0, 20]],
     holding: false,
@@ -124,6 +125,28 @@ describe('Watchdog', () => {
       expect(last.detail).toContain('10.0')
       expect(last.detail).not.toContain('picture')
     }
+  })
+
+  it("gives a viewer's seek a new ladder, but not the engine's own seeks (F1)", () => {
+    const r = rig()
+    const patch = {
+      buffered: [] as [number, number][],
+      trackEnds: [
+        { name: 'picture', end: 30 },
+        { name: 'sound', end: 10 },
+      ],
+    }
+    expect(freeze(r, patch)).toEqual({ action: 'refeed' })
+    // The engine's own seek (a refeed's serve) between: the ladder stays, so the next futile sample is stuck.
+    expect(r.tick(500, { ...patch, seeking: true })).toBeNull()
+    expect(r.tick(500, patch)).toBeNull()
+    // The viewer's seek to another place, stuck with no data: a new ladder, so a refeed there first.
+    const seek = { ...patch, at: 50, seeking: true, seeked: true }
+    expect(r.tick(500, seek)).toBeNull()
+    const there = { ...patch, at: 50 }
+    expect(r.tick(500, there)).toBeNull()
+    expect(r.tick(STUCK_MS - 500, there)).toEqual({ action: 'refeed' })
+    expect(r.tick(STUCK_MS, there)?.action).toBe('stuck')
   })
 
   it('refeeds again and again while a feed waits for bytes, never reporting stuck (R39)', () => {

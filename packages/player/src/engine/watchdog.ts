@@ -15,6 +15,8 @@ export interface WatchSample {
   paused: boolean
   /** True while the element seeks, or when a seek began since the previous sample (the engine sets it). */
   seeking: boolean
+  /** True once after a seek of the viewer's (not the engine's own): the watchdog gives the play a new ladder (F1). */
+  seeked: boolean
   ended: boolean
   /** The element's buffered ranges, in seconds. */
   buffered: [number, number][]
@@ -48,7 +50,7 @@ function seconds(value: number): string {
  * REOPENS_MAX per play), then `stuck`. A refeed that ends with no data at the
  * playhead, while no feed waits for bytes, is futile (a track that ends or has a
  * hole there): the next rung is `stuck`, naming that track (A1). When the play moves, the ladder starts
- * again; the reopens used are never given back.
+ * again, and so does a seek of the viewer's (F1); the reopens used are never given back.
  */
 export class Watchdog {
   private readonly now: () => number
@@ -75,6 +77,11 @@ export class Watchdog {
 
   observe(sample: WatchSample): WatchAction | null {
     const t = this.now()
+    if (sample.seeked) {
+      this.gapTried = false
+      this.refed = false
+      this.lastStepAt = null
+    }
     const playing = !sample.paused && !sample.seeking && !sample.holding && !sample.ended
     const last = this.lastSampleAt
     const first = last === null

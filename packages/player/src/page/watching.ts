@@ -23,6 +23,8 @@ export class Watching {
   readonly #dog: Watchdog
   /** True when a seek began since the last sample: the element may already be done with it. */
   #seekSince = false
+  /** True when a seek of the viewer's began since the last sample: the watchdog starts its ladder again (F1). */
+  #seeked = false
 
   constructor(video: HTMLVideoElement, picture: EngineTrack) {
     this.#video = video
@@ -32,6 +34,7 @@ export class Watching {
   /** A seek began (the viewer's, not the engine's own). */
   noteSeek(): void {
     this.#seekSince = true
+    this.#seeked = true
   }
 
   /**
@@ -45,13 +48,16 @@ export class Watching {
   ): WatchAction | null {
     const video = this.#video
     const seeking = video.seeking || this.#seekSince
+    const seeked = this.#seeked
     this.#seekSince = false
+    this.#seeked = false
     return this.#dog.observe({
       at: video.currentTime,
       frames: framesShown(video),
       readyState: video.readyState,
       paused: video.paused,
       seeking,
+      seeked,
       ended: video.ended,
       buffered: rangesOf(video.buffered),
       holding,
