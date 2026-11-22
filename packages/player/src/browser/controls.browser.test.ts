@@ -6,6 +6,7 @@
 
 import { afterEach, expect, test, vi } from 'vitest'
 import { MediaSourceSink } from '../page/index.ts'
+import { Seeks } from '../page/seeks.ts'
 import { SEEK_DEADLINE_MS, STUCK_MS, WATCH_EVERY_MS } from '../limits.ts'
 import { begin, endPlays, frames, ofType, served, suite, until } from './play-harness.ts'
 import type { Play } from './play-harness.ts'
@@ -197,6 +198,36 @@ suite(NAME)('playStreamed: seeks', () => {
     expect(ofType(play.events, 'seek').filter((event) => event.ms !== null)).toHaveLength(1)
     expect(play.video.currentTime).toBeGreaterThanOrEqual(7.9)
   }, 120_000)
+
+  test('a seek served from the store that shows no picture by its deadline sends an error and refeeds, once, and still sends its time to picture (A5)', async () => {
+    const play = begin(NAME)
+    await firstPicture(play)
+    await until(play, '4 s buffered', 40_000, () => bufferedEnd(play.video) > 4)
+    // The picture is late: the seek's check finds none, as if the decoder held it back. Nothing is requested or served, so the engine is not busy.
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- the original is called on the seeks it was taken from, below.
+    const real = Seeks.prototype.check
+    let late = true
+    vi.spyOn(Seeks.prototype, 'check').mockImplementation(function (this: Seeks) {
+      if (!late) real.call(this)
+    })
+    await clearLog()
+    play.video.currentTime = 2
+    await until(play, 'the deadline error', SEEK_DEADLINE_MS + 5_000, () =>
+      ofType(play.events, 'error').some((event) => event.from === 'engine'),
+    )
+    const error = ofType(play.events, 'error').find((event) => event.from === 'engine')
+    expect(error?.message).toContain('2.0')
+    expect(error?.message).toContain(String(SEEK_DEADLINE_MS / 1000))
+    // The refeed follows at once, from the store: no request is made.
+    const refeeds = ofType(play.events, 'watchdog').filter((event) => event.action === 'refeed')
+    expect(refeeds).toHaveLength(1)
+    expect(refeeds[0]?.detail).toContain('deadline')
+    late = false
+    await until(play, "the seek's picture", 20_000, () => shown(play).length > 0)
+    expect(shown(play).at(-1)?.ms).toBeGreaterThanOrEqual(SEEK_DEADLINE_MS)
+    expect(await log()).toEqual([])
+    expect(play.video.currentTime).toBeGreaterThanOrEqual(1.9)
+  }, 60_000)
 
   test('a seek back after the end reopens the stream, stays paused as it was, and plays on when the viewer plays', async () => {
     const reopen = vi.spyOn(MediaSourceSink.prototype, 'reopen')
