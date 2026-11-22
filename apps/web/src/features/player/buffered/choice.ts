@@ -58,14 +58,28 @@ export function pagePlay(input: {
   const sound = info.container.startsWith('matroska')
     ? (sounds.find((stream) => stream.default) ?? sounds[0])
     : sounds[0]
-  if (
-    sound?.codecString != null &&
-    !supports(`audio/mp4; codecs="${sound.codecString}"`) &&
-    !(sound.codec === 'mp3' && supports('audio/mp4; codecs="mp3"'))
-  ) {
+  if (sound?.codecString != null && !soundSupported(sound.codec, sound.codecString, supports)) {
     return { play: 'elsewhere', reason: 'sound', codec: sound.codec }
   }
   return { play: 'buffered' }
+}
+
+/** The other names the engine asks Media Source for a sound codec by; mirrors `codecNames` in `@dfs/mp4`. */
+const SOUND_ALIASES: Record<string, string[]> = {
+  mp3: ['mp3', 'mp4a.40.34'],
+  opus: ['Opus'],
+  flac: ['fLaC'],
+}
+
+/** Whether Media Source takes a sound under its codec string or any name the engine also tries. */
+function soundSupported(
+  codec: string,
+  codecString: string,
+  supports: (mime: string) => boolean,
+): boolean {
+  return [codecString, ...(SOUND_ALIASES[codec] ?? [])].some((name) =>
+    supports(`audio/mp4; codecs="${name}"`),
+  )
 }
 
 /** Whether this browser has what buffered play needs (§10.4): Media Source, `AbortSignal.any` and WebCrypto, which the store encrypts with. */

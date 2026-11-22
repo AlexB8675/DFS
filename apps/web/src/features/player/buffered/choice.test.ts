@@ -251,6 +251,57 @@ describe('deciding how a video plays', () => {
     ).toEqual({ play: 'buffered' })
   })
 
+  it('lets an MP3 sound through where Media Source takes only mp4a.40.34', () => {
+    const supports = (mime: string) =>
+      mime.startsWith('video/') || mime === 'audio/mp4; codecs="mp4a.40.34"'
+    const info = mp4Info({
+      video: 'avc1.64001f',
+      audio: [{ codec: 'mp3', codecString: 'mp4a.6B' }],
+    })
+    expect(pagePlay({ name: 'a.mp4', info, device: 'windows', canBuffer: true, supports })).toEqual(
+      {
+        play: 'buffered',
+      },
+    )
+  })
+
+  it('lets an Opus sound through where Media Source takes only "Opus"', () => {
+    const supports = (mime: string) =>
+      mime.startsWith('video/') || mime === 'audio/mp4; codecs="Opus"'
+    const info = mkvInfo({ video: 'avc1.64001f', audio: [{ codec: 'opus', codecString: 'opus' }] })
+    expect(pagePlay({ name: 'a.mkv', info, device: 'windows', canBuffer: true, supports })).toEqual(
+      {
+        play: 'buffered',
+      },
+    )
+  })
+
+  it('lets a FLAC sound through where Media Source takes only "fLaC"', () => {
+    const supports = (mime: string) =>
+      mime.startsWith('video/') || mime === 'audio/mp4; codecs="fLaC"'
+    const info = mkvInfo({ video: 'avc1.64001f', audio: [{ codec: 'flac', codecString: 'flac' }] })
+    expect(pagePlay({ name: 'a.mkv', info, device: 'windows', canBuffer: true, supports })).toEqual(
+      {
+        play: 'buffered',
+      },
+    )
+  })
+
+  it('offers another player for an AAC sound refused under its only name', () => {
+    const supports = (mime: string) => mime.startsWith('video/')
+    const info = mp4Info({
+      video: 'avc1.64001f',
+      audio: [{ codec: 'aac', codecString: 'mp4a.40.2' }],
+    })
+    expect(pagePlay({ name: 'a.mp4', info, device: 'windows', canBuffer: true, supports })).toEqual(
+      {
+        play: 'elsewhere',
+        reason: 'sound',
+        codec: 'aac',
+      },
+    )
+  })
+
   it('offers another player for an audio file, even one whose cover is a picture stream', () => {
     expect(pagePlay(input({ ...PROOF, kind: 'audio' }, HEVC_MIME, AAC_MIME))).toEqual({
       play: 'elsewhere',
