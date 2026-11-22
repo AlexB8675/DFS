@@ -184,6 +184,26 @@ describe('Holding', () => {
     expect(on?.targetS).toBeGreaterThan(2.5)
   })
 
+  // F5: the rate meter keeps a fast rate a few seconds after the link drops, so in a retry pause only a slow rate is trusted.
+  test('a hold decided while the downloader waits, with a fast rate, keeps the 2 s goal, not a release', () => {
+    const play = setup()
+    play.link.state = 'waiting'
+    play.link.rate = 5_000_000
+    // 1 s of the video is stored: a fast rate would play at once, into an outage; the 2 s goal of an unknown rate holds.
+    play.held.add({ start: 0, end: 1_000_000 })
+    play.holding.begin('start')
+    expect(play.holding.holding).toBe(true)
+    expect(holds(play.events)[0]?.targetS).toBe(2)
+  })
+
+  test('a hold decided while the downloader reads, with a fast rate, plays at once', () => {
+    const play = setup()
+    play.link.rate = 5_000_000
+    play.held.add({ start: 0, end: 1_000_000 })
+    play.holding.begin('start')
+    expect(play.holding.holding).toBe(false)
+  })
+
   // R41 item 5: while a hold is on it is checked every HOLD_CHECK_MS, so release does not wait for the tick.
   test('a hold lets go within 100 ms of the rate becoming fast enough, with no tick', async () => {
     const play = setup()

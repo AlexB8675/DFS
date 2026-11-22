@@ -10,7 +10,7 @@
 import type { TimelineEventInput } from '@dfs/shared'
 import type { Downloader } from '../downloader.ts'
 import type { Feeder } from '../engine/feeder.ts'
-import { holdDecision } from '../engine/hold.ts'
+import { KEEPS_UP, holdDecision } from '../engine/hold.ts'
 import type { HoldDecision, HoldReason } from '../engine/hold.ts'
 import { HOLD_CHECK_MS } from '../limits.ts'
 import type { RangeSet } from '../ranges.ts'
@@ -43,6 +43,17 @@ function heldBefore(held: RangeSet, offset: number): number {
 
 /** The seconds the clock must have moved from where it started before a wait is a stall. */
 const STALL_AFTER_SECONDS = 0.1
+
+/**
+ * The rate the hold rule is given. While the downloader reads it is the measured rate. While it waits (a retry
+ * pause) the meter still holds the rate from before the link dropped, so only a slow one is trusted, which can
+ * only lengthen the hold; a rate that keeps up is not given, so a hold is not let go into an outage (§10.4).
+ */
+function heldRate(state: string, rate: number | null, bitrate: number): number | null {
+  if (state === 'reading') return rate
+  if (state === 'waiting' && rate !== null && rate < bitrate * KEEPS_UP) return rate
+  return null
+}
 
 export class Holding {
   readonly #world: HoldWorld
@@ -104,7 +115,7 @@ export class Holding {
     const decision = holdDecision({
       reason,
       heldAheadSeconds: ahead / bitrate,
-      rateBytesPerSecond: state === 'reading' || state === 'waiting' ? downloader.rate() : null,
+      rateBytesPerSecond: heldRate(state, downloader.rate(), bitrate),
       bitrateBytesPerSecond: bitrate,
       remainingSeconds: duration - at,
       storeAheadCapSeconds: (store.capBytes - Math.min(behind, store.capBytes / 2)) / bitrate,

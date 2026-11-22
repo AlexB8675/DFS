@@ -7,7 +7,7 @@
 import { CHUNK_BYTES, SLOW_RATE_SHARE, START_GOAL_SECONDS, STALL_GOAL_SECONDS } from '../limits.ts'
 
 /** A link at this multiple of the bit rate keeps up, with room to spare. */
-const KEEPS_UP = 1.1
+export const KEEPS_UP = 1.1
 
 /** The share of the store's cap a hold may ask for, so the store keeps room to take more. */
 const CAP_SHARE = 0.9
