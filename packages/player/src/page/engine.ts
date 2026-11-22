@@ -277,6 +277,8 @@ class Play {
       this.#stopped = true
       this.#feedControl.abort(this.#signal.reason)
       this.#wake()
+      // An abort during the opening lets go of what waits on the browser, as `run` does after the first frame.
+      this.#sink?.close()
     }
     if (this.#signal.aborted) stop()
     else this.#signal.addEventListener('abort', stop, { once: true })
