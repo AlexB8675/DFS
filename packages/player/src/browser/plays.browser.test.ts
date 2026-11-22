@@ -16,7 +16,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import { Downloader } from '../downloader.ts'
 import type { ByteRange } from '@dfs/mp4'
 import { indexOfRun } from '../testing/contains.ts'
-import { heldAt, neededVideoEnd, seekHeldToSecond } from '../testing/held-at.ts'
+import { heldAt, lastNeededFrame, neededVideoEnd, seekHeldToSecond } from '../testing/held-at.ts'
 import type { ReadStamp } from '../testing/held-at.ts'
 import { PLAYS_DIRECTORY } from '../opfs.ts'
 import {
@@ -72,18 +72,14 @@ afterEach(async () => {
   expect(silent, 'waits longer than STUCK_MS with no watchdog event and no hold').toEqual([])
 })
 
-/** The downloader of the play being measured, seen at its first read: the store that the seek's bytes are looked for in. */
-let lastDownloader: Downloader | null = null
-
-/** Whether the store holds the byte before `end` now: the answer is taken as a snapshot at the seek's mark. */
-function heldSnapshot(): (end: number) => boolean {
-  const held = lastDownloader?.store.held()
-  return (end) => held?.has({ start: end - 1, end }) ?? false
-}
-
-/** Records when each read of the downloader resolves, for the time from the store's holding the keyframe's bytes to the picture. */
-function recordReads(): ReadStamp[] {
+/**
+ * Records when each read of the downloader resolves, for the time from the store's holding the keyframe's bytes to the
+ * picture, and answers `heldSnapshot()`: whether the store of the play, seen at its first read, holds the byte before
+ * `end` now (taken as a snapshot at the seek's mark).
+ */
+function recordReads(): { reads: ReadStamp[]; heldSnapshot: () => (end: number) => boolean } {
   const reads: ReadStamp[] = []
+  let downloader: Downloader | null = null
   // eslint-disable-next-line @typescript-eslint/unbound-method -- the original is called on the downloader it was taken from, below.
   const real = Downloader.prototype.read
   vi.spyOn(Downloader.prototype, 'read').mockImplementation(async function (
@@ -92,12 +88,16 @@ function recordReads(): ReadStamp[] {
     signal?: AbortSignal,
   ) {
     // eslint-disable-next-line @typescript-eslint/no-this-alias -- the spy keeps the downloader that the measure looks into.
-    lastDownloader = this
+    downloader = this
     const bytes = await real.call(this, range, signal)
     reads.push({ start: range.start, end: range.end, at: performance.now() })
     return bytes
   })
-  return reads
+  const heldSnapshot = (): ((end: number) => boolean) => {
+    const held = downloader?.store.held()
+    return (end) => held?.has({ start: end - 1, end }) ?? false
+  }
+  return { reads, heldSnapshot }
 }
 
 /** Resolves with the time, in ms, from `from` until the element shows a picture past `frameCount` and has stopped seeking at the target. */
@@ -156,7 +156,8 @@ function neededOf(facts: Facts, seconds: number | null): Needed | null {
   let shown = first
   while (shown < table.count - 1 && presentationSeconds(table, timing, shown) < target) shown += 1
   const frameEnds: number[] = []
-  for (let i = first; i <= Math.min(table.count - 1, shown + REORDER_FRAMES); i += 1) {
+  const lastFrame = lastNeededFrame(table.sync, shown, table.count, REORDER_FRAMES)
+  for (let i = first; i <= lastFrame; i += 1) {
     frameEnds.push((table.offsets[i] ?? 0) + (table.sizes[i] ?? 0))
   }
   const others: number[] = []
@@ -241,7 +242,7 @@ describe.skipIf(choice.length === 0)('the fast link: a start and a seek to a pic
 
       const link = fastLink(file, duration)
       await control(link)
-      const reads = recordReads()
+      const { reads, heldSnapshot } = recordReads()
       const startedAt = performance.now()
       const play = begin(file.name, { autoplay: () => true })
       try {

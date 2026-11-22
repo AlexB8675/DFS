@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { heldAt, neededVideoEnd, seekHeldToSecond } from './held-at.ts'
+import { heldAt, lastNeededFrame, neededVideoEnd, seekHeldToSecond } from './held-at.ts'
 
 // The moment the store held the bytes a picture needs, from the reads that resolved (DESIGN.md §10.4, R50).
 
@@ -62,6 +62,19 @@ describe('heldAt', () => {
   })
 })
 
+describe('heldAt, bytes held at the mark', () => {
+  it('is the mark for bytes the store held then, though a read made after the mark returned them later (R54)', () => {
+    // The read of the engine from the store resolved at 180, but the bytes were there at the mark.
+    const reads = [{ start: 0, end: 5000, at: 180 }]
+    expect(heldAt(reads, 100, [4000], 'a seek', (end) => end <= 4000)).toBe(100)
+  })
+
+  it('still takes the read for a byte that the store did not hold at the mark', () => {
+    const reads = [{ start: 0, end: 5000, at: 180 }]
+    expect(heldAt(reads, 100, [4000, 4500], 'a seek', (end) => end <= 4000)).toBe(180)
+  })
+})
+
 describe('neededVideoEnd', () => {
   const ends = [100, 200, 300, 400, 500]
 
@@ -109,5 +122,27 @@ describe('seekHeldToSecond', () => {
 
   it('holds a seek that has no bytes to cross', () => {
     expect(seekHeldToSecond(0, 12_500_000)).toBe(true)
+  })
+})
+
+describe('lastNeededFrame', () => {
+  const sync = Uint8Array.from([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0])
+
+  it('is the shown frame plus the reorder frames inside the group', () => {
+    expect(lastNeededFrame(sync, 1, 12, 2)).toBe(3)
+  })
+
+  it('stops before the next keyframe: the next group is never needed (R54)', () => {
+    // Frame 3 is shown; the reorder frames would reach 7, but frame 5 begins the next group.
+    expect(lastNeededFrame(sync, 3, 12, 4)).toBe(4)
+  })
+
+  it('stops at the last frame of the file', () => {
+    expect(lastNeededFrame(sync, 11, 12, 8)).toBe(11)
+    expect(lastNeededFrame(sync, 10, 12, 8)).toBe(11)
+  })
+
+  it('is the shown frame itself when the next frame is a keyframe', () => {
+    expect(lastNeededFrame(sync, 4, 12, 8)).toBe(4)
   })
 })

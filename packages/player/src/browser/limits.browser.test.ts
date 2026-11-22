@@ -9,7 +9,7 @@
 // over, for a wait that the engine left in silence, as in plays.browser.test.ts.
 
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { MEMORY_CAP_BYTES, SEEK_DEADLINE_MS, WINDOW_BYTES } from '../limits.ts'
+import { BLOCK_BYTES, MEMORY_CAP_BYTES, SEEK_DEADLINE_MS, WINDOW_BYTES } from '../limits.ts'
 import {
   activePlays,
   begin,
@@ -191,15 +191,39 @@ describe('quota and the decoder window: 30 s, a seek outside the window, 10 s mo
       )
       const reach = held === undefined ? clock : play.video.buffered.end(held)
       const wholeMiddle = duration / 2
-      const middle =
-        Math.round((wholeMiddle > reach + 1 ? wholeMiddle : (reach + 1 + duration) / 2) * 1000) /
-        1000
+      // A light file's window reaches the end of the file (a seek ahead would be clamped to it): the seek then goes back,
+      // to 0 when the buffer no longer holds it, or else to the earliest time that it does not hold (R54).
+      const behind = reach + 1 >= duration
+      let target = wholeMiddle > reach + 1 ? wholeMiddle : (reach + 1 + duration) / 2
+      if (behind) {
+        const ranges = play.video.buffered
+        const spans = Array.from({ length: ranges.length }, (_, i) => [
+          ranges.start(i),
+          ranges.end(i),
+        ])
+        let hole = 0
+        for (const [from, to] of spans) {
+          if (from !== undefined && to !== undefined && from <= hole + 0.05 && to > hole) hole = to
+        }
+        if (hole + 0.5 >= duration) {
+          skip('the window holds the whole file: there is no time outside it to seek to')
+          return
+        }
+        target = hole
+      }
+      const middle = Math.round(target * 1000) / 1000
+      const seeksBefore = ofType(play.events, 'seek').length
       const markedAt = performance.now()
       play.video.currentTime = middle
+      // The seek event that the engine sends after the mark, whatever target it settled on.
       await until(play, 'the seek outside the window', 60_000, () => {
-        return ofType(play.events, 'seek').some((event) => event.to === middle && event.ms !== null)
+        return ofType(play.events, 'seek')
+          .slice(seeksBefore)
+          .some((event) => event.ms !== null)
       })
-      const seekEvent = ofType(play.events, 'seek').findLast((event) => event.to === middle)
+      const seekEvent = ofType(play.events, 'seek')
+        .slice(seeksBefore)
+        .findLast((event) => event.ms !== null)
       await until(play, `the clock ${AFTER_SEEK_SECONDS} s after the seek`, 120_000, () => {
         return play.video.ended || play.video.currentTime >= middle + AFTER_SEEK_SECONDS
       })
@@ -300,25 +324,41 @@ describe('a seek storm: 30 seeks 200 ms apart, at seeded random times', () => {
           const before = await freshStats(play, 1)
           const stormFrom = performance.now() - play.startedAt
           let lastMark = 0
+          let seeksBeforeLast = 0
           for (const [i, target] of targets.entries()) {
+            // The element's `seeking` event comes later than the assignment: the last seek's own events are those from here on (R54).
+            if (i === targets.length - 1) seeksBeforeLast = ofType(play.events, 'seek').length
             lastMark = performance.now()
             play.video.currentTime = target
             if (i < targets.length - 1) await pause(STORM_GAP_MS)
           }
           const last = targets.at(-1) ?? 0
-          // The last seek's own picture: its `seek` event with a time, after the last one that began without it.
-          await until(play, "the last seek's picture", SEEK_DEADLINE_MS + 5_000, () => {
-            const seeks = ofType(play.events, 'seek')
-            const began = seeks.findLastIndex((event) => event.ms === null)
-            return seeks.slice(began + 1).some((event) => event.ms !== null)
-          })
+          // The last seek's own picture: a seek event that began (no time) at or after that index, then one with a time after it.
+          const seekEvents = (): ReturnType<typeof ofType<'seek'>> => ofType(play.events, 'seek')
+          const lastPictureOf = () => {
+            const seeks = seekEvents().slice(seeksBeforeLast)
+            const began = seeks.findIndex((event) => event.ms === null)
+            if (began < 0) return undefined
+            return seeks.slice(began + 1).find((event) => event.ms !== null)
+          }
+          await until(
+            play,
+            "the last seek's picture",
+            SEEK_DEADLINE_MS + 5_000,
+            () => lastPictureOf() !== undefined,
+          )
           const lastWallMs = performance.now() - lastMark
           const seeks = ofType(play.events, 'seek')
-          const lastBegan = seeks.findLastIndex((event) => event.ms === null)
-          const lastPicture = seeks.slice(lastBegan + 1).find((event) => event.ms !== null)
-          const stormTo = performance.now() - play.startedAt
+          const lastPicture = lastPictureOf()
           const after = await freshStats(play, 2)
-          const full = fullDuring(play, stormFrom, stormTo)
+          const stormTo = performance.now() - play.startedAt
+          const capBytes = ofType(play.events, 'store').at(-1)?.capBytes ?? Infinity
+          const peakStored = Math.max(
+            0,
+            ...play.stats.slice(before, after + 1).map((numbers) => numbers.storedBytes),
+          )
+          // Full when `storeFull` was on, or the store reached its cap less a block (a nearer block takes the slot of a farther one without a `storeFull`).
+          const full = fullDuring(play, stormFrom, stormTo) || peakStored >= capBytes - BLOCK_BYTES
           const evictedBefore = play.stats[before]?.evictedBytes ?? 0
           const evictedAfter = play.stats[after]?.evictedBytes ?? 0
           // What the store holds never shrinks in the storm: a seek discards nothing (eviction is for a full store).

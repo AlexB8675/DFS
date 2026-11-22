@@ -29,11 +29,13 @@ export function heldAt(
   if (needed.length === 0) return null
   let latest = mark
   for (const end of needed) {
+    // Held when the seek began: the whole seek is the time, whenever a read of the store returned it.
+    if (heldAtMark(end)) continue
     const covers = (read: ReadStamp): boolean => read.start < end && end <= read.end
     const after = reads.find((read) => read.at >= mark && covers(read))
     if (after !== undefined) {
       latest = Math.max(latest, after.at)
-    } else if (!heldAtMark(end) && !reads.some((read) => read.at < mark && covers(read))) {
+    } else if (!reads.some((read) => read.at < mark && covers(read))) {
       throw new Error(`The measure of ${what} found no read that covers the bytes up to ${end}.`)
     }
   }
@@ -77,4 +79,24 @@ export const SEEK_TRANSFER_SECONDS = 0.5
  */
 export function seekHeldToSecond(groupBytes: number, bandwidthBytesPerSecond: number): boolean {
   return groupBytes / bandwidthBytesPerSecond <= SEEK_TRANSFER_SECONDS
+}
+
+/**
+ * The last frame (an index) that the picture of a seek can need: `shown` and the `reorder` frames after it, but
+ * never a frame of the next group, which begins at the next keyframe after `shown` (R54). Never past the table.
+ */
+export function lastNeededFrame(
+  sync: Uint8Array,
+  shown: number,
+  count: number,
+  reorder: number,
+): number {
+  let last = Math.min(count - 1, shown + reorder)
+  for (let i = shown + 1; i <= last; i += 1) {
+    if (sync[i] === 1) {
+      last = i - 1
+      break
+    }
+  }
+  return last
 }
