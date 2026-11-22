@@ -200,9 +200,17 @@ suite(NAME)('playStreamed: seeks', () => {
   }, 120_000)
 
   test('a seek served from the store that shows no picture by its deadline sends an error and refeeds, once, and still sends its time to picture (A5)', async () => {
+    const size = served(NAME)?.size ?? 0
     const play = begin(NAME)
     await firstPicture(play)
     await until(play, '4 s buffered', 40_000, () => bufferedEnd(play.video) > 4)
+    // The whole file stored first: an onward read still under way would be a request that is not the seek's.
+    await until(
+      play,
+      'the file stored',
+      30_000,
+      () => (play.stats.at(-1)?.storedBytes ?? 0) >= size,
+    )
     // The picture is late: the seek's check finds none, as if the decoder held it back. Nothing is requested or served, so the engine is not busy.
     // eslint-disable-next-line @typescript-eslint/unbound-method -- the original is called on the seeks it was taken from, below.
     const real = Seeks.prototype.check
