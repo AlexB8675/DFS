@@ -9,8 +9,10 @@ import { HEAD_BYTES } from '../limits.ts'
 import { locateMoov, openSource } from '@dfs/mp4'
 import type { Chunk, SourceIndex } from '@dfs/mp4'
 import { keyframeGapSeconds } from '../testing/keyframes.ts'
+import { frames } from './play-harness.ts'
+import type { Play } from './play-harness.ts'
 import { fileUrl } from './server.ts'
-import type { PlayFile } from './server.ts'
+import type { Network, PlayFile } from './server.ts'
 
 /** The reads that finding a file's index may take: far above what any file needs (`MAX_INDEX_READS` is the reader's own bound). */
 const MAX_INDEX_READS = 40
@@ -110,4 +112,123 @@ export function hexOf(bytes: Uint8Array): string {
 
 export function pause(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * The fast link: at least 100 Mbit/s with 20 ms to the first byte (a good home link), and at least twice the
+ * file's own bit rate, so that it keeps up with a file that is heavier than 100 Mbit/s too (the hold rule, which
+ * waits for what the rest of a video will take on a link slower than it, is the links' tests', not this one's).
+ * The brief names no number; a link with no limit at all would be the machine's loopback.
+ */
+export const FAST_BYTES_PER_SECOND = 12_500_000
+export const FAST_LATENCY_MS = 20
+
+export function fastLink(file: PlayFile, durationSeconds: number): Network {
+  const bitrate = durationSeconds > 0 ? file.size / durationSeconds : 0
+  return {
+    bandwidthBytesPerSecond: Math.max(FAST_BYTES_PER_SECOND, Math.ceil(bitrate * 2)),
+    latencyMs: FAST_LATENCY_MS,
+  }
+}
+
+/** One line per measured test, printed for the report: user files by their manifest name only, with no bytes. */
+export function report(line: Record<string, unknown>): void {
+  console.info(`PLAYS ${JSON.stringify(line)}`)
+}
+
+/**
+ * The start's two times, in ms from `from`: the first frame the element shows, and the moving picture (spec goal 2):
+ * the first frame shown after the clock has moved past where it began, while the element plays. A paused first
+ * frame is not a moving picture.
+ */
+export async function startPicture(
+  play: Play,
+  from: number,
+  limitMs = 40_000,
+): Promise<{ firstFrameMs: number; movingMs: number }> {
+  const { video } = play
+  let firstFrameMs: number | null = null
+  let began: number | null = null
+  let framesAtMove: number | null = null
+  for (;;) {
+    if (play.resolved || play.rejection !== null) {
+      throw new Error('The play ended while waiting for the moving picture of the start.', {
+        cause: play.rejection?.reason,
+      })
+    }
+    if (performance.now() - from > limitMs)
+      throw new Error('Gave up waiting for the moving picture.')
+    if (video.readyState >= 2 && frames(video) > 0) {
+      firstFrameMs ??= performance.now() - from
+      began ??= video.currentTime
+      if (!video.paused && video.currentTime > began + 0.05) {
+        framesAtMove ??= frames(video)
+        if (frames(video) > framesAtMove) {
+          return { firstFrameMs, movingMs: performance.now() - from }
+        }
+      }
+    }
+    await pause(5)
+  }
+}
+
+/**
+ * A play's timeline as lines for a failure's report: what the engine and the element did, and when (ms after the
+ * play began). The samples are left out, and the appends and removals are counted by runs (a track, how many, from
+ * when to when), with the element's and the engine's state at the end.
+ */
+export function timelineOf(play: Play): string[] {
+  const left = new Set(['sample', 'storeLevel'])
+  const lines: string[] = []
+  let run: {
+    type: string
+    track: string
+    count: number
+    bytes: number
+    from: number
+    to: number
+  } | null = null
+  const flush = (): void => {
+    if (run !== null) {
+      lines.push(
+        `${Math.round(run.from)}-${Math.round(run.to)} ${run.type} ${run.track} x${run.count} ${run.bytes} bytes`,
+      )
+    }
+    run = null
+  }
+  for (const { at, event } of play.stamped) {
+    if (left.has(event.type)) continue
+    if (event.type === 'append' || event.type === 'remove') {
+      const track = event.track
+      const bytes = event.type === 'append' ? event.bytes : 0
+      if (run !== null && run.type === event.type && run.track === track) {
+        run.count += 1
+        run.bytes += bytes
+        run.to = at
+      } else {
+        flush()
+        run = { type: event.type, track, count: 1, bytes, from: at, to: at }
+      }
+      continue
+    }
+    flush()
+    lines.push(`${Math.round(at)} ${JSON.stringify(event)}`)
+  }
+  flush()
+  for (const wait of play.waits) {
+    lines.push(
+      `wait ${Math.round(wait.from)} to ${wait.to === null ? 'open' : Math.round(wait.to)}`,
+    )
+  }
+  const { video } = play
+  const ranges = Array.from({ length: video.buffered.length }, (_, i) => [
+    video.buffered.start(i),
+    video.buffered.end(i),
+  ])
+  lines.push(
+    `element at ${video.currentTime} readyState ${video.readyState} paused ${video.paused} ranges ${JSON.stringify(ranges)}`,
+  )
+  const last = play.stats.at(-1)
+  if (last !== undefined) lines.push(`stats ${JSON.stringify(last)}`)
+  return lines
 }
