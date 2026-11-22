@@ -21,6 +21,9 @@ export const MEMORY_CAP_BYTES = 256 * 1024 * 1024
 /** How many blocks being filled, or full and waiting for a slot, are kept in memory outside the cap: 8 (8 MiB), enough for two onward reads, the priority reads, a block pending on disk and the partial blocks that aborted reads leave. */
 export const FRONTIER_BLOCKS = 8
 
+/** How long a read that the store's frontier rule refused is not opened again for its range, if nothing changes meanwhile (the position moves, a write succeeds): 250 ms, so that a refusal is not a tight loop of requests. */
+export const FRONTIER_RETRY_MS = 250
+
 /** The first pause before a failed read is tried again: 500 ms, and each pause after it doubles. */
 export const RETRY_BASE_MS = 500
 

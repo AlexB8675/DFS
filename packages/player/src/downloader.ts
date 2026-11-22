@@ -42,6 +42,7 @@ import {
   RETRY_BASE_MS,
   RETRY_JITTER,
   RETRY_MAX_MS,
+  FRONTIER_RETRY_MS,
   STALL_COVER_MS,
 } from './limits.ts'
 import { ReadError, openRead } from './read.ts'
@@ -343,6 +344,10 @@ export class Downloader {
   #unlisten: (() => void) | null = null
   /** The look at those who wait that is to be made when a read that covers a place of theirs will have gone quiet. `at` is when, by the downloader's clock. */
   #recheck: { timer: ReturnType<typeof setTimeout>; at: number } | null = null
+  /** The writes that succeeded, in all: a change of the store's frontier that lifts a refusal's gate. */
+  #writes = 0
+  /** The range that the frontier rule refused last, until the position moves, a write succeeds, or FRONTIER_RETRY_MS passes (R54). */
+  #refusal: { from: number; writes: number; timer: ReturnType<typeof setTimeout> } | null = null
   /** Where the onward reads would go on if the store had room: the first gap at or after the position when it filled. A read that opens anywhere else, once there is room, is a seek. */
   #stoppedAt = 0
 
@@ -451,6 +456,7 @@ export class Downloader {
     if (this.#closed) return
     this.#store.setPosition(offset)
     this.#position = offset
+    this.#liftRefusal()
     if (!this.#started) return
     switch (this.#state) {
       case 'full':
@@ -526,6 +532,7 @@ export class Downloader {
     for (const waiter of [...this.#waiters]) this.#refuse(waiter, closedError())
     this.#stopLevels()
     this.#stopRecheck()
+    this.#liftRefusal()
     try {
       await this.#store.close()
     } catch {
@@ -622,6 +629,36 @@ export class Downloader {
     return this.#store.held().firstGap(this.#position, this.#store.fileSize)
   }
 
+  /**
+   * The store refused a write at `from` by its frontier rule: that range is not opened again until the position
+   * moves, a write succeeds (the frontier changed) or FRONTIER_RETRY_MS has passed, when everything is considered again.
+   */
+  #refuseFrontier(from: number): void {
+    this.#liftRefusal()
+    const timer = setTimeout(() => {
+      this.#refusal = null
+      this.#reconsider()
+    }, FRONTIER_RETRY_MS)
+    this.#refusal = { from, writes: this.#writes, timer }
+  }
+
+  /** Whether a read at `from` is held back by a refusal that nothing has lifted. */
+  #refused(from: number): boolean {
+    const refusal = this.#refusal
+    if (refusal === null) return false
+    if (refusal.writes !== this.#writes) {
+      this.#liftRefusal()
+      return false
+    }
+    return refusal.from === from
+  }
+
+  #liftRefusal(): void {
+    if (this.#refusal === null) return
+    clearTimeout(this.#refusal.timer)
+    this.#refusal = null
+  }
+
   /** Whether `read` is open: a read that was let go of is not, and what it meets after that is not the play's concern. */
   #isCurrent(read: ActiveRead): boolean {
     return this.#reads.has(read)
@@ -713,6 +750,10 @@ export class Downloader {
     }
     if (this.#covers(gap.start)) {
       this.#setState('reading')
+      return
+    }
+    if (this.#refused(gap.start)) {
+      if (!this.#hasOnward()) this.#setState('waiting')
       return
     }
     const onward = [...this.#reads].filter((read) => read.kind === 'onward')
@@ -881,6 +922,7 @@ export class Downloader {
       }
       if (!this.#isCurrent(read)) return false
       read.at += length
+      this.#writes += 1
       // A write that took long is no quiet of the read: it moved when its bytes were taken.
       read.lastAt = this.#now()
       this.#checkWaiters()
@@ -1015,7 +1057,9 @@ export class Downloader {
     }
     if (error instanceof FrontierFullError) {
       // The store's own rule (it holds blocks nearer the position), not a fault of the read: the read ends quietly, and its range is asked for again by the usual rule when it is wanted (R48).
+      const from = read.at
       this.#end(read, 'aborted', null)
+      this.#refuseFrontier(from)
       this.#reconsider()
       return
     }
@@ -1047,6 +1091,7 @@ export class Downloader {
     for (const waiter of [...this.#waiters]) this.#refuse(waiter, error)
     this.#stopLevels()
     this.#stopRecheck()
+    this.#liftRefusal()
   }
 
   /** A read failed in a way that a later try may mend: its own line waits, and the others go on. */
@@ -1196,6 +1241,7 @@ export class Downloader {
     for (let gap = held.firstGap(start, end); gap !== null; gap = held.firstGap(gap.end, end)) {
       const covering = this.#covering(gap.start, true)
       if (covering.length === 0) {
+        if (this.#refused(gap.start)) continue
         this.#open('priority', gap.start, gap.end - 1, waiter)
       } else {
         // The part is covered until its last mover has been quiet for STALL_COVER_MS.

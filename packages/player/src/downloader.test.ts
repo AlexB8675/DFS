@@ -7,6 +7,7 @@ import type { Connectivity, HeadRead } from './downloader.ts'
 import { StoreError } from './errors.ts'
 import {
   BLOCK_BYTES,
+  FRONTIER_RETRY_MS,
   LEVEL_EVERY_MS,
   RATE_EARLY_MS,
   READ_IDLE_MS,
@@ -772,29 +773,67 @@ describe('Downloader: failures and retries', () => {
     expect(await firstMismatch(store, { start: 0, end: size })).toBe(-1)
   })
 
-  it('ends a read quietly when the store refuses its write by the frontier rule, and asks for its range again by the usual rule', async () => {
-    const size = 2 * MIB
-    const stub = stubNetwork((call) => pipeFor(call, size))
-    const store = memoryStore(size)
-    store.failNextWrite = new FrontierFullError('the frontier holds blocks nearer the position')
-    const rig = build({ url: 'http://stub.invalid/file', store, fetch: stub.fetch })
+  describe('a refusal by the frontier rule', () => {
+    /** A play whose first onward read was refused once by the store's frontier rule, and ended quietly. */
+    async function refused() {
+      const size = 2 * MIB
+      const stub = stubNetwork((call) => pipeFor(call, size))
+      const store = memoryStore(size)
+      store.failNextWrite = new FrontierFullError('the frontier holds blocks nearer the position')
+      const rig = build({ url: 'http://stub.invalid/file', store, fetch: stub.fetch })
+      rig.downloader.start()
+      await until(() => stub.pipes.length === 1)
+      stub.pipes[0]?.push(0, 64 * 1024)
+      await until(() => ofType(rig.events, 'requestEnd').length === 1)
+      await settle()
+      return { size, stub, store, rig }
+    }
 
-    rig.downloader.start()
-    await until(() => stub.pipes.length === 1)
-    stub.pipes[0]?.push(0, 64 * 1024)
-    await until(() => ofType(rig.events, 'requestEnd').length === 1)
-    await settle()
+    it('ends the read quietly, with no error and no retry after a pause', async () => {
+      const { rig } = await refused()
+      expect(ofType(rig.events, 'error')).toEqual([])
+      expect(ofType(rig.events, 'retry')).toEqual([])
+      expect(ofType(rig.events, 'requestEnd')[0]?.outcome).toBe('aborted')
+      expect(rig.downloader.failure()).toBeNull()
+    })
 
-    // Not an error and no retry after a pause: the store's own rule, not a fault of the read.
-    expect(ofType(rig.events, 'error')).toEqual([])
-    expect(ofType(rig.events, 'retry')).toEqual([])
-    expect(ofType(rig.events, 'requestEnd')[0]?.outcome).toBe('aborted')
-    expect(rig.downloader.failure()).toBeNull()
-    // The onward read is wanted still, and is opened again at once, with no pause.
-    await until(() => stub.pipes.length === 2)
-    stub.pipes[1]?.push(0, size)
-    await until(() => store.held().heldFrom(0) === size)
-    expect(await firstMismatch(store, { start: 0, end: size })).toBe(-1)
+    it('does not open the read again for its range at once, but after FRONTIER_RETRY_MS', async () => {
+      const { size, stub, store } = await refused()
+      await settle()
+      // Nothing changed: no position move, no write, no time. Not a tight loop of requests.
+      expect(stub.pipes).toHaveLength(1)
+      await vi.advanceTimersByTimeAsync(FRONTIER_RETRY_MS - 1)
+      expect(stub.pipes).toHaveLength(1)
+      await vi.advanceTimersByTimeAsync(1)
+      await until(() => stub.pipes.length === 2)
+      stub.pipes[1]?.push(0, size)
+      await until(() => store.held().heldFrom(0) === size)
+      expect(await firstMismatch(store, { start: 0, end: size })).toBe(-1)
+    })
+
+    it('opens the read again when the position is told', async () => {
+      const { stub, rig } = await refused()
+      expect(stub.pipes).toHaveLength(1)
+      rig.downloader.setPosition(0)
+      await until(() => stub.pipes.length === 2)
+    })
+
+    it('opens the read again when the frontier changes: a write by another read succeeds', async () => {
+      const { stub, rig } = await refused()
+      expect(stub.pipes).toHaveLength(1)
+      // A priority read (the engine's) farther on brings a block.
+      const wait = rig.downloader.fetchNow({ start: MIB, end: MIB + 1024 })
+      await until(() => stub.pipes.length === 2)
+      stub.pipes[1]?.push(MIB, MIB + 1024)
+      await wait
+      await until(() => stub.pipes.length === 3)
+    })
+
+    it('has no timer left when the downloader closes with the gate set', async () => {
+      const { rig } = await refused()
+      await rig.downloader.close()
+      expect(vi.getTimerCount()).toBe(0)
+    })
   })
 
   it('stops quietly when the store is closed under it', async () => {

@@ -9,6 +9,7 @@ import {
   ESTIMATE_MS,
   FEED_STEP_SECONDS,
   FRONTIER_BLOCKS,
+  FRONTIER_RETRY_MS,
   GAP_EDGE_SECONDS,
   GAP_STEP_SECONDS,
   HEAD_BYTES,
@@ -67,6 +68,10 @@ describe('the store and the downloader limits', () => {
   it('caps the memory fallback at 256 MiB and keeps 8 frontier blocks outside the cap', () => {
     expect(MEMORY_CAP_BYTES).toBe(256 * 1024 * 1024)
     expect(FRONTIER_BLOCKS).toBe(8)
+  })
+
+  it('does not ask the store again for a range that its frontier refused for 250 ms', () => {
+    expect(FRONTIER_RETRY_MS).toBe(250)
   })
 
   it('retries after 500 ms, doubling to at most 30 s, with 20% of jitter', () => {
