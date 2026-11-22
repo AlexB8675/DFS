@@ -7,11 +7,12 @@
 import { chooseEngineTracks } from '../engine/tracks.ts'
 import { HEAD_BYTES } from '../limits.ts'
 import { locateMoov, openSource } from '@dfs/mp4'
+import { filesToPlay } from '@dfs/mp4/testing'
 import type { Chunk, SourceIndex } from '@dfs/mp4'
 import { keyframeGapSeconds } from '../testing/keyframes.ts'
-import { frames } from './play-harness.ts'
+import { frames, ofType } from './play-harness.ts'
 import type { Play } from './play-harness.ts'
-import { fileUrl } from './server.ts'
+import { fileUrl, files, log } from './server.ts'
 import type { Network, PlayFile } from './server.ts'
 
 /** The reads that finding a file's index may take: far above what any file needs (`MAX_INDEX_READS` is the reader's own bound). */
@@ -71,6 +72,17 @@ export interface Facts {
 /** The most keyframe spacing that holds a file to the one-second marks of the fast link: a second, and a frame or two of rounding. */
 export const DENSE_KEYFRAME_SECONDS = 1.05
 
+/** Why a file whose picture is HEVC is not played in Firefox (R48, R49): the build reports support, and fails at the first append. */
+export const NO_HEVC_IN_FIREFOX =
+  "Playwright's Firefox build has no HEVC decoder: it reports support, and fails at the first append."
+
+/** The reason this browser cannot decode the file's picture though it reports the codec, or null: HEVC (`hvc1`, `hev1`) in Firefox. */
+export function undecodable(index: SourceIndex): string | null {
+  const codec: unknown = index.video.codec
+  const hevc = typeof codec === 'string' && (codec.startsWith('hvc1') || codec.startsWith('hev1'))
+  return hevc && navigator.userAgent.includes('Firefox') ? NO_HEVC_IN_FIREFOX : null
+}
+
 export async function factsOf(file: PlayFile): Promise<Facts> {
   const { index, moovEnd } = await readIndex(file)
   const durationSeconds = index.durationSeconds
@@ -82,7 +94,7 @@ export async function factsOf(file: PlayFile): Promise<Facts> {
     moovEnd,
     durationSeconds,
     keyframeGap,
-    unplayable: 'refusal' in chosen ? chosen.refusal : null,
+    unplayable: 'refusal' in chosen ? chosen.refusal : undecodable(index),
   }
 }
 
@@ -231,4 +243,64 @@ export function timelineOf(play: Play): string[] {
   const last = play.stats.at(-1)
   if (last !== undefined) lines.push(`stats ${JSON.stringify(last)}`)
   return lines
+}
+
+/** A file of the plays with what the suite knows of it. */
+export interface Pick {
+  file: PlayFile
+  facts: Facts
+  duration: number
+}
+
+/** A served file with its facts, or the reason it is not played here (not served, no codec this browser takes, no duration). */
+export async function pickOf(file: PlayFile | undefined): Promise<Pick | string> {
+  if (file === undefined) return 'the file is not served'
+  const facts = await factsOf(file)
+  if (facts.unplayable !== null) {
+    return `this browser's Media Source takes none of its codecs: ${facts.unplayable}`
+  }
+  if (facts.durationSeconds === null || !(facts.durationSeconds > 0)) {
+    return 'the file has no duration'
+  }
+  return { file, facts, duration: facts.durationSeconds }
+}
+
+let userSample: Promise<Pick[]> | null = null
+
+/** The user's files of the sample (never all of them) that this browser plays, with their index read over HTTP ranges only. */
+export function userPicks(): Promise<Pick[]> {
+  userSample ??= (async () => {
+    const out: Pick[] = []
+    for (const file of filesToPlay(files(), false).filter((candidate) => !candidate.synthetic)) {
+      const pick = await pickOf(file)
+      if (typeof pick !== 'string') out.push(pick)
+    }
+    return out
+  })()
+  return userSample
+}
+
+/** The engine's own errors on a play's timeline. */
+export function engineErrors(play: Play): string[] {
+  return ofType(play.events, 'error')
+    .filter((event) => event.from === 'engine')
+    .map((event) => event.message)
+}
+
+/** The requests of the server's log as a report line: no file id, the range, the status, the bytes sent and what became of it. */
+export async function serverLines(): Promise<string[]> {
+  return (await log()).map(
+    (entry) => `${entry.range ?? 'no range'} ${entry.status} ${entry.bytesSent} ${entry.outcome}`,
+  )
+}
+
+/** What a failed play leaves in the report: its timeline, and the requests the server saw. */
+export async function failure(play: Play, name: string, error: unknown): Promise<never> {
+  report({ test: 'timeline', name, lines: timelineOf(play) })
+  try {
+    report({ test: 'server-log', name, lines: await serverLines() })
+  } catch {
+    // The log is for the report only.
+  }
+  throw error instanceof Error ? error : new Error(String(error))
 }

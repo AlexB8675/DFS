@@ -105,6 +105,8 @@ export function begin(
     startAt?: number
     windowBytes?: number
     autoplay?: () => boolean
+    /** Plays with the memory store (no worker), as where the private file system is unavailable. */
+    memory?: boolean
     onEvent?: (event: TimelineEventInput, play: Play) => void
   } = {},
 ): Play {
@@ -128,7 +130,7 @@ export function begin(
     video,
     url: fileUrl(file.id),
     playId,
-    makeWorker,
+    makeWorker: options.memory === true ? null : makeWorker,
     signal: controller.signal,
     ...(options.startAt === undefined ? {} : { startAt: options.startAt }),
     ...(options.windowBytes === undefined ? {} : { windowBytes: options.windowBytes }),

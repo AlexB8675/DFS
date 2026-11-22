@@ -11,23 +11,24 @@
 // one to its end. Every play of the file is checked, when its test is over, for a wait that the engine left in
 // silence, as in plays.browser.test.ts.
 
-import { filesToPlay } from '@dfs/mp4/testing'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { STUCK_MS } from '../limits.ts'
 import { activePlays, begin, endPlays, ofType, served, silentWaits, until } from './play-harness.ts'
 import type { Play } from './play-harness.ts'
 import {
-  factsOf,
-  fastLink,
+  engineErrors,
+  failure,
   isDense,
   pause,
+  pickOf,
   report,
   startPicture,
   timelineOf,
+  userPicks,
 } from './plays-support.ts'
-import type { Facts } from './plays-support.ts'
-import { clearLog, control, files, log, playAll, switchNetwork } from './server.ts'
-import type { Fault, LogEntry, Network, PlayFile } from './server.ts'
+import type { Facts, Pick } from './plays-support.ts'
+import { clearLog, control, log, playAll, switchNetwork } from './server.ts'
+import type { Fault, LogEntry, Network } from './server.ts'
 
 /** The media a user file plays, in seconds from its start (R43): a constant of this file, not of the engine. */
 const STRETCH_SECONDS = 20
@@ -66,40 +67,6 @@ afterEach(async () => {
   await endPlays()
   expect(silent, 'waits longer than STUCK_MS with no watchdog event and no hold').toEqual([])
 })
-
-/** A file of the plays with what the suite knows of it. */
-interface Pick {
-  file: PlayFile
-  facts: Facts
-  duration: number
-}
-
-async function pickOf(file: PlayFile | undefined): Promise<Pick | string> {
-  if (file === undefined) return 'the file is not served'
-  const facts = await factsOf(file)
-  if (facts.unplayable !== null) {
-    return `this browser's Media Source takes none of its codecs: ${facts.unplayable}`
-  }
-  if (facts.durationSeconds === null || !(facts.durationSeconds > 0)) {
-    return 'the file has no duration'
-  }
-  return { file, facts, duration: facts.durationSeconds }
-}
-
-let userSample: Promise<Pick[]> | null = null
-
-/** The user's files of the sample (never all of them) that this browser plays, with their index read over HTTP ranges only. */
-function userPicks(): Promise<Pick[]> {
-  userSample ??= (async () => {
-    const out: Pick[] = []
-    for (const file of filesToPlay(files(), false).filter((candidate) => !candidate.synthetic)) {
-      const pick = await pickOf(file)
-      if (typeof pick !== 'string') out.push(pick)
-    }
-    return out
-  })()
-  return userSample
-}
 
 const bySize = (a: Pick, b: Pick): number => b.file.size - a.file.size
 
@@ -148,13 +115,6 @@ function frameSecondsOf(facts: Facts): number {
   return 1 / 30
 }
 
-/** The requests of the server's log as a report line: no file id, the range, the status, the bytes sent and what became of it. */
-async function serverLines(): Promise<string[]> {
-  return (await log()).map(
-    (entry) => `${entry.range ?? 'no range'} ${entry.status} ${entry.bytesSent} ${entry.outcome}`,
-  )
-}
-
 /** Waits until the play has played through (see `playedSeconds`): it ends, or its clock reaches the target. */
 async function playThrough(play: Play, pick: Pick, ms: number, whole = false): Promise<void> {
   const target = playedSeconds(pick, whole)
@@ -183,13 +143,6 @@ function watchClock(play: Play): { backSeconds: () => number; stop: () => void }
   }
 }
 
-/** The engine's own errors on a play's timeline. */
-function engineErrors(play: Play): string[] {
-  return ofType(play.events, 'error')
-    .filter((event) => event.from === 'engine')
-    .map((event) => event.message)
-}
-
 /** The waits that begin after the picture moved and last longer than `WAIT_LIMIT_MS`, and every stall hold of the play (a stall hold before the picture moves is no less a stall). */
 function stallsAfter(play: Play, movedAt: number): { longWaits: string[]; stallHolds: string[] } {
   const now = performance.now() - play.startedAt
@@ -200,17 +153,6 @@ function stallsAfter(play: Play, movedAt: number): { longWaits: string[]; stallH
     .filter(({ event }) => event.type === 'hold' && event.on && event.reason === 'stall')
     .map(({ at }) => `stall hold on at ${Math.round(at)}`)
   return { longWaits, stallHolds }
-}
-
-/** What a failed play leaves in the report: its timeline, and the requests the server saw. */
-async function failure(play: Play, name: string, error: unknown): Promise<never> {
-  report({ test: 'timeline', name, lines: timelineOf(play) })
-  try {
-    report({ test: 'server-log', name, lines: await serverLines() })
-  } catch {
-    // The log is for the report only.
-  }
-  throw error instanceof Error ? error : new Error(String(error))
 }
 
 /** The expected length of a play, in ms, over a link at `factor` of the bit rate (the download takes as long as the clock needs at worst). */
