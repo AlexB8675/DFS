@@ -314,8 +314,13 @@ describe('below the bit rate: a start hold that says slow, then a play with no s
   }
 })
 
-/** Three drops, each after 8 KiB of the body: the engine's retry reads after a switch can be under 64 KiB, and a drop must bite each of them (R45, R47). */
-const DROPS: Fault[] = Array.from({ length: 3 }, () => ({ kind: 'drop', afterBytes: 8_192 }))
+/**
+ * Three drops, each after the body's first byte: a fault that the body does not reach is spent all the same (the
+ * server hands one to each request), and the engine's retry of what is left of a read can be a few KiB (5,390 bytes
+ * in a run of R50, which an 8 KiB drop let through), so a drop that must bite each of them cuts after one byte (R45,
+ * R47, R51). The test still asserts that the server dropped three requests.
+ */
+const DROPS: Fault[] = Array.from({ length: 3 }, () => ({ kind: 'drop', afterBytes: 1 }))
 
 /** The files of the drops and the switch: a synthetic one, and the largest dense file of the sample. */
 const DISRUPTED: Case[] = [
