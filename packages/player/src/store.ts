@@ -66,8 +66,10 @@ export interface StoreStats {
   capBytes: number
   /** The bytes of the file that are in slots. The frontier is kept outside the cap and is not counted. */
   storedBytes: number
-  /** The bytes that eviction has let go of, in all. */
+  /** The bytes that eviction has let go of, in all: blocks that held a slot, which is stored data lost. */
   evictedBytes: number
+  /** The bytes of frontier blocks that were let go of, in all: bytes received that were never stored (R49), which a seek's abandoned reads leave. Not an eviction. */
+  droppedBytes: number
 }
 
 /** The store of one play, as every part of the player uses it. */
@@ -164,6 +166,7 @@ export class CoreStore implements PlayStore {
   /** The first slot that was never used: the slots from here to the end are free (none, once the store has shrunk). */
   #unused = 0
   #evictedBytes = 0
+  #droppedBytes = 0
   /** The ranges that eviction let go of in writes that then failed: a write that fails cannot say what it evicted, so the next one that succeeds does. */
   readonly #unreported: ByteRange[] = []
   #position = 0
@@ -324,7 +327,7 @@ export class CoreStore implements PlayStore {
     for (const run of block.have.ranges()) {
       const range = { start: start + run.start, end: start + run.end }
       this.#held.remove(range)
-      this.#evictedBytes += range.end - range.start
+      this.#droppedBytes += range.end - range.start
       evicted.push(range)
     }
     this.#frontier.delete(index)
@@ -618,6 +621,7 @@ export class CoreStore implements PlayStore {
       capBytes: this.capBytes,
       storedBytes,
       evictedBytes: this.#evictedBytes,
+      droppedBytes: this.#droppedBytes,
     }
   }
 

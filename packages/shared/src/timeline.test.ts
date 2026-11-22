@@ -57,6 +57,7 @@ const EXAMPLES: TimelineEvent[] = [
     storedBytes: 1_073_741_824,
     aheadBytes: 536_870_912,
     evictedBytes: 0,
+    droppedBytes: 0,
   },
   { type: 'seek', t: 978, to: 61.5, inWindow: true, ms: null },
   { type: 'watchdog', t: 979, action: 'gap', at: 12.25, detail: 'stepped over 0.04 s' },
@@ -136,7 +137,10 @@ describe('timeline events (§16)', () => {
     const full = { type: 'storeFull', t: 6, on: false, storedBytes: 0 }
     expect(timelineEventSchema.parse(full)).toEqual(full)
     const level = { type: 'storeLevel', t: 7, storedBytes: 9, aheadBytes: 5, evictedBytes: 3 }
-    expect(timelineEventSchema.parse(level)).toEqual(level)
+    // An event from before `droppedBytes` existed says none dropped.
+    expect(timelineEventSchema.parse(level)).toEqual({ ...level, droppedBytes: 0 })
+    const dropped = { ...level, droppedBytes: 4 }
+    expect(timelineEventSchema.parse(dropped)).toEqual(dropped)
   })
 
   it('refuses a store event with a wrong backend, a negative size or a reason over 40 characters', () => {
@@ -165,7 +169,7 @@ describe('timeline events (§16)', () => {
     const events = [
       { type: 'phase', t: 1, phase: 'opening' },
       { type: 'store', t: 2, backend: 'disk', capBytes: 1_000_000, reason: null },
-      { type: 'storeLevel', t: 3, storedBytes: 4, aheadBytes: 4, evictedBytes: 0 },
+      { type: 'storeLevel', t: 3, storedBytes: 4, aheadBytes: 4, evictedBytes: 0, droppedBytes: 0 },
       { type: 'storeFull', t: 4, on: true, storedBytes: 1_000_000 },
       { type: 'closed', t: 5 },
     ]

@@ -235,6 +235,7 @@ class FallbackStore implements PlayStore {
   #position = 0
   /** What the stores that the play has left had evicted. */
   #evictedBefore = 0
+  #droppedBefore = 0
   #closed = false
   #closing: Promise<void> | null = null
   /** The shrink of the disk store that is in flight, which every write that meets the full disk waits for. */
@@ -265,7 +266,11 @@ class FallbackStore implements PlayStore {
 
   stats(): StoreStats {
     const stats = this.#current.store.stats()
-    return { ...stats, evictedBytes: stats.evictedBytes + this.#evictedBefore }
+    return {
+      ...stats,
+      evictedBytes: stats.evictedBytes + this.#evictedBefore,
+      droppedBytes: stats.droppedBytes + this.#droppedBefore,
+    }
   }
 
   /**
@@ -283,6 +288,7 @@ class FallbackStore implements PlayStore {
     })
     store.setPosition(this.#position)
     this.#evictedBefore += from.store.stats().evictedBytes
+    this.#droppedBefore += from.store.stats().droppedBytes
     this.#current = { kind: 'memory', store }
     emit(this.#onEvent, {
       type: 'store',

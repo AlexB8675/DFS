@@ -453,7 +453,7 @@ describe('Downloader: reading to the end', () => {
       { type: 'request', id: 1, from: 0, to: null },
       { type: 'firstByte', id: 1 },
       { type: 'requestEnd', id: 1, bytes: size, outcome: 'done', message: null },
-      { type: 'storeLevel', storedBytes: size, aheadBytes: size, evictedBytes: 0 },
+      { type: 'storeLevel', storedBytes: size, aheadBytes: size, evictedBytes: 0, droppedBytes: 0 },
     ])
     // Every write is of one block at most: a block is what the store seals and evicts.
     for (const write of rig.store.writes) {
@@ -475,7 +475,7 @@ describe('Downloader: reading to the end', () => {
     expect(rig.downloader.state()).toBe('done')
     expect(server.requests).toEqual([])
     expect(rig.events).toEqual([
-      { type: 'storeLevel', storedBytes: size, aheadBytes: size, evictedBytes: 0 },
+      { type: 'storeLevel', storedBytes: size, aheadBytes: size, evictedBytes: 0, droppedBytes: 0 },
     ])
   })
 
@@ -1416,7 +1416,7 @@ describe('Downloader: the level', () => {
 
     await vi.advanceTimersByTimeAsync(1)
     expect(ofType(rig.events, 'storeLevel')).toEqual([
-      { type: 'storeLevel', storedBytes: MIB, aheadBytes: MIB, evictedBytes: 0 },
+      { type: 'storeLevel', storedBytes: MIB, aheadBytes: MIB, evictedBytes: 0, droppedBytes: 0 },
     ])
     // The server keeps sending (a read that is quiet for READ_IDLE_MS is given up on, and the level with it).
     await vi.advanceTimersByTimeAsync(LEVEL_EVERY_MS - 1000)

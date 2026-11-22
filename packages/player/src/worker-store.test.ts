@@ -197,7 +197,14 @@ class Script {
 
 /** Stats with the given fields. */
 function stats(fields: Partial<StoreStats> = {}): StoreStats {
-  return { backend: 'disk', capBytes: 4 * MIB, storedBytes: 0, evictedBytes: 0, ...fields }
+  return {
+    backend: 'disk',
+    capBytes: 4 * MIB,
+    storedBytes: 0,
+    evictedBytes: 0,
+    droppedBytes: 0,
+    ...fields,
+  }
 }
 
 describe('a store in a worker', () => {

@@ -215,13 +215,15 @@ export const timelineEventSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('storeFull'), t: ms, on: z.boolean(), storedBytes: offset }),
   // The store's level, every 5 s while a read is open. `aheadBytes` is what it
   // holds from the position on without a gap; `evictedBytes` is the total
-  // evicted since the play opened.
+  // evicted since the play opened (blocks that held a slot); `droppedBytes` is
+  // the total of frontier blocks let go of that were never stored.
   z.object({
     type: z.literal('storeLevel'),
     t: ms,
     storedBytes: offset,
     aheadBytes: offset,
     evictedBytes: offset,
+    droppedBytes: offset.default(0),
   }),
   // The engine's seek (§10.4): sent when it starts, with `ms` null, and again
   // when its picture comes, with `ms` the time to picture, even if that is

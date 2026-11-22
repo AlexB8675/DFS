@@ -609,9 +609,9 @@ export class Downloader {
 
   #sendLevel(): void {
     try {
-      const { storedBytes, evictedBytes } = this.#store.stats()
+      const { storedBytes, evictedBytes, droppedBytes } = this.#store.stats()
       const aheadBytes = this.#store.held().heldFrom(this.#position)
-      this.#emit({ type: 'storeLevel', storedBytes, aheadBytes, evictedBytes })
+      this.#emit({ type: 'storeLevel', storedBytes, aheadBytes, evictedBytes, droppedBytes })
     } catch {
       // A store that cannot say how full it is has been closed under the play, which ends it.
     }

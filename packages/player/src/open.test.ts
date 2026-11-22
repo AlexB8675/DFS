@@ -538,6 +538,7 @@ describe('a store in memory', () => {
       capBytes: MEMORY_CAP_BYTES,
       storedBytes: 2 * MIB,
       evictedBytes: 0,
+      droppedBytes: 0,
     })
     await store.close()
     await expectStoreError(store.read(0, 10), 'closed')
@@ -955,6 +956,7 @@ describe('a disk that fails during the play', () => {
       capBytes: MEMORY_CAP_BYTES,
       storedBytes: 0,
       evictedBytes: 2 * MIB,
+      droppedBytes: 0,
     })
     await store.write(MIB, block(1))
     expect(store.stats().evictedBytes).toBe(2 * MIB)

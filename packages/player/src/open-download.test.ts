@@ -411,7 +411,7 @@ describe('openDownload: the head', () => {
       RangeError,
     )
     expect(ofType(events, 'storeLevel')).toEqual([
-      { type: 'storeLevel', storedBytes: size, aheadBytes: size, evictedBytes: 0 },
+      { type: 'storeLevel', storedBytes: size, aheadBytes: size, evictedBytes: 0, droppedBytes: 0 },
     ])
     expect(ofType(events, 'requestEnd')).toEqual([
       { type: 'requestEnd', id: 1, bytes: size, outcome: 'done', message: null },

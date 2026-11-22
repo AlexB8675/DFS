@@ -117,7 +117,8 @@ function isStats(value: unknown): value is StoreStats {
     (value.backend === 'disk' || value.backend === 'memory') &&
     typeof value.capBytes === 'number' &&
     typeof value.storedBytes === 'number' &&
-    typeof value.evictedBytes === 'number'
+    typeof value.evictedBytes === 'number' &&
+    typeof value.droppedBytes === 'number'
   )
 }
 

@@ -525,6 +525,7 @@ describe.each(['disk', 'memory'] as const)('the store on the %s backend', (kind)
         capBytes: 4 * MIB,
         storedBytes: 4 * MIB,
         evictedBytes: MIB,
+        droppedBytes: 0,
       })
     })
 
@@ -765,7 +766,9 @@ describe.each(['disk', 'memory'] as const)('the store on the %s backend', (kind)
         const outcome = await store.write(13 * MIB, CONTENT.subarray(13 * MIB, 13 * MIB + 100))
         expect(outcome).toEqual({ full: false, evictedBytes: MIB, evicted: [blocks(28, 29)] })
         expect(store.held().has({ start: 28 * MIB, end: 28 * MIB + 1 })).toBe(false)
-        expect(store.stats().evictedBytes).toBe(10 * MIB)
+        // The block let go of from the frontier was never stored in a slot: it is dropped, not evicted (R49).
+        expect(store.stats().evictedBytes).toBe(9 * MIB)
+        expect(store.stats().droppedBytes).toBe(MIB)
       })
 
       it('answers full for a waiting block that is no farther than the first gap, and not for one that is', async () => {
@@ -843,7 +846,9 @@ describe.each(['disk', 'memory'] as const)('the store on the %s backend', (kind)
         expectSame(await store.read(0, 64 * 1024), piece)
         expect(await store.read(last * MIB, last * MIB + 1)).toBeNull()
         expectSame(await store.read((last - 1) * MIB, last * MIB), plainBlock(last - 1))
-        expect(store.stats().evictedBytes).toBe(MIB)
+        // A frontier block let go of was never stored: it is dropped, not evicted (R49).
+        expect(store.stats().evictedBytes).toBe(0)
+        expect(store.stats().droppedBytes).toBe(MIB)
       })
 
       it('lets go of partly filled blocks too, the farthest first, and counts only the bytes they held', async () => {
@@ -869,7 +874,8 @@ describe.each(['disk', 'memory'] as const)('the store on the %s backend', (kind)
         ])
         expectSame(await store.read(15 * MIB - 100, 15 * MIB + 100), piece)
         expect(await store.read(4 * MIB, 4 * MIB + 100)).toBeNull()
-        expect(store.stats().evictedBytes).toBe(200)
+        expect(store.stats().evictedBytes).toBe(0)
+        expect(store.stats().droppedBytes).toBe(200)
       })
 
       it('lets go of the block behind the position first when two are as far as one another', async () => {
@@ -964,6 +970,7 @@ describe.each(['disk', 'memory'] as const)('the store on the %s backend', (kind)
         capBytes: 2 * MIB,
         storedBytes: 2 * MIB,
         evictedBytes: 0,
+        droppedBytes: 0,
       })
     })
 
@@ -992,6 +999,7 @@ describe.each(['disk', 'memory'] as const)('the store on the %s backend', (kind)
         capBytes: 2 * MIB,
         storedBytes: 2 * MIB,
         evictedBytes: MIB,
+        droppedBytes: 0,
       })
     })
 
@@ -1005,6 +1013,7 @@ describe.each(['disk', 'memory'] as const)('the store on the %s backend', (kind)
         capBytes: MIB,
         storedBytes: MIB,
         evictedBytes: 0,
+        droppedBytes: 0,
       })
       expectSame(await store.read(0, MIB), plainBlock(0))
     })
@@ -1056,6 +1065,7 @@ describe.each(['disk', 'memory'] as const)('the store on the %s backend', (kind)
         capBytes: 3 * MIB,
         storedBytes: 0,
         evictedBytes: 0,
+        droppedBytes: 0,
       })
       await store.write(0, CONTENT.subarray(0, 2 * MIB + 100))
       expect(store.stats()).toEqual({
@@ -1063,6 +1073,7 @@ describe.each(['disk', 'memory'] as const)('the store on the %s backend', (kind)
         capBytes: 3 * MIB,
         storedBytes: 2 * MIB,
         evictedBytes: 0,
+        droppedBytes: 0,
       })
     })
 
@@ -1111,6 +1122,7 @@ describe.each(['disk', 'memory'] as const)('the store on the %s backend', (kind)
         capBytes: 4 * MIB,
         storedBytes: 0,
         evictedBytes: 0,
+        droppedBytes: 0,
       })
     })
   })
@@ -1216,6 +1228,7 @@ describe('the store on disk', () => {
         capBytes: FRONTIER_BLOCKS * MIB,
         storedBytes: FRONTIER_BLOCKS * MIB,
         evictedBytes: 0,
+        droppedBytes: 0,
       })
     })
 
@@ -1311,6 +1324,7 @@ describe('the store on disk', () => {
         capBytes: MIB,
         storedBytes: 0,
         evictedBytes: MIB,
+        droppedBytes: 0,
       })
 
       // The slot is free again: block 3 takes it without evicting, and the write reports the eviction that was lost.
@@ -1321,6 +1335,7 @@ describe('the store on disk', () => {
         capBytes: MIB,
         storedBytes: MIB,
         evictedBytes: MIB,
+        droppedBytes: 0,
       })
       expect(file.raw().length).toBe(SLOT_BYTES)
       expectSame(await openBlock(key, 3, file.raw()), plainBlock(3))
@@ -1415,7 +1430,7 @@ describe('the store on disk', () => {
         store.write((FRONTIER_BLOCKS - 1) * MIB, plainBlock(FRONTIER_BLOCKS - 1)),
         'disk',
       )
-      expect(store.stats().evictedBytes).toBe(2 * MIB)
+      expect(store.stats().droppedBytes + store.stats().evictedBytes).toBe(2 * MIB)
 
       const next = await store.write(waiting * MIB, NOTHING)
       // Block 0 is gone once, though two writes let go of it: it is reported once and counted once.
@@ -1488,6 +1503,7 @@ describe('the store on disk', () => {
         capBytes: MIB,
         storedBytes: MIB,
         evictedBytes: 0,
+        droppedBytes: 0,
       })
     })
 
