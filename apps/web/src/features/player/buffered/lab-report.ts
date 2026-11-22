@@ -1,9 +1,9 @@
 import type { PlaybackReport } from '@dfs/shared'
-import type { BufferedStats } from './buffered-player'
+import type { EngineStats } from '@dfs/player/page'
 
 // What the buffered-play trial page counts and reports (DESIGN.md §10.4). The
 // page has no say in how the regular player counts: these are the same numbers,
-// worked out from the stats `playBuffered` gives and the video element's events,
+// worked out from the stats `playStreamed` gives and the video element's events,
 // as plain functions so they can be tested without a browser.
 
 /** What made a report go, kept in its `lab` line so the log tells them apart. */
@@ -61,7 +61,7 @@ export function stallTotals(trace: LabTrace, now: number): { stalls: number; sta
 
 /** How fast the file came in while it was being read, in Mbit/s; `null` before any bytes. */
 export function downloadMbit(
-  stats: Pick<BufferedStats, 'bytesReceived' | 'readingMs'>,
+  stats: Pick<EngineStats, 'bytesReceived' | 'readingMs'>,
 ): number | null {
   if (stats.readingMs <= 0) return null
   return (stats.bytesReceived * 8) / stats.readingMs / 1000
@@ -89,8 +89,6 @@ export function readVideo(video: HTMLVideoElement): VideoReading {
 
 /** What the page shows of the video, read twice a second: its numbers and its stalls. */
 export interface VideoNumbers extends VideoReading {
-  /** Buffered ahead of the playhead, read from the element: the stats stop when the stream ends. */
-  aheadSeconds: number
   stalls: number
   stallMs: number
 }
@@ -100,13 +98,12 @@ export const NO_NUMBERS: VideoNumbers = {
   durationSeconds: Number.NaN,
   frames: 0,
   droppedFrames: 0,
-  aheadSeconds: 0,
   stalls: 0,
   stallMs: 0,
 }
 
 /** What the page shows until the play has said anything. */
-export const OPENING_STATS: BufferedStats = {
+export const OPENING_STATS: EngineStats = {
   phase: 'opening',
   codecs: [],
   supported: {},
@@ -124,12 +121,20 @@ export const OPENING_STATS: BufferedStats = {
   holdMs: 0,
   segments: 0,
   error: null,
+  failedOn: null,
+  begun: false,
+  backend: 'memory',
+  storedBytes: 0,
+  evictedBytes: 0,
+  windowBytes: 0,
+  rate: null,
+  slow: false,
 }
 
 export interface LabReportInput {
   versionId: string
   reason: SentReason
-  stats: BufferedStats
+  stats: EngineStats
   trace: LabTrace
   video: VideoReading
   now: number

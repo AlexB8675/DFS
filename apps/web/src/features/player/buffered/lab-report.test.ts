@@ -1,6 +1,6 @@
 import { playbackReportSchema } from '@dfs/shared'
 import { describe, expect, it } from 'vitest'
-import type { BufferedStats } from './buffered-player'
+import type { EngineStats } from '@dfs/player/page'
 import {
   buildLabReport,
   downloadMbit,
@@ -9,12 +9,13 @@ import {
   markWaiting,
   newTrace,
   stallTotals,
+  OPENING_STATS,
   type LabReportInput,
 } from './lab-report'
 
 const VERSION_ID = '0b9b3e0e-7a0d-4b1e-9d3a-0f5b0d9c1a11'
 
-function stats(overrides: Partial<BufferedStats> = {}): BufferedStats {
+function stats(overrides: Partial<EngineStats> = {}): EngineStats {
   return {
     phase: 'buffering',
     codecs: ['hvc1.2.4.L153.B0', 'mp4a.40.2'],
@@ -36,6 +37,14 @@ function stats(overrides: Partial<BufferedStats> = {}): BufferedStats {
     holdMs: 0,
     segments: 120,
     error: null,
+    failedOn: null,
+    begun: true,
+    backend: 'disk',
+    storedBytes: 8_000_000,
+    evictedBytes: 0,
+    windowBytes: 4_000_000,
+    rate: 15_000_000,
+    slow: false,
     ...overrides,
   }
 }
@@ -60,6 +69,19 @@ function input(overrides: Partial<LabReportInput> = {}): LabReportInput {
     ...overrides,
   }
 }
+
+describe('OPENING_STATS', () => {
+  it('has the engine�s fields, as of a play that has not begun', () => {
+    expect(OPENING_STATS).toMatchObject({
+      phase: 'opening',
+      backend: 'memory',
+      storedBytes: 0,
+      failedOn: null,
+      slow: false,
+      begun: false,
+    })
+  })
+})
 
 describe('downloadMbit', () => {
   it('is bits over reading time, in Mbit/s', () => {

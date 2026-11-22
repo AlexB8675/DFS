@@ -1,3 +1,4 @@
+import { playStreamed, type EngineStats } from '@dfs/player/page'
 import { useQuery } from '@tanstack/react-query'
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { useParams } from 'react-router'
@@ -6,7 +7,8 @@ import { Button } from '@/components/ui/button'
 import { contentUrl, playbackQuery } from '@/features/player/api'
 import { apiFetch, errorMessage } from '@/lib/api/client'
 import { drivePlace, type FilePlace } from '@/lib/file-place'
-import { playBuffered, type BufferedStats } from './buffered-player'
+import { makeStoreWorker } from '../play-store'
+import { newPlayId } from '../timeline/recorder'
 import {
   buildLabReport,
   downloadMbit,
@@ -22,7 +24,6 @@ import {
   type SentReason,
   type VideoNumbers,
 } from './lab-report'
-import { aheadSeconds } from './tracks'
 
 // A trial page for buffered play (DESIGN.md §10.4), reachable only by its
 // address, `/lab/stream/:nodeId`: nothing links to it. It plays one of the
@@ -37,7 +38,7 @@ const NUMBERS_MS = 500
 const AUTO_REPORT_MS = 60_000
 
 /**
- * Runs the trial: Start plays the version through `playBuffered`, the video's
+ * Runs the trial: Start plays the version through `playStreamed`, the video's
  * events and a timer keep its numbers, and the report goes to the API on
  * `send('button')`, when the page is hidden or left (closed, or left inside
  * the app), and once 60 s after the first frame.
@@ -49,9 +50,9 @@ function useBufferedLab(
 ) {
   const playing = useRef<AbortController | null>(null)
   const trace = useRef<LabTrace>(newTrace())
-  const latest = useRef<BufferedStats>(OPENING_STATS)
+  const latest = useRef<EngineStats>(OPENING_STATS)
   const reporter = useRef<((reason: SentReason) => void) | null>(null)
-  const [stats, setStats] = useState<BufferedStats | null>(null)
+  const [stats, setStats] = useState<EngineStats | null>(null)
   const [numbers, setNumbers] = useState<VideoNumbers>(NO_NUMBERS)
   const [reports, setReports] = useState(0)
 
@@ -102,7 +103,6 @@ function useBufferedLab(
       if (trace.current.startedAt === null) return
       setNumbers({
         ...readVideo(video),
-        aheadSeconds: aheadSeconds(video.buffered, video.currentTime),
         ...stallTotals(trace.current, performance.now()),
       })
     }
@@ -127,7 +127,7 @@ function useBufferedLab(
     }
   }, [videoRef, place.path, versionId])
 
-  // Leaving stops the play and lets go of the object URL `playBuffered` gave the element.
+  // Leaving stops the play (the engine closes its store) and lets go of the object URL it gave the element.
   useEffect(() => {
     const video = videoRef.current
     return () => {
@@ -140,10 +140,9 @@ function useBufferedLab(
   }, [videoRef])
 
   /**
-   * Called by the Start button. Its click gives the page the user activation
-   * autoplay needs, but it can't play the video at once: `playBuffered` sets
-   * the source a moment later, and setting the source cancels a pending play.
-   * So the video plays once the source has its metadata.
+   * Called by the Start button, once per mount. The engine has no `autoplay` here, so it never plays
+   * or holds: the element is the viewer's, and the button's click plays it once the source has its
+   * metadata (setting the source cancels a pending play).
    */
   const start = () => {
     const video = videoRef.current
@@ -159,14 +158,31 @@ function useBufferedLab(
       },
       { once: true, signal: controller.signal },
     )
-    void playBuffered({
+    playStreamed({
       video,
       url: contentUrl(place, versionId),
+      playId: newPlayId(),
+      makeWorker: makeStoreWorker,
       signal: controller.signal,
+      // Nothing is told to a timeline here: the trial reports through its own report.
+      onEvent: () => undefined,
       onStats: (next) => {
+        if (controller.signal.aborted) return
         latest.current = next
         setStats(next)
       },
+    }).catch((error: unknown) => {
+      // It rejects only before the first frame; a viewer who leaves is no failure.
+      if (controller.signal.aborted) return
+      const reason =
+        error instanceof Error
+          ? error.message
+          : typeof error === 'object' && error !== null && 'refusal' in error
+            ? `refused: ${String(error.refusal)}, ${String('reason' in error ? error.reason : '')}`
+            : String(error)
+      const failed: EngineStats = { ...latest.current, phase: 'failed', error: reason }
+      latest.current = failed
+      setStats(failed)
     })
   }
 
@@ -246,7 +262,7 @@ export function LabStreamPage() {
             </Line>
             <Line label="held s">{fixed(shown.heldMs / 1000)}</Line>
             <Line label="ahead s / target s">
-              {fixed(numbers.aheadSeconds)} / {fixed(shown.targetAheadSeconds)}
+              {fixed(shown.aheadSeconds)} / {fixed(shown.targetAheadSeconds)}
             </Line>
             <Line label="keyframe gap s">{fixed(shown.keyframeGapSeconds)}</Line>
             <Line label="played s / duration s">
