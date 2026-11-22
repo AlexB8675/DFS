@@ -922,26 +922,6 @@ describe.each(['disk', 'memory'] as const)('the store on the %s backend', (kind)
         )
       })
 
-      it('lets go of a partial block wholly behind the position for a write at or ahead of it, though that block is nearer', async () => {
-        const { store } = await rigOf(kind, 20 * MIB, 4 * MIB)
-        store.setPosition(10 * MIB)
-        // Blocks 6 to 9 are leftovers of aborted reads behind the position, 11 to 13 are ahead of it, 10 is its own: all eight places.
-        await startBlocks(store, 6, 7, 8, 9, 10, 11, 12, 13)
-        // Block 14 is 4 away: every block is as near or nearer, so by distance alone nothing can go.
-        const outcome = await store.write(14 * MIB, CONTENT.subarray(14 * MIB, 14 * MIB + 100))
-        expect(outcome.evicted).toEqual([{ start: 6 * MIB, end: 6 * MIB + 100 }])
-        expect(store.held().has({ start: 14 * MIB, end: 14 * MIB + 1 })).toBe(true)
-        expect(store.stats().droppedBytes).toBe(100)
-      })
-
-      it('does not let go of a block behind the position for a write behind it, if that block is nearer', async () => {
-        const { store } = await rigOf(kind, 20 * MIB, 4 * MIB)
-        store.setPosition(10 * MIB)
-        await startBlocks(store, 6, 7, 8, 9, 10, 11, 12, 13)
-        // A write far behind (block 5, 5 away) is no read ahead: it is refused, as the rule was.
-        await expectRangeError(store.write(5 * MIB, CONTENT.subarray(5 * MIB, 5 * MIB + 100)))
-      })
-
       it('does not let go of a block that the write itself fills', async () => {
         const { store } = await rigOf(kind, 16 * MIB, 4 * MIB)
         await startBlocks(
@@ -959,17 +939,17 @@ describe.each(['disk', 'memory'] as const)('the store on the %s backend', (kind)
       })
 
       it('does not let go of a block that is nearer than any block the write adds', async () => {
-        const { store } = await rigOf(kind, 24 * MIB, 4 * MIB)
-        store.setPosition(5 * MIB)
-        // Half the frontier is the blocks just ahead of the position, and half is far from it.
+        const { store } = await rigOf(kind, 16 * MIB, 4 * MIB)
+        store.setPosition(10 * MIB)
+        // Half the frontier is block 9 and the blocks behind it, near the position, and half is far from it.
         const half = FRONTIER_BLOCKS / 2
         await startBlocks(
           store,
-          ...Array.from({ length: half }, (_, index) => 6 + index),
-          ...Array.from({ length: half }, (_, index) => 20 + index),
+          ...Array.from({ length: half }, (_, index) => 9 - index),
+          ...Array.from({ length: half }, (_, index) => index),
         )
         const before = store.held().ranges()
-        // The write adds half + 1 blocks from block 10, which needs a place for each. The last of them is 9 away, and the near blocks are not further than that: they must stay, and the far half is one place short.
+        // The write adds blocks 10 up to one more than the far half, which needs a place for each. The last of them is `half` away, and the near blocks are not further than that: they must stay, and the far half is one place short.
         await expectRangeError(
           store.write(10 * MIB, CONTENT.subarray(10 * MIB, (10 + half + 1) * MIB)),
         )
@@ -1256,8 +1236,8 @@ describe('the store on disk', () => {
       const { store } = await diskRig(24 * MIB, MIB)
       await store.write(0, plainBlock(0))
       await store.write(5 * MIB, plainBlock(5))
-      // Blocks ahead of block 5 start, so that with block 5 they fill the frontier.
-      const started = [6, 7, 8, 9, 10, 11, 12, 13, 14].slice(0, FRONTIER_BLOCKS - 1)
+      // Blocks near block 5 start, so that with block 5 they fill the frontier.
+      const started = [3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14].slice(0, FRONTIER_BLOCKS - 1)
       for (const index of started) {
         await store.write(index * MIB, CONTENT.subarray(index * MIB, index * MIB + 100))
       }

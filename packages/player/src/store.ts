@@ -276,8 +276,7 @@ export class CoreStore implements PlayStore {
    * On disk a block that is given a slot stays in the frontier until its write lands,
    * and in memory it leaves at once. A block that can be let go of is not in flight,
    * is not one the write fills or the plan places, and is strictly further from the
-   * position than every block the write adds (or is a partial block wholly behind the position, for a write at or ahead
-   * of it): the furthest goes first, and the one
+   * position than every block the write adds: the furthest goes first, and the one
    * behind the position among blocks as far as one another. A write that cannot be
    * made to fit throws before anything is changed.
    */
@@ -292,15 +291,10 @@ export class CoreStore implements PlayStore {
     if (over <= 0) return []
     const away = this.#distances()
     const reach = Math.max(...added.map(away))
-    const position = blockOf(this.#position)
-    const writesAhead = write.offset >= this.#position
     const kept = new Set([...touched, ...placements.map((placement) => placement.index)])
     const droppable: number[] = []
     for (const [index, block] of this.#frontier) {
-      if (block.pending || kept.has(index)) continue
-      // A partial block wholly behind the position is a leftover of an aborted read: it is worth less than the bytes ahead (R54).
-      const leftover = writesAhead && index < position && !isComplete(block)
-      if (away(index) > reach || leftover) droppable.push(index)
+      if (!block.pending && !kept.has(index) && away(index) > reach) droppable.push(index)
     }
     if (droppable.length < over) {
       throw new FrontierFullError(
