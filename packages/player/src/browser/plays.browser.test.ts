@@ -16,6 +16,8 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import { Downloader } from '../downloader.ts'
 import type { ByteRange } from '@dfs/mp4'
 import { indexOfRun } from '../testing/contains.ts'
+import { heldAt } from '../testing/held-at.ts'
+import type { ReadStamp } from '../testing/held-at.ts'
 import { PLAYS_DIRECTORY } from '../opfs.ts'
 import {
   activePlays,
@@ -69,13 +71,6 @@ afterEach(async () => {
   expect(silent, 'waits longer than STUCK_MS with no watchdog event and no hold').toEqual([])
 })
 
-/** The read the engine's feeder made of the file's bytes, as the downloader resolved it. */
-interface ReadStamp {
-  start: number
-  end: number
-  at: number
-}
-
 /** Records when each read of the downloader resolves, for the time from the store's holding the keyframe's bytes to the picture. */
 function recordReads(): ReadStamp[] {
   const reads: ReadStamp[] = []
@@ -91,30 +86,6 @@ function recordReads(): ReadStamp[] {
     return bytes
   })
   return reads
-}
-
-/**
- * The moment the store held every byte in `needed` (the end offset of each, exclusive): the latest, over them, of
- * when the first read that covers its last byte, made at or after `mark`, resolved. A byte that no read covers is a
- * fault of the measure, and fails the test naming it: it is never taken as held at `mark`. Null when there is
- * nothing to say a moment by (Matroska, whose index keeps no frame table).
- */
-function heldAt(
-  reads: readonly ReadStamp[],
-  mark: number,
-  needed: readonly number[],
-  what: string,
-): number | null {
-  if (needed.length === 0) return null
-  let latest = mark
-  for (const end of needed) {
-    const covering = reads.find((read) => read.at >= mark && read.start < end && end <= read.end)
-    if (covering === undefined) {
-      throw new Error(`The measure of ${what} found no read that covers the bytes up to ${end}.`)
-    }
-    latest = Math.max(latest, covering.at)
-  }
-  return latest
 }
 
 /** Resolves with the time, in ms, from `from` until the element shows a picture past `frameCount` and has stopped seeking at the target. */
