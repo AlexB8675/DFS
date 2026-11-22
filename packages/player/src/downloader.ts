@@ -632,7 +632,7 @@ export class Downloader {
   /**
    * The store refused a write at `from` by its frontier rule: that range is not opened again until the position
    * moves, a write succeeds (the frontier changed) or FRONTIER_RETRY_MS has passed, when everything is considered again.
-   * Each offset has its own refusal, so one refused read does not free another's range.
+   * Each offset has its own refusal, so a new refusal does not lift another's; a write that lands lifts them all.
    */
   #refuseFrontier(from: number): void {
     const old = this.#refusals.get(from)
