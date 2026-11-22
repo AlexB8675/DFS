@@ -749,6 +749,34 @@ describe('feeding a Matroska file (§10.4)', () => {
     expect(wentBack).toBe(true)
   })
 
+  it('begins a fragment at every keyframe of a picture read in chunk-sized pieces, so that the window can cut there (R49)', async () => {
+    // 4K-sized frames: a chunk of CHUNK_BYTES holds two of them, far less than half a second of a 30 fps picture, and
+    // a keyframe every second falls inside a chunk's frames, never at its start.
+    const frames: MovieFrame[] = []
+    for (let i = 0; i < 150; i += 1) {
+      const keyframe = i % 30 === 0
+      frames.push({
+        track: 1,
+        time: Math.round((i * 1000) / 30),
+        keyframe,
+        data: pictureFrame(i, 500_000, keyframe),
+      })
+    }
+    const file = matroskaMovie({
+      docType: 'webm',
+      scale: 1_000_000,
+      duration: 5000,
+      tracks: [WEBM_VIDEO],
+      clusters: [{ timestamp: 0, frames }],
+    })
+    const { feeder } = await open(file.bytes)
+    const sink = new RecordingSink()
+    expect(await feedAll(feeder, sink)).toBe('ended')
+    const flagged = sink.appended('video').filter(({ run }) => run.keyframe)
+    // One run begins at each of the five keyframes, at its time.
+    expect(flagged.map(({ run }) => Math.round(run.start))).toEqual([0, 1, 2, 3, 4])
+  })
+
   it('goes on with no sound when the first three seconds of picture hold none, and holds them until then', async () => {
     const { bytes, pictures } = webm({ seconds: 6, size: 30_000, soundFrom: 5 })
     const { feeder } = await open(bytes)

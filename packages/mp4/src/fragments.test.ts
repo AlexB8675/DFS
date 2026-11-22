@@ -49,11 +49,12 @@ describe('fragmentRuns', () => {
     ])
   })
 
-  it('starts a run at a keyframe once the one before has covered half a second, and not sooner', () => {
-    // A keyframe at 4 comes after 0.4 s: too soon. The limit cuts at 10, and the keyframe at 16 comes 0.6 s after that.
+  it('starts a run at every keyframe after the first frame of the stretch, and cuts at a second', () => {
+    // A keyframe at 4 comes after 0.4 s and starts a run (R49: no half-second condition); the keyframe at 16 does too.
     expect(fragmentRuns(table(frames(30), [0, 4, 16]), 0, 30, true)).toEqual([
-      [0, 10],
-      [10, 16],
+      [0, 4],
+      [4, 14],
+      [14, 16],
       [16, 26],
       [26, 30],
     ])
@@ -62,6 +63,20 @@ describe('fragmentRuns', () => {
       [0, 6],
       [6, 16],
       [16, 20],
+    ])
+  })
+
+  it('cuts at a keyframe inside a stretch shorter than half a second', () => {
+    // Frames of 30 fps read a chunk at a time (two of them) hold 0.067 s, with a keyframe inside: it begins a run.
+    expect(fragmentRuns(table(frames(4, 33), [0, 1]), 0, 4, true)).toEqual([
+      [0, 1],
+      [1, 4],
+    ])
+    // The first frame of the stretch is never cut before, keyframe or not.
+    expect(fragmentRuns(table(frames(3, 33), [0]), 0, 3, true)).toEqual([[0, 3]])
+    expect(fragmentRuns(table(frames(3, 33), [2]), 0, 3, true)).toEqual([
+      [0, 2],
+      [2, 3],
     ])
   })
 
