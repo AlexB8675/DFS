@@ -28,6 +28,7 @@ import { mergeRequests } from '../engine/requests.ts'
 import type { Request } from '../engine/requests.ts'
 import { feedTargets } from '../engine/targets.ts'
 import type { ChosenTracks, EngineTrack } from '../engine/tracks.ts'
+import { bytesReceivedOf } from '../engine/received.ts'
 import type { WatchAction } from '../engine/watchdog.ts'
 import { DecoderWindow } from '../engine/window.ts'
 import type { FedRun } from '../engine/window.ts'
@@ -293,9 +294,10 @@ class Play {
       const { store } = downloader
       const held = store.held()
       stats.backend = store.backend
-      stats.storedBytes = store.stats().storedBytes
-      stats.evictedBytes = store.stats().evictedBytes
-      stats.bytesReceived = held.bytes() + store.stats().evictedBytes
+      const storeStats = store.stats()
+      stats.storedBytes = storeStats.storedBytes
+      stats.evictedBytes = storeStats.evictedBytes
+      stats.bytesReceived = bytesReceivedOf(held.bytes(), storeStats)
       stats.rate = downloader.rate()
       const duration = this.#feeder?.durationSeconds ?? null
       stats.slow =
