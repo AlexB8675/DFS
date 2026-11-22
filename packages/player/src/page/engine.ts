@@ -702,7 +702,8 @@ class Play {
       this.#wake()
       return
     }
-    const inWindow = this.#inWindow(at)
+    // While a request waits or is served, what the window holds is being replaced: the seek is posted too, so it merges with that request and the serve restarts at the newest target (R39), not applied to the old one.
+    const inWindow = !this.#busy() && this.#inWindow(at)
     // The intent before the seek is settled: playing, or held for a play that is wanted.
     const playing = !isPaused(video) || this.#holding.wantsPlay
     this.#seeks.begin(at, inWindow)

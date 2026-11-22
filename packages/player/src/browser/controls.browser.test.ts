@@ -5,6 +5,7 @@
 // engine.browser.test.ts. A file that is not served (no `corpus:make`) skips its tests, with the reason.
 
 import { afterEach, expect, test, vi } from 'vitest'
+import { Feeder } from '../engine/feeder.ts'
 import { MediaSourceSink } from '../page/index.ts'
 import { Seeks } from '../page/seeks.ts'
 import { SEEK_DEADLINE_MS, STUCK_MS, WATCH_EVERY_MS } from '../limits.ts'
@@ -116,6 +117,51 @@ suite(NAME)('playStreamed: seeks', () => {
     expect(shown(play)[0]?.ms).toBeGreaterThan(0)
     expect(ofType(play.events, 'error')).toEqual([])
   })
+
+  test('a seek made while a seek outside the window is served is served too, and lands at its own target (F3)', async () => {
+    // The first feed after the serve's seek ends late: the serve stays busy, with data from its target already in the buffer.
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- the originals are called on the feeder they were taken from, below.
+    const { seek: realSeek, feed: realFeed } = Feeder.prototype
+    const watch = { on: false, delayNext: false }
+    vi.spyOn(Feeder.prototype, 'seek').mockImplementation(async function (
+      this: Feeder,
+      ...args: Parameters<Feeder['seek']>
+    ) {
+      await realSeek.apply(this, args)
+      if (watch.on) watch.delayNext = true
+    })
+    vi.spyOn(Feeder.prototype, 'feed').mockImplementation(async function (
+      this: Feeder,
+      ...args: Parameters<Feeder['feed']>
+    ) {
+      const result = await realFeed.apply(this, args)
+      if (watch.delayNext) {
+        watch.delayNext = false
+        await pause(3_000)
+      }
+      return result
+    })
+    await control({ bandwidthBytesPerSecond: 300_000 })
+    const play = begin(NAME)
+    await firstPicture(play)
+    watch.on = true
+    play.video.currentTime = 8
+    await until(play, 'data from the first target', 30_000, () => bufferedEnd(play.video) > 8.8)
+    const before = ofType(play.events, 'seek').length
+    play.video.currentTime = 8.3
+    await until(
+      play,
+      "the second seek's picture",
+      20_000,
+      () => shown(play).some((seek) => Math.abs(seek.to - 8.3) < 0.1),
+    )
+    expect(play.video.currentTime).toBeGreaterThanOrEqual(8.25)
+    expect(play.video.currentTime).toBeLessThan(8.8)
+    // The second seek was posted as a request, not taken as inside the window.
+    expect(ofType(play.events, 'seek')[before]).toMatchObject({ inWindow: false, ms: null })
+    await pause(SEEK_DEADLINE_MS + 1_000)
+    expect(ofType(play.events, 'error')).toEqual([])
+  }, 60_000)
 
   test('a seek made during the opening is kept, and lands at its target', async () => {
     let sought = false
