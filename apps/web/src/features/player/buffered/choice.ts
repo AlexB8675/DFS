@@ -16,11 +16,13 @@ export type PagePlay =
  * Decides how a video plays on this device (§10.4, D45). An iPhone or iPad plays
  * in Safari's own player. Elsewhere a video plays in the page only through Media
  * Source: in a browser that has it, from an MP4 or MOV (ffmpeg's container name
- * starts with `mov,mp4`; Matroska and WebM aren't split by mp4box) whose first
- * picture and first sound track the browser takes. The first sound track is the
- * one the engine plays; the others are for another player. A stream with no
+ * starts with `mov,mp4`) or a Matroska or WebM file (`matroska`), whose first
+ * picture and the sound that plays the browser takes. The engine repackages
+ * Matroska into MP4 fragments, so the checks are for MP4's MIME types. The sound
+ * that plays is an MP4's first, and a Matroska file's first flagged default, else
+ * its first; the others are for another player. A stream with no
  * codec string is let through, as the player checks it as it opens. With no
- * media info, the name has to be an MP4's or MOV's. Anything else is for another
+ * media info, the name has to be an MP4's, MOV's, MKV's or WebM's. Anything else is for another
  * player, with the reason, and the codec where a codec is the reason.
  */
 export function pagePlay(input: {
@@ -42,40 +44,51 @@ export function pagePlay(input: {
       : { play: 'elsewhere', reason: 'format', codec: null }
   }
   const picture = info.streams.find((stream) => stream.type === 'video')
-  if (info.kind !== 'video' || !info.container.startsWith('mov,mp4') || picture === undefined) {
+  if (
+    info.kind !== 'video' ||
+    !(info.container.startsWith('mov,mp4') || info.container.startsWith('matroska')) ||
+    picture === undefined
+  ) {
     return { play: 'elsewhere', reason: 'format', codec: null }
   }
   if (picture.codecString !== null && !supports(`video/mp4; codecs="${picture.codecString}"`)) {
     return { play: 'elsewhere', reason: 'picture', codec: picture.codec }
   }
-  const sound = info.streams.find((stream) => stream.type === 'audio')
-  if (sound?.codecString != null && !supports(`audio/mp4; codecs="${sound.codecString}"`)) {
+  const sounds = info.streams.filter((stream) => stream.type === 'audio')
+  const sound = info.container.startsWith('matroska')
+    ? (sounds.find((stream) => stream.default) ?? sounds[0])
+    : sounds[0]
+  if (
+    sound?.codecString != null &&
+    !supports(`audio/mp4; codecs="${sound.codecString}"`) &&
+    !(sound.codec === 'mp3' && supports('audio/mp4; codecs="mp3"'))
+  ) {
     return { play: 'elsewhere', reason: 'sound', codec: sound.codec }
   }
   return { play: 'buffered' }
 }
 
-/** Whether this browser has what buffered play needs (§10.4): Media Source, `AbortSignal.any` and `Promise.withResolvers`. */
+/** Whether this browser has what buffered play needs (§10.4): Media Source, `AbortSignal.any` and WebCrypto, which the store encrypts with. */
 export function bufferedPlayAvailable(
   scope: {
     MediaSource?: unknown
     AbortSignal?: { any?: unknown }
-    Promise?: { withResolvers?: unknown }
+    crypto?: { subtle?: unknown }
   } = globalThis,
 ): boolean {
   return (
     scope.MediaSource !== undefined &&
     typeof scope.AbortSignal?.any === 'function' &&
-    typeof scope.Promise?.withResolvers === 'function'
+    scope.crypto?.subtle !== undefined
   )
 }
 
 /**
- * Whether a file named `name` may play through the buffer: only an MP4 or MOV
- * can, and its name is all there is to go on before the media info has come, so
+ * Whether a file named `name` may play through the buffer: only an MP4, MOV,
+ * MKV or WebM can, and its name is all there is to go on before the media info has come, so
  * the video player waits for the info only for these (§10.4). The info
  * (`pagePlay`) has the last word.
  */
 export function mayPlayBuffered(name: string): boolean {
-  return /\.(mp4|m4v|mov)$/i.test(name)
+  return /\.(mp4|m4v|mov|mkv|webm)$/i.test(name)
 }

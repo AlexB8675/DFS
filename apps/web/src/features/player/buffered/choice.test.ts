@@ -104,6 +104,29 @@ function input(
   }
 }
 
+/** A video file's info: a picture and the given sounds, in the given container. */
+function fileInfo(
+  container: string,
+  parts: {
+    video: string
+    audio: { codec: string; codecString: string; default?: boolean }[]
+  },
+): MediaInfo {
+  const picture: MediaStream = { ...HEVC, codec: 'h264', codecString: parts.video }
+  const sounds = parts.audio.map((sound, at): MediaStream => ({
+    ...AAC,
+    ...sound,
+    index: at + 1,
+    default: sound.default ?? true,
+  }))
+  return { ...PROOF, container, streams: [picture, ...sounds] }
+}
+
+const mkvInfo = (parts: Parameters<typeof fileInfo>[1]): MediaInfo =>
+  fileInfo('matroska,webm', parts)
+const mp4Info = (parts: Parameters<typeof fileInfo>[1]): MediaInfo =>
+  fileInfo('mov,mp4,m4a,3gp,3g2,mj2', parts)
+
 describe('deciding how a video plays', () => {
   it('leaves an iPhone or iPad to Safari’s own player, whatever the info', () => {
     for (const info of [PROOF, null, { ...PROOF, container: 'matroska,webm' }]) {
@@ -130,21 +153,102 @@ describe('deciding how a video plays', () => {
     expect(given.asked).toEqual([])
   })
 
-  it('offers another player for a name that cannot be an MP4 while there is no info', () => {
-    expect(pagePlay({ ...input(null), name: 'film.mkv' })).toEqual({
+  it('offers another player for a name that cannot be an MP4 or Matroska while there is no info', () => {
+    expect(pagePlay({ ...input(null), name: 'film.avi' })).toEqual({
       play: 'elsewhere',
       reason: 'format',
       codec: null,
     })
   })
 
-  it('offers another player for a Matroska or WebM container', () => {
-    const info = { ...PROOF, container: 'matroska,webm' }
+  it('offers another player for a container that is neither MP4 nor Matroska', () => {
+    const info = { ...PROOF, container: 'avi' }
     expect(pagePlay(input(info, HEVC_MIME, AAC_MIME))).toEqual({
       play: 'elsewhere',
       reason: 'format',
       codec: null,
     })
+  })
+
+  it('plays a Matroska file in the page when the browser takes its picture and the sound that plays', () => {
+    expect(
+      pagePlay({
+        name: 'a.mkv',
+        info: mkvInfo({
+          video: 'av01.0.08M.08',
+          audio: [{ codec: 'opus', codecString: 'opus', default: false }],
+        }),
+        device: 'windows',
+        canBuffer: true,
+        supports: () => true,
+      }),
+    ).toEqual({ play: 'buffered' })
+  })
+
+  it('checks the Matroska sound flagged default, not the first, as the engine plays it', () => {
+    const info = mkvInfo({
+      video: 'avc1.64001f',
+      audio: [
+        { codec: 'opus', codecString: 'opus', default: false },
+        { codec: 'ac3', codecString: 'ac-3', default: true },
+      ],
+    })
+    const supports = (mime: string) => !mime.includes('ac-3')
+    expect(pagePlay({ name: 'a.mkv', info, device: 'windows', canBuffer: true, supports })).toEqual(
+      {
+        play: 'elsewhere',
+        reason: 'sound',
+        codec: 'ac3',
+      },
+    )
+  })
+
+  it('checks the first Matroska sound when none is flagged default', () => {
+    const info = mkvInfo({
+      video: 'avc1.64001f',
+      audio: [
+        { codec: 'ac3', codecString: 'ac-3', default: false },
+        { codec: 'opus', codecString: 'opus', default: false },
+      ],
+    })
+    const supports = (mime: string) => !mime.includes('ac-3')
+    expect(pagePlay({ name: 'a.mkv', info, device: 'windows', canBuffer: true, supports })).toEqual(
+      {
+        play: 'elsewhere',
+        reason: 'sound',
+        codec: 'ac3',
+      },
+    )
+  })
+
+  it('checks an MP4’s first sound, as before', () => {
+    const info = mp4Info({
+      video: 'avc1.64001f',
+      audio: [
+        { codec: 'aac', codecString: 'mp4a.40.2', default: false },
+        { codec: 'ac3', codecString: 'ac-3', default: true },
+      ],
+    })
+    const supports = (mime: string) => !mime.includes('ac-3')
+    expect(pagePlay({ name: 'a.mp4', info, device: 'windows', canBuffer: true, supports })).toEqual(
+      {
+        play: 'buffered',
+      },
+    )
+  })
+
+  it('lets an MP3 sound through where Media Source takes it only as "mp3" (Firefox)', () => {
+    const supports = (mime: string) =>
+      mime.startsWith('video/') || mime === 'audio/mp4; codecs="mp3"'
+    expect(
+      pagePlay({
+        name: 'a.mp4',
+        info: mp4Info({ video: 'avc1.64001f', audio: [{ codec: 'mp3', codecString: 'mp4a.6B' }] }),
+        device: 'windows',
+        canBuffer: true,
+        supports,
+      }),
+    ).toEqual({ play: 'buffered' })
   })
 
   it('offers another player for an audio file, even one whose cover is a picture stream', () => {
@@ -230,10 +334,10 @@ describe('telling whether this browser can buffer', () => {
   const FULL = {
     MediaSource: () => undefined,
     AbortSignal: { any: () => undefined },
-    Promise: { withResolvers: () => undefined },
+    crypto: { subtle: {} },
   }
 
-  it('can where Media Source, AbortSignal.any and Promise.withResolvers exist', () => {
+  it('can where Media Source, AbortSignal.any and WebCrypto exist', () => {
     expect(bufferedPlayAvailable(FULL)).toBe(true)
   })
 
@@ -246,14 +350,20 @@ describe('telling whether this browser can buffer', () => {
     expect(bufferedPlayAvailable({ ...FULL, AbortSignal: undefined })).toBe(false)
   })
 
-  it('cannot without Promise.withResolvers', () => {
-    expect(bufferedPlayAvailable({ ...FULL, Promise: {} })).toBe(false)
-    expect(bufferedPlayAvailable({ ...FULL, Promise: undefined })).toBe(false)
+  it('cannot without WebCrypto, which the store encrypts with', () => {
+    expect(bufferedPlayAvailable({ ...FULL, crypto: {} })).toBe(false)
+    expect(bufferedPlayAvailable({ ...FULL, crypto: undefined })).toBe(false)
+  })
+
+  it('does not need Promise.withResolvers, which only the old engine used', () => {
+    expect(bufferedPlayAvailable(FULL)).toBe(true)
   })
 })
 
 describe('telling by its name that a file may play through the buffer', () => {
-  it('allows MP4, M4V and MOV, whatever the case', () => {
+  it('allows MP4, M4V, MOV, MKV and WebM, whatever the case', () => {
+    expect(mayPlayBuffered('Clip.MKV')).toBe(true)
+    expect(mayPlayBuffered('clip.webm')).toBe(true)
     expect(mayPlayBuffered('Clip.MP4')).toBe(true)
     expect(mayPlayBuffered('b.m4v')).toBe(true)
     expect(mayPlayBuffered('a.mov')).toBe(true)
@@ -261,9 +371,8 @@ describe('telling by its name that a file may play through the buffer', () => {
   })
 
   it('leaves the other containers to the element', () => {
-    expect(mayPlayBuffered('film.mkv')).toBe(false)
-    expect(mayPlayBuffered('clip.webm')).toBe(false)
     expect(mayPlayBuffered('old.avi')).toBe(false)
+    expect(mayPlayBuffered('clip.avi')).toBe(false)
   })
 
   it('needs the extension to be the last part of the name', () => {
