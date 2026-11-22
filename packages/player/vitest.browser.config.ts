@@ -106,7 +106,8 @@ if (wanted.includes('firefox')) {
           'media.autoplay.default': 0,
           'media.autoplay.blocking_policy': 0,
           // A window that other windows cover is hidden to the page, and Firefox presents no pictures to a hidden
-          // page (requestVideoFrameCallback never fires), so a headed run would fail whenever something covers it.
+          // page (the frame count of getVideoPlaybackQuality, which the watchdog and the tests read, stands still),
+          // so a headed run would fail whenever something covers it.
           'widget.windows.window_occlusion_tracking.enabled': false,
         },
       },

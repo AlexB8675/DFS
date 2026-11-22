@@ -26,7 +26,7 @@ export interface HoldInput {
   remainingSeconds: number
   /** What the store can hold ahead of the playhead, in seconds of the video. The engine works it out. */
   storeAheadCapSeconds: number
-  /** True when the downloader's state is `full`: the store can hold no more ahead, whatever the cap arithmetic says (�10.4). */
+  /** True when the downloader's state is `full`: the store can hold no more ahead, whatever the cap arithmetic says (§10.4). */
   storeFull: boolean
 }
 

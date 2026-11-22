@@ -61,7 +61,7 @@ export interface EngineStats {
   codecs: string[]
   /** Each SourceBuffer MIME type, and whether `MediaSource.isTypeSupported` said yes: the engine only plays a type that it did. */
   supported: Record<string, boolean>
-  /** The bytes of the file that the store has taken, cumulative: what it holds and what it has evicted. */
+  /** The bytes of the file that the store has taken, cumulative: what it holds, what it has evicted and what it has dropped (frontier blocks let go of). */
   bytesReceived: number
   /** Time the downloader spent reading from the network. */
   readingMs: number
