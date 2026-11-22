@@ -17,7 +17,7 @@ import {
 import { ReadError } from './read.ts'
 import { RangeSet } from './ranges.ts'
 import { newPlayKey } from './seal.ts'
-import { CoreStore } from './store.ts'
+import { CoreStore, FrontierFullError } from './store.ts'
 import type { PlayStore, StoreStats, WriteOutcome } from './store.ts'
 import { byteAt, startRangeServer } from './testing/range-server.ts'
 import type { Fault, RangeServer } from './testing/range-server.ts'
@@ -768,6 +768,31 @@ describe('Downloader: failures and retries', () => {
     expect(ofType(rig.events, 'error')[0]?.message).toContain('the frontier is full')
     expect(ofType(rig.events, 'requestEnd').map((end) => end.outcome)).toEqual(['failed', 'done'])
     expect(ofType(rig.events, 'retry')).toHaveLength(1)
+    expect(await firstMismatch(store, { start: 0, end: size })).toBe(-1)
+  })
+
+  it('ends a read quietly when the store refuses its write by the frontier rule, and asks for its range again by the usual rule', async () => {
+    const size = 2 * MIB
+    const stub = stubNetwork((call) => pipeFor(call, size))
+    const store = memoryStore(size)
+    store.failNextWrite = new FrontierFullError('the frontier holds blocks nearer the position')
+    const rig = build({ url: 'http://stub.invalid/file', store, fetch: stub.fetch })
+
+    rig.downloader.start()
+    await until(() => stub.pipes.length === 1)
+    stub.pipes[0]?.push(0, 64 * 1024)
+    await until(() => ofType(rig.events, 'requestEnd').length === 1)
+    await settle()
+
+    // Not an error and no retry after a pause: the store's own rule, not a fault of the read.
+    expect(ofType(rig.events, 'error')).toEqual([])
+    expect(ofType(rig.events, 'retry')).toEqual([])
+    expect(ofType(rig.events, 'requestEnd')[0]?.outcome).toBe('aborted')
+    expect(rig.downloader.failure()).toBeNull()
+    // The onward read is wanted still, and is opened again at once, with no pause.
+    await until(() => stub.pipes.length === 2)
+    stub.pipes[1]?.push(0, size)
+    await until(() => store.held().heldFrom(0) === size)
     expect(await firstMismatch(store, { start: 0, end: size })).toBe(-1)
   })
 
@@ -2132,13 +2157,9 @@ describe('Downloader: a seek', () => {
     const { rig, store, position, mostOpen } = await storm(size)
 
     expect(mostOpen).toBe(2)
-    // A read far from the position can find the frontier full of the partial blocks that the reads which yielded left nearer to it: the store refuses that write, and the read is tried again after a pause. Nothing else goes wrong.
-    for (const error of ofType(rig.events, 'error')) {
-      expect(error.message).toContain('The store refused a write')
-    }
-    expect(ofType(rig.events, 'retry').length).toBeGreaterThanOrEqual(
-      ofType(rig.events, 'error').length,
-    )
+    // A read far from the position can find the frontier full of the partial blocks that the reads which yielded left nearer to it: the store refuses that write by its own rule, and the read ends quietly (R48). Nothing is told as an error and nothing is retried after a pause.
+    expect(ofType(rig.events, 'error')).toEqual([])
+    expect(ofType(rig.events, 'retry')).toEqual([])
     expect(store.held().heldFrom(position)).toBe(size - position)
     await expectHeldBytesRight(store)
   }, 30_000)
@@ -2171,10 +2192,9 @@ describe('Downloader: a seek', () => {
     expect(last).not.toBeNull()
     await until(() => last?.outcome.state !== 'pending')
     expect(last?.outcome.state).toBe('held')
-    // A read far from the position can still be refused a write by the frontier, and its retry is told with the offset of the position's first gap (see the test above). The last target's own reads are not: they end clean, and the call needs no retry.
-    for (const error of ofType(rig.events, 'error')) {
-      expect(error.message).toContain('The store refused a write')
-    }
+    // A read far from the position can still be refused a write by the frontier; it ends quietly (R48), and the last target's own reads end clean too.
+    expect(ofType(rig.events, 'error')).toEqual([])
+    expect(ofType(rig.events, 'retry')).toEqual([])
     await expectOwnReadsClean(rig, last)
     if (last !== null) expect(await firstMismatch(store, last.range)).toBe(-1)
     expect(store.held().heldFrom(position)).toBe(size - position)

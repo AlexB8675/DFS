@@ -27,6 +27,13 @@ import { SEAL_OVERHEAD, openBlock, sealBlock } from './seal.ts'
 import type { PlayKey } from './seal.ts'
 
 /**
+ * A write that the frontier refuses by its own rule: it holds blocks nearer the position than the write's, and has
+ * no room for another. It is the store's rule and not a fault of the read, so the downloader ends that read quietly
+ * (R48). A `RangeError`, as it was.
+ */
+export class FrontierFullError extends RangeError {}
+
+/**
  * The synchronous calls of a private file's access handle (`FileSystemSyncAccessHandle`)
  * that the store uses. Each can throw a `DOMException`, and the store tells a full disk
  * (`QuotaExceededError`) from any other failure.
@@ -294,7 +301,7 @@ export class CoreStore implements PlayStore {
       if (!block.pending && !kept.has(index) && away(index) > reach) droppable.push(index)
     }
     if (droppable.length < over) {
-      throw new RangeError(
+      throw new FrontierFullError(
         `a write of ${write.length} bytes at ${write.offset} would add ${added.length} blocks to the ${this.#frontier.size} that the frontier holds, past its ${FRONTIER_BLOCKS}`,
       )
     }

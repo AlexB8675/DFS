@@ -45,6 +45,7 @@ import {
   STALL_COVER_MS,
 } from './limits.ts'
 import { ReadError, openRead } from './read.ts'
+import { FrontierFullError } from './store.ts'
 import type { PlayStore, WriteOutcome } from './store.ts'
 
 /** What the engine may see of a play's store: its backend, its cap, what it holds and its figures. It can't write, read, move the position or close it. */
@@ -1011,6 +1012,12 @@ export class Downloader {
     if (isClosed(error)) {
       this.#end(read, 'aborted', null)
       void this.close()
+      return
+    }
+    if (error instanceof FrontierFullError) {
+      // The store's own rule (it holds blocks nearer the position), not a fault of the read: the read ends quietly, and its range is asked for again by the usual rule when it is wanted (R48).
+      this.#end(read, 'aborted', null)
+      this.#reconsider()
       return
     }
     const message = clip(`The store refused a write: ${messageOf(error)}`)
