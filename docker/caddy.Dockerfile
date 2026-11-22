@@ -17,12 +17,19 @@ COPY packages/config/package.json packages/config/
 COPY packages/contract/package.json packages/contract/
 COPY packages/crypto/package.json packages/crypto/
 COPY packages/db/package.json packages/db/
+COPY packages/mp4/package.json packages/mp4/
+COPY packages/player/package.json packages/player/
 COPY packages/shared/package.json packages/shared/
 COPY packages/storage/package.json packages/storage/
 RUN --mount=type=cache,id=dfs-pnpm-store,target=/pnpm-store \
     pnpm install --frozen-lockfile --store-dir /pnpm-store --filter "@dfs/web..."
 
+# The player's store (its worker and the clean-up at the start) is bundled into the
+# app, with the MP4 reader it builds on (DESIGN.md §10.4).
 COPY packages/shared packages/shared
+COPY packages/mp4/tsconfig*.json packages/mp4/
+COPY packages/mp4/src packages/mp4/src
+COPY packages/player packages/player
 COPY apps/web apps/web
 # The deploy's version and time, built into the app (docker/deploy.sh): a
 # page compares them with what the API says is deployed.
