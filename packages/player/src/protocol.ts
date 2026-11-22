@@ -46,8 +46,8 @@ export function dataOf(event: unknown): unknown {
   return typeof event === 'object' && event !== null && 'data' in event ? event.data : undefined
 }
 
-/** What a failure is called on the wire: a kind of `StoreError`, or `range` for a `RangeError`, which is the caller's mistake and not the store's. */
-export type WireErrorKind = StoreErrorKind | 'range'
+/** What a failure is called on the wire: a kind of `StoreError`, `range` for a `RangeError`, which is the caller's mistake and not the store's, or `frontier` for the frontier's own refusal of a write (a `RangeError` that is the store's rule, R48). */
+export type WireErrorKind = StoreErrorKind | 'range' | 'frontier'
 
 /** A failure as it crosses: errors themselves do not. */
 export interface WireError {
@@ -96,6 +96,7 @@ const WIRE_ERROR_KINDS: Record<WireErrorKind, true> = {
   refused: true,
   'no-opfs': true,
   range: true,
+  frontier: true,
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

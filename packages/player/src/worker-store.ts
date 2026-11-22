@@ -4,7 +4,7 @@
 // that carries its number is the result. What the store holds is kept here as well,
 // from what the answers say, so that `held()` and `stats()` stay synchronous.
 
-import { StoreError } from './errors.ts'
+import { FrontierFullError, StoreError } from './errors.ts'
 import { LATE_TIMER_MS, STORE_CALL_MS, STORE_OPEN_MS, WAKE_GRACE_MS } from './limits.ts'
 import { dataOf, idOf, parseReply } from './protocol.ts'
 import type { Endpoint, StoreReply, StoreRequest, WireError } from './protocol.ts'
@@ -20,6 +20,7 @@ interface Waiting {
 
 /** The error that an error answer stands for: a caller's mistake stays a `RangeError`, and the store's own failures keep their kinds. */
 function errorOf(error: WireError): Error {
+  if (error.kind === 'frontier') return new FrontierFullError(error.message)
   return error.kind === 'range'
     ? new RangeError(error.message)
     : new StoreError(error.kind, error.message)

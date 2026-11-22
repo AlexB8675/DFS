@@ -23,3 +23,10 @@ export class StoreError extends Error {
     this.kind = kind
   }
 }
+
+/**
+ * A write that the frontier refuses by its own rule: it holds blocks nearer the position than the write's, and has
+ * no room for another. It is the store's rule and not a fault of the read, so the downloader ends that read quietly
+ * (R48). A `RangeError`, as it was; it crosses the worker's wire as the kind `frontier`.
+ */
+export class FrontierFullError extends RangeError {}

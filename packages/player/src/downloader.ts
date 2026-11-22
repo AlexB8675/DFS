@@ -32,7 +32,7 @@
 import type { ByteRange } from '@dfs/mp4'
 import type { TimelineEventInput } from '@dfs/shared'
 import { blockOf } from './blocks.ts'
-import { StoreError } from './errors.ts'
+import { FrontierFullError, StoreError } from './errors.ts'
 import {
   BLOCK_BYTES,
   COVER_AHEAD_MS,
@@ -45,7 +45,6 @@ import {
   STALL_COVER_MS,
 } from './limits.ts'
 import { ReadError, openRead } from './read.ts'
-import { FrontierFullError } from './store.ts'
 import type { PlayStore, WriteOutcome } from './store.ts'
 
 /** What the engine may see of a play's store: its backend, its cap, what it holds and its figures. It can't write, read, move the position or close it. */

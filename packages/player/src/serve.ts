@@ -6,7 +6,7 @@
 // sent them in. A request that fails is answered with an error, and nothing that
 // the page sends can stop the worker from answering the next.
 
-import { StoreError } from './errors.ts'
+import { FrontierFullError, StoreError } from './errors.ts'
 import { BLOCK_BYTES } from './limits.ts'
 import { dataOf, idOf, parseRequest } from './protocol.ts'
 import type {
@@ -50,6 +50,7 @@ function isQuota(error: unknown): boolean {
 function wireError(error: unknown, fallback: WireErrorKind): WireError {
   const message = error instanceof Error ? error.message : 'it did not say why'
   if (error instanceof StoreError) return { kind: error.kind, message }
+  if (error instanceof FrontierFullError) return { kind: 'frontier', message }
   if (error instanceof RangeError) return { kind: 'range', message }
   if (isQuota(error)) return { kind: 'quota', message }
   return { kind: fallback, message }

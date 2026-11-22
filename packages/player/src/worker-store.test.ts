@@ -1,7 +1,7 @@
 import type { MessagePort } from 'node:worker_threads'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { StoreError } from './errors.ts'
+import { FrontierFullError, StoreError } from './errors.ts'
 import type { StoreErrorKind } from './errors.ts'
 import {
   BLOCK_BYTES,
@@ -659,6 +659,23 @@ describe('what the client holds', () => {
     const second = await script.request(2, 'write')
     script.send({ id: second.id, ok: false, error: { kind: 'range', message: 'too far' } })
     expect(await failureOf(refused)).toBeInstanceOf(RangeError)
+    expect(store.held().ranges()).toEqual([])
+  })
+
+  it('tells the frontier refusal of the worker as it is, a FrontierFullError, so that the downloader can end that read quietly (R48)', async () => {
+    const script = new Script()
+    const store = await script.open()
+    const refused = store.write(0, new Uint8Array(10))
+    const request = await script.request(1, 'write')
+    script.send({
+      id: request.id,
+      ok: false,
+      error: { kind: 'frontier', message: 'the frontier holds blocks nearer the position' },
+    })
+    const error = await failureOf(refused)
+    expect(error).toBeInstanceOf(FrontierFullError)
+    // It is still a RangeError, as the store has always thrown it.
+    expect(error).toBeInstanceOf(RangeError)
     expect(store.held().ranges()).toEqual([])
   })
 
