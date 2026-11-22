@@ -51,7 +51,8 @@ describe('a virtual file', () => {
       expect(file.bytes({ start, end })).toEqual(whole.subarray(start, end))
     }
     expect(() => file.bytes({ start: 0, end: file.total + 1 })).toThrow(RangeError)
-  })
+    // Turbo's parallel load slows this CPU-heavy test, so it has 30 s, not the default 5 s (§10.4).
+  }, 30_000)
 
   it('holds clusters the reader finds, each with the Timestamp and the size given', () => {
     const whole = file.bytes({ start: 0, end: file.total })

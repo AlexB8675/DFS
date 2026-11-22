@@ -381,5 +381,6 @@ describe('RangeSet against a model', () => {
         for (let at = 0; at < SPAN; at += 1) expect(set.heldFrom(at)).toBe(modelHeldFrom(at))
       }
     }
-  })
+    // Turbo's parallel load slows this CPU-heavy test, so it has 30 s, not the default 5 s (§10.4).
+  }, 30_000)
 })

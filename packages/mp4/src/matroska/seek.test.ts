@@ -1212,8 +1212,9 @@ describe('the bounds on the walk of the Cues (ยง10.4)', () => {
         const { cursor, asks } = seek(index, bytes, 20.5)
         const took = performance.now() - before
 
-        expect(took).toBeLessThan(3000)
+        // The bound is the work, the reads the seek asks for (`MAX_SEEK_READS`), not the clock of a machine that turbo loads with every package at once (ง10.4). The wall time is only a guard against a hang.
         expect(asks.length).toBeLessThanOrEqual(MAX_SEEK_READS)
+        expect(took).toBeLessThan(15_000)
         expect(cursor.cluster).toBeNull()
         expect(cursor.at).toBe(must(built.clusters[20]))
         expect(landsBefore(index, bytes, cursor, 20.5)).toBe(20)
