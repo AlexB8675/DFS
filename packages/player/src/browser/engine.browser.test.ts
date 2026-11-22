@@ -505,6 +505,27 @@ suite('h264-aac-faststart.mp4')('playStreamed: a play from its start', () => {
     expect(play.stats).toHaveLength(numbers)
   })
 
+  test('an abort while an opening append never ends settles at once, with the abort’s own reason', async () => {
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- restored below.
+    const real = SourceBuffer.prototype.appendBuffer
+    // An append that the browser never ends: no `updateend` comes.
+    SourceBuffer.prototype.appendBuffer = function () {
+      return undefined
+    }
+    try {
+      const play = begin('h264-aac-faststart.mp4')
+      await new Promise((resolve) => setTimeout(resolve, 1_500))
+      const reason = new Error('left while the opening waited')
+      const aborted = performance.now()
+      play.controller.abort(reason)
+      await expect(play.done).rejects.toBe(reason)
+      expect(performance.now() - aborted).toBeLessThan(2_000)
+      expect(play.video.getAttribute('src')).toBeNull()
+    } finally {
+      SourceBuffer.prototype.appendBuffer = real
+    }
+  })
+
   test('an abort before the first picture rejects with its reason and leaves no directory', async () => {
     const play = begin('h264-aac-faststart.mp4')
     const reason = new Error('left at once')

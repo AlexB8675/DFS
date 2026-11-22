@@ -280,8 +280,9 @@ export class MediaSourceSink implements Sink {
     this.seek(at)
   }
 
-  /** Lets the element go of the media. */
+  /** Lets the element go of the media. Once: a later call (an abort closes it from more than one place) leaves the element alone, which a newer play may have by then. */
   close(): void {
+    if (this.#closed) return
     this.#closed = true
     this.#generation += 1
     this.#buffers = { video: null, audio: null }
