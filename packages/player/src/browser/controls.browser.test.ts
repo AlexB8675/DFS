@@ -586,6 +586,25 @@ suite(NAME)('playStreamed: the watchdog', () => {
     expect(ofType(play.events, 'error')).toEqual([])
   }, 90_000)
 
+  test('a reopen does not play a play whose autoplay() now says no', async () => {
+    let wanted = true
+    const reopen = vi.spyOn(MediaSourceSink.prototype, 'reopen')
+    const play = begin(NAME, { windowBytes: 2 * 1024 * 1024, autoplay: () => wanted })
+    await firstPicture(play)
+    await play.video.play()
+    await until(play, 'the clock', 15_000, () => play.video.currentTime > 1)
+    // The viewer pauses: the element stays as it is, and the clock is then held still, so the watchdog reopens.
+    wanted = false
+    play.video.playbackRate = 0
+    await until(play, 'a reopen', 40_000, () =>
+      ofType(play.events, 'watchdog').some((event) => event.action === 'reopen'),
+    )
+    await until(play, 'the reopen to finish', 15_000, () => reopen.mock.settledResults.length > 0)
+    await pause(2_000)
+    expect(play.video.paused).toBe(true)
+    expect(ofType(play.events, 'error')).toEqual([])
+  }, 90_000)
+
   test('fails the play with the watchdog reason when nothing moves it, after the reopens it may make', async () => {
     const play = begin(NAME)
     await firstPicture(play)

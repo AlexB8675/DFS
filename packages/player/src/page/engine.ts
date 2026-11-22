@@ -23,6 +23,7 @@ import type { Downloader } from '../downloader.ts'
 import { Feeder } from '../engine/feeder.ts'
 import type { Sink } from '../engine/feeder.ts'
 import { slowWhile } from '../engine/hold.ts'
+import { keyframeGapSeconds } from '../engine/keyframe-gap.ts'
 import { holdingRange, holdsAt } from '../engine/holds-at.ts'
 import { mergeRequests } from '../engine/requests.ts'
 import type { Request } from '../engine/requests.ts'
@@ -71,7 +72,7 @@ export interface EngineStats {
   aheadSeconds: number
   /** Seconds the window reaches ahead. */
   targetAheadSeconds: number
-  /** The longest stretch of the picture without a keyframe; 0, as it is not measured. */
+  /** The longest stretch of the picture without a keyframe, from the frame table: 0 where it isn't known (Matroska). */
   keyframeGapSeconds: number
   quotaErrors: number
   /** Times the watchdog reopened Media Source. */
@@ -87,6 +88,8 @@ export interface EngineStats {
   /** Fragments appended. */
   segments: number
   error: string | null
+  /** Why the play failed: `read` when the server refused a read for good (a `ReadError`), `play` for any other failure, null while it hasn't failed. */
+  failedOn: 'read' | 'play' | null
   backend: 'disk' | 'memory'
   /** The bytes the store holds. */
   storedBytes: number
@@ -227,6 +230,7 @@ class Play {
     holdMs: 0,
     segments: 0,
     error: null,
+    failedOn: null,
     backend: 'memory',
     storedBytes: 0,
     evictedBytes: 0,
@@ -446,6 +450,7 @@ class Play {
     const { video: picture, audio } = feeder.tracks
     this.#watching = new Watching(this.#video, picture)
     this.#stats.codecs = [codecsOf(picture.mime)]
+    this.#stats.keyframeGapSeconds = keyframeGapSeconds(picture)
     this.#stats.supported[picture.mime] = true
     if (audio !== null) this.#stats.supported[audio.mime] = true
     this.#startTimers()
@@ -1048,8 +1053,14 @@ class Play {
       this.#applyCommonStart(to)
       this.#givePosition()
       if (request.seek) this.#holding.begin('seek', request.playing)
-      // A new Media Source pauses the element: the engine gives back what it took, with or without an autoplay.
-      if (reopen && request.playing && !this.#holding.holding && isPaused(video)) {
+      // A new Media Source pauses the element: the engine gives back what it took, unless an autoplay now says the viewer does not want it played.
+      if (
+        reopen &&
+        request.playing &&
+        (this.#options.autoplay?.() ?? true) &&
+        !this.#holding.holding &&
+        isPaused(video)
+      ) {
         video.play().catch(() => undefined)
       }
       completed = true
@@ -1082,6 +1093,7 @@ class Play {
     this.#failed = true
     const message = messageOf(error)
     this.#stats.error = message
+    this.#stats.failedOn = error instanceof ReadError ? 'read' : 'play'
     if (!isTold(error)) this.#say({ type: 'error', from: 'engine', code: null, message })
     this.#setPhase('failed')
     this.#request = null
@@ -1102,6 +1114,7 @@ class Play {
     const message = isRefusal(error) ? messageOf(new Error(error.refusal)) : messageOf(error)
     if (!isTold(error)) this.#say({ type: 'error', from: 'engine', code: null, message })
     this.#stats.error = message
+    this.#stats.failedOn = error instanceof ReadError ? 'read' : 'play'
     this.#setPhase('failed')
   }
 

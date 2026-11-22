@@ -429,6 +429,41 @@ suite('h264-aac-faststart.mp4')('playStreamed: a play from its start', () => {
     expect(play.stats.at(-1)?.error).not.toBeNull()
   })
 
+  test('a play whose file the server refuses for good after its first frame fails on the read', async () => {
+    // As above: a slow link keeps the read open, a network change drops it once, and the read is then refused for good (404).
+    await control({ bandwidthBytesPerSecond: 200_000 })
+    const play = begin('h264-aac-faststart.mp4')
+    await until(play, 'the first picture', 20_000, () => play.video.readyState >= 2)
+    expect(play.stats.at(-1)?.failedOn).toBeNull()
+    await control({
+      bandwidthBytesPerSecond: 200_000,
+      faults: [
+        { kind: 'drop', afterBytes: 0 },
+        { kind: 'status', status: 404 },
+      ],
+    })
+    await switchNetwork(200)
+    await until(
+      play,
+      'the play to fail',
+      30_000,
+      () => ofType(play.events, 'phase').at(-1)?.phase === 'failed',
+    )
+    await until(play, 'the numbers', 5_000, () => play.stats.at(-1)?.phase === 'failed')
+    expect(play.stats.at(-1)).toMatchObject({ phase: 'failed', failedOn: 'read' })
+  })
+
+  test('measures the keyframe gap from the frame table, as the suite does from the index', async () => {
+    const file = served('h264-aac-faststart.mp4')
+    if (file === undefined) throw new Error('h264-aac-faststart.mp4 is not served.')
+    const facts = await factsOf(file)
+    expect(facts.keyframeGap).not.toBeNull()
+    const play = begin('h264-aac-faststart.mp4')
+    await until(play, 'the first picture', 15_000, () => play.video.readyState >= 2)
+    await until(play, 'the numbers', 5_000, () => play.stats.length > 0)
+    expect(play.stats.at(-1)?.keyframeGapSeconds).toBeCloseTo(facts.keyframeGap ?? 0, 2)
+  })
+
   test('plays to its end: ended fires once, and the stream is ended once', async () => {
     const end = vi.spyOn(MediaSourceSink.prototype, 'end')
     const play = begin('h264-aac-faststart.mp4')
@@ -625,5 +660,6 @@ suite('short-sound.mp4')('playStreamed: a sound that ends long before the pictur
     // The sound's end, 10 s into the file: the clock got there and stood.
     expect(play.video.currentTime).toBeGreaterThan(9)
     expect(play.video.currentTime).toBeLessThan(11)
+    expect(play.stats.at(-1)?.failedOn).toBe('play')
   })
 })
