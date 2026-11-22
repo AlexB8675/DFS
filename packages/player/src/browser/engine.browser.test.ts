@@ -9,6 +9,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import { Downloader } from '../downloader.ts'
 import { CHUNK_BYTES, WINDOW_BYTES, WINDOW_FLOOR_BYTES } from '../limits.ts'
 import { DecoderWindow } from '../engine/window.ts'
+import { Feeder } from '../engine/feeder.ts'
 import { MediaSourceSink } from '../page/index.ts'
 import {
   begin,
@@ -347,6 +348,58 @@ suite('h264-aac-faststart.mp4')('playStreamed: a play from its start', () => {
       expect(errors[0]?.message).toMatch(/group of pictures.*larger than the browser's buffer/)
     } finally {
       restore()
+    }
+  })
+
+  test('a refeed served while a quota stall is on, whose first cover round appends nothing and meets no refusal, does not fail the play (F2)', async () => {
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- the original is called on the buffer it was taken from, below.
+    const real = SourceBuffer.prototype.appendBuffer
+    const refusing = { on: true }
+    let fragments = 0
+    SourceBuffer.prototype.appendBuffer = function (this: SourceBuffer, source: BufferSource) {
+      const head = ArrayBuffer.isView(source)
+        ? new Uint8Array(source.buffer, source.byteOffset, source.byteLength)
+        : new Uint8Array(source)
+      if (String.fromCharCode(...head.subarray(4, 8)) !== 'ftyp') {
+        fragments += 1
+        if (refusing.on && fragments > 4) {
+          throw new DOMException('The buffer is full.', 'QuotaExceededError')
+        }
+      }
+      real.call(this, source)
+    }
+    // While `quiet.on`, the feed does nothing and answers that there is more: a feed that waits (a decision pending), with no refusal.
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- the original is called on the feeder it was taken from, below.
+    const realFeed = Feeder.prototype.feed
+    const quiet = { on: false }
+    vi.spyOn(Feeder.prototype, 'feed').mockImplementation(async function (
+      this: Feeder,
+      ...args: Parameters<Feeder['feed']>
+    ) {
+      if (quiet.on) return 'more'
+      return realFeed.apply(this, args)
+    })
+    try {
+      const play = begin('h264-aac-faststart.mp4', { windowBytes: WINDOW_FLOOR_BYTES })
+      await until(play, 'the first picture', 15_000, () => play.video.readyState >= 2)
+      await play.video.play()
+      // The browser refuses after the fifth fragment: the stall is on, and the playhead runs out of data.
+      await until(play, 'the stall', 15_000, () => ofType(play.events, 'quota').length === 1)
+      // The refusals end and the feed goes quiet, so the stall stays on (nothing is appended to clear it).
+      refusing.on = false
+      quiet.on = true
+      await until(play, 'the watchdog refeed', 30_000, () =>
+        ofType(play.events, 'watchdog').some((event) => event.action === 'refeed'),
+      )
+      // The refeed's cover has nothing to feed and meets no refusal: it ends, and the play is not failed.
+      await new Promise((resolve) => setTimeout(resolve, 600))
+      quiet.on = false
+      expect(ofType(play.events, 'error')).toEqual([])
+      expect(ofType(play.events, 'phase').at(-1)?.phase).not.toBe('failed')
+      await until(play, 'the clock to go on', 20_000, () => play.video.currentTime > 4)
+      expect(ofType(play.events, 'error')).toEqual([])
+    } finally {
+      SourceBuffer.prototype.appendBuffer = real
     }
   })
 

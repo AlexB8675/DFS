@@ -190,6 +190,8 @@ class Play {
   #pendingStart: number | null = null
   /** True from a quota error that nothing could mend until the next append or removal: the timeline hears of it once. */
   #quotaStalled = false
+  /** Every `SinkQuotaError` of the play, one per refusal: a cover counts as refused only when this rose during a round of it (a stall, `#quotaStalled`, can outlive a refeed). */
+  #quotaRefusals = 0
   /** Where the playhead was at such an error once the play had begun: the feed waits for it to move. */
   #stallAt: number | null = null
   /** What the pump is asked to do next, if anything: requests are merged, never dropped. */
@@ -503,10 +505,12 @@ class Play {
   async #feedCovering(target: number, interrupted: () => boolean): Promise<void> {
     const sink = this.#sink
     if (sink === null) throw new Error('The sink is not open.')
-    // True after a quota stall that nothing mended: the feed starts at the keyframe at or before the target, so
-    // nothing behind it can be removed, and no later wait can free room. It is tried once more, at the next wake.
+    // True after a round that the browser refused, with nothing mended: the feed starts at the keyframe at or before
+    // the target, so nothing behind it can be removed, and no later wait can free room. It is tried once more, at the
+    // next wake. Only a refusal of this cover counts, not a stall that began before it (§10.4).
     let refused = false
     for (;;) {
+      const refusals = this.#quotaRefusals
       const result = await this.#feedOnce()
       if (interrupted()) return
       if (result === 'ended' || this.#covers(sink, target)) return
@@ -514,7 +518,7 @@ class Play {
         refused = false
         continue
       }
-      if (!this.#quotaStalled) return
+      if (this.#quotaRefusals === refusals) return
       if (refused) {
         throw new Error(
           "A group of pictures of this file is larger than the browser's buffer, so it cannot be played here.",
@@ -556,7 +560,10 @@ class Play {
       try {
         await sink.append(kind, bytes, run)
       } catch (error) {
-        if (error instanceof SinkQuotaError) this.#quota(kind, bytes.length)
+        if (error instanceof SinkQuotaError) {
+          this.#quotaRefusals += 1
+          this.#quota(kind, bytes.length)
+        }
         throw error
       }
       this.#quotaStalled = false
