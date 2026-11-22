@@ -149,11 +149,8 @@ suite(NAME)('playStreamed: seeks', () => {
     await until(play, 'data from the first target', 30_000, () => bufferedEnd(play.video) > 8.8)
     const before = ofType(play.events, 'seek').length
     play.video.currentTime = 8.3
-    await until(
-      play,
-      "the second seek's picture",
-      20_000,
-      () => shown(play).some((seek) => Math.abs(seek.to - 8.3) < 0.1),
+    await until(play, "the second seek's picture", 20_000, () =>
+      shown(play).some((seek) => Math.abs(seek.to - 8.3) < 0.1),
     )
     expect(play.video.currentTime).toBeGreaterThanOrEqual(8.25)
     expect(play.video.currentTime).toBeLessThan(8.8)
