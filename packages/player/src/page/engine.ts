@@ -624,6 +624,37 @@ class Play {
     }
   }
 
+  /**
+   * A seek within the window whose target lies before the start of the range that holds it, on a playing track
+   * (a late first frame, or the start of what the window keeps, after a removal): the clock goes to the latest
+   * such start, as the common start does for a late track, and the seek is retargeted there so that it completes.
+   * Within the window `last[0]` is the window's start, not the last group, so the common start's branch for a
+   * target past the end does not apply.
+   */
+  #applyWindowStart(target: number): void {
+    const sink = this.#sink
+    const feeder = this.#feeder
+    if (sink === null || feeder === null) return
+    let start = target
+    for (const kind of this.#kinds) {
+      const range = sink
+        .buffered(kind)
+        .find((candidate) => holdsAt([candidate], target, this.#feedDone))
+      if (range !== undefined) start = Math.max(start, range[0])
+    }
+    if (start - target <= 1e-6) return
+    if (start - target > frameSeconds(feeder.tracks.video)) {
+      this.#say({
+        type: 'watchdog',
+        action: 'gap',
+        at: target,
+        detail: `The tracks first have frames at ${start.toFixed(3)} s, so the play starts there and not at ${target.toFixed(3)} s.`,
+      })
+    }
+    this.#seeks.retarget(start)
+    this.#moveTo(start)
+  }
+
   /** Gives the downloader the file offset of the picture at the playhead, when it is known. */
   #givePosition(): void {
     const offset = this.#feeder?.positions.offsetAt(this.#video.currentTime) ?? null
@@ -670,6 +701,8 @@ class Play {
     // The intent before the seek is settled: playing, or held for a play that is wanted.
     const playing = !isPaused(video) || this.#holding.wantsPlay
     this.#seeks.begin(at, inWindow)
+    // A seek into the band just before a range's start (inside `holdsAt`'s edge) has no data at its target: the clock goes to the latest such start.
+    if (inWindow) this.#applyWindowStart(at)
     // Within the window the playhead's own place is the position. Outside it the feeder's seek gives it, at the
     // group of the target, which only the feeder knows: `Positions` still holds the old runs then, and gave
     // the downloader a wrong offset first, and a second restart later.

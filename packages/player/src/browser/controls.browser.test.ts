@@ -6,7 +6,7 @@
 
 import { afterEach, expect, test, vi } from 'vitest'
 import { MediaSourceSink } from '../page/index.ts'
-import { SEEK_DEADLINE_MS, STUCK_MS } from '../limits.ts'
+import { SEEK_DEADLINE_MS, STUCK_MS, WATCH_EVERY_MS } from '../limits.ts'
 import { begin, endPlays, frames, ofType, served, suite, until } from './play-harness.ts'
 import type { Play } from './play-harness.ts'
 import { clearLog, control, log } from './server.ts'
@@ -231,6 +231,73 @@ suite(NAME)('playStreamed: seeks', () => {
     expect(ofType(play.events, 'phase').map((event) => event.phase)).toContain('ended')
     expect(ofType(play.events, 'error')).toEqual([])
   })
+})
+
+// The sound of `late-sound.mp4` is shown from 0.4787 s, the picture from 0: a seek to 0.35 s lies in the band that
+// the window's edge tolerance counts as inside the window, though the element has no data there (A4).
+suite('late-sound.mp4')('playStreamed: a seek just before a range starts', () => {
+  const LATE = 'late-sound.mp4'
+
+  for (const playing of [false, true]) {
+    test(`${playing ? 'a playing' : 'a paused'} seek to just before the tracks' common start moves to it, with no refeed, gap or deadline`, async () => {
+      const play = begin(LATE)
+      await until(play, 'the first picture', 15_000, () => play.video.readyState >= 2)
+      await until(play, '2 s buffered', 15_000, () => bufferedEnd(play.video) > 2)
+      if (playing) await play.video.play()
+      await until(play, 'the clock past 1 s', 15_000, () => !playing || play.video.currentTime > 1)
+      const start = play.video.buffered.start(0)
+      expect(start).toBeGreaterThan(0.4)
+      const target = 0.35
+      expect(start - target).toBeGreaterThan(0.1)
+      const before = play.events.length
+      const seeked = shown(play).length
+      const from = performance.now()
+      play.video.currentTime = target
+      await until(play, "the seek's picture", 3_000, () => shown(play).length > seeked)
+      expect(performance.now() - from).toBeLessThan(2_000)
+      const seeks = ofType(play.events, 'seek')
+      expect(seeks.at(-1)).toMatchObject({ inWindow: true, to: expect.closeTo(start, 2) as number })
+      expect(play.video.currentTime).toBeGreaterThanOrEqual(start - 0.01)
+      // The engine says where it moved the clock to, as the common start says it, and the watchdog does nothing.
+      const after = play.events.slice(before)
+      const gaps = ofType(after, 'watchdog').filter((event) => event.action === 'gap')
+      expect(gaps).toHaveLength(1)
+      expect(gaps[0]?.detail).toContain('play starts there')
+      await pause(WATCH_EVERY_MS * 2)
+      const later = play.events.slice(before)
+      expect(ofType(later, 'watchdog').filter((event) => event.action === 'refeed')).toEqual([])
+      expect(
+        ofType(later, 'watchdog').filter((event) => event.detail.includes('stood still')),
+      ).toEqual([])
+      expect(ofType(later, 'error')).toEqual([])
+    })
+  }
+})
+
+suite(NAME)('playStreamed: a seek just past the last frame', () => {
+  test('after the end, a seek within the window to just past the last frame tells its picture, with no deadline error or reopen (A4)', async () => {
+    const reopen = vi.spyOn(MediaSourceSink.prototype, 'reopen')
+    const play = begin(NAME, { autoplay: () => true })
+    play.video.playbackRate = 4
+    await until(play, 'the end', 60_000, () => play.video.ended)
+    await until(
+      play,
+      'the phase',
+      5_000,
+      () => ofType(play.events, 'phase').at(-1)?.phase === 'ended',
+    )
+    const end = bufferedEnd(play.video)
+    expect(holds(play.video, end - 0.1)).toBe(true)
+    const before = ofType(play.events, 'seek').length
+    const seeked = shown(play).length
+    play.video.currentTime = end + 0.1
+    await until(play, "the seek's picture", 3_000, () => shown(play).length > seeked)
+    expect(ofType(play.events, 'seek').length).toBeGreaterThan(before)
+    expect(shown(play).at(-1)?.ms).not.toBeNull()
+    await pause(SEEK_DEADLINE_MS + 1_000)
+    expect(ofType(play.events, 'error')).toEqual([])
+    expect(reopen).not.toHaveBeenCalled()
+  }, 30_000)
 })
 
 suite(NAME)('playStreamed: holding', () => {
