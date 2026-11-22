@@ -20,6 +20,7 @@ import {
   synthetic,
   until,
 } from './play-harness.ts'
+import { factsOf } from './plays-support.ts'
 import { clearLog, control, log, switchNetwork } from './server.ts'
 
 afterEach(async () => {
@@ -88,10 +89,21 @@ suite('h264-aac-faststart.mp4')('playStreamed: a play from its start', () => {
     expect(play.stats.at(-1)?.rate).toBeLessThan(500_000)
   })
 
-  test('does not say slow on a link that is faster than the bit rate', async () => {
+  test('does not say slow on a link that is faster than the bit rate, while it is still reading', async () => {
+    const file = served('h264-aac-faststart.mp4')
+    const facts = file === undefined ? null : await factsOf(file)
+    if (file === undefined || facts?.durationSeconds == null)
+      throw new Error('the file is not served')
+    // Three times the bit rate: the download is still reading past a stats tick, with a rate known.
+    await control({ bandwidthBytesPerSecond: Math.ceil((3 * file.size) / facts.durationSeconds) })
     const play = begin('h264-aac-faststart.mp4')
     await until(play, 'the first picture', 15_000, () => play.video.readyState >= 2)
-    await until(play, 'a rate', 15_000, () => play.stats.at(-1)?.rate !== null)
+    // The guard against a vacuous pass: a snapshot with a known rate, taken before the whole file was in.
+    await until(play, 'a snapshot with a rate, mid-download', 15_000, () => {
+      return play.stats.some(
+        (numbers) => numbers.rate !== null && numbers.bytesReceived < file.size,
+      )
+    })
     expect(play.stats.some((numbers) => numbers.slow)).toBe(false)
   })
 

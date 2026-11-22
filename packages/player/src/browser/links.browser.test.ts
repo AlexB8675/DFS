@@ -27,7 +27,7 @@ import {
 } from './plays-support.ts'
 import type { Facts } from './plays-support.ts'
 import { clearLog, control, files, log, playAll, switchNetwork } from './server.ts'
-import type { Fault, Network, PlayFile } from './server.ts'
+import type { Fault, LogEntry, Network, PlayFile } from './server.ts'
 
 /** The media a user file plays, in seconds from its start (R43): a constant of this file, not of the engine. */
 const STRETCH_SECONDS = 20
@@ -128,9 +128,9 @@ async function shortest(): Promise<Pick | string> {
 
 const synthetic = (name: string) => async (): Promise<Pick | string> => pickOf(served(name))
 
-/** The seconds of media a play shows before it counts as played through: all of a synthetic file, a stretch of a user's. */
-function playedSeconds(pick: Pick): number {
-  return pick.file.synthetic ? pick.duration : Math.min(STRETCH_SECONDS, pick.duration)
+/** The seconds of media a play shows before it counts as played through: all of a synthetic file, a stretch of a user's (all of it when `whole`). */
+function playedSeconds(pick: Pick, whole = false): number {
+  return whole || pick.file.synthetic ? pick.duration : Math.min(STRETCH_SECONDS, pick.duration)
 }
 
 function bitrateOf(pick: Pick): number {
@@ -155,14 +155,15 @@ async function serverLines(): Promise<string[]> {
   )
 }
 
-/** Waits until the play has played through (see `playedSeconds`): a synthetic file ends, a user file's clock reaches the stretch. */
-async function playThrough(play: Play, pick: Pick, ms: number): Promise<void> {
-  if (pick.file.synthetic) {
-    await until(play, 'the end', ms, () => play.video.ended)
-    return
-  }
-  const target = playedSeconds(pick)
-  await until(play, `the clock to reach ${target} s`, ms, () => play.video.currentTime >= target)
+/** Waits until the play has played through (see `playedSeconds`): it ends, or its clock reaches the target. */
+async function playThrough(play: Play, pick: Pick, ms: number, whole = false): Promise<void> {
+  const target = playedSeconds(pick, whole)
+  await until(
+    play,
+    `the end or the clock at ${target} s`,
+    ms,
+    () => play.video.ended || play.video.currentTime >= target,
+  )
 }
 
 /** The longest the clock is seen to go back, in seconds, from a sampler that runs while the play does. */
@@ -189,17 +190,14 @@ function engineErrors(play: Play): string[] {
     .map((event) => event.message)
 }
 
-/** The waits that begin after the picture moved and last longer than `WAIT_LIMIT_MS`, and the stall holds after it. */
+/** The waits that begin after the picture moved and last longer than `WAIT_LIMIT_MS`, and every stall hold of the play (a stall hold before the picture moves is no less a stall). */
 function stallsAfter(play: Play, movedAt: number): { longWaits: string[]; stallHolds: string[] } {
   const now = performance.now() - play.startedAt
   const longWaits = play.waits
     .filter((wait) => wait.from >= movedAt && (wait.to ?? now) - wait.from > WAIT_LIMIT_MS)
     .map((wait) => `${Math.round(wait.from)} to ${wait.to === null ? 'open' : Math.round(wait.to)}`)
   const stallHolds = play.stamped
-    .filter(
-      ({ at, event }) =>
-        at >= movedAt && event.type === 'hold' && event.on && event.reason === 'stall',
-    )
+    .filter(({ event }) => event.type === 'hold' && event.on && event.reason === 'stall')
     .map(({ at }) => `stall hold on at ${Math.round(at)}`)
   return { longWaits, stallHolds }
 }
@@ -216,8 +214,8 @@ async function failure(play: Play, name: string, error: unknown): Promise<never>
 }
 
 /** The expected length of a play, in ms, over a link at `factor` of the bit rate (the download takes as long as the clock needs at worst). */
-function expectedMs(pick: Pick, factor: number): number {
-  const seconds = playedSeconds(pick)
+function expectedMs(pick: Pick, factor: number, whole = false): number {
+  const seconds = playedSeconds(pick, whole)
   return Math.ceil((seconds / Math.min(1, factor) + 10) * 1000)
 }
 
@@ -281,6 +279,9 @@ describe('above the bit rate: no stall after the picture moves', () => {
           expect(longWaits, `waits over ${WAIT_LIMIT_MS} ms after the picture moved`).toEqual([])
           expect(engineErrors(play)).toEqual([])
           expect(play.video.error).toBeNull()
+          expect(clock.backSeconds(), 'the clock going back').toBeLessThanOrEqual(
+            frameSecondsOf(pick.facts),
+          )
         } catch (error) {
           await failure(play, name, error)
         } finally {
@@ -310,14 +311,14 @@ describe('below the bit rate: a start hold that says slow, then a play with no s
           skip(pick)
           return
         }
-        const ms = expectedMs(pick, BELOW) + 30_000
+        const ms = expectedMs(pick, BELOW, true) + 30_000
         if (ms > TEST_LIMIT_MS) skip(`the play would take ${Math.round(ms / 1000)} s`)
         const link = linkOf(pick, BELOW)
         await control(link)
         const play = begin(pick.file.name, { autoplay: () => true })
         try {
           const { movingMs } = await startPicture(play, play.startedAt, ms)
-          await playThrough(play, pick, ms)
+          await playThrough(play, pick, ms, true)
           const holdEvents = ofType(play.events, 'hold')
           const stamps = play.stamped.filter(({ event }) => event.type === 'hold')
           const { longWaits, stallHolds } = stallsAfter(play, movingMs)
@@ -371,8 +372,8 @@ describe('below the bit rate: a start hold that says slow, then a play with no s
   }
 })
 
-/** Three drops, each after 64 KiB of the body: the engine's new reads after a switch are small, and a drop must bite each of them (R45). */
-const DROPS: Fault[] = Array.from({ length: 3 }, () => ({ kind: 'drop', afterBytes: 65_536 }))
+/** Three drops, each after 8 KiB of the body: the engine's retry reads after a switch can be under 64 KiB, and a drop must bite each of them (R45, R47). */
+const DROPS: Fault[] = Array.from({ length: 3 }, () => ({ kind: 'drop', afterBytes: 8_192 }))
 
 /** The files of the drops and the switch: a synthetic one, and the largest dense file of the sample. */
 const DISRUPTED: Case[] = [
@@ -380,9 +381,26 @@ const DISRUPTED: Case[] = [
   DENSE,
 ]
 
-/** The link of the drops and the switch: the fast link of the plays for a user's file; a synthetic file is small enough to be downloaded in under half a second on it, so it gets the above-the-bit-rate link, which keeps a read open for most of its play. */
+/** The link of the drops and the switch: 1.5 times the bit rate for every file, so that bytes remain unheld when the fault comes and the play must fetch more after it (R47). */
 function disruptedLink(pick: Pick): Network {
-  return pick.file.synthetic ? linkOf(pick, ABOVE) : fastLink(pick.file, pick.duration)
+  return linkOf(pick, ABOVE)
+}
+
+/**
+ * What the log says of a fault, over every entry of the play: how many connections were cut or refused, and whether a
+ * `206` that carried bytes began after the last of them (the play went on with bytes fetched after the fault, and was
+ * not coasting on what it held).
+ */
+function faultOutcome(entries: readonly LogEntry[]): { cut: number; fetchedAfter: boolean } {
+  const isCut = (entry: LogEntry): boolean =>
+    ['dropped', 'aborted', 'refused'].includes(entry.outcome)
+  const lastCut = entries.findLastIndex(isCut)
+  return {
+    cut: entries.filter(isCut).length,
+    fetchedAfter:
+      lastCut >= 0 &&
+      entries.slice(lastCut + 1).some((entry) => entry.status === 206 && entry.bytesSent > 0),
+  }
 }
 
 describe('drops mid-play: the play recovers with the same picture', () => {
@@ -399,12 +417,13 @@ describe('drops mid-play: the play recovers with the same picture', () => {
         if (ms > TEST_LIMIT_MS) skip(`the play would take ${Math.round(ms / 1000)} s`)
         const link = disruptedLink(pick)
         await control(link)
+        // The log is cleared before the play, so that the open read's own entry stays in it.
+        await clearLog()
         const play = begin(pick.file.name, { autoplay: () => true })
         const clock = watchClock(play)
         try {
           await startPicture(play, play.startedAt, ms)
           // The next three requests after the picture moves are dropped.
-          await clearLog()
           await control({ ...link, faults: DROPS })
           // The open read is one request to the end of the file, so nothing new would be asked for: a break of the
           // connection makes the engine ask again, and each of its asks meets the next drop.
@@ -420,6 +439,9 @@ describe('drops mid-play: the play recovers with the same picture', () => {
             backSeconds: clock.backSeconds(),
           })
           expect(dropped, 'requests the server dropped').toHaveLength(3)
+          expect(faultOutcome(entries).fetchedAfter, 'a 206 with bytes after the last cut').toBe(
+            true,
+          )
           expect(engineErrors(play)).toEqual([])
           expect(clock.backSeconds(), 'the clock going back').toBeLessThanOrEqual(
             frameSecondsOf(pick.facts),
@@ -446,17 +468,17 @@ describe('a network switch mid-play: the play recovers', () => {
           return
         }
         const switchAfterMs = pick.file.synthetic ? SYNTHETIC_SWITCH_AFTER_MS : SWITCH_AFTER_MS
-        const ms = expectedMs(pick, 1) + (switchAfterMs + SWITCH_REFUSES_MS) / 1000 + 30_000
+        const ms = expectedMs(pick, 1) + switchAfterMs + SWITCH_REFUSES_MS + 30_000
         if (ms > TEST_LIMIT_MS) skip(`the play would take ${Math.round(ms / 1000)} s`)
         const link = disruptedLink(pick)
         await control(link)
+        await clearLog()
         const play = begin(pick.file.name, { autoplay: () => true })
         const clock = watchClock(play)
         try {
           await startPicture(play, play.startedAt, ms)
           await pause(switchAfterMs)
           const playhead = play.video.currentTime
-          await clearLog()
           await switchNetwork(SWITCH_REFUSES_MS)
           const target = Math.min(playhead + SWITCH_PLAYS_SECONDS, pick.duration - 0.2)
           await until(play, `the clock to pass ${target.toFixed(1)} s`, ms, () => {
@@ -475,11 +497,10 @@ describe('a network switch mid-play: the play recovers', () => {
             backSeconds: clock.backSeconds(),
             stuckMs: STUCK_MS,
           })
-          // The switch must have cut or refused something, or it proved nothing.
-          expect(
-            entries.some((entry) => ['dropped', 'aborted', 'refused'].includes(entry.outcome)),
-            'a connection cut or refused at the switch',
-          ).toBe(true)
+          // The switch must have cut or refused something, and the play must have fetched bytes after it.
+          const outcome = faultOutcome(entries)
+          expect(outcome.cut, 'connections cut or refused at the switch').toBeGreaterThan(0)
+          expect(outcome.fetchedAfter, 'a 206 with bytes after the last cut').toBe(true)
           expect(engineErrors(play)).toEqual([])
           expect(clock.backSeconds(), 'the clock going back').toBeLessThanOrEqual(
             frameSecondsOf(pick.facts),
