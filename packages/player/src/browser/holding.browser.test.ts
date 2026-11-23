@@ -564,6 +564,7 @@ describe('Holding', () => {
       play.buffer.push([0, 4])
       play.holding.begin('seek', true)
       expect(holds(play.events)[0]).toMatchObject({ on: true, reason: 'seek', aheadS: 1 })
+      play.holding.dispose()
     })
 
     test("the store ahead wins when it is larger than the element's smaller non-zero buffer", () => {
@@ -573,24 +574,28 @@ describe('Holding', () => {
       play.buffer.push([0, 3.5])
       play.holding.begin('seek', true)
       expect(holds(play.events)[0]).toMatchObject({ on: true, reason: 'seek', aheadS: 1 })
-    })
-
-    test('a stall with the element dry is measured on the store alone', () => {
-      const play = setup({ at: 3, offset: 3_000_000 })
-      play.video.paused = false
-      play.held.add({ start: 3_000_000, end: 4_000_000 })
-      play.holding.stalled()
-      expect(holds(play.events)[0]).toMatchObject({ on: true, reason: 'stall', aheadS: 1 })
+      play.holding.dispose()
     })
 
     // A slow stall's goal is a byte budget from the file's average bit rate: decoded seconds of a thin stretch must not release it early.
-    test('a stall with the element buffered well past the goal but the store short still holds', () => {
+    test("a stall's hold is measured on the store alone: the element's buffer neither makes nor releases it, the store does", () => {
       const play = setup({ at: 3, offset: 3_000_000 })
       play.video.paused = false
       play.held.add({ start: 3_000_000, end: 4_000_000 })
-      play.buffer.push([0, 20])
+      // The element is dry: the stall holds, at the store's 1 s.
       play.holding.stalled()
       expect(holds(play.events)[0]).toMatchObject({ on: true, reason: 'stall', aheadS: 1 })
+      // The element then holds well past the goal, and the store is still short: the hold stays.
+      play.buffer.push([0, 20])
+      play.holding.check()
+      expect(play.holding.holding).toBe(true)
+      expect(holds(play.events)).toHaveLength(1)
+      // The store grows past the goal: the hold lets go, and plays.
+      play.held.add({ start: 4_000_000, end: 10_000_000 })
+      play.holding.check()
+      expect(play.holding.holding).toBe(false)
+      expect(holds(play.events).map((event) => event.on)).toEqual([true, false])
+      play.holding.dispose()
     })
   })
 })

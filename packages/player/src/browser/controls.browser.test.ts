@@ -168,6 +168,7 @@ suite(NAME)('playStreamed: seeks', () => {
         playingFree() &&
         edge() > play.video.currentTime + 0.3 &&
         edge() < tailStartSeconds - 1 &&
+        storedSeconds() < tailStartSeconds &&
         storedSeconds() - edge() < 1.5,
     )
     const target = edge()
