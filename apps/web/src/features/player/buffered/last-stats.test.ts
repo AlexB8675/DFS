@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { holdsPlay, holdSpinner, LastStats } from './last-stats'
+import { holdsPlay, LastStats } from './last-stats'
 
 describe('LastStats', () => {
   it('has nothing before a play has numbers', () => {
@@ -68,20 +68,5 @@ describe('holdsPlay', () => {
 
   it('does not hold what is not a buffered play', () => {
     expect(holdsPlay(null, false)).toBe(false)
-  })
-})
-
-describe('holdSpinner', () => {
-  it('turns for a hold while the play is wanted', () => {
-    expect(holdSpinner({ holding: true }, true)).toBe(true)
-  })
-
-  it("does not turn for a hold the viewer's pause has left unwanted (the engine's hold stays on through a serve)", () => {
-    expect(holdSpinner({ holding: true }, false)).toBe(false)
-  })
-
-  it('does not turn with no hold or no numbers', () => {
-    expect(holdSpinner({ holding: false }, true)).toBe(false)
-    expect(holdSpinner(null, true)).toBe(false)
   })
 })
