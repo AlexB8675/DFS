@@ -35,3 +35,12 @@ export function holdsPlay(
   if (stats?.holding === true) return true
   return bufferedPlay && stats?.begun !== true
 }
+
+/**
+ * Whether the spinner turns for the engine's hold (§10.4): only while the play is wanted. A viewer's
+ * pause during a hold that a serve keeps leaves the hold on until the serve ends, so a quick pause
+ * and play still waits for the goal, but the page shows that hold as paused.
+ */
+export function holdSpinner(stats: { holding: boolean } | null, wanted: boolean): boolean {
+  return stats?.holding === true && wanted
+}

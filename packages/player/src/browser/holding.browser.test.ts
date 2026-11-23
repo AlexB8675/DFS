@@ -286,63 +286,89 @@ describe('Holding', () => {
     expect(play.holding.holding).toBe(false)
   })
 
-  // The viewer's "no" (autoplay() false) is read by the timer even while the engine is busy; the rule's own release is not.
-  test("a slow-link seek hold ends at the timer's check when autoplay() turns to no while the engine is busy", async () => {
+  // A viewer's pause during a hold that a serve keeps (the engine is busy) does not end it: the timer waits for canCheck, so a
+  // quick pause-then-play still waits for the goal. The serve's end (`begin`) is what leaves it. The page hides the spinner meanwhile.
+  test("a busy engine keeps a slow-link seek hold on through the viewer's pause and play, until the serve's end", async () => {
     const play = setup({ at: 4 })
-    play.video.paused = false
-    play.holding.seekStarted(true, 4, 4_000_000)
-    expect(play.holding.holding).toBe(true)
-    play.engine.canCheck = false
-    play.want.autoplay = false
-    await new Promise((resolve) => setTimeout(resolve, 200))
-    expect(play.holding.holding).toBe(false)
-    expect(play.stats.holding).toBe(false)
-    expect(play.calls).toEqual(['pause'])
-    expect(play.stats.holds).toBe(1)
-    expect(holds(play.events).map((event) => event.on)).toEqual([true, false])
-    // The serve's end finds the hold left and the play not wanted: nothing more happens.
-    play.holding.begin('seek', true)
-    expect(play.calls).toEqual(['pause'])
-    expect(play.stats.holds).toBe(1)
-    expect(holds(play.events)).toHaveLength(2)
+    try {
+      play.video.paused = false
+      play.holding.seekStarted(true, 4, 4_000_000)
+      expect(play.holding.holding).toBe(true)
+      play.engine.canCheck = false
+      play.want.autoplay = false
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      // Still on: no play, no off event, counted nowhere yet.
+      expect(play.holding.holding).toBe(true)
+      expect(play.stats.holding).toBe(true)
+      expect(play.calls).toEqual(['pause'])
+      expect(play.stats.holds).toBe(0)
+      expect(holds(play.events).map((event) => event.on)).toEqual([true])
+      // The viewer plays again before the serve ends: the hold is still on, so the page's toggle waits.
+      play.want.autoplay = true
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect(play.holding.holding).toBe(true)
+      expect(play.calls).toEqual(['pause'])
+      // The serve's end, 1 s stored under the 2 s goal: the hold is kept, nothing plays before the goal.
+      play.held.add({ start: 0, end: 1_000_000 })
+      play.holding.begin('seek', true)
+      expect(play.holding.holding).toBe(true)
+      expect(play.calls).toEqual(['pause'])
+    } finally {
+      play.holding.dispose()
+    }
   })
 
-  test("a stall hold ends at the timer's check when autoplay() turns to no while the engine is busy", async () => {
+  test("a busy engine keeps a stall hold on while autoplay() says no; the serve's end leaves it with no play, counted once", async () => {
     const play = setup()
-    play.video.paused = false
-    play.video.currentTime = 0.5
-    play.holding.stalled()
-    expect(play.holding.holding).toBe(true)
-    play.engine.canCheck = false
-    play.want.autoplay = false
-    await new Promise((resolve) => setTimeout(resolve, 200))
-    expect(play.holding.holding).toBe(false)
-    expect(play.calls).toEqual(['pause'])
-    expect(play.stats.holds).toBe(1)
-    expect(holds(play.events).map((event) => event.on)).toEqual([true, false])
+    try {
+      play.video.paused = false
+      play.video.currentTime = 0.5
+      play.holding.stalled()
+      expect(play.holding.holding).toBe(true)
+      play.engine.canCheck = false
+      play.want.autoplay = false
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      expect(play.holding.holding).toBe(true)
+      expect(play.stats.holds).toBe(0)
+      play.holding.begin('seek', true)
+      expect(play.holding.holding).toBe(false)
+      expect(play.calls).toEqual(['pause'])
+      expect(play.stats.holds).toBe(1)
+      expect(holds(play.events).map((event) => event.on)).toEqual([true, false])
+    } finally {
+      play.holding.dispose()
+    }
   })
 
   test('a busy engine with autoplay() still yes leaves a seek hold on', async () => {
     const play = setup({ at: 4 })
-    play.video.paused = false
-    play.holding.seekStarted(true, 4, 4_000_000)
-    play.engine.canCheck = false
-    play.link.rate = 5_000_000
-    await new Promise((resolve) => setTimeout(resolve, 200))
-    expect(play.holding.holding).toBe(true)
-    expect(play.calls).toEqual(['pause'])
+    try {
+      play.video.paused = false
+      play.holding.seekStarted(true, 4, 4_000_000)
+      play.engine.canCheck = false
+      play.link.rate = 5_000_000
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      expect(play.holding.holding).toBe(true)
+      expect(play.calls).toEqual(['pause'])
+    } finally {
+      play.holding.dispose()
+    }
   })
 
   test("a seek hold whose autoplay() turns to no ends at the serve's end, before any timer tick, with no play", () => {
     const play = setup({ at: 4 })
-    play.video.paused = false
-    play.holding.seekStarted(true, 4, 4_000_000)
-    play.want.autoplay = false
-    play.holding.begin('seek', true)
-    expect(play.holding.holding).toBe(false)
-    expect(play.calls).toEqual(['pause'])
-    expect(play.stats.holds).toBe(1)
-    expect(holds(play.events).map((event) => event.on)).toEqual([true, false])
+    try {
+      play.video.paused = false
+      play.holding.seekStarted(true, 4, 4_000_000)
+      play.want.autoplay = false
+      play.holding.begin('seek', true)
+      expect(play.holding.holding).toBe(false)
+      expect(play.calls).toEqual(['pause'])
+      expect(play.stats.holds).toBe(1)
+      expect(holds(play.events).map((event) => event.on)).toEqual([true, false])
+    } finally {
+      play.holding.dispose()
+    }
   })
 
   // I1: a wanted seek outside the window holds at the seek on a slow link, before anything plays. The seek's target is 4 s, its feed starts at the offset 4 MB (1 MB a second).

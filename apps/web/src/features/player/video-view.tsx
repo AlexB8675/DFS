@@ -42,7 +42,7 @@ import type { FilePlace } from '@/lib/file-place'
 import { cn } from '@/lib/utils'
 import { contentUrl, mediaQuery, playbackQuery } from './api'
 import { bufferedPlayAvailable, mayPlayBuffered, pagePlay, type PagePlay } from './buffered/choice'
-import { holdsPlay } from './buffered/last-stats'
+import { holdsPlay, holdSpinner } from './buffered/last-stats'
 import { useBufferedPlay } from './buffered/use-buffered-play'
 import { PlayIntent } from './play-intent'
 import { reportLab } from './report-lab'
@@ -1011,7 +1011,9 @@ export default function VideoView({
       )}
       {!shown && (
         <Center
-          loading={decided === null || starting || state.waiting || bufferedStats?.holding === true}
+          loading={
+            decided === null || starting || state.waiting || holdSpinner(bufferedStats, wanted)
+          }
           paused={shownPaused && decided !== null && !starting}
           ended={state.ended}
           onPlay={togglePlay}
