@@ -1060,7 +1060,9 @@ class Play {
       this.#resetFeed()
       // A clock that is not at the target yet (a seek the sink deferred) leaves the playhead at the target for the feed.
       if (Math.abs(video.currentTime - to) > 1e-6) this.#pendingStart = to
-      await feeder.seek(to, signal)
+      const startOffset = await feeder.seek(to, signal)
+      // A wanted seek on a link that does not keep up holds here, at the seek, with the sink empty: nothing plays from the first fragments before its goal (§10.4). The rule reads the offset the feed starts at, since the positions still hold the old runs.
+      if (request.seek && request.playing) this.#holding.seekStarted(true, startOffset)
       await this.#feedCovering(to, () => this.#requested())
       if (this.#requested()) return
       this.#signal.throwIfAborted()

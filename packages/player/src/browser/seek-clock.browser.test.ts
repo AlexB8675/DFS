@@ -88,32 +88,25 @@ test('a playing seek outside the window on a slow link never puts the clock back
     bandwidthBytesPerSecond: Math.ceil((pick.file.size / pick.duration) * LINK_FACTOR),
     latencyMs: LINK_LATENCY_MS,
   })
-  // The engine asks `autoplay()` for the seek's hold (`Holding.begin('seek')`) strictly after `#applyCommonStart`, and not before in a serve: while one runs the engine is busy and the hold's check is not made.
-  let autoplayCalls = 0
-  const play = begin(pick.file.name, {
-    autoplay: () => {
-      autoplayCalls += 1
-      return true
-    },
-  })
+  // The seek's hold lets go only once the serve has ended (its common start applied, then `Holding.begin('seek')`): while a serve runs the engine is busy and the hold's own check is not made. The first `hold` event with `on: false` after the seek is therefore strictly after the common start.
+  const play = begin(pick.file.name, { autoplay: () => true })
   const mine = { viewer: false }
   const writes = recordWrites(play.video, mine)
   await until(play, 'the clock past 1 s', 120_000, () => play.video.currentTime > 1)
   const target = play.video.currentTime + SEEK_AHEAD_SECONDS
   const mark = writes.length
-  const seeksBefore = ofType(play.events, 'seek').length
-  // The calls of `autoplay()` once the engine has taken the seek up (its `seek` event): the first one after is the end of the serve.
-  let callsAtSeek: number | null = null
+  const eventsBefore = play.events.length
   mine.viewer = true
   play.video.currentTime = target
   mine.viewer = false
   let highest = target
   let back = 0
+  // I1: from the seek until the seek's hold lets go, nothing plays: the clock stays within a frame of the target.
+  let burst = 0
   const timer = setInterval(() => {
-    if (callsAtSeek === null && ofType(play.events, 'seek').length > seeksBefore) {
-      callsAtSeek = autoplayCalls
-    }
     const at = play.video.currentTime
+    const holdEvents = ofType(play.events.slice(eventsBefore), 'hold')
+    if (!holdEvents.some((event) => !event.on)) burst = Math.max(burst, at - target)
     if (at < target - 1e-3) return
     highest = Math.max(highest, at)
     back = Math.max(back, highest - at)
@@ -125,12 +118,9 @@ test('a playing seek outside the window on a slow link never puts the clock back
       60_000,
       () => play.video.currentTime >= target + PLAYED_PAST_SECONDS,
     )
-    // The serve's common start has run once the seek's hold has begun (`autoplay()` asked after the engine took the seek up); fail without it.
-    await until(
-      play,
-      "the serve's end (the seek's hold)",
-      60_000,
-      () => callsAtSeek !== null && autoplayCalls > callsAtSeek,
+    // The serve's common start has run once the seek's hold has let go; fail without it.
+    await until(play, "the seek's hold letting go", 60_000, () =>
+      ofType(play.events.slice(eventsBefore), 'hold').some((event) => !event.on),
     )
     await new Promise((resolve) => setTimeout(resolve, 500))
   } finally {
@@ -141,4 +131,11 @@ test('a playing seek outside the window on a slow link never puts the clock back
   const putBack = engine.filter((write) => write.value < write.before - 1e-3)
   expect(putBack, "the engine's writes that put the clock back").toEqual([])
   expect(back, 'the clock going back').toBeLessThanOrEqual(frameSecondsOf(pick.facts))
+  // The seek's hold is the first the viewer sees after the seek, and nothing plays before it lets go.
+  const afterSeek = ofType(play.events.slice(eventsBefore), 'hold')
+  expect(afterSeek[0], "the seek's first hold").toMatchObject({ on: true, reason: 'seek' })
+  expect(afterSeek.some((event) => !event.on)).toBe(true)
+  expect(burst, 'the clock moving past the target before the hold let go').toBeLessThanOrEqual(
+    frameSecondsOf(pick.facts),
+  )
 })

@@ -230,9 +230,9 @@ export class Feeder {
    * the reader is done, then go to the index cache. The position then goes to where reading
    * starts. A seek never discards what the source holds, and keeps the sequence numbers and the
    * sound's decision. An abort rejects with the signal's reason, with no event, and leaves the
-   * feeder where it was.
+   * feeder where it was. Gives the file offset where the feed will start (the downloader's position), or null when the cursor has no next read.
    */
-  async seek(seconds: number, signal: AbortSignal): Promise<void> {
+  async seek(seconds: number, signal: AbortSignal): Promise<number | null> {
     signal.throwIfAborted()
     const { index } = this
     const sound = this.#soundId()
@@ -279,6 +279,7 @@ export class Feeder {
       at = soundAt
     }
     if (at !== null) this.#source.setPosition(at)
+    return at
   }
 
   /** Sets the downloader's position to where `seconds` probably is in a Matroska file, by time, before the seek's reads; nothing when the file says no duration. */

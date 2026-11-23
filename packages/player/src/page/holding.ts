@@ -68,6 +68,8 @@ export class Holding {
   #anchor = 0
   /** What the rule last measured, which the `hold` events tell: the store's seconds ahead of the playhead, and the goal. */
   #aheadSeconds = 0
+  /** Whether the store was full when the rule last measured. */
+  #storeFull = false
   #goalSeconds = 0
   /** The check that runs every HOLD_CHECK_MS while a hold is on, and only then. */
   #timer: ReturnType<typeof setInterval> | null = null
@@ -96,7 +98,7 @@ export class Holding {
    * the download is done or has failed (nothing more will come, so waiting gains nothing), or the store holds
    * every byte from the playhead's offset to the end of the file.
    */
-  #decide(reason: HoldReason): HoldDecision | null {
+  #decide(reason: HoldReason, offsetAt?: number | null): HoldDecision | null {
     const { video } = this.#world
     const downloader = this.#world.downloader()
     const feeder = this.#world.feeder()
@@ -108,7 +110,7 @@ export class Holding {
     const bitrate = downloader.fileSize / duration
     if (!(bitrate > 0)) return null
     const at = video.currentTime
-    const offset = feeder.positions.offsetAt(at)
+    const offset = offsetAt === undefined ? feeder.positions.offsetAt(at) : offsetAt
     const { store } = downloader
     const held = store.held()
     const ahead = offset === null ? 0 : held.heldFrom(offset)
@@ -128,6 +130,7 @@ export class Holding {
       storeFull: state === 'full',
     })
     this.#aheadSeconds = ahead / bitrate
+    this.#storeFull = state === 'full'
     this.#goalSeconds = decision.goalSeconds
     return decision
   }
@@ -153,6 +156,28 @@ export class Holding {
     }
     if (this.#holding) this.#leave()
     this.#play()
+  }
+
+  /**
+   * A wanted seek outside the decoder window is being served, its feed about to start from the file offset
+   * `offset` (the feeder's: the positions still hold the old runs, so they are not asked), with the sink empty:
+   * on a link that does not keep up it holds now, at the seek, so nothing plays from the first appended
+   * fragments before the goal; the serve's end (`begin('seek')`) decides the rest. A link that keeps up (goal 0)
+   * is not held here: it plays at the first frames, with no pause and play between. A full store with nothing
+   * held at the target still holds (the downloader evicts and reads); the serve's end lets it go. A hold
+   * already on (a stall's, say) stays, and its reason becomes `seek`. Does nothing for a play with no
+   * `autoplay`, a seek that is not wanted (`playing`, and `autoplay()`), or when the rule has nothing to wait for.
+   */
+  seekStarted(playing: boolean, offset?: number | null): void {
+    const { autoplay } = this.#world
+    if (autoplay === undefined) return
+    this.moved()
+    if (!(playing && autoplay())) return
+    const decision = this.#decide('seek', offset)
+    if (decision === null || !(decision.goalSeconds > 0)) return
+    if (!decision.hold && !(this.#storeFull && this.#aheadSeconds <= 0)) return
+    if (this.#holding) this.#reason = 'seek'
+    else this.#enter('seek')
   }
 
   /** The element stalled (`waiting`) while playing: a wanted play, so it holds, and pauses, when the rule says to wait. */

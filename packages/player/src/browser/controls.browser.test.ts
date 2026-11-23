@@ -106,6 +106,26 @@ suite(NAME)('playStreamed: seeks', () => {
     expect(ofType(play.events, 'error')).toEqual([])
   })
 
+  // I1: a link that keeps up plays at the first frames, so the seek's pre-hold never pauses it (no round trip).
+  test('a playing seek outside the window on a link that keeps up makes no seek hold and no engine pause', async () => {
+    // Shaped above 1.1 times the bit rate (the file is longer than 8 s, so its bit rate is under size / 8 s): the rate is known and the downloader reads at the seek, so the gate is exercised; unshaped, the file is `done` at once and holds nothing.
+    await control({ bandwidthBytesPerSecond: Math.ceil(((served(NAME)?.size ?? 0) / 8) * 1.5) })
+    const play = begin(NAME, { windowBytes: 2 * 1024 * 1024, autoplay: () => true })
+    await until(play, 'the clock past 1 s', 40_000, () => play.video.currentTime > 1)
+    const pauses: number[] = []
+    play.video.addEventListener('pause', () => pauses.push(performance.now()))
+    const mark = play.events.length
+    const seeked = shown(play).length
+    play.video.currentTime = 8
+    await until(play, "the seek's picture", 30_000, () => shown(play).length > seeked)
+    await pause(300)
+    expect(ofType(play.events, 'seek').at(-1)).toMatchObject({ inWindow: false })
+    expect(
+      ofType(play.events.slice(mark), 'hold').filter((event) => event.reason === 'seek'),
+    ).toEqual([])
+    expect(pauses).toEqual([])
+  })
+
   test('a seek outside what the store holds fetches from the place, keeping what is stored', async () => {
     await control({ bandwidthBytesPerSecond: 300_000 })
     const play = begin(NAME)
