@@ -8,6 +8,7 @@
 // which one chunk of 1 MiB covers for any file below about 1 MiB/s, and then the clock has no time to play on before
 // the common start. A dense file of the user's sample, with a high bit rate, needs many chunks for that second, so the
 // first fragments are appended and the element plays while the feed goes on. It is picked by its properties, read in
+// The rule itself, in every case, is unit-tested in src/engine/start-move.test.ts; this test shows it in a real element.
 // place through the play server, and no name of it is in this file; a sample with no such file skips the test.
 
 import { afterEach, expect, test, vi } from 'vitest'
@@ -93,6 +94,7 @@ test('a playing seek outside the window on a slow link never puts the clock back
   await until(play, 'the clock past 1 s', 120_000, () => play.video.currentTime > 1)
   const target = play.video.currentTime + SEEK_AHEAD_SECONDS
   const mark = writes.length
+  const seeksBefore = ofType(play.events, 'seek').length
   mine.viewer = true
   play.video.currentTime = target
   mine.viewer = false
@@ -111,8 +113,12 @@ test('a playing seek outside the window on a slow link never puts the clock back
       60_000,
       () => play.video.currentTime >= target + PLAYED_PAST_SECONDS,
     )
-    // The serve's common start comes after the feed has covered the target: give it the time to run.
-    await new Promise((resolve) => setTimeout(resolve, 1_000))
+    // The serve's common start has run once the seek has shown its picture (the event with its time): wait for that, and fail without it.
+    await until(play, "the seek's picture", 60_000, () =>
+      ofType(play.events, 'seek')
+        .slice(seeksBefore)
+        .some((event) => event.ms !== null),
+    )
   } finally {
     clearInterval(timer)
   }

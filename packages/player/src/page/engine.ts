@@ -23,6 +23,7 @@ import type { Downloader } from '../downloader.ts'
 import { Feeder } from '../engine/feeder.ts'
 import type { Sink } from '../engine/feeder.ts'
 import { slowWhile } from '../engine/hold.ts'
+import { commonStartMoves, startStaysPending, windowStartMoves } from '../engine/start-move.ts'
 import { failedOnOf } from '../engine/failed-on.ts'
 import { keyframeGapSeconds } from '../engine/keyframe-gap.ts'
 import { holdingRange, holdsAt } from '../engine/holds-at.ts'
@@ -637,17 +638,14 @@ class Play {
     }
     // A start that is not the target (a sound late, a target past the end) is the seek's target now, so that it completes.
     if (Math.abs(start - target) > 1e-6) this.#seeks.retarget(start)
-    // The clock only goes forward here: a playing element has played on from the target while the feed went on, and that is
-    // its own progress, not a position to undo. That holds only when the clock was at the target when the feed began; a
-    // clock that was not (`#pendingStart`: a seek the sink deferred, or one the browser clamped) is put at the start, as
-    // before. A target past the end goes back to the last frames.
-    const clock = this.#video.currentTime
-    const behind =
-      past || this.#pendingStart !== null ? Math.abs(clock - start) > 1e-6 : clock < start - 1e-6
-    if (behind) {
-      this.#moveTo(start)
-      if (Math.abs(this.#video.currentTime - start) > 1e-6) this.#pendingStart = start
-    }
+    // The clock only goes forward here (a target past the end goes to the last frames): a playing element has played on
+    // from the target while the feed went on, and that is its own progress, not a position to undo. The browser has
+    // clamped a seek before `#onSeeking` reads it, and a reopen leaves the clock at 0, so the clock is at the target or
+    // behind the start, or has played on from it.
+    const moved = commonStartMoves(this.#video.currentTime, start, past)
+    if (moved) this.#moveTo(start)
+    // The target is the playhead only for a move that the sink deferred; otherwise `#at()` must read the clock.
+    this.#pendingStart = startStaysPending(moved, this.#video.currentTime, start) ? start : null
   }
 
   /**
@@ -677,7 +675,7 @@ class Play {
     }
     this.#seeks.retarget(start)
     // Forward only, as the common start: a playing element that has played on past the start is left where it is.
-    if (this.#video.currentTime < start - 1e-6) this.#moveTo(start)
+    if (windowStartMoves(this.#video.currentTime, start)) this.#moveTo(start)
   }
 
   /** Gives the downloader the file offset of the picture at the playhead, when it is known. */
