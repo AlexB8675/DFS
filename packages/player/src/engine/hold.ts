@@ -4,7 +4,13 @@
 // hold a play forever. The old engine's `bufferingGoal` is its model. It uses no
 // DOM type and no timer.
 
-import { CHUNK_BYTES, SLOW_RATE_SHARE, START_GOAL_SECONDS, STALL_GOAL_SECONDS } from '../limits.ts'
+import {
+  CHUNK_BYTES,
+  SLOW_RATE_SHARE,
+  START_GOAL_SECONDS,
+  STALL_GOAL_SECONDS,
+  STALL_MAX_WAIT_SECONDS,
+} from '../limits.ts'
 
 /** A link at this multiple of the bit rate keeps up, with room to spare. */
 export const KEEPS_UP = 1.1
@@ -30,6 +36,8 @@ export interface HoldInput {
   windowAheadCapSeconds: number
   /** True when the downloader's state is `full`: the store can hold no more ahead, whatever the cap arithmetic says (§10.4). */
   storeFull: boolean
+  /** Seconds this hold has been on, 0 when none is on. NaN or a negative value counts as 0. Only a slow stall reads it (see `holdDecision`). */
+  waitedSeconds: number
 }
 
 export interface HoldDecision {
@@ -64,7 +72,10 @@ export function slowWhile(state: SlowState, rate: number | null, bitrate: number
  * other link, a slow one too, it holds for the start goal. A stall holds for the
  * stall goal; after a stall on a link slower than the video the goal is what the
  * rest of the video will take from it, as far as the store and the decoder window
- * allow. This is the old engine's rule, the user's choice of 2026-11-23.
+ * allow. This is the old engine's rule, the user's choice of 2026-11-23. That
+ * play-through part is waited for at most `STALL_MAX_WAIT_SECONDS` (`waitedSeconds`,
+ * the user's choice of 2026-11-23): after it the goal is the floor, or less where
+ * the store's cap is smaller. The other paths ignore `waitedSeconds`.
  */
 export function holdDecision(input: HoldInput): HoldDecision {
   const { reason, heldAheadSeconds, bitrateBytesPerSecond } = input
@@ -98,14 +109,11 @@ export function holdDecision(input: HoldInput): HoldDecision {
     // The feeder takes whole reads of CHUNK_BYTES, so the read in progress is store-ahead it cannot use yet: one read's margin keeps the release off the exact break-even point.
     const margin = CHUNK_BYTES / bitrateBytesPerSecond
     // The store's cap is strict; the decoder window's only lengthens the wait up to 0.9 of itself, and a window under the floor leaves the floor (a stall waits at least that, whatever the window).
-    goalSeconds = Math.min(
-      remaining,
-      clamp(
-        needed + margin,
-        floor,
-        Math.min(cap * CAP_SHARE, Math.max(floor, windowCap * CAP_SHARE)),
-      ),
-    )
+    const upper = Math.min(cap * CAP_SHARE, Math.max(floor, windowCap * CAP_SHARE))
+    // A wait of the limit or more lets go of the play-through part: only the floor (as the cap allows) is waited for.
+    const waited = input.waitedSeconds > 0 ? input.waitedSeconds : 0
+    const playThrough = waited >= STALL_MAX_WAIT_SECONDS ? 0 : needed + margin
+    goalSeconds = Math.min(remaining, clamp(playThrough, floor, upper))
   }
   goalSeconds = Math.max(0, goalSeconds)
   return { hold: !input.storeFull && heldAheadSeconds < goalSeconds, goalSeconds, slow }

@@ -131,6 +131,9 @@ export const START_GOAL_SECONDS = 2
 /** The hold rule's goal after a stall, in seconds of picture: 4, as the old engine's. */
 export const STALL_GOAL_SECONDS = 4
 
+/** The most a slow stall waits for its play-through goal, in seconds of real time, once the stall floor is stored: 10 (the user's choice of 2026-11-23). After it the play goes at the floor. */
+export const STALL_MAX_WAIT_SECONDS = 10
+
 /** How long a seek may wait for its picture: 10 s. A seek with none by then is logged and refed by the watchdog. */
 export const SEEK_DEADLINE_MS = 10_000
 

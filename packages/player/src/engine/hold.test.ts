@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { CHUNK_BYTES, SLOW_RATE_SHARE, START_GOAL_SECONDS, STALL_GOAL_SECONDS } from '../limits.ts'
+import {
+  CHUNK_BYTES,
+  SLOW_RATE_SHARE,
+  START_GOAL_SECONDS,
+  STALL_GOAL_SECONDS,
+  STALL_MAX_WAIT_SECONDS,
+} from '../limits.ts'
 import { holdDecision, isSlow, slowWhile } from './hold.ts'
 import type { HoldInput } from './hold.ts'
 
@@ -21,6 +27,7 @@ function input(over: Partial<HoldInput>): HoldInput {
     storeAheadCapSeconds: 100,
     windowAheadCapSeconds: 30,
     storeFull: false,
+    waitedSeconds: 0,
     ...over,
   }
 }
@@ -102,6 +109,68 @@ describe('holdDecision', () => {
     )
     expect(d.goalSeconds).toBe(STALL_GOAL_SECONDS)
     expect(d.slow).toBe(true)
+  })
+
+  describe('a slow stall lets go after STALL_MAX_WAIT_SECONDS of waiting', () => {
+    const slowStall = {
+      reason: 'stall' as const,
+      rateBytesPerSecond: BITRATE / 2,
+      remainingSeconds: 60,
+      storeAheadCapSeconds: 100,
+      windowAheadCapSeconds: 40,
+    }
+    const long = 60 * (1 - SLOW_RATE_SHARE * 0.5) + MARGIN
+
+    it('keeps the long goal before the limit', () => {
+      for (const waitedSeconds of [0, STALL_MAX_WAIT_SECONDS - 0.1]) {
+        expect(holdDecision(input({ ...slowStall, waitedSeconds })).goalSeconds).toBeCloseTo(long)
+      }
+    })
+
+    it('drops to the floor at and after the limit, and lets go once the floor is stored', () => {
+      for (const waitedSeconds of [STALL_MAX_WAIT_SECONDS, 30]) {
+        const held = holdDecision(input({ ...slowStall, waitedSeconds, heldAheadSeconds: 3 }))
+        expect(held).toEqual({ hold: true, goalSeconds: STALL_GOAL_SECONDS, slow: true })
+        const done = holdDecision(
+          input({ ...slowStall, waitedSeconds, heldAheadSeconds: STALL_GOAL_SECONDS }),
+        )
+        expect(done).toEqual({ hold: false, goalSeconds: STALL_GOAL_SECONDS, slow: true })
+      }
+    })
+
+    it('gives a store cap under the floor at the limit, as the clamp does', () => {
+      const d = holdDecision(input({ ...slowStall, waitedSeconds: 10, storeAheadCapSeconds: 2.5 }))
+      expect(d.goalSeconds).toBeCloseTo(2.25)
+    })
+
+    it('gives the remaining time when it is under the floor', () => {
+      const d = holdDecision(input({ ...slowStall, waitedSeconds: 10, remainingSeconds: 3 }))
+      expect(d.goalSeconds).toBe(3)
+    })
+
+    it('reads NaN or a negative wait as 0', () => {
+      for (const waitedSeconds of [NaN, -5]) {
+        expect(holdDecision(input({ ...slowStall, waitedSeconds })).goalSeconds).toBeCloseTo(long)
+      }
+    })
+
+    it('is ignored by a start, a seek, a fast link and an unknown rate', () => {
+      const waitedSeconds = 30
+      expect(
+        holdDecision(input({ rateBytesPerSecond: BITRATE / 2, waitedSeconds })).goalSeconds,
+      ).toBe(START_GOAL_SECONDS)
+      expect(
+        holdDecision(input({ reason: 'seek', rateBytesPerSecond: BITRATE / 2, waitedSeconds }))
+          .goalSeconds,
+      ).toBe(START_GOAL_SECONDS)
+      expect(
+        holdDecision(input({ reason: 'stall', rateBytesPerSecond: BITRATE * 3, waitedSeconds }))
+          .goalSeconds,
+      ).toBe(STALL_GOAL_SECONDS)
+      expect(
+        holdDecision(input({ reason: 'stall', waitedSeconds, remainingSeconds: 600 })).goalSeconds,
+      ).toBe(STALL_GOAL_SECONDS)
+    })
   })
 
   it('reads a window cap that is NaN or negative as 0, and Infinity as no window cap', () => {

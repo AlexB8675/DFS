@@ -232,6 +232,55 @@ describe('Holding', () => {
     expect(on?.targetS).toBeGreaterThan(STALL_GOAL_SECONDS + 1)
   })
 
+  // The user's choice of 2026-11-23: a slow stall waits at most STALL_MAX_WAIT_SECONDS for its play-through goal, once the floor is stored.
+  test('a slow stall with the floor stored holds until 10 s of waiting, then lets go', () => {
+    const play = setup()
+    try {
+      play.video.paused = false
+      play.video.currentTime = 3
+      // 5 s stored: over the 4 s floor, under the long goal of a link at a tenth of the bit rate.
+      play.held.add({ start: 0, end: 5_000_000 })
+      play.holding.stalled()
+      expect(play.holding.holding).toBe(true)
+      expect(holds(play.events)[0]?.targetS).toBeGreaterThan(STALL_GOAL_SECONDS + 1)
+      play.clock.now = 9_900
+      play.holding.check()
+      expect(play.holding.holding).toBe(true)
+      expect(play.calls).toEqual(['pause'])
+      play.clock.now = 10_000
+      play.holding.check()
+      expect(play.holding.holding).toBe(false)
+      expect(play.calls).toEqual(['pause', 'play'])
+      expect(holds(play.events)[1]).toMatchObject({
+        on: false,
+        reason: null,
+        targetS: STALL_GOAL_SECONDS,
+      })
+    } finally {
+      play.holding.dispose()
+    }
+  })
+
+  test('a slow stall with less than the floor stored still holds at 10 s, and lets go when the floor is stored', () => {
+    const play = setup()
+    try {
+      play.video.paused = false
+      play.video.currentTime = 3
+      play.held.add({ start: 0, end: 3_000_000 })
+      play.holding.stalled()
+      expect(play.holding.holding).toBe(true)
+      play.clock.now = 12_000
+      play.holding.check()
+      expect(play.holding.holding).toBe(true)
+      play.held.add({ start: 0, end: 4_000_000 })
+      play.holding.check()
+      expect(play.holding.holding).toBe(false)
+      expect(play.calls).toEqual(['pause', 'play'])
+    } finally {
+      play.holding.dispose()
+    }
+  })
+
   // F5: the rate meter keeps a fast rate a few seconds after the link drops, so in a retry pause only a slow rate is trusted.
   test('a hold decided while the downloader waits, with a fast rate, keeps the 2 s goal, not a release', () => {
     const play = setup()

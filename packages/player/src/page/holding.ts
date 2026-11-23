@@ -135,6 +135,8 @@ export class Holding {
         this.#world.windowLimitBytes() / bitrate,
       ),
       storeFull: state === 'full',
+      // A hold relabelled to `seek` keeps its `#since`; only a stall reads this. Before a hold is on there is nothing waited.
+      waitedSeconds: this.#holding ? (this.#world.now() - this.#since) / 1000 : 0,
     })
     this.#aheadSeconds = heldAheadSeconds
     this.#goalSeconds = decision.goalSeconds
