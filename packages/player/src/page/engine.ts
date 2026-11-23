@@ -637,7 +637,14 @@ class Play {
     }
     // A start that is not the target (a sound late, a target past the end) is the seek's target now, so that it completes.
     if (Math.abs(start - target) > 1e-6) this.#seeks.retarget(start)
-    if (Math.abs(this.#video.currentTime - start) > 1e-6) {
+    // The clock only goes forward here: a playing element has played on from the target while the feed went on, and that is
+    // its own progress, not a position to undo. That holds only when the clock was at the target when the feed began; a
+    // clock that was not (`#pendingStart`: a seek the sink deferred, or one the browser clamped) is put at the start, as
+    // before. A target past the end goes back to the last frames.
+    const clock = this.#video.currentTime
+    const behind =
+      past || this.#pendingStart !== null ? Math.abs(clock - start) > 1e-6 : clock < start - 1e-6
+    if (behind) {
       this.#moveTo(start)
       if (Math.abs(this.#video.currentTime - start) > 1e-6) this.#pendingStart = start
     }
@@ -669,7 +676,8 @@ class Play {
       })
     }
     this.#seeks.retarget(start)
-    this.#moveTo(start)
+    // Forward only, as the common start: a playing element that has played on past the start is left where it is.
+    if (this.#video.currentTime < start - 1e-6) this.#moveTo(start)
   }
 
   /** Gives the downloader the file offset of the picture at the playhead, when it is known. */
