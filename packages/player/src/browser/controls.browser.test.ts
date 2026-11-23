@@ -18,8 +18,9 @@ import {
   WINDOW_BYTES,
 } from '../limits.ts'
 import { begin, endPlays, frames, ofType, served, suite, until } from './play-harness.ts'
+import { pickOf } from './plays-support.ts'
 import type { Play } from './play-harness.ts'
-import { clearLog, control, log } from './server.ts'
+import { clearLog, control, files, log } from './server.ts'
 
 const NAME = 'h264-aac-faststart.mp4'
 
@@ -108,14 +109,18 @@ suite(NAME)('playStreamed: seeks', () => {
 
   // I1: a link that keeps up plays at the first frames, so the seek's pre-hold never pauses it (no round trip).
   test('a playing seek outside the window on a link that keeps up makes no seek hold and no engine pause', async () => {
-    // Shaped above 1.1 times the bit rate (the file is longer than 8 s, so its bit rate is under size / 8 s): the rate is known and the downloader reads at the seek, so the gate is exercised; unshaped, the file is `done` at once and holds nothing.
-    await control({ bandwidthBytesPerSecond: Math.ceil(((served(NAME)?.size ?? 0) / 8) * 1.5) })
+    // Shaped to 1.4 times the file's own bit rate (over 1.1, under what finishes the download before the seek): the rate is known and the downloader reads at the seek, so the gate is exercised; unshaped, the file is `done` at once and holds nothing.
+    const pick = await pickOf(files().find((file) => file.name.endsWith(NAME)))
+    if (typeof pick === 'string') throw new Error(pick)
+    await control({ bandwidthBytesPerSecond: Math.ceil((1.4 * pick.file.size) / pick.duration) })
     const play = begin(NAME, { windowBytes: 2 * 1024 * 1024, autoplay: () => true })
     await until(play, 'the clock past 1 s', 40_000, () => play.video.currentTime > 1)
     const pauses: number[] = []
     play.video.addEventListener('pause', () => pauses.push(performance.now()))
     const mark = play.events.length
     const seeked = shown(play).length
+    // The download is still reading at the seek: the gate, not an empty decision, is what holds nothing.
+    expect(play.stats.at(-1)?.storedBytes ?? 0).toBeLessThan(pick.file.size)
     play.video.currentTime = 8
     await until(play, "the seek's picture", 30_000, () => shown(play).length > seeked)
     await pause(300)
@@ -155,8 +160,9 @@ suite(NAME)('playStreamed: seeks', () => {
       this: Feeder,
       ...args: Parameters<Feeder['seek']>
     ) {
-      await realSeek.apply(this, args)
+      const at = await realSeek.apply(this, args)
       if (watch.on) watch.delayNext = true
+      return at
     })
     vi.spyOn(Feeder.prototype, 'feed').mockImplementation(async function (
       this: Feeder,

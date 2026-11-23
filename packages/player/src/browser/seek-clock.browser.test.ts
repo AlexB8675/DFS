@@ -1,15 +1,16 @@
-// A seek outside the decoder window on a slow link must not pull the playing clock back (DESIGN.md §10.4): the
-// element starts playing on its own once the first fragments from the target are appended, while the serve still
-// feeds, so by the time the common start is applied the clock has moved on from the target. The engine must
-// leave it there and not move it back to the target. The element's `currentTime` setter is wrapped here to tell
-// the engine's writes from the viewer's.
+// A playing seek outside the decoder window on a slow link holds at the seek before anything plays (DESIGN.md §10.4;
+// the final review's I1): the serve pauses the element when the feeder's seek has emptied the sink, so the clock stays
+// at the target until the seek's hold lets go, and no write of the engine's puts it back. The element's `currentTime`
+// setter is wrapped here to tell the engine's writes from the viewer's.
 //
 // The synthetic files cannot show it: the serve's feed asks for a second of media past the target (FEED_STEP_SECONDS),
-// which one chunk of 1 MiB covers for any file below about 1 MiB/s, and then the clock has no time to play on before
-// the common start. A dense file of the user's sample, with a high bit rate, needs many chunks for that second, so the
-// first fragments are appended and the element plays while the feed goes on. It is picked by its properties, read in
+// which one chunk of 1 MiB covers for any file below about 1 MiB/s, and then the clock has no time to play on. A dense
+// file of the user's sample, with a high bit rate, needs many chunks for that second, so the first fragments are appended
+// while the feed goes on, and an element that was not held would play (the burst). It is picked by its properties, read in
 // place through the play server, and no name of it is in this file; a sample with no such file skips the test.
-// The rule itself, in every case, is unit-tested in src/engine/start-move.test.ts; this test shows it in a real element.
+// The forward-only common start (a clock that played on is never put back) is unit-tested in src/engine/start-move.test.ts:
+// with the pre-hold nothing plays on during a serve with an autoplay, and a synthetic file cannot make an element with no
+// autoplay play on during one (the old backward move was tried on two synthetic files and the test did not fail).
 
 import { afterEach, expect, test, vi } from 'vitest'
 import { begin, endPlays, ofType, until } from './play-harness.ts'
@@ -76,7 +77,7 @@ async function fastestDense(): Promise<Pick | undefined> {
     .sort((a, b) => b.file.size / b.duration - a.file.size / a.duration)[0]
 }
 
-test('a playing seek outside the window on a slow link never puts the clock back once it has played on from the target', async ({
+test('a playing seek outside the window on a slow link holds at the seek: no motion before its hold lets go, and no back step', async ({
   skip,
 }) => {
   const pick = await fastestDense()

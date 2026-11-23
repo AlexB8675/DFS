@@ -286,12 +286,15 @@ describe('Holding', () => {
     expect(play.holding.holding).toBe(false)
   })
 
-  // I1: a wanted seek outside the window holds at the seek on a slow link, before anything plays.
+  // I1: a wanted seek outside the window holds at the seek on a slow link, before anything plays. The seek's target is 4 s, its feed starts at the offset 4 MB (1 MB a second).
   describe('seekStarted', () => {
+    const TO = 4
+    const AT = 4_000_000
+
     test("on a slow link a playing seek holds at once with reason seek, and its own pause is not the viewer's", () => {
-      const play = setup({ at: 4 })
+      const play = setup({ at: TO })
       play.video.paused = false
-      play.holding.seekStarted(true)
+      play.holding.seekStarted(true, TO, AT)
       expect(play.calls).toEqual(['pause'])
       expect(play.holding.holding).toBe(true)
       expect(holds(play.events)[0]).toMatchObject({ on: true, reason: 'seek' })
@@ -302,92 +305,107 @@ describe('Holding', () => {
     })
 
     test('a link that keeps up holds nothing and does not pause', () => {
-      const play = setup({ at: 4 })
+      const play = setup({ at: TO })
       play.link.rate = 5_000_000
       play.video.paused = false
-      play.holding.seekStarted(true)
+      play.holding.seekStarted(true, TO, AT)
       expect(play.holding.holding).toBe(false)
       expect(holds(play.events)).toEqual([])
       expect(play.calls).toEqual([])
     })
 
     test('a seek that is not playing, or whose autoplay() says no, holds nothing', () => {
-      const idle = setup({ at: 4 })
-      idle.holding.seekStarted(false)
+      const idle = setup({ at: TO })
+      idle.holding.seekStarted(false, TO, AT)
       expect(holds(idle.events)).toEqual([])
-      const vetoed = setup({ at: 4 })
+      const vetoed = setup({ at: TO })
       vetoed.video.paused = false
       vetoed.want.autoplay = false
-      vetoed.holding.seekStarted(true)
+      vetoed.holding.seekStarted(true, TO, AT)
       expect(holds(vetoed.events)).toEqual([])
       expect(vetoed.calls).toEqual([])
     })
 
-    // The positions still hold the old runs at a seek's start: the offset the feeder gives is what the rule reads.
-    test('the rule reads the offset the seek gives, not the positions of the old runs', () => {
-      const play = setup({ at: 4, offset: 0 })
-      // 2.5 s are stored at the old runs' offset, none at the target's.
-      play.held.add({ start: 0, end: 2_500_000 })
-      play.video.paused = false
-      play.holding.seekStarted(true, 8_000_000)
-      expect(play.holding.holding).toBe(true)
-      expect(holds(play.events)[0]).toMatchObject({ on: true, reason: 'seek', aheadS: 0 })
-      // A seek whose target the store holds 2 s of at once does not pause.
-      const held = setup({ at: 4 })
-      held.held.add({ start: 8_000_000, end: 10_000_000 })
-      held.video.paused = false
-      held.holding.seekStarted(true, 8_000_000)
-      expect(held.holding.holding).toBe(false)
-      expect(held.calls).toEqual([])
-    })
-
-    test('a full store with nothing held at the target still holds; one that holds the target does not', () => {
-      const play = setup({ at: 4 })
-      play.link.state = 'full'
-      play.video.paused = false
-      play.holding.seekStarted(true, 8_000_000)
-      expect(play.holding.holding).toBe(true)
-      const held = setup({ at: 4 })
-      held.link.state = 'full'
-      held.held.add({ start: 8_000_000, end: 9_000_000 })
-      held.video.paused = false
-      held.holding.seekStarted(true, 8_000_000)
-      expect(held.holding.holding).toBe(false)
-    })
-
     test('with no autoplay it does nothing', () => {
-      const play = setup({ at: 4, autoplay: null })
+      const play = setup({ at: TO, autoplay: null })
       play.video.paused = false
-      play.holding.seekStarted(true)
+      play.holding.seekStarted(true, TO, AT)
       expect(holds(play.events)).toEqual([])
       expect(play.calls).toEqual([])
     })
 
     test('nothing to wait for (the download is done) holds nothing', () => {
-      const play = setup({ at: 4 })
+      const play = setup({ at: TO })
       play.link.state = 'done'
       play.video.paused = false
-      play.holding.seekStarted(true)
+      play.holding.seekStarted(true, TO, AT)
       expect(holds(play.events)).toEqual([])
       expect(play.calls).toEqual([])
     })
 
+    test('a null offset (the feed has no next read) holds nothing', () => {
+      const play = setup({ at: TO })
+      play.video.paused = false
+      play.holding.seekStarted(true, TO, null)
+      expect(holds(play.events)).toEqual([])
+      expect(play.calls).toEqual([])
+    })
+
+    test('a store that holds to the end of the file from the offset has nothing to wait for', () => {
+      const play = setup({ at: TO })
+      play.held.add({ start: AT, end: FILE_BYTES })
+      play.video.paused = false
+      play.holding.seekStarted(true, TO, AT)
+      expect(holds(play.events)).toEqual([])
+    })
+
+    // The positions still hold the old runs at a seek's start, and the store's state is the old position's: neither is read.
+    test('the pre-hold ignores the store: a stale full state with some bytes ahead, or 2 s held, still holds', () => {
+      const full = setup({ at: TO, offset: 0 })
+      full.link.state = 'full'
+      full.held.add({ start: AT, end: AT + 1_000_000 })
+      full.video.paused = false
+      full.holding.seekStarted(true, TO, AT)
+      expect(full.holding.holding).toBe(true)
+      expect(holds(full.events)[0]).toMatchObject({ on: true, reason: 'seek', aheadS: 1 })
+
+      // 2.5 s are held from the offset: the pre-hold pauses, and the serve's end lets go at once and plays.
+      // (The fed positions at the serve's end are at the offset.)
+      const held = setup({ at: TO, offset: AT })
+      held.held.add({ start: AT, end: AT + 2_500_000 })
+      held.video.paused = false
+      held.holding.seekStarted(true, TO, AT)
+      expect(held.holding.holding).toBe(true)
+      expect(held.calls).toEqual(['pause'])
+      held.holding.begin('seek', true)
+      expect(held.holding.holding).toBe(false)
+      expect(held.calls).toEqual(['pause', 'play'])
+      expect(held.stats.holds).toBe(1)
+    })
+
+    test("the goal is the target's remaining time near the end", () => {
+      const play = setup({ at: 0 })
+      play.video.paused = false
+      // The clock is not at the target yet; 1 s remains of the target's 10 s.
+      play.holding.seekStarted(true, 9, 9_000_000)
+      expect(holds(play.events)[0]?.targetS).toBeCloseTo(1, 3)
+    })
+
     test('a stall hold that is on stays, its reason becomes seek, and the serve end keeps or releases it by the 2 s goal', () => {
-      const play = setup({ at: 4 })
+      const play = setup({ at: TO })
       play.video.paused = false
       play.video.currentTime = 4.5
       play.holding.stalled()
       expect(holds(play.events)[0]).toMatchObject({ on: true, reason: 'stall' })
-      play.video.currentTime = 4
-      play.holding.seekStarted(true)
+      play.video.currentTime = TO
+      play.holding.seekStarted(true, TO, AT)
       expect(play.holding.holding).toBe(true)
       expect(play.calls).toEqual(['pause'])
       expect(holds(play.events)).toHaveLength(1)
-      // The serve's end: 1 s stored is under the 2 s goal, so the hold is kept (and says seek on its end).
+      // The serve's end: 1 s stored is under the 2 s goal, so the hold is kept.
       play.held.add({ start: 0, end: 1_000_000 })
       play.holding.begin('seek', true)
       expect(play.holding.holding).toBe(true)
-      expect(play.calls).toEqual(['pause'])
       // 2.5 s is over it: the hold ends, once, in a play.
       play.held.add({ start: 0, end: 2_500_000 })
       play.holding.begin('seek', true)
@@ -397,16 +415,32 @@ describe('Holding', () => {
       expect(holds(play.events).map((event) => event.on)).toEqual([true, false])
     })
 
+    test('a seek that is not wanted ends a hold that is on, with no play, counted once', () => {
+      const play = setup({ at: TO })
+      play.video.paused = false
+      play.video.currentTime = 4.5
+      play.holding.stalled()
+      expect(play.holding.holding).toBe(true)
+      play.video.currentTime = TO
+      play.want.autoplay = false
+      play.holding.seekStarted(false, TO, AT)
+      expect(play.holding.holding).toBe(false)
+      expect(play.video.paused).toBe(true)
+      expect(play.calls).toEqual(['pause'])
+      expect(play.stats.holds).toBe(1)
+      expect(holds(play.events).map((event) => event.on)).toEqual([true, false])
+    })
+
     test("the viewer's play ends the pre-hold, and a viewer's pause is caught by the check", () => {
-      const played = setup({ at: 4 })
+      const played = setup({ at: TO })
       played.video.paused = false
-      played.holding.seekStarted(true)
+      played.holding.seekStarted(true, TO, AT)
       played.video.paused = false
       played.holding.played()
       expect(played.holding.holding).toBe(false)
-      const paused = setup({ at: 4 })
+      const paused = setup({ at: TO })
       paused.video.paused = false
-      paused.holding.seekStarted(true)
+      paused.holding.seekStarted(true, TO, AT)
       paused.want.autoplay = false
       paused.holding.check()
       expect(paused.holding.holding).toBe(false)
