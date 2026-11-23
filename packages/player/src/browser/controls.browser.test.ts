@@ -13,6 +13,7 @@ import {
   STALL_GOAL_SECONDS,
   START_GOAL_SECONDS,
   STUCK_MS,
+  TAIL_BYTES,
   WATCH_EVERY_MS,
   WINDOW_AHEAD_SECONDS,
   WINDOW_BYTES,
@@ -139,8 +140,14 @@ suite(NAME)('playStreamed: seeks', () => {
     await control({ bandwidthBytesPerSecond: Math.ceil(0.6 * bitrate) })
     // The default window follows the store's edge (a small one would stop short of it, and the store would lead the target by a chunk).
     const play = begin(NAME, { autoplay: () => true })
-    // The seek's target is just inside the window's forward edge, and the store leads that edge by less than the goal: the window follows the store, so wait for a moment when it has caught up.
-    const storedSeconds = (): number => (play.stats.at(-1)?.storedBytes ?? 0) / bitrate
+    // The seek's target is just inside the window's forward edge, and the store leads the target by less than the goal: the window follows the store, so wait for a moment when it has caught up.
+    // What the rule reads is the store's bytes from the target's offset on. This file is read in order from its start and nothing is evicted, so the bytes the store has taken (`bytesReceived`, the frontier block included, unlike `storedBytes`) less the tail read at the start (`TAIL_BYTES`, held apart) over the bit rate is the store's edge in seconds, and the download is not done while that is short of the file.
+    const storedBytes = (): number =>
+      Math.max(0, (play.stats.at(-1)?.bytesReceived ?? 0) - TAIL_BYTES)
+    const storedSeconds = (): number => storedBytes() / bitrate
+    // The tail the start read is held too: a target near it would find the store contiguous to the end of the file, so the target stays a second short of where the tail begins.
+    const tailStartSeconds = (pick.file.size - TAIL_BYTES) / bitrate
+    const playingFree = (): boolean => !play.video.paused && play.stats.at(-1)?.holding === false
     const edge = (): number => bufferedEnd(play.video) - 0.4
     await until(
       play,
@@ -148,13 +155,16 @@ suite(NAME)('playStreamed: seeks', () => {
       40_000,
       () =>
         play.video.currentTime > 1 &&
+        playingFree() &&
         edge() > play.video.currentTime + 0.3 &&
-        storedSeconds() - edge() < 1,
+        edge() < tailStartSeconds - 1 &&
+        storedSeconds() - edge() < 1.5,
     )
     const target = edge()
     // The precondition: the store holds less than the goal ahead of the target, and the download is not done.
     expect(storedSeconds() - target).toBeLessThan(START_GOAL_SECONDS)
-    expect(play.stats.at(-1)?.storedBytes ?? 0).toBeLessThan(pick.file.size)
+    expect(playingFree()).toBe(true)
+    expect(storedSeconds()).toBeLessThan(tailStartSeconds)
     const mark = play.events.length
     let burst = 0
     const timer = setInterval(() => {
@@ -169,23 +179,29 @@ suite(NAME)('playStreamed: seeks', () => {
     } finally {
       clearInterval(timer)
     }
+    // The clock first: before the seek's hold let go it never moved more than a frame past the target.
+    expect(burst).toBeLessThan(0.05)
     expect(ofType(play.events.slice(mark), 'seek')[0]).toMatchObject({ inWindow: true })
     expect(ofType(play.events.slice(mark), 'hold')[0]).toMatchObject({ on: true, reason: 'seek' })
-    expect(burst).toBeLessThan(0.05)
   })
 
+  // What this guards: an in-window forward seek on a link that keeps up is never paused by the engine. It does not prove the store holds under the goal there (on a fast link it holds more), so it is not a test of the rule's hold, only of the absence of a pause.
   test('a playing seek inside the window on a link that keeps up makes no seek hold and no pause', async () => {
     const pick = await pickOf(files().find((file) => file.name.endsWith(NAME)))
     if (typeof pick === 'string') throw new Error(pick)
-    await control({ bandwidthBytesPerSecond: Math.ceil((1.4 * pick.file.size) / pick.duration) })
-    const play = begin(NAME, { windowBytes: 2 * 1024 * 1024, autoplay: () => true })
+    const bitrate = pick.file.size / pick.duration
+    await control({ bandwidthBytesPerSecond: Math.ceil(1.4 * bitrate) })
+    const play = begin(NAME, { autoplay: () => true })
     await until(
       play,
-      'the clock past 1 s, with data ahead',
+      'the clock past 1 s, with data ahead and a rate known',
       40_000,
-      () => play.video.currentTime > 1 && bufferedEnd(play.video) > play.video.currentTime + 1,
+      () =>
+        play.video.currentTime > 1 &&
+        bufferedEnd(play.video) > play.video.currentTime + 1 &&
+        (play.stats.at(-1)?.rate ?? 0) >= 1.1 * bitrate,
     )
-    expect(play.stats.at(-1)?.storedBytes ?? 0).toBeLessThan(pick.file.size)
+    expect(play.stats.at(-1)?.bytesReceived ?? 0).toBeLessThan(pick.file.size)
     const pauses: number[] = []
     play.video.addEventListener('pause', () => pauses.push(performance.now()))
     const mark = play.events.length

@@ -1,8 +1,11 @@
 // The hold for the network (DESIGN.md §10.4; the iron-clad spec §4.8): when the play may start, or start again
-// after a seek or a stall, and when it waits. The rule is `holdDecision`, which measures what the STORE holds
-// ahead of the playhead, never the decoder window, so a window shrunk by quota errors cannot hold a play for
-// ever. The hold is the engine's own pause: while it holds, the element is paused, and when the rule lets go
-// the engine calls `play()`. Only a play that has an `autoplay` is held or played by the engine at all; with
+// after a seek or a stall, and when it waits. The rule is `holdDecision`, which measures what is held ahead of the
+// playhead: the larger of what the STORE holds and what the element has buffered there. The window is never what
+// a hold waits to fill (the goal is measured, not the window's reach), and taking the larger can only shorten a
+// hold, so a window shrunk by quota errors cannot hold a play for ever, and a seek the decoder already covers is
+// not held for want of stored bytes (blocks evicted behind the position, a fresh memory store).
+// The hold is the engine's own pause: while it holds, the element is paused, and when the rule lets go the engine
+// calls `play()`. Only a play that has an `autoplay` is held or played by the engine at all; with
 // none, the element is the viewer's. Only a wanted play is held: a seek made while paused never holds or plays.
 // Nothing here feeds. The play asks it to check on its tick, and while a hold is on a timer of its own checks too
 // (`HOLD_CHECK_MS`), when the engine says it can (`canCheck`: not busy, not stopped, not failed); `dispose` stops it.
@@ -14,6 +17,7 @@ import { KEEPS_UP, holdDecision } from '../engine/hold.ts'
 import type { HoldDecision, HoldReason } from '../engine/hold.ts'
 import { HOLD_CHECK_MS, WINDOW_AHEAD_SECONDS } from '../limits.ts'
 import type { RangeSet } from '../ranges.ts'
+import { aheadOf } from './video.ts'
 
 /** What the play lets the hold read and say. */
 export interface HoldWorld {
@@ -114,9 +118,11 @@ export class Holding {
     const ahead = offset === null ? 0 : held.heldFrom(offset)
     if (offset !== null && ahead >= downloader.fileSize - offset) return null
     const behind = offset === null ? 0 : heldBefore(held, offset)
+    // The store's seconds ahead, or the element's from the same time when that is more: a seek's pre-hold measures at its target, where the emptied sink holds nothing.
+    const heldAheadSeconds = Math.max(ahead / bitrate, aheadOf(video.buffered, at))
     const decision = holdDecision({
       reason,
-      heldAheadSeconds: ahead / bitrate,
+      heldAheadSeconds,
       rateBytesPerSecond: heldRate(state, downloader.rate(), bitrate),
       bitrateBytesPerSecond: bitrate,
       remainingSeconds: duration - at,
@@ -127,7 +133,7 @@ export class Holding {
       ),
       storeFull: state === 'full',
     })
-    this.#aheadSeconds = ahead / bitrate
+    this.#aheadSeconds = heldAheadSeconds
     this.#goalSeconds = decision.goalSeconds
     return decision
   }

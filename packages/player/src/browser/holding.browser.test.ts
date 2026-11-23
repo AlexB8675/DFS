@@ -15,6 +15,8 @@ interface Setup {
   events: TimelineEventInput[]
   video: { paused: boolean; ended: boolean; seeking: boolean; currentTime: number }
   held: RangeSet
+  /** The element's buffered ranges, in seconds. */
+  buffer: [number, number][]
   calls: string[]
   link: { state: string; rate: number | null }
   want: { autoplay: boolean }
@@ -32,6 +34,7 @@ function setup(
   const events: TimelineEventInput[] = []
   const calls: string[] = []
   const held = new RangeSet()
+  const buffer: [number, number][] = []
   const video = { paused: true, ended: false, seeking: false, currentTime: options.at ?? 0 }
   const link = { state: 'reading', rate: 100_000 as number | null }
   const want = { autoplay: options.autoplay ?? true }
@@ -39,7 +42,13 @@ function setup(
   const clock = { now: 0 }
   const stats = { holding: false, holds: 0, holdMs: 0 }
   const element = Object.assign(video, {
-    buffered: { length: 0, start: () => 0, end: () => 0 },
+    buffered: {
+      get length() {
+        return buffer.length
+      },
+      start: (i: number) => buffer[i]?.[0] ?? 0,
+      end: (i: number) => buffer[i]?.[1] ?? 0,
+    },
     play: () => {
       calls.push('play')
       video.paused = false
@@ -71,7 +80,7 @@ function setup(
     changed: () => undefined,
     now: () => clock.now,
   })
-  return { holding, events, video, held, calls, link, want, engine, clock, stats }
+  return { holding, events, video, held, buffer, calls, link, want, engine, clock, stats }
 }
 
 function holds(events: TimelineEventInput[]): Extract<TimelineEventInput, { type: 'hold' }>[] {
@@ -531,6 +540,39 @@ describe('Holding', () => {
       expect(paused.holding.holding).toBe(false)
       expect(paused.calls).toEqual(['pause'])
       expect(paused.stats.holds).toBe(1)
+    })
+  })
+
+  // F1 (Gemini, task 2): the rule's ahead is the larger of the store's and the element's, so a seek the decoder window covers is not held for want of stored bytes (blocks evicted behind the position, a fresh memory store).
+  describe("the element's buffer counts toward what is ahead", () => {
+    test('a seek the element covers by the goal is not held, with nothing stored: slow link and fast link', () => {
+      for (const rate of [100_000, 2_000_000]) {
+        const play = setup({ at: 3 })
+        play.link.rate = rate
+        play.video.paused = false
+        play.buffer.push([0, 6])
+        play.holding.begin('seek', true)
+        expect(holds(play.events)).toEqual([])
+        expect(play.holding.holding).toBe(false)
+        expect(play.calls).toEqual([])
+      }
+    })
+
+    test("a seek the element covers by 1 s holds on a slow link, and the event's aheadS is that 1 s", () => {
+      const play = setup({ at: 3 })
+      play.video.paused = false
+      play.buffer.push([0, 4])
+      play.holding.begin('seek', true)
+      expect(holds(play.events)[0]).toMatchObject({ on: true, reason: 'seek', aheadS: 1 })
+    })
+
+    test('the store ahead wins when it is the larger, and a stall with the element dry is the store alone', () => {
+      const play = setup({ at: 3, offset: 3_000_000 })
+      play.video.paused = false
+      play.held.add({ start: 3_000_000, end: 4_000_000 })
+      play.video.currentTime = 3
+      play.holding.stalled()
+      expect(holds(play.events)[0]).toMatchObject({ on: true, reason: 'stall', aheadS: 1 })
     })
   })
 })
