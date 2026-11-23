@@ -42,7 +42,7 @@ const STRETCH_SECONDS = 20
 /** The longest a single test may take; a file that would take more is skipped with the reason (R43). */
 const TEST_LIMIT_MS = 240_000
 
-/** The wait after the picture moves that is a stall: longer than this is a failure of the above-the-bit-rate and below-the-bit-rate plays (R43). */
+/** The wait after the picture moves that is a stall: longer than this is a failure of the above-the-bit-rate play (R43). The below-the-bit-rate play expects stalls and only reports them. */
 const WAIT_LIMIT_MS = 250
 
 /** How much of the file's bit rate each link has (R43): above, and below it. */

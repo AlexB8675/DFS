@@ -70,7 +70,8 @@ export function holdDecision(input: HoldInput): HoldDecision {
   const { reason, heldAheadSeconds, bitrateBytesPerSecond } = input
   const remaining = input.remainingSeconds
   const cap = Math.max(0, input.storeAheadCapSeconds)
-  const windowCap = Math.max(0, input.windowAheadCapSeconds)
+  // NaN or a negative cap is none to give (0: the floor); an infinite one is no window cap at all.
+  const windowCap = input.windowAheadCapSeconds > 0 ? input.windowAheadCapSeconds : 0
   // A rate of 0 is the downloader gone quiet (a full store, a finished file), not a slow link; a
   // bit rate that can't be compared makes the rate unknown too.
   const rate = input.rateBytesPerSecond

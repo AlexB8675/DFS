@@ -3,6 +3,7 @@
 
 import type { TimelineEventInput } from '@dfs/shared'
 import { describe, expect, test } from 'vitest'
+import { STALL_GOAL_SECONDS } from '../limits.ts'
 import { Holding } from '../page/holding.ts'
 import { RangeSet } from '../ranges.ts'
 
@@ -218,7 +219,8 @@ describe('Holding', () => {
     expect(play.holding.holding).toBe(true)
     const on = holds(play.events)[0]
     expect(on).toMatchObject({ on: true, reason: 'stall' })
-    expect(on?.targetS).toBeGreaterThan(2.5)
+    // The slow goal (about 9 s here) is over the 4 s floor an unknown rate would give, and the store holds 3.5 s: under both.
+    expect(on?.targetS).toBeGreaterThan(STALL_GOAL_SECONDS + 1)
   })
 
   // F5: the rate meter keeps a fast rate a few seconds after the link drops, so in a retry pause only a slow rate is trusted.

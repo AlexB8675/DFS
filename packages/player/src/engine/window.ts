@@ -55,15 +55,19 @@ function part(run: FedRun, start: number, end: number): FedRun | null {
 }
 
 export class DecoderWindow {
-  /** The byte limit now: it starts at the constructor's and shrinks on a quota error. */
-  limit: number
+  private bytesLimit: number
   /** Each track's runs, by start. */
   private readonly runs: Record<'video' | 'audio', FedRun[]> = { video: [], audio: [] }
   /** Each track's origin: the start of the earliest run fed since the window was made or last reset, or null before one. Where a track began, a playhead just before it is not a hole. */
   private readonly origins: Record<'video' | 'audio', number | null> = { video: null, audio: null }
 
   constructor(limitBytes = WINDOW_BYTES) {
-    this.limit = limitBytes
+    this.bytesLimit = limitBytes
+  }
+
+  /** The byte limit now: it starts at the constructor's and only a quota error shrinks it. */
+  get limit(): number {
+    return this.bytesLimit
   }
 
   /** A fragment was appended. It replaces the runs of its track that it overlaps, as Media Source overwrites the frames it holds at the same times: they are dropped, or trimmed with their bytes prorated. */
@@ -163,8 +167,8 @@ export class DecoderWindow {
     const held = this.bytes()
     const from = held > 0 ? Math.min(this.limit, held) : this.limit
     const shrunk = Math.max(WINDOW_FLOOR_BYTES, Math.floor(from * QUOTA_SHRINK))
-    this.limit = Math.min(this.limit, shrunk)
-    return this.limit
+    this.bytesLimit = Math.min(this.bytesLimit, shrunk)
+    return this.bytesLimit
   }
 
   /** The bytes the window holds, across both tracks. */

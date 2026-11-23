@@ -8,7 +8,15 @@ import { afterEach, expect, test, vi } from 'vitest'
 import { Feeder } from '../engine/feeder.ts'
 import { MediaSourceSink } from '../page/index.ts'
 import { Seeks } from '../page/seeks.ts'
-import { SEEK_DEADLINE_MS, START_GOAL_SECONDS, STUCK_MS, WATCH_EVERY_MS } from '../limits.ts'
+import {
+  SEEK_DEADLINE_MS,
+  STALL_GOAL_SECONDS,
+  START_GOAL_SECONDS,
+  STUCK_MS,
+  WATCH_EVERY_MS,
+  WINDOW_AHEAD_SECONDS,
+  WINDOW_BYTES,
+} from '../limits.ts'
 import { begin, endPlays, frames, ofType, served, suite, until } from './play-harness.ts'
 import type { Play } from './play-harness.ts'
 import { clearLog, control, log } from './server.ts'
@@ -394,14 +402,31 @@ suite(NAME)('playStreamed: holding', () => {
     expect(first?.on).toBe(true)
     expect(['start', 'stall']).toContain(first?.reason)
     expect(play.video.paused).toBe(true)
+    const at = play.video.currentTime
     await until(play, 'the hold to end', 90_000, () =>
       ofType(play.events, 'hold').some((event) => !event.on),
     )
-    await until(play, 'the clock to move', 30_000, () => play.video.currentTime > 1)
-    expect(play.video.paused).toBe(false)
+    await until(
+      play,
+      'the clock to move on from the hold',
+      30_000,
+      () => play.video.currentTime > at + 0.5 && !play.video.paused,
+    )
     expect(frames(play.video)).toBeGreaterThan(0)
     await until(play, 'the numbers', 5_000, () => (play.stats.at(-1)?.holds ?? 0) >= 1)
     expect(play.stats.at(-1)?.holdMs).toBeGreaterThan(0)
+    // The first hold met its rule, whichever it was, so this runs once and cannot pass by not running.
+    const bitrate = (served(NAME)?.size ?? 0) / play.video.duration
+    expect(Number.isFinite(bitrate) && bitrate > 0, 'a bit rate to judge the goal by').toBe(true)
+    if (first?.reason === 'start') {
+      expect(first.targetS).toBeLessThanOrEqual(START_GOAL_SECONDS + 1e-6)
+    } else {
+      expect(first?.targetS).toBeGreaterThanOrEqual(STALL_GOAL_SECONDS - 1e-6)
+      expect(first?.targetS).toBeLessThanOrEqual(
+        Math.max(STALL_GOAL_SECONDS, 0.9 * Math.min(WINDOW_AHEAD_SECONDS, WINDOW_BYTES / bitrate)) +
+          1e-6,
+      )
+    }
     for (const event of ofType(play.events, 'hold')) {
       if (event.on && event.reason === 'start') {
         expect(event.targetS).toBeLessThanOrEqual(START_GOAL_SECONDS + 1e-6)

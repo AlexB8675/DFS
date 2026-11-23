@@ -104,6 +104,26 @@ describe('holdDecision', () => {
     expect(d.slow).toBe(true)
   })
 
+  it('reads a window cap that is NaN or negative as 0, and Infinity as no window cap', () => {
+    const base = {
+      reason: 'stall' as const,
+      rateBytesPerSecond: BITRATE / 2,
+      remainingSeconds: 60,
+      storeAheadCapSeconds: 100,
+    }
+    for (const windowAheadCapSeconds of [NaN, -5, -Infinity]) {
+      const d = holdDecision(input({ ...base, windowAheadCapSeconds }))
+      expect(d.goalSeconds).toBe(STALL_GOAL_SECONDS)
+      expect(d.slow).toBe(true)
+    }
+    const open = holdDecision(input({ ...base, windowAheadCapSeconds: Infinity }))
+    expect(open.goalSeconds).toBeCloseTo(60 * (1 - SLOW_RATE_SHARE * 0.5) + MARGIN)
+    const capped = holdDecision(
+      input({ ...base, storeAheadCapSeconds: 20, windowAheadCapSeconds: Infinity }),
+    )
+    expect(capped.goalSeconds).toBeCloseTo(18)
+  })
+
   it('waits 2 s at a start and 4 s at a stall for a 120 Mbit/s video on a 58 Mbit/s line', () => {
     const slow = {
       bitrateBytesPerSecond: 14_975_000,
