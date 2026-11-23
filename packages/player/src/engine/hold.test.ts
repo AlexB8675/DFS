@@ -19,6 +19,7 @@ function input(over: Partial<HoldInput>): HoldInput {
     bitrateBytesPerSecond: BITRATE,
     remainingSeconds: 600,
     storeAheadCapSeconds: 100,
+    windowAheadCapSeconds: 30,
     storeFull: false,
     ...over,
   }
@@ -52,27 +53,70 @@ describe('holdDecision', () => {
     expect(holdDecision(input({ heldAheadSeconds: START_GOAL_SECONDS })).hold).toBe(false)
   })
 
-  it('holds longer on a slow link and says so', () => {
-    const d = holdDecision(input({ rateBytesPerSecond: BITRATE * 0.75, remainingSeconds: 60 }))
-    expect(d.slow).toBe(true)
-    expect(d.hold).toBe(true)
-    expect(d.goalSeconds).toBeCloseTo(60 * (1 - SLOW_RATE_SHARE * 0.75) + MARGIN)
-    expect(d.goalSeconds).toBeGreaterThan(START_GOAL_SECONDS)
+  it('holds a slow start for the start goal only, whatever remains, and says slow', () => {
+    for (const remainingSeconds of [60, 3600]) {
+      const base = { rateBytesPerSecond: BITRATE * 0.5, remainingSeconds }
+      const d = holdDecision(input({ ...base, heldAheadSeconds: START_GOAL_SECONDS - 0.5 }))
+      expect(d).toEqual({ hold: true, goalSeconds: START_GOAL_SECONDS, slow: true })
+      const done = holdDecision(input({ ...base, heldAheadSeconds: START_GOAL_SECONDS }))
+      expect(done).toEqual({ hold: false, goalSeconds: START_GOAL_SECONDS, slow: true })
+    }
   })
 
-  it('scales the goal by what the rest of the video takes, capped by 0.9 of the store', () => {
+  it('holds a slow seek like a slow start', () => {
+    const base = { rateBytesPerSecond: BITRATE * 0.5, remainingSeconds: 3600 }
+    for (const heldAheadSeconds of [0, 1.9, 2]) {
+      expect(holdDecision(input({ ...base, reason: 'seek', heldAheadSeconds }))).toEqual(
+        holdDecision(input({ ...base, reason: 'start', heldAheadSeconds })),
+      )
+    }
+    expect(holdDecision(input({ ...base, reason: 'seek' })).goalSeconds).toBe(START_GOAL_SECONDS)
+  })
+
+  it('holds a slow stall for what the rest takes, capped by 0.9 of the store and of the window', () => {
     const half = {
+      reason: 'stall' as const,
       rateBytesPerSecond: BITRATE / 2,
       remainingSeconds: 60,
       storeAheadCapSeconds: 100,
+      windowAheadCapSeconds: 40,
     }
     expect(holdDecision(input(half)).goalSeconds).toBeCloseTo(
       60 * (1 - SLOW_RATE_SHARE * 0.5) + MARGIN,
     )
     expect(holdDecision(input({ ...half, storeAheadCapSeconds: 20 })).goalSeconds).toBeCloseTo(18)
-    expect(holdDecision(input({ ...half, reason: 'stall' })).goalSeconds).toBeCloseTo(
-      60 * (1 - SLOW_RATE_SHARE * 0.5) + MARGIN,
+    expect(holdDecision(input({ ...half, windowAheadCapSeconds: 20 })).goalSeconds).toBeCloseTo(18)
+    // The window's cap is the less of the two here, and over the floor.
+    const both = { ...half, storeAheadCapSeconds: 20, windowAheadCapSeconds: 10 }
+    expect(holdDecision(input(both)).goalSeconds).toBeCloseTo(9)
+  })
+
+  it('holds a slow stall for the floor when 0.9 of the window is under it', () => {
+    const d = holdDecision(
+      input({
+        reason: 'stall',
+        rateBytesPerSecond: BITRATE / 2,
+        remainingSeconds: 60,
+        windowAheadCapSeconds: 3,
+      }),
     )
+    expect(d.goalSeconds).toBe(STALL_GOAL_SECONDS)
+    expect(d.slow).toBe(true)
+  })
+
+  it('waits 2 s at a start and 4 s at a stall for a 120 Mbit/s video on a 58 Mbit/s line', () => {
+    const slow = {
+      bitrateBytesPerSecond: 14_975_000,
+      rateBytesPerSecond: 7_000_000,
+      remainingSeconds: 60,
+      windowAheadCapSeconds: 4.48,
+      storeAheadCapSeconds: 140,
+    }
+    const start = holdDecision(input({ ...slow, reason: 'start' }))
+    expect(start).toEqual({ hold: true, goalSeconds: START_GOAL_SECONDS, slow: true })
+    const stall = holdDecision(input({ ...slow, reason: 'stall' }))
+    expect(stall).toMatchObject({ hold: true, slow: true })
+    expect(stall.goalSeconds).toBeCloseTo(0.9 * 4.48, 6)
   })
 
   it('applies the floor when the need is under it', () => {
@@ -110,7 +154,11 @@ describe('holdDecision', () => {
       2.5,
     )
     const slow = holdDecision(input({ rateBytesPerSecond: 1, storeAheadCapSeconds: 1 }))
-    expect(slow.goalSeconds).toBeCloseTo(0.9)
+    expect(slow.goalSeconds).toBe(1)
+    const slowStall = holdDecision(
+      input({ reason: 'stall', rateBytesPerSecond: 1, storeAheadCapSeconds: 1 }),
+    )
+    expect(slowStall.goalSeconds).toBeCloseTo(0.9)
     expect(holdDecision(input({ storeAheadCapSeconds: 0 })).goalSeconds).toBe(0)
   })
 
@@ -144,6 +192,7 @@ describe('holdDecision', () => {
   it('never holds on a full store, and still says slow', () => {
     const d = holdDecision(
       input({
+        reason: 'stall',
         rateBytesPerSecond: BITRATE / 2,
         remainingSeconds: 60,
         heldAheadSeconds: 5,
@@ -178,7 +227,11 @@ describe('holdDecision', () => {
     const slow = holdDecision(
       input({ rateBytesPerSecond: BITRATE / 2, remainingSeconds: Infinity }),
     )
-    expect(slow.goalSeconds).toBeCloseTo(90)
+    expect(slow.goalSeconds).toBe(START_GOAL_SECONDS)
+    const slowStall = holdDecision(
+      input({ reason: 'stall', rateBytesPerSecond: BITRATE / 2, remainingSeconds: Infinity }),
+    )
+    expect(slowStall.goalSeconds).toBeCloseTo(30 * 0.9)
     const fast = holdDecision(
       input({ reason: 'stall', rateBytesPerSecond: BITRATE * 3, remainingSeconds: Infinity }),
     )

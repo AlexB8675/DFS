@@ -26,6 +26,8 @@ export interface HoldInput {
   remainingSeconds: number
   /** What the store can hold ahead of the playhead, in seconds of the video. The engine works it out. */
   storeAheadCapSeconds: number
+  /** What the decoder window can hold ahead of the playhead, in seconds of the video: its byte limit now over the bit rate, and no more than `WINDOW_AHEAD_SECONDS`. The engine works it out. */
+  windowAheadCapSeconds: number
   /** True when the downloader's state is `full`: the store can hold no more ahead, whatever the cap arithmetic says (§10.4). */
   storeFull: boolean
 }
@@ -58,15 +60,17 @@ export function slowWhile(state: SlowState, rate: number | null, bitrate: number
 }
 
 /**
- * A start or a seek on a link that keeps up plays at the first frames; on an
- * unknown link it holds for the start goal. A stall holds for the stall goal. On
- * a link slower than the video the goal is what the rest of the video will take
- * from it, as far as the store allows.
+ * A start or a seek on a link that keeps up plays at the first frames; on any
+ * other link, a slow one too, it holds for the start goal. A stall holds for the
+ * stall goal; after a stall on a link slower than the video the goal is what the
+ * rest of the video will take from it, as far as the store and the decoder window
+ * allow. This is the old engine's rule, the user's choice of 2026-11-23.
  */
 export function holdDecision(input: HoldInput): HoldDecision {
   const { reason, heldAheadSeconds, bitrateBytesPerSecond } = input
   const remaining = input.remainingSeconds
   const cap = Math.max(0, input.storeAheadCapSeconds)
+  const windowCap = Math.max(0, input.windowAheadCapSeconds)
   // A rate of 0 is the downloader gone quiet (a full store, a finished file), not a slow link; a
   // bit rate that can't be compared makes the rate unknown too.
   const rate = input.rateBytesPerSecond
@@ -83,15 +87,24 @@ export function holdDecision(input: HoldInput): HoldDecision {
   if (fast && reason !== 'stall') {
     // The first frames are enough; a full store has none to give, and the play goes on.
     return { hold: !input.storeFull && heldAheadSeconds <= 0, goalSeconds: 0, slow }
-  } else if (!slow) {
+  } else if (!slow || reason !== 'stall') {
+    // A start or a seek on any link but one that keeps up, a slow one too, waits for the start goal and no more.
     goalSeconds = Math.min(floor, remaining, cap)
     // Between the bit rate and its multiple the floor applies, with the cap's share.
-    if (known && !fast) goalSeconds = Math.min(remaining, clamp(0, floor, cap * CAP_SHARE))
+    if (known && !fast && !slow) goalSeconds = Math.min(remaining, clamp(0, floor, cap * CAP_SHARE))
   } else {
     const needed = remaining * (1 - (SLOW_RATE_SHARE * (rate ?? 0)) / bitrateBytesPerSecond)
     // The feeder takes whole reads of CHUNK_BYTES, so the read in progress is store-ahead it cannot use yet: one read's margin keeps the release off the exact break-even point.
     const margin = CHUNK_BYTES / bitrateBytesPerSecond
-    goalSeconds = Math.min(remaining, clamp(needed + margin, floor, cap * CAP_SHARE))
+    // The store's cap is strict; the decoder window's only lengthens the wait up to 0.9 of itself, and a window under the floor leaves the floor (a stall waits at least that, whatever the window).
+    goalSeconds = Math.min(
+      remaining,
+      clamp(
+        needed + margin,
+        floor,
+        Math.min(cap * CAP_SHARE, Math.max(floor, windowCap * CAP_SHARE)),
+      ),
+    )
   }
   goalSeconds = Math.max(0, goalSeconds)
   return { hold: !input.storeFull && heldAheadSeconds < goalSeconds, goalSeconds, slow }

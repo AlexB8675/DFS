@@ -1,7 +1,7 @@
 // The engine proved over links of different speeds (DESIGN.md §10.4; the iron-clad spec §4.9): a link faster than
 // the video's bit rate, one slower than it, drops of the connection in the middle of a play, and a network switch.
-// What each play must show: no stall after the picture moves (above), a start hold that says `slow` and then a
-// play with no stall (below), a recovery with the same picture and no error of the engine's (drops, switch).
+// What each play must show: no stall after the picture moves (above), a short start that says `slow`, stalls held
+// for a few seconds, and a play that reaches the end (below), a recovery with the same picture and no error of the engine's (drops, switch).
 //
 // The files are fixed choices, not the corpus's whole sample (`DFS_CORPUS_ALL` does not widen this file, as a full
 // real-time play of every file over every link would take many hours): named synthetic files, and files of the
@@ -12,7 +12,13 @@
 // silence, as in plays.browser.test.ts.
 
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { STUCK_MS } from '../limits.ts'
+import {
+  START_GOAL_SECONDS,
+  STALL_GOAL_SECONDS,
+  STUCK_MS,
+  WINDOW_AHEAD_SECONDS,
+  WINDOW_BYTES,
+} from '../limits.ts'
 import { activePlays, begin, endPlays, ofType, served, silentWaits, until } from './play-harness.ts'
 import type { Play } from './play-harness.ts'
 import {
@@ -235,7 +241,7 @@ describe('above the bit rate: no stall after the picture moves', () => {
   }
 })
 
-describe('below the bit rate: a start hold that says slow, then a play with no stall', () => {
+describe('below the bit rate: a short start that says slow, stalls held for a few seconds, and the play reaches the end', () => {
   const cases: Case[] = [
     {
       name: 'h264-aac-faststart.mp4',
@@ -258,6 +264,7 @@ describe('below the bit rate: a start hold that says slow, then a play with no s
         const link = linkOf(pick, BELOW)
         await control(link)
         const play = begin(pick.file.name, { autoplay: () => true })
+        const clock = watchClock(play)
         try {
           const { movingMs } = await startPicture(play, play.startedAt, ms)
           await playThrough(play, pick, ms, true)
@@ -293,7 +300,6 @@ describe('below the bit rate: a start hold that says slow, then a play with no s
             longWaits,
             stallHolds,
           })
-          expect(holdEvents[0], 'the first hold').toMatchObject({ on: true, reason: 'start' })
           expect(
             play.stats.some((numbers) => numbers.holding && numbers.slow),
             'a stats snapshot that holds and says slow',
@@ -302,11 +308,27 @@ describe('below the bit rate: a start hold that says slow, then a play with no s
           expect(Math.abs((last?.holdMs ?? 0) - heldMs), "the stats' holdMs").toBeLessThan(
             5 * Math.max(1, ended),
           )
-          expect(stallHolds, 'stall holds after the start hold let go').toEqual([])
-          expect(longWaits, `waits over ${WAIT_LIMIT_MS} ms after the picture moved`).toEqual([])
+          const stallGoal = Math.max(
+            STALL_GOAL_SECONDS,
+            0.9 * Math.min(WINDOW_AHEAD_SECONDS, WINDOW_BYTES / bitrateOf(pick)),
+          )
+          for (const event of holdEvents) {
+            if (!event.on) continue
+            if (event.reason === 'stall')
+              expect(event.targetS, 'a stall hold goal').toBeLessThanOrEqual(stallGoal + 1e-6)
+            else
+              expect(event.targetS, 'a start or seek hold goal').toBeLessThanOrEqual(
+                START_GOAL_SECONDS + 1e-6,
+              )
+          }
           expect(engineErrors(play)).toEqual([])
+          expect(clock.backSeconds(), 'the clock going back').toBeLessThanOrEqual(
+            frameSecondsOf(pick.facts),
+          )
         } catch (error) {
           await failure(play, name, error)
+        } finally {
+          clock.stop()
         }
       },
       TEST_LIMIT_MS,

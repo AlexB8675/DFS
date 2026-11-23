@@ -12,7 +12,7 @@ import type { Downloader } from '../downloader.ts'
 import type { Feeder } from '../engine/feeder.ts'
 import { KEEPS_UP, holdDecision } from '../engine/hold.ts'
 import type { HoldDecision, HoldReason } from '../engine/hold.ts'
-import { HOLD_CHECK_MS } from '../limits.ts'
+import { HOLD_CHECK_MS, WINDOW_AHEAD_SECONDS } from '../limits.ts'
 import type { RangeSet } from '../ranges.ts'
 
 /** What the play lets the hold read and say. */
@@ -24,6 +24,8 @@ export interface HoldWorld {
   feeder: () => Feeder | null
   /** True once the feed answered `'ended'`: every fragment is appended, and the hold is not consulted. */
   feedDone: () => boolean
+  /** The decoder window's byte limit now (it shrinks on quota errors). */
+  windowLimitBytes: () => number
   /** Whether the engine can be checked for a release now: it is not busy with a request, and the play is neither stopped nor failed. The hold's own timer asks it. */
   canCheck: () => boolean
   say: (event: TimelineEventInput) => void
@@ -119,6 +121,10 @@ export class Holding {
       bitrateBytesPerSecond: bitrate,
       remainingSeconds: duration - at,
       storeAheadCapSeconds: (store.capBytes - Math.min(behind, store.capBytes / 2)) / bitrate,
+      windowAheadCapSeconds: Math.min(
+        WINDOW_AHEAD_SECONDS,
+        this.#world.windowLimitBytes() / bitrate,
+      ),
       storeFull: state === 'full',
     })
     this.#aheadSeconds = ahead / bitrate

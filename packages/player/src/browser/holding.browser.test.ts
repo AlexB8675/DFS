@@ -63,6 +63,7 @@ function setup(
     downloader: () => downloader as never,
     feeder: () => feeder as never,
     feedDone: () => false,
+    windowLimitBytes: () => 64 * 1024 * 1024,
     canCheck: () => engine.canCheck,
     say: (event) => events.push(event),
     stats,
@@ -202,16 +203,21 @@ describe('Holding', () => {
     expect(off?.targetS).toBe(on?.targetS)
   })
 
-  // B2: the downloader that waits (its reads end and open again) still has a rate, and the hold goes by it as for `reading` (R47).
-  test('a hold decided while the downloader waits on a slow link keeps the slow goal, not the 2 s goal', () => {
+  // B2: the downloader that waits (its reads end and open again) still has a rate, and the hold goes by it as for `reading` (R47). A slow start waits the 2 s goal and no more (the user's decision of 2026-11-23); a slow stall waits for the rest.
+  test('a hold decided while the downloader waits on a slow link is the 2 s goal at a start, and the long goal at a stall', () => {
     const play = setup()
     play.link.state = 'waiting'
-    // 2.5 s of the video is stored: over the 2 s goal of an unknown rate, under what a link of a tenth of the bit rate needs.
+    // 2.5 s of the video is stored: over the 2 s start goal, under what a link of a tenth of the bit rate needs after a stall.
     play.held.add({ start: 0, end: 2_500_000 })
     play.holding.begin('start')
+    expect(play.holding.holding).toBe(false)
+    play.video.paused = false
+    play.video.currentTime = 1
+    play.held.add({ start: 0, end: 3_500_000 })
+    play.holding.stalled()
     expect(play.holding.holding).toBe(true)
     const on = holds(play.events)[0]
-    expect(on).toMatchObject({ on: true, reason: 'start' })
+    expect(on).toMatchObject({ on: true, reason: 'stall' })
     expect(on?.targetS).toBeGreaterThan(2.5)
   })
 

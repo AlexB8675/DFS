@@ -8,7 +8,7 @@ import { afterEach, expect, test, vi } from 'vitest'
 import { Feeder } from '../engine/feeder.ts'
 import { MediaSourceSink } from '../page/index.ts'
 import { Seeks } from '../page/seeks.ts'
-import { SEEK_DEADLINE_MS, STUCK_MS, WATCH_EVERY_MS } from '../limits.ts'
+import { SEEK_DEADLINE_MS, START_GOAL_SECONDS, STUCK_MS, WATCH_EVERY_MS } from '../limits.ts'
 import { begin, endPlays, frames, ofType, served, suite, until } from './play-harness.ts'
 import type { Play } from './play-harness.ts'
 import { clearLog, control, log } from './server.ts'
@@ -383,14 +383,16 @@ suite(NAME)('playStreamed: a seek just past the last frame', () => {
 })
 
 suite(NAME)('playStreamed: holding', () => {
-  test('with autoplay the play is held on a slow link, and then plays by itself', async () => {
+  test('with autoplay on a slow link the play is held, and then plays by itself', async () => {
     await control({ bandwidthBytesPerSecond: 200_000 })
     const play = begin(NAME, { autoplay: () => true })
     await until(play, 'the hold to begin', 40_000, () =>
       ofType(play.events, 'hold').some((event) => event.on),
     )
     const first = ofType(play.events, 'hold')[0]
-    expect(first).toMatchObject({ on: true, reason: 'start' })
+    // A start finds START_GOAL_SECONDS already held when the first whole read covers it at this file's bit rate, so the first hold may be a stall.
+    expect(first?.on).toBe(true)
+    expect(['start', 'stall']).toContain(first?.reason)
     expect(play.video.paused).toBe(true)
     await until(play, 'the hold to end', 90_000, () =>
       ofType(play.events, 'hold').some((event) => !event.on),
@@ -400,6 +402,11 @@ suite(NAME)('playStreamed: holding', () => {
     expect(frames(play.video)).toBeGreaterThan(0)
     await until(play, 'the numbers', 5_000, () => (play.stats.at(-1)?.holds ?? 0) >= 1)
     expect(play.stats.at(-1)?.holdMs).toBeGreaterThan(0)
+    for (const event of ofType(play.events, 'hold')) {
+      if (event.on && event.reason === 'start') {
+        expect(event.targetS).toBeLessThanOrEqual(START_GOAL_SECONDS + 1e-6)
+      }
+    }
     expect(ofType(play.events, 'error')).toEqual([])
   }, 150_000)
 

@@ -55,7 +55,8 @@ function part(run: FedRun, start: number, end: number): FedRun | null {
 }
 
 export class DecoderWindow {
-  private limit: number
+  /** The byte limit now: it starts at the constructor's and shrinks on a quota error. */
+  limit: number
   /** Each track's runs, by start. */
   private readonly runs: Record<'video' | 'audio', FedRun[]> = { video: [], audio: [] }
   /** Each track's origin: the start of the earliest run fed since the window was made or last reset, or null before one. Where a track began, a playhead just before it is not a hole. */
