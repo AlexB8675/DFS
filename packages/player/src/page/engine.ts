@@ -640,8 +640,9 @@ class Play {
     if (Math.abs(start - target) > 1e-6) this.#seeks.retarget(start)
     // The clock only goes forward here (a target past the end goes to the last frames): a playing element has played on
     // from the target while the feed went on, and that is its own progress, not a position to undo. The browser has
-    // clamped a seek before `#onSeeking` reads it, and a reopen leaves the clock at 0, so the clock is at the target or
-    // behind the start, or has played on from it.
+    // clamped a seek before `#onSeeking` reads it, and a reopen puts the clock at the target through the sink's seek (or
+    // leaves it at 0 while that seek waits for data), so the clock is at the target or behind the start, or has played on
+    // from it.
     const moved = commonStartMoves(this.#video.currentTime, start, past)
     if (moved) this.#moveTo(start)
     // The target is the playhead only for a move that the sink deferred; otherwise `#at()` must read the clock.
