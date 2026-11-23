@@ -131,6 +131,75 @@ suite(NAME)('playStreamed: seeks', () => {
     expect(pauses).toEqual([])
   })
 
+  // The rule's seek case inside the window: a target near the window's forward edge, with less than the goal stored ahead of it, holds at the seek (no burst, then freeze).
+  test('a playing seek inside the window on a link below the bit rate holds at the seek: the clock does not move before its hold lets go', async () => {
+    const pick = await pickOf(files().find((file) => file.name.endsWith(NAME)))
+    if (typeof pick === 'string') throw new Error(pick)
+    const bitrate = pick.file.size / pick.duration
+    await control({ bandwidthBytesPerSecond: Math.ceil(0.6 * bitrate) })
+    // The default window follows the store's edge (a small one would stop short of it, and the store would lead the target by a chunk).
+    const play = begin(NAME, { autoplay: () => true })
+    // The seek's target is just inside the window's forward edge, and the store leads that edge by less than the goal: the window follows the store, so wait for a moment when it has caught up.
+    const storedSeconds = (): number => (play.stats.at(-1)?.storedBytes ?? 0) / bitrate
+    const edge = (): number => bufferedEnd(play.video) - 0.4
+    await until(
+      play,
+      "the window at the store's edge",
+      40_000,
+      () =>
+        play.video.currentTime > 1 &&
+        edge() > play.video.currentTime + 0.3 &&
+        storedSeconds() - edge() < 1,
+    )
+    const target = edge()
+    // The precondition: the store holds less than the goal ahead of the target, and the download is not done.
+    expect(storedSeconds() - target).toBeLessThan(START_GOAL_SECONDS)
+    expect(play.stats.at(-1)?.storedBytes ?? 0).toBeLessThan(pick.file.size)
+    const mark = play.events.length
+    let burst = 0
+    const timer = setInterval(() => {
+      const ended = ofType(play.events.slice(mark), 'hold').some((event) => !event.on)
+      if (!ended) burst = Math.max(burst, play.video.currentTime - target)
+    }, 10)
+    try {
+      play.video.currentTime = target
+      await until(play, "the seek's hold letting go", 60_000, () =>
+        ofType(play.events.slice(mark), 'hold').some((event) => !event.on),
+      )
+    } finally {
+      clearInterval(timer)
+    }
+    expect(ofType(play.events.slice(mark), 'seek')[0]).toMatchObject({ inWindow: true })
+    expect(ofType(play.events.slice(mark), 'hold')[0]).toMatchObject({ on: true, reason: 'seek' })
+    expect(burst).toBeLessThan(0.05)
+  })
+
+  test('a playing seek inside the window on a link that keeps up makes no seek hold and no pause', async () => {
+    const pick = await pickOf(files().find((file) => file.name.endsWith(NAME)))
+    if (typeof pick === 'string') throw new Error(pick)
+    await control({ bandwidthBytesPerSecond: Math.ceil((1.4 * pick.file.size) / pick.duration) })
+    const play = begin(NAME, { windowBytes: 2 * 1024 * 1024, autoplay: () => true })
+    await until(
+      play,
+      'the clock past 1 s, with data ahead',
+      40_000,
+      () => play.video.currentTime > 1 && bufferedEnd(play.video) > play.video.currentTime + 1,
+    )
+    expect(play.stats.at(-1)?.storedBytes ?? 0).toBeLessThan(pick.file.size)
+    const pauses: number[] = []
+    play.video.addEventListener('pause', () => pauses.push(performance.now()))
+    const mark = play.events.length
+    const target = bufferedEnd(play.video) - 0.6
+    play.video.currentTime = target
+    await until(play, "the seek's picture", 30_000, () => shown(play).length > 0)
+    await pause(500)
+    expect(ofType(play.events.slice(mark), 'seek')[0]).toMatchObject({ inWindow: true })
+    expect(
+      ofType(play.events.slice(mark), 'hold').filter((event) => event.reason === 'seek'),
+    ).toEqual([])
+    expect(pauses).toEqual([])
+  })
+
   test('a seek outside what the store holds fetches from the place, keeping what is stored', async () => {
     await control({ bandwidthBytesPerSecond: 300_000 })
     const play = begin(NAME)

@@ -736,7 +736,8 @@ class Play {
       this.#stats.seeks += 1
       this.#post({ kind: 'seek', to: at, told: true, seek: true, playing })
     }
-    if (!this.#busy()) this.#holding.check()
+    // Inside the window the feeder's positions are valid, so the seek's rule measures at the clock's final place: a target with less than the goal stored ahead holds at the seek on a link that does not keep up, else it plays on. Outside the window the engine is busy (the request is posted), so the serve's end asks the rule.
+    if (inWindow) this.#holding.begin('seek', playing)
     this.#wake()
   }
 
