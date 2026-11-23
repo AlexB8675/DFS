@@ -1,8 +1,9 @@
 import { playStreamed, type EngineStats } from '@dfs/player/page'
 import type { TimelineEventInput } from '@dfs/shared'
-import { useEffect, useEffectEvent, useRef, useState } from 'react'
+import { useCallback, useEffect, useEffectEvent, useRef, useState } from 'react'
 import { makeStoreWorker } from '../play-store'
 import { afterPrevious } from './after-previous'
+import { LastStats } from './last-stats'
 import { failureOf, type PlayFailure } from './play-failure'
 
 /** The stats of one play, with what the play was started with. */
@@ -21,7 +22,10 @@ interface PlayStats {
  * instead; a failure after the first frame is in the stats (`phase: 'failed'`). A new `video`,
  * `url`, `playId` or `startAt` ends the play and starts another; `autoplay`, `onFailed` and
  * `onEvent` do not. `onEvent` is given what the engine does, for the play's timeline (§16), until
- * the play is over. `stats` is the play's latest numbers, or null before the first.
+ * the play is over. `stats` is the play's latest numbers, or null before the first. `latestStats`
+ * gives the same numbers at once, as the engine sent them, and keeps them when the play's own
+ * failure ends it, until another play starts (§10.4): a handler of that failure, a toggle and the
+ * report read it, as `stats` follows a render behind and is null once the play is over.
  */
 export function useBufferedPlay(input: {
   video: HTMLVideoElement | null
@@ -32,11 +36,13 @@ export function useBufferedPlay(input: {
   autoplay: () => boolean
   onFailed: (failure: PlayFailure) => void
   onEvent?: (event: TimelineEventInput) => void
-}): { stats: EngineStats | null } {
+}): { stats: EngineStats | null; latestStats: () => EngineStats | null } {
   const { video, url, playId, enabled, startAt } = input
   const [latest, setLatest] = useState<PlayStats | null>(null)
   // The previous play's end, which a new one on the element waits for (it never rejects).
   const previous = useRef<Promise<void>>(Promise.resolve())
+  const last = useRef(new LastStats<EngineStats>())
+  const latestStats = useCallback(() => last.current.get(), [])
 
   // The latest `autoplay`, `onFailed` and `onEvent`, which the play reads when it needs them.
   const wantsPlay = useEffectEvent(() => input.autoplay())
@@ -51,6 +57,7 @@ export function useBufferedPlay(input: {
     if (!enabled || !video || !playId) return
     const controller = new AbortController()
     const { signal } = controller
+    const setLast = last.current.start()
 
     // A play that is closing would clear the source of the one that follows it on the element,
     // so the new play starts when the old one has settled (§10.4).
@@ -69,7 +76,9 @@ export function useBufferedPlay(input: {
           if (!signal.aborted) record(event)
         },
         onStats: (stats) => {
-          if (!signal.aborted) setLatest({ video, url, startAt, stats })
+          if (signal.aborted) return
+          setLast(stats)
+          setLatest({ video, url, startAt, stats })
         },
       }).catch((error: unknown) => {
         // It rejects only before the first frame, and a viewer who leaves is no failure.
@@ -96,5 +105,5 @@ export function useBufferedPlay(input: {
     latest.startAt === startAt
       ? latest.stats
       : null
-  return { stats: current }
+  return { stats: current, latestStats }
 }

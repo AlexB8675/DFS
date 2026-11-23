@@ -42,6 +42,7 @@ import type { FilePlace } from '@/lib/file-place'
 import { cn } from '@/lib/utils'
 import { contentUrl, mediaQuery, playbackQuery } from './api'
 import { bufferedPlayAvailable, mayPlayBuffered, pagePlay, type PagePlay } from './buffered/choice'
+import { holdsPlay } from './buffered/last-stats'
 import { useBufferedPlay } from './buffered/use-buffered-play'
 import { PlayIntent } from './play-intent'
 import { reportLab } from './report-lab'
@@ -265,7 +266,7 @@ export default function VideoView({
     else intent.current.pause()
   }, [sourceKey])
   const wantsPlay = useCallback(() => activeNow.current && intent.current.wanted, [])
-  const { stats: bufferedStats } = useBufferedPlay({
+  const { stats: bufferedStats, latestStats } = useBufferedPlay({
     video,
     url: source ? contentUrl(place, source.versionId, 0, timeline?.playId) : '',
     playId: timeline?.playId ?? null,
@@ -339,23 +340,25 @@ export default function VideoView({
   const shown: Problem | null =
     problem ?? elsewhereProblem ?? (pictureFails ? { kind: 'codec', codec: pictureFails } : null)
   const stopped = shown !== null
-  // A wanted play that the engine holds shows as playing, though the element is paused.
-  const heldPlay = bufferedStats?.holding === true && wanted
+  // A wanted play that the engine holds, or that is still opening, shows as playing, though the
+  // element is paused.
+  const heldPlay = holdsPlay(bufferedStats, buffered && !stopped) && wanted
   const shownPaused = state.paused && !heldPlay
   const visible = awake || state.paused || menuOpen
 
   // How it played, for the play's report (§10.4): read when the report goes, so kept in a ref.
-  const played = useRef({ player: how?.play ?? null, stats: bufferedStats })
+  const played = useRef({ player: how?.play ?? null })
   useEffect(() => {
-    played.current = { player: how?.play ?? null, stats: bufferedStats }
+    played.current = { player: how?.play ?? null }
   })
   const howItPlayed = useCallback(() => {
-    const { player, stats } = played.current
+    const { player } = played.current
     if (player === 'native') return '{"player":"native"}'
     // Elsewhere nothing plays, and no element follows it: nothing to say.
     if (player !== 'buffered') return undefined
-    return reportLab(stats)
-  }, [])
+    // The engine's last numbers, which a failed play keeps.
+    return reportLab(latestStats())
+  }, [latestStats])
 
   // The play's timeline (§16). What happened before it existed is recorded when it does: each of
   // these once for each timeline (a refetch of a query records nothing again, a new timeline
@@ -590,7 +593,11 @@ export default function VideoView({
     element.currentTime = Math.min(Math.max(0, seconds), end)
   }, [])
 
-  const holdingNow = useCallback(() => played.current.stats?.holding === true, [])
+  // Held: the engine holds, or the play is opening (the engine's last numbers, not a render's).
+  const holdingNow = useCallback(
+    () => holdsPlay(latestStats(), buffered && !stopped),
+    [latestStats, buffered, stopped],
+  )
 
   /** The viewer plays: not into a hold, which plays when it ends, as the play is wanted. */
   const playByViewer = useCallback(() => {
@@ -736,6 +743,17 @@ export default function VideoView({
     [run, stopped, pauseByViewer],
   )
 
+  // What the system's controls show: playing while the element plays or a wanted play is held or
+  // opening.
+  useEffect(() => {
+    const session = typeof navigator === 'undefined' ? undefined : navigator.mediaSession
+    if (!session || !video) return
+    session.playbackState = shownPaused ? 'paused' : 'playing'
+    return () => {
+      session.playbackState = 'none'
+    }
+  }, [video, shownPaused])
+
   // Media keys and the system's controls (the lock screen, notifications).
   useEffect(() => {
     const session = typeof navigator === 'undefined' ? undefined : navigator.mediaSession
@@ -779,8 +797,14 @@ export default function VideoView({
     const error = element?.error ?? null
     const playing = source
     if (!playing) return
-    const startAt = element?.currentTime ?? playing.startAt
-    const stats = played.current.stats
+    // The engine's last numbers: what a render shows is a commit behind, or none once the play
+    // is over.
+    const stats = buffered ? latestStats() : null
+    // A play that read nothing yet has no place of its own on the element: its start is the place.
+    const startAt =
+      buffered && stats?.begun !== true
+        ? playing.startAt
+        : (element?.currentTime ?? playing.startAt)
     const fresh = await queryClient
       .query({ ...playbackQuery(place), staleTime: 0 })
       .catch((reason: unknown) => (reason instanceof ApiError ? reason : null))

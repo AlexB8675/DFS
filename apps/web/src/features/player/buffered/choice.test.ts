@@ -302,6 +302,17 @@ describe('deciding how a video plays', () => {
     )
   })
 
+  it('does not take a codec named like an Object key for one with other names', () => {
+    const supports = (mime: string) => mime.startsWith('video/')
+    const info = mp4Info({
+      video: 'avc1.64001f',
+      audio: [{ codec: 'constructor', codecString: 'mp4a.40.2' }],
+    })
+    expect(pagePlay({ name: 'a.mp4', info, device: 'windows', canBuffer: true, supports })).toEqual(
+      { play: 'elsewhere', reason: 'sound', codec: 'constructor' },
+    )
+  })
+
   it('offers another player for an audio file, even one whose cover is a picture stream', () => {
     expect(pagePlay(input({ ...PROOF, kind: 'audio' }, HEVC_MIME, AAC_MIME))).toEqual({
       play: 'elsewhere',

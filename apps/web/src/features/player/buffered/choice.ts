@@ -77,9 +77,9 @@ function soundSupported(
   codecString: string,
   supports: (mime: string) => boolean,
 ): boolean {
-  return [codecString, ...(SOUND_ALIASES[codec] ?? [])].some((name) =>
-    supports(`audio/mp4; codecs="${name}"`),
-  )
+  // Own keys only: a codec named like an Object.prototype key has no other names.
+  const aliases = Object.hasOwn(SOUND_ALIASES, codec) ? (SOUND_ALIASES[codec] ?? []) : []
+  return [codecString, ...aliases].some((name) => supports(`audio/mp4; codecs="${name}"`))
 }
 
 /** Whether this browser has what buffered play needs (§10.4): Media Source, `AbortSignal.any` and WebCrypto, which the store encrypts with. */

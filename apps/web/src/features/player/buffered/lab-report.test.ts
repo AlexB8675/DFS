@@ -71,7 +71,7 @@ function input(overrides: Partial<LabReportInput> = {}): LabReportInput {
 }
 
 describe('OPENING_STATS', () => {
-  it('has the engine�s fields, as of a play that has not begun', () => {
+  it('has the engine’s fields, as of a play that has not begun', () => {
     expect(OPENING_STATS).toMatchObject({
       phase: 'opening',
       backend: 'memory',
