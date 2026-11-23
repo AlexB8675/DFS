@@ -141,9 +141,19 @@ suite(NAME)('playStreamed: seeks', () => {
     // The default window follows the store's edge (a small one would stop short of it, and the store would lead the target by a chunk).
     const play = begin(NAME, { autoplay: () => true })
     // The seek's target is just inside the window's forward edge, and the store leads the target by less than the goal: the window follows the store, so wait for a moment when it has caught up.
-    // What the rule reads is the store's bytes from the target's offset on. This file is read in order from its start and nothing is evicted, so the bytes the store has taken (`bytesReceived`, the frontier block included, unlike `storedBytes`) less the tail read at the start (`TAIL_BYTES`, held apart) over the bit rate is the store's edge in seconds, and the download is not done while that is short of the file.
+    // What the rule reads is the store's bytes from the target's offset on. This file is read in order from its start and nothing is evicted, so the bytes the store has taken (`bytesReceived`, the frontier block included, unlike `storedBytes`) less the bytes of the tail read at the start (held apart; that read is aborted once the head parses, so it receives a variable part of `TAIL_BYTES`: counted from the requests' own events) over the bit rate is the store's edge in seconds.
+    const tailReceived = (): number => {
+      const tails = new Set(
+        ofType(play.events, 'request')
+          .filter((event) => event.from >= pick.file.size - TAIL_BYTES)
+          .map((event) => event.id),
+      )
+      return ofType(play.events, 'requestEnd')
+        .filter((event) => tails.has(event.id))
+        .reduce((sum, event) => sum + event.bytes, 0)
+    }
     const storedBytes = (): number =>
-      Math.max(0, (play.stats.at(-1)?.bytesReceived ?? 0) - TAIL_BYTES)
+      Math.max(0, (play.stats.at(-1)?.bytesReceived ?? 0) - tailReceived())
     const storedSeconds = (): number => storedBytes() / bitrate
     // The tail the start read is held too: a target near it would find the store contiguous to the end of the file, so the target stays a second short of where the tail begins.
     const tailStartSeconds = (pick.file.size - TAIL_BYTES) / bitrate

@@ -566,11 +566,29 @@ describe('Holding', () => {
       expect(holds(play.events)[0]).toMatchObject({ on: true, reason: 'seek', aheadS: 1 })
     })
 
-    test('the store ahead wins when it is the larger, and a stall with the element dry is the store alone', () => {
+    test("the store ahead wins when it is larger than the element's smaller non-zero buffer", () => {
       const play = setup({ at: 3, offset: 3_000_000 })
       play.video.paused = false
       play.held.add({ start: 3_000_000, end: 4_000_000 })
-      play.video.currentTime = 3
+      play.buffer.push([0, 3.5])
+      play.holding.begin('seek', true)
+      expect(holds(play.events)[0]).toMatchObject({ on: true, reason: 'seek', aheadS: 1 })
+    })
+
+    test('a stall with the element dry is measured on the store alone', () => {
+      const play = setup({ at: 3, offset: 3_000_000 })
+      play.video.paused = false
+      play.held.add({ start: 3_000_000, end: 4_000_000 })
+      play.holding.stalled()
+      expect(holds(play.events)[0]).toMatchObject({ on: true, reason: 'stall', aheadS: 1 })
+    })
+
+    // A slow stall's goal is a byte budget from the file's average bit rate: decoded seconds of a thin stretch must not release it early.
+    test('a stall with the element buffered well past the goal but the store short still holds', () => {
+      const play = setup({ at: 3, offset: 3_000_000 })
+      play.video.paused = false
+      play.held.add({ start: 3_000_000, end: 4_000_000 })
+      play.buffer.push([0, 20])
       play.holding.stalled()
       expect(holds(play.events)[0]).toMatchObject({ on: true, reason: 'stall', aheadS: 1 })
     })

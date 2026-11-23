@@ -1,6 +1,7 @@
 // The hold for the network (DESIGN.md §10.4; the iron-clad spec §4.8): when the play may start, or start again
 // after a seek or a stall, and when it waits. The rule is `holdDecision`, which measures what is held ahead of the
-// playhead: the larger of what the STORE holds and what the element has buffered there. The window is never what
+// playhead: for a start and a seek the larger of what the STORE holds and what the element has buffered there (a stall
+// is measured on the store alone: its goal is a byte budget from the file's average bit rate). The window is never what
 // a hold waits to fill (the goal is measured, not the window's reach), and taking the larger can only shorten a
 // hold, so a window shrunk by quota errors cannot hold a play for ever, and a seek the decoder already covers is
 // not held for want of stored bytes (blocks evicted behind the position, a fresh memory store).
@@ -118,8 +119,10 @@ export class Holding {
     const ahead = offset === null ? 0 : held.heldFrom(offset)
     if (offset !== null && ahead >= downloader.fileSize - offset) return null
     const behind = offset === null ? 0 : heldBefore(held, offset)
-    // The store's seconds ahead, or the element's from the same time when that is more: a seek's pre-hold measures at its target, where the emptied sink holds nothing.
-    const heldAheadSeconds = Math.max(ahead / bitrate, aheadOf(video.buffered, at))
+    // The store's seconds ahead, or the element's from the same time when that is more: a seek's pre-hold measures at its target, where the emptied sink holds nothing. Not for a stall: its goal is a byte budget from the file's average bit rate, so it stays measured on the store (decoded seconds of a thin stretch would release it early).
+    const storeSeconds = ahead / bitrate
+    const heldAheadSeconds =
+      reason === 'stall' ? storeSeconds : Math.max(storeSeconds, aheadOf(video.buffered, at))
     const decision = holdDecision({
       reason,
       heldAheadSeconds,
