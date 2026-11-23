@@ -8,8 +8,8 @@
 // which one chunk of 1 MiB covers for any file below about 1 MiB/s, and then the clock has no time to play on before
 // the common start. A dense file of the user's sample, with a high bit rate, needs many chunks for that second, so the
 // first fragments are appended and the element plays while the feed goes on. It is picked by its properties, read in
-// The rule itself, in every case, is unit-tested in src/engine/start-move.test.ts; this test shows it in a real element.
 // place through the play server, and no name of it is in this file; a sample with no such file skips the test.
+// The rule itself, in every case, is unit-tested in src/engine/start-move.test.ts; this test shows it in a real element.
 
 import { afterEach, expect, test, vi } from 'vitest'
 import { begin, endPlays, ofType, until } from './play-harness.ts'
@@ -88,19 +88,31 @@ test('a playing seek outside the window on a slow link never puts the clock back
     bandwidthBytesPerSecond: Math.ceil((pick.file.size / pick.duration) * LINK_FACTOR),
     latencyMs: LINK_LATENCY_MS,
   })
-  const play = begin(pick.file.name, { autoplay: () => true })
+  // The engine asks `autoplay()` for the seek's hold (`Holding.begin('seek')`) strictly after `#applyCommonStart`, and not before in a serve: while one runs the engine is busy and the hold's check is not made.
+  let autoplayCalls = 0
+  const play = begin(pick.file.name, {
+    autoplay: () => {
+      autoplayCalls += 1
+      return true
+    },
+  })
   const mine = { viewer: false }
   const writes = recordWrites(play.video, mine)
   await until(play, 'the clock past 1 s', 120_000, () => play.video.currentTime > 1)
   const target = play.video.currentTime + SEEK_AHEAD_SECONDS
   const mark = writes.length
   const seeksBefore = ofType(play.events, 'seek').length
+  // The calls of `autoplay()` once the engine has taken the seek up (its `seek` event): the first one after is the end of the serve.
+  let callsAtSeek: number | null = null
   mine.viewer = true
   play.video.currentTime = target
   mine.viewer = false
   let highest = target
   let back = 0
   const timer = setInterval(() => {
+    if (callsAtSeek === null && ofType(play.events, 'seek').length > seeksBefore) {
+      callsAtSeek = autoplayCalls
+    }
     const at = play.video.currentTime
     if (at < target - 1e-3) return
     highest = Math.max(highest, at)
@@ -113,12 +125,14 @@ test('a playing seek outside the window on a slow link never puts the clock back
       60_000,
       () => play.video.currentTime >= target + PLAYED_PAST_SECONDS,
     )
-    // The serve's common start has run once the seek has shown its picture (the event with its time): wait for that, and fail without it.
-    await until(play, "the seek's picture", 60_000, () =>
-      ofType(play.events, 'seek')
-        .slice(seeksBefore)
-        .some((event) => event.ms !== null),
+    // The serve's common start has run once the seek's hold has begun (`autoplay()` asked after the engine took the seek up); fail without it.
+    await until(
+      play,
+      "the serve's end (the seek's hold)",
+      60_000,
+      () => callsAtSeek !== null && autoplayCalls > callsAtSeek,
     )
+    await new Promise((resolve) => setTimeout(resolve, 500))
   } finally {
     clearInterval(timer)
   }
