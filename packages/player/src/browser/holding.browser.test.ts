@@ -286,6 +286,65 @@ describe('Holding', () => {
     expect(play.holding.holding).toBe(false)
   })
 
+  // The viewer's "no" (autoplay() false) is read by the timer even while the engine is busy; the rule's own release is not.
+  test("a slow-link seek hold ends at the timer's check when autoplay() turns to no while the engine is busy", async () => {
+    const play = setup({ at: 4 })
+    play.video.paused = false
+    play.holding.seekStarted(true, 4, 4_000_000)
+    expect(play.holding.holding).toBe(true)
+    play.engine.canCheck = false
+    play.want.autoplay = false
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(play.holding.holding).toBe(false)
+    expect(play.stats.holding).toBe(false)
+    expect(play.calls).toEqual(['pause'])
+    expect(play.stats.holds).toBe(1)
+    expect(holds(play.events).map((event) => event.on)).toEqual([true, false])
+    // The serve's end finds the hold left and the play not wanted: nothing more happens.
+    play.holding.begin('seek', true)
+    expect(play.calls).toEqual(['pause'])
+    expect(play.stats.holds).toBe(1)
+    expect(holds(play.events)).toHaveLength(2)
+  })
+
+  test("a stall hold ends at the timer's check when autoplay() turns to no while the engine is busy", async () => {
+    const play = setup()
+    play.video.paused = false
+    play.video.currentTime = 0.5
+    play.holding.stalled()
+    expect(play.holding.holding).toBe(true)
+    play.engine.canCheck = false
+    play.want.autoplay = false
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(play.holding.holding).toBe(false)
+    expect(play.calls).toEqual(['pause'])
+    expect(play.stats.holds).toBe(1)
+    expect(holds(play.events).map((event) => event.on)).toEqual([true, false])
+  })
+
+  test('a busy engine with autoplay() still yes leaves a seek hold on', async () => {
+    const play = setup({ at: 4 })
+    play.video.paused = false
+    play.holding.seekStarted(true, 4, 4_000_000)
+    play.engine.canCheck = false
+    play.link.rate = 5_000_000
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(play.holding.holding).toBe(true)
+    expect(play.calls).toEqual(['pause'])
+  })
+
+  test("a seek hold whose autoplay() turns to no ends at the serve's end, before any timer tick, with no play", () => {
+    const play = setup({ at: 4 })
+    play.video.paused = false
+    play.holding.seekStarted(true, 4, 4_000_000)
+    play.want.autoplay = false
+    play.holding.begin('seek', true)
+    expect(play.holding.holding).toBe(false)
+    expect(play.calls).toEqual(['pause'])
+    expect(play.stats.holds).toBe(1)
+    expect(holds(play.events).map((event) => event.on)).toEqual([true, false])
+  })
+
   // I1: a wanted seek outside the window holds at the seek on a slow link, before anything plays. The seek's target is 4 s, its feed starts at the offset 4 MB (1 MB a second).
   describe('seekStarted', () => {
     const TO = 4
@@ -431,7 +490,7 @@ describe('Holding', () => {
       expect(holds(play.events).map((event) => event.on)).toEqual([true, false])
     })
 
-    test("the viewer's play ends the pre-hold, and a viewer's pause is caught by the check", () => {
+    test("the viewer's play ends the pre-hold, and a viewer's pause is caught by a check made after the serve", () => {
       const played = setup({ at: TO })
       played.video.paused = false
       played.holding.seekStarted(true, TO, AT)

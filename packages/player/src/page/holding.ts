@@ -234,7 +234,8 @@ export class Holding {
     const world = this.#world
     this.#holding = true
     this.#timer ??= setInterval(() => {
-      if (this.#world.canCheck()) this.check()
+      // A busy engine waits for the rule's release, but the viewer's "no" ends the hold at once.
+      if (this.#world.canCheck() || this.#world.autoplay?.() === false) this.check()
     }, HOLD_CHECK_MS)
     this.#reason = reason
     this.#since = world.now()
