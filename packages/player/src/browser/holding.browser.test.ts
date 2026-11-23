@@ -19,6 +19,8 @@ interface Setup {
   want: { autoplay: boolean }
   /** What the engine answers to `canCheck`. */
   engine: { canCheck: boolean }
+  /** What the hold reads as the time. */
+  clock: { now: number }
   stats: { holding: boolean; holds: number; holdMs: number }
 }
 
@@ -33,6 +35,7 @@ function setup(
   const link = { state: 'reading', rate: 100_000 as number | null }
   const want = { autoplay: options.autoplay ?? true }
   const engine = { canCheck: true }
+  const clock = { now: 0 }
   const stats = { holding: false, holds: 0, holdMs: 0 }
   const element = Object.assign(video, {
     buffered: { length: 0, start: () => 0, end: () => 0 },
@@ -64,9 +67,9 @@ function setup(
     say: (event) => events.push(event),
     stats,
     changed: () => undefined,
-    now: () => 0,
+    now: () => clock.now,
   })
-  return { holding, events, video, held, calls, link, want, engine, stats }
+  return { holding, events, video, held, calls, link, want, engine, clock, stats }
 }
 
 function holds(events: TimelineEventInput[]): Extract<TimelineEventInput, { type: 'hold' }>[] {
@@ -127,6 +130,34 @@ describe('Holding', () => {
     play.held.add({ start: 0, end: 10_000_000 })
     play.holding.check()
     expect(holds(play.events)[1]).toMatchObject({ on: false })
+    expect(play.calls).toEqual([])
+  })
+
+  // The viewer's pause during a hold is a no-op on the element the hold already paused, so no `pause` event says it: `autoplay()` does.
+  test('a hold ends with no play when autoplay() turns to no, and stops counting there', () => {
+    const play = setup()
+    play.holding.begin('start')
+    expect(play.holding.holding).toBe(true)
+    play.clock.now = 300
+    play.want.autoplay = false
+    play.holding.check()
+    expect(play.holding.holding).toBe(false)
+    expect(play.stats.holding).toBe(false)
+    expect(play.stats.holds).toBe(1)
+    expect(play.stats.holdMs).toBe(300)
+    expect(holds(play.events)[1]).toMatchObject({ on: false, reason: null })
+    // Time passing after the hold has ended adds nothing.
+    play.clock.now = 900
+    play.holding.check()
+    expect(play.stats.holdMs).toBe(300)
+    expect(play.calls).toEqual([])
+  })
+
+  test('a seek made while autoplay() says no begins no hold', () => {
+    const play = setup({ at: 4 })
+    play.want.autoplay = false
+    play.holding.begin('seek', true)
+    expect(holds(play.events)).toEqual([])
     expect(play.calls).toEqual([])
   })
 

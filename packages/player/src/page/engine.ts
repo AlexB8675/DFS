@@ -1177,10 +1177,12 @@ export async function playStreamed(options: PlayStreamedOptions): Promise<void> 
     await play.open()
     play.began()
   } catch (error) {
+    // Whether the viewer had left when the play failed: an abort that comes later does not change what was published.
+    const aborted = options.signal.aborted
     play.rejected(error)
     await play.close()
     // An abort is the viewer leaving: its own reason, not the sink's "closed" that it caused.
-    throw options.signal.aborted ? options.signal.reason : error
+    throw aborted ? options.signal.reason : error
   }
   await play.run()
 }

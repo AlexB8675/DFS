@@ -128,14 +128,14 @@ export class Holding {
 
   /**
    * The play starts (`start`: wanted when `autoplay()` says so) or a seek ends (`seek`: wanted when the play
-   * was playing, `playing`): holds while the rule says to wait, else plays. A play that is not wanted is never
+   * was playing, `playing`, and `autoplay()` still says yes): holds while the rule says to wait, else plays. A play that is not wanted is never
    * held, and a hold that is on is left with no play. Does nothing for a play with no `autoplay`.
    */
   begin(reason: 'start' | 'seek', playing = true): void {
     const { autoplay } = this.#world
     if (autoplay === undefined) return
     this.moved()
-    const wanted = reason === 'start' ? autoplay() : playing
+    const wanted = reason === 'start' ? autoplay() : playing && autoplay()
     if (!wanted) {
       if (this.#holding) this.#leave()
       return
@@ -158,9 +158,17 @@ export class Holding {
     if (this.#decide('stall')?.hold === true) this.#enter('stall')
   }
 
-  /** To be called on the tick: lets the hold go, and plays, when the rule no longer says to wait. */
+  /**
+   * To be called on the tick: lets the hold go, and plays, when the rule no longer says to wait. A hold whose
+   * `autoplay()` now says no is left with no play: the element is paused by the hold, so the viewer's pause is
+   * a no-op that sends no `pause` event, and `autoplay()` is how the hold learns of it.
+   */
   check(): void {
     if (!this.#holding) return
+    if (this.#world.autoplay?.() === false) {
+      this.#leave()
+      return
+    }
     if (this.#decide(this.#reason)?.hold === true) return
     this.#leave()
     this.#play()

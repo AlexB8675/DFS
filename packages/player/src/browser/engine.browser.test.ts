@@ -508,13 +508,16 @@ suite('h264-aac-faststart.mp4')('playStreamed: a play from its start', () => {
   test('an abort while an opening append never ends settles at once, with the abort’s own reason', async () => {
     // eslint-disable-next-line @typescript-eslint/unbound-method -- restored below.
     const real = SourceBuffer.prototype.appendBuffer
+    let appends = 0
     // An append that the browser never ends: no `updateend` comes.
     SourceBuffer.prototype.appendBuffer = function () {
+      appends += 1
       return undefined
     }
     try {
       const play = begin('h264-aac-faststart.mp4')
-      await new Promise((resolve) => setTimeout(resolve, 1_500))
+      // The abort must land in the hang, so it waits for the first append, however slow the machine.
+      await until(play, 'the first append', 40_000, () => appends > 0)
       const reason = new Error('left while the opening waited')
       const aborted = performance.now()
       play.controller.abort(reason)
