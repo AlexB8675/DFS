@@ -37,6 +37,7 @@ import {
   STATS_EVERY_MS,
   STALL_COVER_MS,
   STALL_GOAL_SECONDS,
+  STALL_MAX_WAIT_SECONDS,
   STUCK_MS,
   STORE_CALL_MS,
   STORE_OPEN_MS,
@@ -142,6 +143,7 @@ describe('the store and the downloader limits', () => {
     expect(POSITION_EVERY_MS).toBe(1_000)
     expect(START_GOAL_SECONDS).toBe(2)
     expect(STALL_GOAL_SECONDS).toBe(4)
+    expect(STALL_MAX_WAIT_SECONDS).toBe(10)
   })
 
   it('gives a seek 10 s, takes 2 s without movement as stuck, watches every 500 ms and reopens at most 3 times', () => {
