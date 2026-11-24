@@ -289,10 +289,28 @@ export class Holding {
       this.#leave()
       return
     }
+    // Used up only when it is evaluated: while the engine is busy a serve decides (`served()` asks it at a non-seek serve's end).
+    if (this.#world.autoplay?.() !== true || !this.#world.canCheck()) return
+    this.#ask()
+  }
+
+  /**
+   * The end of a completed serve that is not a seek's (a refeed, a reopen: no `begin` follows). A viewer's Play that came
+   * during it, with a standing goal at this place, is asked of the rule now, as `played()` would have: the serve is still
+   * running, so `canCheck` is not read, and the numbers are fresh. An element that is paused keeps the goal.
+   */
+  served(): void {
+    if (this.#holding || this.#world.video.paused) return
+    if (this.#world.autoplay?.() !== true) return
+    this.#ask()
+  }
+
+  /** Uses the standing goal: asks the rule for its reason and holds on a wait, when the clock is still at its place. */
+  #ask(): void {
+    const { video } = this.#world
     const standing = this.#standing
     if (standing === null) return
     this.#standing = null
-    if (this.#world.autoplay?.() !== true || !this.#world.canCheck()) return
     if (Math.abs(video.currentTime - standing.at) > STANDING_PLACE_SECONDS) return
     if (this.#decide(standing.reason)?.hold === true) this.#enter(standing.reason)
   }

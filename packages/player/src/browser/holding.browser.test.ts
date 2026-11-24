@@ -600,16 +600,41 @@ describe('Holding', () => {
       expect(holds(play.events)[0]).toMatchObject({ on: true, reason: 'start' })
     })
 
-    test('a goal is not asked while the engine cannot check (a serve runs), and is used up', () => {
+    test('a goal is not asked while the engine cannot check (a serve runs), and is kept: the serve end asks it', () => {
       const play = setup({ at: 4 })
       play.holding.begin('seek', false)
       play.engine.canCheck = false
       viewerPlays(play)
       expect(holds(play.events)).toEqual([])
-      play.engine.canCheck = true
-      play.video.paused = true
-      viewerPlays(play)
-      expect(holds(play.events)).toEqual([])
+      // The serve's end (a non-seek serve): the element plays at the place on a slow link, so the goal holds it.
+      play.holding.served()
+      expect(holds(play.events)[0]).toMatchObject({ on: true, reason: 'seek' })
+      expect(play.video.paused).toBe(true)
+    })
+
+    test('served() on a link that keeps up holds nothing; with the element paused it keeps the goal; past the place it holds nothing', () => {
+      const fast = setup({ at: 4, offset: 4_000_000 })
+      fast.holding.begin('seek', false)
+      fast.link.rate = 5_000_000
+      fast.held.add({ start: 4_000_000, end: 4_500_000 })
+      fast.video.paused = false
+      fast.holding.served()
+      expect(holds(fast.events)).toEqual([])
+
+      const paused = setup({ at: 4 })
+      paused.holding.begin('seek', false)
+      paused.holding.served()
+      expect(holds(paused.events)).toEqual([])
+      // Kept: a later Play at the place, the engine able to check, still holds.
+      viewerPlays(paused)
+      expect(holds(paused.events)[0]).toMatchObject({ on: true, reason: 'seek' })
+
+      const moved = setup({ at: 4 })
+      moved.holding.begin('seek', false)
+      moved.video.paused = false
+      moved.video.currentTime = 4.5
+      moved.holding.served()
+      expect(holds(moved.events)).toEqual([])
     })
 
     test('a Play while autoplay() says no, or after dropGoal(), is not held', () => {
