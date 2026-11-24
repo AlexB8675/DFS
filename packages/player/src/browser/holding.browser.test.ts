@@ -515,6 +515,39 @@ describe('Holding', () => {
       expect(play.stats.holds).toBe(0)
     })
 
+    // F1: a hold always means a paused element. A viewer's play (the engine's C path) with nothing left to wait for leaves the hold; the element already plays.
+    test('seekStarted with a hold on, the element playing and nothing to wait for leaves the hold, with no play, counted once', () => {
+      const play = setup({ at: TO })
+      play.video.paused = false
+      play.holding.seekStarted(true, TO, AT)
+      expect(play.holding.holding).toBe(true)
+      // A link that keeps up now: goal 0. The viewer's play is the element playing.
+      play.link.rate = 5_000_000
+      play.video.paused = false
+      play.holding.seekStarted(true, TO, AT)
+      expect(play.holding.holding).toBe(false)
+      expect(play.stats.holding).toBe(false)
+      expect(play.video.paused).toBe(false)
+      expect(play.calls).toEqual(['pause'])
+      expect(play.stats.holds).toBe(1)
+      expect(holds(play.events).map((event) => event.on)).toEqual([true, false])
+    })
+
+    test('begin(seek) holding with a hold on and the element playing pauses it back, still one hold', () => {
+      const play = setup({ at: TO })
+      play.video.paused = false
+      play.holding.seekStarted(true, TO, AT)
+      play.video.paused = false
+      play.holding.begin('seek', true)
+      expect(play.holding.holding).toBe(true)
+      expect(play.video.paused).toBe(true)
+      expect(play.calls).toEqual(['pause', 'pause'])
+      expect(play.stats.holds).toBe(0)
+      expect(holds(play.events).map((event) => event.on)).toEqual([true])
+      play.holding.paused()
+      expect(play.holding.holding).toBe(true)
+    })
+
     test('a link that keeps up holds nothing and does not pause', () => {
       const play = setup({ at: TO })
       play.link.rate = 5_000_000
@@ -693,7 +726,7 @@ describe('Holding', () => {
     })
 
     // A slow stall's goal is a byte budget from the file's average bit rate: decoded seconds of a thin stretch must not release it early.
-    test("a stall's hold is measured on the store alone: the element's buffer neither prevents nor releases it, the store does", () => {
+    test("a stall's hold is released by the store, not by the element's buffer (a buffer past the goal does not let it go)", () => {
       const play = setup({ at: 3, offset: 3_000_000 })
       // A link at half the bit rate: the goal is about 4.7 s, under the 7 s left, so the rule (not the end of the file) decides.
       play.link.rate = 500_000

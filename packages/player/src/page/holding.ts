@@ -164,6 +164,8 @@ export class Holding {
     if (this.#holding) this.#reason = reason
     if (this.#decide(reason)?.hold === true) {
       if (!this.#holding) this.#enter(reason)
+      // A hold always means a paused element: a play from outside during it is paused back.
+      else this.#pauseForHold()
       return
     }
     if (this.#holding) this.#leave()
@@ -191,7 +193,11 @@ export class Holding {
     }
     if (offset === null) return
     const decision = this.#decide('seek', { at: to, offset })
-    if (decision === null || !(decision.goalSeconds > 0)) return
+    if (decision === null || !(decision.goalSeconds > 0)) {
+      // Nothing to wait for: a hold that is on while the element plays (the viewer's play) is over, and the element already plays.
+      if (this.#holding && !this.#world.video.paused) this.#leave()
+      return
+    }
     if (this.#holding) {
       this.#reason = 'seek'
       // A play from outside (Picture-in-Picture's button) during the hold: the hold pauses it back, as its own pause.

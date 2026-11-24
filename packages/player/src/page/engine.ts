@@ -1062,12 +1062,13 @@ class Play {
     const video = this.#video
     const signal = this.#feedControl.signal
     let completed = false
-    // What the viewer wants at a decision: the request's intent, or the element playing now (a viewer's `play()` flips `paused` at once, before its event is dispatched), or a hold for a wanted play that has paused it again (the hold's own pause is not the viewer's "no": a pause ends the hold at once, through `autoplay()`).
-    const playingNow = (): boolean => request.playing || !isPaused(video) || this.#holding.wantsPlay
+    const reopen = request.kind === 'reopen' || this.#ended
+    // What the viewer wants at a decision: a reopen's intent (only a reopen pauses the element by itself; a seek's old intent is stale once the viewer paused), or the element playing now (a viewer's `play()` flips `paused` at once, before its event is dispatched), or a hold for a wanted play that has paused it again (the hold's own pause is not the viewer's "no": a pause ends the hold at once, through `autoplay()`).
+    const playingNow = (): boolean =>
+      (reopen && request.playing) || !isPaused(video) || this.#holding.wantsPlay
     try {
       const { to } = request
       if (request.seek) this.#seekFeed = { to, offset: undefined }
-      const reopen = request.kind === 'reopen' || this.#ended
       if (reopen) {
         this.#clockHint = to
         this.#ownSeek = to

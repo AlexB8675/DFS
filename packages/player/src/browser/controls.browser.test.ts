@@ -13,7 +13,6 @@ import {
   STALL_GOAL_SECONDS,
   START_GOAL_SECONDS,
   STUCK_MS,
-  TAIL_BYTES,
   WATCH_EVERY_MS,
   WINDOW_AHEAD_SECONDS,
   WINDOW_BYTES,
@@ -140,42 +139,18 @@ suite(NAME)('playStreamed: seeks', () => {
     await control({ bandwidthBytesPerSecond: Math.ceil(0.6 * bitrate) })
     // The default window follows the store's edge (a small one would stop short of it, and the store would lead the target by a chunk).
     const play = begin(NAME, { autoplay: () => true })
-    // The seek's target is just inside the window's forward edge, and the store leads the target by less than the goal: the window follows the store, so wait for a moment when it has caught up.
-    // What the rule reads is the store's bytes from the target's offset on. This file is read in order from its start and nothing is evicted, so the bytes the store has taken (`bytesReceived`, the frontier block included, unlike `storedBytes`) less the bytes of the tail read at the start (held apart; that read is aborted once the head parses, so it receives a variable part of `TAIL_BYTES`: counted from the requests' own events) over the bit rate is the store's edge in seconds.
-    const tailReceived = (): number => {
-      const tails = new Set(
-        ofType(play.events, 'request')
-          .filter((event) => event.from >= pick.file.size - TAIL_BYTES)
-          .map((event) => event.id),
-      )
-      return ofType(play.events, 'requestEnd')
-        .filter((event) => tails.has(event.id))
-        .reduce((sum, event) => sum + event.bytes, 0)
-    }
-    const storedBytes = (): number =>
-      Math.max(0, (play.stats.at(-1)?.bytesReceived ?? 0) - tailReceived())
-    const storedSeconds = (): number => storedBytes() / bitrate
-    // The tail the start read is held too: a target near it would find the store contiguous to the end of the file, so the target stays a second short of where the tail begins.
-    const tailStartSeconds = (pick.file.size - TAIL_BYTES) / bitrate
+    // Structural, not tuned: once the element plays free past 1 s with data ahead, the link is throttled hard, so the store cannot run ahead of the window while the target is picked, and the target is just inside the window's forward edge (where the store holds under the goal). The link is restored once the seek's hold is on.
     const playingFree = (): boolean => !play.video.paused && play.stats.at(-1)?.holding === false
     const edge = (): number => bufferedEnd(play.video) - 0.4
     await until(
       play,
-      "the window at the store's edge",
+      'a free play with data ahead',
       40_000,
-      () =>
-        play.video.currentTime > 1 &&
-        playingFree() &&
-        edge() > play.video.currentTime + 0.3 &&
-        edge() < tailStartSeconds - 1 &&
-        storedSeconds() < tailStartSeconds - 0.5 &&
-        storedSeconds() - edge() < 1.5,
+      () => play.video.currentTime > 1 && playingFree() && edge() > play.video.currentTime + 0.3,
     )
+    await control({ bandwidthBytesPerSecond: 10_000 })
     const target = edge()
-    // The precondition: the store holds less than the goal ahead of the target, and the download is not done.
-    expect(storedSeconds() - target).toBeLessThan(START_GOAL_SECONDS)
-    expect(playingFree()).toBe(true)
-    expect(storedSeconds()).toBeLessThan(tailStartSeconds)
+    expect(target).toBeGreaterThan(play.video.currentTime)
     const mark = play.events.length
     let burst = 0
     const timer = setInterval(() => {
@@ -184,6 +159,10 @@ suite(NAME)('playStreamed: seeks', () => {
     }, 10)
     try {
       play.video.currentTime = target
+      await until(play, "the seek's hold", 20_000, () =>
+        ofType(play.events.slice(mark), 'hold').some((event) => event.on),
+      )
+      await control({ bandwidthBytesPerSecond: Math.ceil(0.6 * bitrate) })
       await until(play, "the seek's hold letting go", 60_000, () =>
         ofType(play.events.slice(mark), 'hold').some((event) => !event.on),
       )
@@ -194,6 +173,8 @@ suite(NAME)('playStreamed: seeks', () => {
     expect(burst).toBeLessThan(0.05)
     expect(ofType(play.events.slice(mark), 'seek')[0]).toMatchObject({ inWindow: true })
     expect(ofType(play.events.slice(mark), 'hold')[0]).toMatchObject({ on: true, reason: 'seek' })
+    // The rule's own input: the seek's hold saw less than the goal held ahead.
+    expect(ofType(play.events.slice(mark), 'hold')[0]?.aheadS).toBeLessThan(START_GOAL_SECONDS)
   })
 
   // What this guards: an in-window forward seek on a link that keeps up is never paused by the engine. It does not prove the store holds under the goal there (on a fast link it holds more), so it is not a test of the rule's hold, only of the absence of a pause.
@@ -891,6 +872,9 @@ suite(NAME)("playStreamed: a viewer's play or pause while a seek is served", () 
     expect(play.video.paused).toBe(true)
     // Still serving: the viewer plays again, which is the seek's play and holds again.
     const second = ofType(play.events.slice(mark), 'hold').length
+    // The second hold's burst is watched from here, not from the first mark (which the pause's own `hold` off ended).
+    const againMark = play.events.length
+    const againBurst = watchBurst(play, target, () => againMark)
     wanted.value = true
     void play.video.play().catch(() => undefined)
     await until(
@@ -907,6 +891,7 @@ suite(NAME)("playStreamed: a viewer's play or pause while a seek is served", () 
       ofType(play.events.slice(mark), 'hold').some((event, i) => i > second && !event.on),
     )
     expect(burst()).toBeLessThan(FRAME_SECONDS)
+    expect(againBurst()).toBeLessThan(FRAME_SECONDS)
     await until(
       play,
       'the clock to play on',
@@ -925,6 +910,8 @@ suite(NAME)("playStreamed: a viewer's play or pause while a seek is served", () 
     const seeks = ofType(play.events, 'seek').length
     play.video.currentTime = target
     await until(play, "the seek's event", 20_000, () => ofType(play.events, 'seek').length > seeks)
+    // The Play comes during the serve, before the seek's picture.
+    expect(shown(play).some((seek) => Math.abs(seek.to - target) < 0.1)).toBe(false)
     const mark = play.events.length
     const pauses: number[] = []
     play.video.addEventListener('pause', () => pauses.push(performance.now()))
@@ -940,5 +927,29 @@ suite(NAME)("playStreamed: a viewer's play or pause while a seek is served", () 
       ofType(play.events.slice(mark), 'hold').filter((event) => event.reason === 'seek'),
     ).toEqual([])
     expect(pauses).toEqual([])
+  })
+
+  // A pause that did not go through the page's intent (Picture-in-Picture's) leaves `autoplay()` yes: the serve's end reads the element, not the seek's old intent.
+  test('a playing seek outside the window on a link that keeps up, paused directly during the serve: the serve does not play it again', async () => {
+    const wanted = { value: true }
+    const { play, duration } = await slowPlay(1.4, wanted)
+    await until(play, 'the clock past 1 s', 60_000, () => play.video.currentTime > 1)
+    const target = Math.floor(duration * 0.7)
+    const seeks = ofType(play.events, 'seek').length
+    play.video.currentTime = target
+    await until(play, "the seek's event", 20_000, () => ofType(play.events, 'seek').length > seeks)
+    expect(shown(play).some((seek) => Math.abs(seek.to - target) < 0.1)).toBe(false)
+    let plays = 0
+    play.video.pause()
+    play.video.addEventListener('play', () => {
+      plays += 1
+    })
+    await until(play, "the seek's picture", 40_000, () =>
+      shown(play).some((seek) => Math.abs(seek.to - target) < 0.1),
+    )
+    await pause(1_000)
+    expect(plays).toBe(0)
+    expect(play.video.paused).toBe(true)
+    expect(play.video.currentTime).toBeLessThan(target + FRAME_SECONDS)
   })
 })

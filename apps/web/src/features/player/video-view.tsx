@@ -633,7 +633,8 @@ export default function VideoView({
   useEffect(() => {
     if (!video) return
     const onPlay = () => {
-      intent.current.played()
+      // A `play` event dispatched after the element was paused again (the viewer's Pause) is stale: it is not a play they want.
+      if (!video.paused) intent.current.played()
     }
     video.addEventListener('play', onPlay)
     return () => {
