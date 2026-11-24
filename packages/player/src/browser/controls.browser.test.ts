@@ -4,7 +4,7 @@
 // engine made, and its control channel slows the link or breaks a read. The plays of the first part are in
 // engine.browser.test.ts. A file that is not served (no `corpus:make`) skips its tests, with the reason.
 
-import { afterEach, expect, test, vi } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import { Feeder } from '../engine/feeder.ts'
 import { MediaSourceSink } from '../page/index.ts'
 import { Seeks } from '../page/seeks.ts'
@@ -13,6 +13,7 @@ import {
   STALL_GOAL_SECONDS,
   START_GOAL_SECONDS,
   STUCK_MS,
+  TAIL_BYTES,
   WATCH_EVERY_MS,
   WINDOW_AHEAD_SECONDS,
   WINDOW_BYTES,
@@ -149,6 +150,9 @@ suite(NAME)('playStreamed: seeks', () => {
       () => play.video.currentTime > 1 && playingFree() && edge() > play.video.currentTime + 0.3,
     )
     await control({ bandwidthBytesPerSecond: 10_000 })
+    // Still playing free, and the store is short of the tail (a target near it would find the store contiguous to the end of the file).
+    expect(playingFree()).toBe(true)
+    expect(edge()).toBeLessThan((pick.file.size - TAIL_BYTES) / bitrate - 1)
     const target = edge()
     expect(target).toBeGreaterThan(play.video.currentTime)
     const mark = play.events.length
@@ -951,5 +955,79 @@ suite(NAME)("playStreamed: a viewer's play or pause while a seek is served", () 
     expect(plays).toBe(0)
     expect(play.video.paused).toBe(true)
     expect(play.video.currentTime).toBeLessThan(target + FRAME_SECONDS)
+  })
+
+  // G2: a reopen's own pause is not the viewer's. After the feed has ended a seek outside the window reopens Media Source, which pauses the element; a second seek during that serve must still be a playing seek.
+  describe('after the feed has ended', () => {
+    async function endedPlay(): Promise<Play> {
+      const play = begin(NAME, { windowBytes: 2 * 1024 * 1024, autoplay: () => true })
+      await until(play, 'the feed to end', 60_000, () =>
+        ofType(play.events, 'phase').some((event) => event.phase === 'ended'),
+      )
+      expect(play.video.paused).toBe(false)
+      return play
+    }
+
+    test("two quick seeks outside the window, the second during the first's reopen serve: it plays at the end", async () => {
+      const watch = { on: false }
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- called on the feeder it was taken from, below.
+      const { seek: realSeek } = Feeder.prototype
+      vi.spyOn(Feeder.prototype, 'seek').mockImplementation(async function (
+        this: Feeder,
+        ...args: Parameters<Feeder['seek']>
+      ) {
+        const at = await realSeek.apply(this, args)
+        // The serve stays in its feed phase, the reopen done and the element paused by it.
+        if (watch.on) await pause(1_500)
+        return at
+      })
+      const play = await endedPlay()
+      watch.on = true
+      play.video.currentTime = 1
+      await until(play, "the reopen's pause", 20_000, () => play.video.paused)
+      watch.on = false
+      play.video.currentTime = 2
+      await until(
+        play,
+        'the clock to play on',
+        40_000,
+        () => play.video.currentTime > 2.5 && !play.video.paused,
+      )
+      expect(ofType(play.events, 'error')).toEqual([])
+    })
+
+    test("a direct pause made before the reopen: the serve's end does not play it", async () => {
+      const play = await endedPlay()
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- called on the Seeks it was taken from, below.
+      const { begin: realBegin } = Seeks.prototype
+      let first = true
+      vi.spyOn(Seeks.prototype, 'begin').mockImplementation(function (
+        this: Seeks,
+        ...args: Parameters<Seeks['begin']>
+      ) {
+        realBegin.apply(this, args)
+        // The seek's intent is read (playing) just before this; the viewer then pauses the element directly (Picture-in-Picture's button), the intent left wanted, before the serve reopens.
+        if (first) play.video.pause()
+        first = false
+      })
+      const seeks = ofType(play.events, 'seek').length
+      play.video.currentTime = 1
+      await until(
+        play,
+        "the seek's event",
+        20_000,
+        () => ofType(play.events, 'seek').length > seeks,
+      )
+      let plays = 0
+      play.video.addEventListener('play', () => {
+        plays += 1
+      })
+      await until(play, "the seek's picture", 40_000, () =>
+        shown(play).some((seek) => Math.abs(seek.to - 1) < 0.1),
+      )
+      await pause(1_000)
+      expect(plays).toBe(0)
+      expect(play.video.paused).toBe(true)
+    })
   })
 })

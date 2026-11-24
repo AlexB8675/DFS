@@ -544,8 +544,42 @@ describe('Holding', () => {
       expect(play.calls).toEqual(['pause', 'pause'])
       expect(play.stats.holds).toBe(0)
       expect(holds(play.events).map((event) => event.on)).toEqual([true])
+      // One `pause` event for each pause the hold made.
+      play.holding.paused()
       play.holding.paused()
       expect(play.holding.holding).toBe(true)
+    })
+
+    // G1: the hold's own pauses are counted, one per `video.pause()` it made, however many `pause` events are queued before the first dispatches.
+    test("two pauses the hold made, both events queued after both: neither is the viewer's", () => {
+      const play = setup({ at: TO })
+      play.video.paused = false
+      play.holding.seekStarted(true, TO, AT)
+      play.video.paused = false
+      play.holding.seekStarted(true, TO, AT)
+      expect(play.calls).toEqual(['pause', 'pause'])
+      play.holding.paused()
+      play.holding.paused()
+      expect(play.holding.holding).toBe(true)
+      expect(play.stats.holds).toBe(0)
+      // A third `pause` event is the viewer's (the element is paused): it ends the hold.
+      play.holding.paused()
+      expect(play.holding.holding).toBe(false)
+      expect(play.stats.holds).toBe(1)
+    })
+
+    test('a stale pause (the element plays at dispatch) ends nothing, and does not hide the hold-made pause count', () => {
+      const play = setup({ at: TO })
+      play.video.paused = false
+      play.holding.seekStarted(true, TO, AT)
+      // The viewer plays (the hold ends it by played()), the stale pause of the hold's own arrives with the element playing.
+      play.video.paused = false
+      play.holding.paused()
+      expect(play.holding.holding).toBe(true)
+      // A pause event with no hold-made pause outstanding, the element playing: stale.
+      play.holding.paused()
+      expect(play.holding.holding).toBe(true)
+      expect(play.stats.holds).toBe(0)
     })
 
     test('a link that keeps up holds nothing and does not pause', () => {
@@ -585,6 +619,16 @@ describe('Holding', () => {
       play.holding.seekStarted(true, TO, AT)
       expect(holds(play.events)).toEqual([])
       expect(play.calls).toEqual([])
+    })
+
+    test('a null offset with a hold on and the element playing leaves the hold: nothing to wait for', () => {
+      const play = setup({ at: TO })
+      play.video.paused = false
+      play.holding.seekStarted(true, TO, AT)
+      play.video.paused = false
+      play.holding.seekStarted(true, TO, null)
+      expect(play.holding.holding).toBe(false)
+      expect(play.stats.holds).toBe(1)
     })
 
     test('a null offset (the feed has no next read) holds nothing', () => {

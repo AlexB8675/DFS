@@ -71,8 +71,8 @@ export class Holding {
   #holding = false
   #reason: HoldReason = 'start'
   #since = 0
-  /** Whether the hold has paused the element: its `pause` event is then the hold's, not the viewer's. */
-  #pausedByHold = false
+  /** How many `pause()` calls the hold has made whose `pause` event has not been seen: each such event is the hold's, not the viewer's (several can be queued before the first dispatches). */
+  #ownPauses = 0
   /** Where the clock was when the play started, resumed or was moved: a `waiting` before the clock has moved is the start's wait for its first frames, not a stall. */
   #anchor = 0
   /** What the rule last measured, which the `hold` events tell: the store's seconds ahead of the playhead, and the goal. */
@@ -191,8 +191,7 @@ export class Holding {
       if (this.#holding) this.#leave()
       return
     }
-    if (offset === null) return
-    const decision = this.#decide('seek', { at: to, offset })
+    const decision = offset === null ? null : this.#decide('seek', { at: to, offset })
     if (decision === null || !(decision.goalSeconds > 0)) {
       // Nothing to wait for: a hold that is on while the element plays (the viewer's play) is over, and the element already plays.
       if (this.#holding && !this.#world.video.paused) this.#leave()
@@ -230,12 +229,17 @@ export class Holding {
     this.#play()
   }
 
-  /** The element's `pause` event: the viewer's pause during a hold ends the hold with no play. */
+  /**
+   * The element's `pause` event: the viewer's pause during a hold ends the hold with no play. One event for each
+   * pause the hold made is the hold's own; an event for an element that plays at dispatch is stale (the pause was
+   * undone, by a play), and ends nothing.
+   */
   paused(): void {
-    if (this.#pausedByHold) {
-      this.#pausedByHold = false
+    if (this.#ownPauses > 0) {
+      this.#ownPauses -= 1
       return
     }
+    if (!this.#world.video.paused) return
     if (this.#holding) this.#leave()
   }
 
@@ -279,7 +283,7 @@ export class Holding {
   #pauseForHold(): void {
     const { video } = this.#world
     if (video.paused) return
-    this.#pausedByHold = true
+    this.#ownPauses += 1
     video.pause()
   }
 

@@ -206,6 +206,8 @@ class Play {
   /** The request the pump is serving: merged back into the next when a newer one aborts it. */
   #serving: Request | null = null
   /** A viewer's seek in its serve's feed phase, from the serve's start to its end-of-serve rule: its target, and its start offset once `feeder.seek` has answered (a number, or null when there is no next read). */
+  /** True from a reopen that paused the element (while the viewer wanted a play) until a serve completes or the element plays: the pause is the reopen's, not the viewer's "no" (which comes through `autoplay()`). */
+  #pausedByReopen = false
   #seekFeed: { to: number; offset: number | null | undefined } | null = null
   /** True while the pump awaits `feeder.feed`: a feed that waits for bytes. */
   #feeding = false
@@ -727,7 +729,7 @@ class Play {
     // While a request waits or is served, what the window holds is being replaced: the seek is posted too, so it merges with that request and the serve restarts at the newest target (R39), not applied to the old one.
     const inWindow = !this.#busy() && this.#inWindow(at)
     // The intent before the seek is settled: playing, or held for a play that is wanted.
-    const playing = !isPaused(video) || this.#holding.wantsPlay
+    const playing = !isPaused(video) || this.#holding.wantsPlay || this.#pausedByReopen
     this.#seeks.begin(at, inWindow)
     // A seek into the band just before a range's start (inside `holdsAt`'s edge) has no data at its target: the clock goes to the latest such start.
     if (inWindow) this.#applyWindowStart(at)
@@ -772,6 +774,7 @@ class Play {
       this.#holding.paused()
     })
     on('play', () => {
+      if (!isPaused(this.#video)) this.#pausedByReopen = false
       // A viewer's play during a seek's feed, with no newer request pending, is that seek's play: it holds by the rule and waits for the goal (§10.4). A play of an element that is paused again (a stale event) is not.
       const feed = this.#seekFeed
       if (
@@ -1063,15 +1066,17 @@ class Play {
     const signal = this.#feedControl.signal
     let completed = false
     const reopen = request.kind === 'reopen' || this.#ended
-    // What the viewer wants at a decision: a reopen's intent (only a reopen pauses the element by itself; a seek's old intent is stale once the viewer paused), or the element playing now (a viewer's `play()` flips `paused` at once, before its event is dispatched), or a hold for a wanted play that has paused it again (the hold's own pause is not the viewer's "no": a pause ends the hold at once, through `autoplay()`).
+    // What the viewer wants at a decision: the pause a reopen gave the element while a play was wanted (`#pausedByReopen`: the one pause the engine makes by itself besides a hold's; a seek's old intent is stale once the viewer paused), or the element playing now (a viewer's `play()` flips `paused` at once, before its event is dispatched), or a hold for a wanted play that has paused it again (the hold's own pause is not the viewer's "no": a pause ends the hold at once, through `autoplay()`).
     const playingNow = (): boolean =>
-      (reopen && request.playing) || !isPaused(video) || this.#holding.wantsPlay
+      this.#pausedByReopen || !isPaused(video) || this.#holding.wantsPlay
     try {
       const { to } = request
       if (request.seek) this.#seekFeed = { to, offset: undefined }
       if (reopen) {
         this.#clockHint = to
         this.#ownSeek = to
+        // What the viewer wants now, kept across the pause that the new Media Source gives the element.
+        this.#pausedByReopen = !isPaused(video) || this.#holding.wantsPlay || this.#pausedByReopen
         await sink.reopen(to, signal)
       } else {
         await this.#clearSink()
@@ -1100,6 +1105,7 @@ class Play {
       ) {
         video.play().catch(() => undefined)
       }
+      this.#pausedByReopen = false
       completed = true
     } catch (error) {
       // A newer request, or the end of the play, ends this one; anything else is the play's failure.
