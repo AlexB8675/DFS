@@ -1079,10 +1079,9 @@ class Play {
         this.#ownSeek = to
         // What the viewer wants now, kept across the pause that the new Media Source gives the element.
         this.#pausedByReopen = !isPaused(video) || this.#holding.wantsPlay || this.#pausedByReopen
-        const reopened = sink.reopen(to, signal)
-        // The load has run, synchronously inside the call: it cancelled every queued media event, the hold's pause among them.
-        this.#holding.mediaLoaded()
-        await reopened
+        await sink.reopen(to, signal, () => {
+          this.#holding.mediaLoaded()
+        })
       } else {
         await this.#clearSink()
       }

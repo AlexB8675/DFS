@@ -688,18 +688,30 @@ describe('Holding', () => {
       expect(holds(dead.events)).toEqual([])
     })
 
-    test('a Play while autoplay() says no, or after dropGoal(), is not held', () => {
+    test('a Play while autoplay() says no is not held', () => {
       const no = setup({ at: 4 })
       no.holding.begin('seek', false)
       no.want.autoplay = false
       viewerPlays(no)
       expect(holds(no.events)).toEqual([])
+    })
 
-      const dropped = setup({ at: 4 })
-      dropped.holding.begin('seek', false)
-      dropped.holding.dropGoal()
-      viewerPlays(dropped)
-      expect(holds(dropped.events)).toEqual([])
+    test('begin() with the element already playing (a play from outside) leaves no goal', () => {
+      const play = setup({ at: 4 })
+      play.video.paused = false
+      play.holding.begin('seek', false)
+      // The viewer pauses, then plays again on a slow link: no goal stands for it.
+      play.video.paused = true
+      viewerPlays(play)
+      expect(holds(play.events)).toEqual([])
+    })
+
+    test('resumeHolds() of a play that is not alive returns false and holds nothing', () => {
+      const play = setup({ at: 4 })
+      play.holding.begin('seek', false)
+      play.engine.alive = false
+      expect(play.holding.resumeHolds()).toBe(false)
+      expect(holds(play.events)).toEqual([])
     })
 
     test("the engine's own play never uses the goal", () => {

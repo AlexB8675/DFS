@@ -77,7 +77,7 @@ export class MediaSourceSink implements Sink {
   }
 
   /** A new Media Source on the element, opened. Its URL is let go once the element holds it, or when this fails. */
-  async #attach(signal?: AbortSignal): Promise<void> {
+  async #attach(signal?: AbortSignal, loaded?: () => void): Promise<void> {
     signal?.throwIfAborted()
     const mediaSource = new MediaSource()
     this.#mediaSource = mediaSource
@@ -114,6 +114,8 @@ export class MediaSourceSink implements Sink {
         video.addEventListener('error', failed)
         signal?.addEventListener('abort', stopped, { once: true })
         video.src = url
+        // The load has run, synchronously: every queued media event is gone.
+        loaded?.()
       })
     } finally {
       URL.revokeObjectURL(url)
@@ -261,8 +263,8 @@ export class MediaSourceSink implements Sink {
     mediaSource.endOfStream()
   }
 
-  /** A new Media Source with fresh SourceBuffers and init segments, and the element at `at`. The caller feeds again, and plays if it was playing. Operations queued before are rejected. */
-  async reopen(at: number, signal?: AbortSignal): Promise<void> {
+  /** A new Media Source with fresh SourceBuffers and init segments, and the element at `at`. `loaded` is called right after the element's `src` is set (the load cancels its queued media events). The caller feeds again, and plays if it was playing. Operations queued before are rejected. */
+  async reopen(at: number, signal?: AbortSignal, loaded?: () => void): Promise<void> {
     if (this.#closed) throw aborted('The sink was closed.')
     if (this.#tracks === null) throw new Error('The sink has no tracks yet.')
     this.#generation += 1
@@ -273,7 +275,7 @@ export class MediaSourceSink implements Sink {
     this.#buffers = { video: null, audio: null }
     this.#tails = { video: Promise.resolve(), audio: Promise.resolve() }
     this.#letGo(aborted('The Media Source was reopened.'))
-    await this.#attach(signal)
+    await this.#attach(signal, loaded)
     if (generation !== this.#generation) throw aborted('The Media Source was reopened again.')
     await this.#build()
     if (generation !== this.#generation) throw aborted('The Media Source was reopened again.')

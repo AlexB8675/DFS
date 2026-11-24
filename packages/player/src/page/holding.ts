@@ -12,8 +12,8 @@
 // (`HOLD_CHECK_MS`): when the engine says it can (`canCheck`: not busy, not stopped, not failed), and also when the
 // viewer's "no" is in (`autoplay()` false) while the play is alive, even busy: the hold then leaves at once with no
 // play, so a pause is not counted as waiting. `dispose` stops it.
-// A viewer's "no" leaves a standing goal (a hold the viewer ended, a seek or start that was not wanted): a Play at the
-// same place re-asks the rule, so it waits for the goal like a play that was wanted from the start.
+// A viewer's "no" leaves a standing goal (a hold the viewer ended, a seek or start that was not wanted): the viewer's
+// next Play re-asks the rule (it ends at a viewer's seek, a hold entered, the first play), so it waits for the goal like a play that was wanted from the start.
 
 import type { TimelineEventInput } from '@dfs/shared'
 import type { Downloader } from '../downloader.ts'
@@ -77,12 +77,12 @@ export class Holding {
   #ownPauses = 0
   /**
    * The goal a viewer's "no" left standing: a hold left by the viewer's pause (or by `autoplay()` turning to no), or a
-   * seek or a start that was not wanted, did not wait for what the rule asks. A Play at the same place re-asks the
+   * seek or a start that was not wanted, did not wait for what the rule asks. The viewer's next Play re-asks the
    * rule, so it waits for the goal as a play that was wanted all along (`played()`). Ends at a viewer's seek
    * (`moved()`), at a hold that is entered, and at the first play (used or not); the rule always decides at the current
    * playhead, so the goal names only the reason.
    */
-  #standing: { reason: HoldReason; at: number } | null = null
+  #standing: HoldReason | null = null
   /** Where the clock was when the play started, resumed or was moved: a `waiting` before the clock has moved is the start's wait for its first frames, not a stall. */
   #anchor = 0
   /** What the rule last measured, which the `hold` events tell: the store's seconds ahead of the playhead, and the goal. */
@@ -115,9 +115,10 @@ export class Holding {
   resumeHolds(): boolean {
     const standing = this.#standing
     this.#standing = null
-    if (standing === null || this.#holding || this.#world.autoplay?.() !== true) return false
-    if (this.#decide(standing.reason)?.hold !== true) return false
-    this.#enter(standing.reason)
+    if (standing === null || this.#holding) return false
+    if (this.#world.autoplay?.() !== true || !this.#world.alive()) return false
+    if (this.#decide(standing)?.hold !== true) return false
+    this.#enter(standing)
     return true
   }
 
@@ -126,13 +127,8 @@ export class Holding {
     this.#ownPauses = 0
   }
 
-  /** Forgets the standing goal: the engine is about to play by itself, which no goal may re-hold. */
-  dropGoal(): void {
-    this.#standing = null
-  }
-
   #stand(reason: HoldReason): void {
-    this.#standing = { reason, at: this.#world.video.currentTime }
+    this.#standing = reason
   }
 
   get holding(): boolean {
@@ -204,8 +200,8 @@ export class Holding {
     const wanted = reason === 'start' ? autoplay() : playing && autoplay()
     if (!wanted) {
       if (this.#holding) this.#leave()
-      // Not wanted now: a Play at this place waits for the goal then (`played()`).
-      this.#stand(reason)
+      // Not wanted now: the viewer's next Play waits for the goal then (`played()`); an element that plays already (a play from outside) has no such Play to come.
+      if (this.#world.video.paused) this.#stand(reason)
       return
     }
     if (this.#holding) this.#reason = reason
@@ -297,7 +293,7 @@ export class Holding {
   /**
    * The element's `play` event: the viewer's play during a hold ends it (the engine's own play comes after the hold is
    * left). An event for an element that is paused at dispatch is stale (the play was undone, by the hold's own pause or
-   * the viewer's): it ends nothing. With no hold on, a standing goal at this place is used up and asked of the rule again:
+   * the viewer's): it ends nothing. With no hold on, a standing goal is used up and asked of the rule again:
    * on a link that does not keep up the play is held, the element paused back as the hold's own pause. While the engine
    * cannot check (a serve runs) it holds at once and the timer's check decides later.
    */
@@ -315,8 +311,8 @@ export class Holding {
     // A play the intent does not back, or one of a play that is over, is not the goal's.
     if (this.#world.autoplay?.() !== true || !this.#world.alive()) return
     // While the engine cannot check (a refeed or a reopen is served or queued: `#decide` would read stale numbers) the goal holds now, with no decision: the hold's timer decides once the engine can, and lets go at once on a link that keeps up. The hold's event then carries the last numbers measured.
-    if (!this.#world.canCheck() || this.#decide(standing.reason)?.hold === true) {
-      this.#enter(standing.reason)
+    if (!this.#world.canCheck() || this.#decide(standing)?.hold === true) {
+      this.#enter(standing)
     }
   }
 
