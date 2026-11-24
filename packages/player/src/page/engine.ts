@@ -205,6 +205,8 @@ class Play {
   #request: Request | null = null
   /** The request the pump is serving: merged back into the next when a newer one aborts it. */
   #serving: Request | null = null
+  /** A viewer's seek in its serve's feed phase, from the serve's start to its end-of-serve rule: its target, and its start offset once `feeder.seek` has answered (a number, or null when there is no next read). */
+  #seekFeed: { to: number; offset: number | null | undefined } | null = null
   /** True while the pump awaits `feeder.feed`: a feed that waits for bytes. */
   #feeding = false
   /** The time of the viewer's latest seek during the opening, which the start is moved to. */
@@ -264,6 +266,7 @@ class Play {
       feedDone: () => this.#feedDone,
       windowLimitBytes: () => this.#window.limit,
       canCheck: () => !this.#busy() && !this.#stopped && !this.#failed,
+      alive: () => !this.#stopped && !this.#failed,
       say: (event) => {
         this.#say(event)
       },
@@ -769,6 +772,17 @@ class Play {
       this.#holding.paused()
     })
     on('play', () => {
+      // A viewer's play during a seek's feed, with no newer request pending, is that seek's play: it holds by the rule and waits for the goal (§10.4). A play of an element that is paused again (a stale event) is not.
+      const feed = this.#seekFeed
+      if (
+        feed !== null &&
+        typeof feed.offset === 'number' &&
+        this.#request === null &&
+        !isPaused(this.#video)
+      ) {
+        this.#holding.seekStarted(true, feed.to, feed.offset)
+        return
+      }
       this.#holding.played()
     })
     this.#timers.push(
@@ -1048,8 +1062,11 @@ class Play {
     const video = this.#video
     const signal = this.#feedControl.signal
     let completed = false
+    // What the viewer wants at a decision: the request's intent, or the element playing now (a viewer's `play()` flips `paused` at once, before its event is dispatched), or a hold for a wanted play that has paused it again (the hold's own pause is not the viewer's "no": a pause ends the hold at once, through `autoplay()`).
+    const playingNow = (): boolean => request.playing || !isPaused(video) || this.#holding.wantsPlay
     try {
       const { to } = request
+      if (request.seek) this.#seekFeed = { to, offset: undefined }
       const reopen = request.kind === 'reopen' || this.#ended
       if (reopen) {
         this.#clockHint = to
@@ -1062,18 +1079,20 @@ class Play {
       // A clock that is not at the target yet (a seek the sink deferred) leaves the playhead at the target for the feed.
       if (Math.abs(video.currentTime - to) > 1e-6) this.#pendingStart = to
       const startOffset = await feeder.seek(to, signal)
+      if (this.#seekFeed !== null) this.#seekFeed.offset = startOffset
       // A wanted seek on a link that does not keep up holds here, at the seek, with the sink empty: nothing plays from the first fragments before its goal (§10.4). The rule reads the offset the feed starts at, since the positions still hold the old runs.
-      if (request.seek) this.#holding.seekStarted(request.playing, to, startOffset)
+      if (request.seek) this.#holding.seekStarted(playingNow(), to, startOffset)
       await this.#feedCovering(to, () => this.#requested())
       if (this.#requested()) return
       this.#signal.throwIfAborted()
       this.#applyCommonStart(to)
       this.#givePosition()
-      if (request.seek) this.#holding.begin('seek', request.playing)
+      this.#seekFeed = null
+      if (request.seek) this.#holding.begin('seek', playingNow())
       // A new Media Source pauses the element: the engine gives back what it took, unless an autoplay now says the viewer does not want it played.
       if (
         reopen &&
-        request.playing &&
+        playingNow() &&
         (this.#options.autoplay?.() ?? true) &&
         !this.#holding.holding &&
         isPaused(video)
@@ -1087,6 +1106,7 @@ class Play {
       throw error
     } finally {
       this.#serving = null
+      this.#seekFeed = null
       const newer = this.#waiting()
       if (!completed && newer !== null) this.#request = mergeRequests(request, newer)
     }

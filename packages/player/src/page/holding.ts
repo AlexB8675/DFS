@@ -9,7 +9,9 @@
 // calls `play()`. Only a play that has an `autoplay` is held or played by the engine at all; with
 // none, the element is the viewer's. Only a wanted play is held: a seek made while paused never holds or plays.
 // Nothing here feeds. The play asks it to check on its tick, and while a hold is on a timer of its own checks too
-// (`HOLD_CHECK_MS`), when the engine says it can (`canCheck`: not busy, not stopped, not failed); `dispose` stops it.
+// (`HOLD_CHECK_MS`): when the engine says it can (`canCheck`: not busy, not stopped, not failed), and also when the
+// viewer's "no" is in (`autoplay()` false) while the play is alive, even busy: the hold then leaves at once with no
+// play, so a pause is not counted as waiting. `dispose` stops it.
 
 import type { TimelineEventInput } from '@dfs/shared'
 import type { Downloader } from '../downloader.ts'
@@ -33,6 +35,8 @@ export interface HoldWorld {
   windowLimitBytes: () => number
   /** Whether the engine can be checked for a release now: it is not busy with a request, and the play is neither stopped nor failed. The hold's own timer asks it. */
   canCheck: () => boolean
+  /** Whether the play is alive: neither stopped nor failed. The timer does nothing once it is not, and lets a hold go on the viewer's "no" while alive even when the engine is busy. */
+  alive: () => boolean
   say: (event: TimelineEventInput) => void
   /** The numbers the hold keeps: whether it holds, how many holds ended, and for how long. */
   stats: { holding: boolean; holds: number; holdMs: number }
@@ -90,9 +94,9 @@ export class Holding {
     return this.#holding
   }
 
-  /** True while a hold for a wanted play is on: a play that is not wanted is never held. */
+  /** True while a hold for a wanted play is on: a play that is not wanted is never held, and one whose `autoplay()` now says no is not wanted. */
   get wantsPlay(): boolean {
-    return this.#holding
+    return this.#holding && this.#world.autoplay?.() !== false
   }
 
   /**
@@ -188,8 +192,11 @@ export class Holding {
     if (offset === null) return
     const decision = this.#decide('seek', { at: to, offset })
     if (decision === null || !(decision.goalSeconds > 0)) return
-    if (this.#holding) this.#reason = 'seek'
-    else this.#enter('seek')
+    if (this.#holding) {
+      this.#reason = 'seek'
+      // A play from outside (Picture-in-Picture's button) during the hold: the hold pauses it back, as its own pause.
+      this.#pauseForHold()
+    } else this.#enter('seek')
   }
 
   /** The element stalled (`waiting`) while playing: a wanted play, so it holds, and pauses, when the rule says to wait. */
@@ -226,8 +233,13 @@ export class Holding {
     if (this.#holding) this.#leave()
   }
 
-  /** The element's `play` event: the viewer's play during a hold ends it (the engine's own play comes after the hold is left). */
+  /**
+   * The element's `play` event: the viewer's play during a hold ends it (the engine's own play comes after the hold is
+   * left). An event for an element that is paused at dispatch is stale (the play was undone, by the hold's own pause or
+   * the viewer's): it ends nothing.
+   */
   played(): void {
+    if (this.#world.video.paused) return
     if (this.#holding) this.#leave()
   }
 
@@ -245,17 +257,24 @@ export class Holding {
     const world = this.#world
     this.#holding = true
     this.#timer ??= setInterval(() => {
-      if (this.#world.canCheck()) this.check()
+      if (!this.#world.alive()) return
+      // The viewer's "no" is checked even while busy: `check()` leaves with no play then, and decides nothing.
+      if (this.#world.canCheck() || this.#world.autoplay?.() === false) this.check()
     }, HOLD_CHECK_MS)
     this.#reason = reason
     this.#since = world.now()
     world.stats.holding = true
-    if (!world.video.paused) {
-      this.#pausedByHold = true
-      world.video.pause()
-    }
+    this.#pauseForHold()
     this.#report(true)
     world.changed()
+  }
+
+  /** Pauses a playing element as the hold's own pause: its `pause` event is the hold's, not the viewer's. */
+  #pauseForHold(): void {
+    const { video } = this.#world
+    if (video.paused) return
+    this.#pausedByHold = true
+    video.pause()
   }
 
   #leave(): void {

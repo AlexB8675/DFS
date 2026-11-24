@@ -793,3 +793,152 @@ suite(NAME)('playStreamed: the watchdog', () => {
     expect(play.stats.at(-1)?.reopens).toBe(3)
   }, 120_000)
 })
+
+// §10.4: the viewer's play or pause while a seek outside the window is served. The page sets what `autoplay()` says, then
+// pauses or plays the element, as the test does here. A pause ends a hold at once; a play during the seek's feed is that
+// seek's play and waits for its goal, so nothing bursts and then freezes.
+suite(NAME)("playStreamed: a viewer's play or pause while a seek is served", () => {
+  /** One frame of the synthetic picture, with room: the clock may move this far past the target before a hold lets go. */
+  const FRAME_SECONDS = 0.05
+
+  async function slowPlay(
+    factor: number,
+    wanted: { value: boolean },
+  ): Promise<{ play: Play; bitrate: number; duration: number; size: number }> {
+    const pick = await pickOf(files().find((file) => file.name.endsWith(NAME)))
+    if (typeof pick === 'string') throw new Error(pick)
+    const bitrate = pick.file.size / pick.duration
+    await control({ bandwidthBytesPerSecond: Math.ceil(factor * bitrate) })
+    const play = begin(NAME, { windowBytes: 2 * 1024 * 1024, autoplay: () => wanted.value })
+    return { play, bitrate, duration: pick.duration, size: pick.file.size }
+  }
+
+  /** The highest the clock goes past `target` while no hold has let go since `mark`; read when asked. */
+  function watchBurst(play: Play, target: number, mark: () => number): () => number {
+    let burst = 0
+    const timer = setInterval(() => {
+      const ended = ofType(play.events.slice(mark()), 'hold').some((event) => !event.on)
+      if (!ended) burst = Math.max(burst, play.video.currentTime - target)
+    }, 10)
+    afterEachStop.push(() => {
+      clearInterval(timer)
+    })
+    return () => burst
+  }
+  const afterEachStop: (() => void)[] = []
+  afterEach(() => {
+    for (const stop of afterEachStop.splice(0)) stop()
+  })
+
+  test('a paused seek outside the window on a slow link, then a Play during the serve: a seek hold, no burst, then it plays', async () => {
+    const wanted = { value: false }
+    const { play, duration } = await slowPlay(0.4, wanted)
+    await firstPicture(play)
+    expect(play.video.paused).toBe(true)
+    const target = Math.floor(duration * 0.7)
+    const seeks = ofType(play.events, 'seek').length
+    play.video.currentTime = target
+    await until(play, "the seek's event", 20_000, () => ofType(play.events, 'seek').length > seeks)
+    // The viewer presses Play while the serve runs, before the seek's picture.
+    expect(shown(play).some((seek) => Math.abs(seek.to - target) < 0.1)).toBe(false)
+    const mark = play.events.length
+    const burst = watchBurst(play, target, () => mark)
+    wanted.value = true
+    void play.video.play().catch(() => undefined)
+    // Either a hold lets go, or (as an unheld play does) the clock plays on.
+    await until(
+      play,
+      'a hold to let go or the clock to play on',
+      60_000,
+      () =>
+        ofType(play.events.slice(mark), 'hold').some((event) => !event.on) ||
+        (play.video.currentTime > target + 0.5 && !play.video.paused),
+    )
+    // The clock first: from the Play until the hold let go it never moved more than a frame past the target.
+    expect(burst()).toBeLessThan(FRAME_SECONDS)
+    expect(ofType(play.events.slice(mark), 'hold')[0]).toMatchObject({ on: true, reason: 'seek' })
+    await until(
+      play,
+      'the clock to play on',
+      30_000,
+      () => play.video.currentTime > target + 0.5 && !play.video.paused,
+    )
+    expect(ofType(play.events, 'error')).toEqual([])
+  })
+
+  test('a playing slow seek outside the window: a pause during the pre-hold lets it go at once, a Play again holds again, no burst', async () => {
+    const wanted = { value: true }
+    const { play, duration } = await slowPlay(0.4, wanted)
+    await until(play, 'the clock past 1 s', 60_000, () => play.video.currentTime > 1)
+    const target = Math.floor(duration * 0.7)
+    const mark = play.events.length
+    play.video.currentTime = target
+    await until(play, "the seek's pre-hold", 30_000, () =>
+      ofType(play.events.slice(mark), 'hold').some((event) => event.on && event.reason === 'seek'),
+    )
+    const burst = watchBurst(play, target, () => mark)
+    // The viewer pauses: the page sets autoplay() to no, then pauses (a no-op on an element the hold paused).
+    wanted.value = false
+    const pausedAt = performance.now()
+    play.video.pause()
+    await until(play, 'the pre-hold to let go', 2_000, () =>
+      ofType(play.events.slice(mark), 'hold').some((event) => !event.on),
+    )
+    const letGo = play.stamped.find(
+      (entry, i) => i >= mark && entry.event.type === 'hold' && !entry.event.on,
+    )
+    expect((letGo?.at ?? 0) + play.startedAt - pausedAt).toBeLessThan(150)
+    expect(play.video.paused).toBe(true)
+    // Still serving: the viewer plays again, which is the seek's play and holds again.
+    const second = ofType(play.events.slice(mark), 'hold').length
+    wanted.value = true
+    void play.video.play().catch(() => undefined)
+    await until(
+      play,
+      'a seek hold again',
+      10_000,
+      () => ofType(play.events.slice(mark), 'hold').length > second,
+    )
+    expect(ofType(play.events.slice(mark), 'hold')[second]).toMatchObject({
+      on: true,
+      reason: 'seek',
+    })
+    await until(play, 'the second hold to let go', 60_000, () =>
+      ofType(play.events.slice(mark), 'hold').some((event, i) => i > second && !event.on),
+    )
+    expect(burst()).toBeLessThan(FRAME_SECONDS)
+    await until(
+      play,
+      'the clock to play on',
+      30_000,
+      () => play.video.currentTime > target + 0.5 && !play.video.paused,
+    )
+    expect(ofType(play.events, 'error')).toEqual([])
+  })
+
+  test('a paused seek outside the window on a link that keeps up, then a Play during the serve: no seek hold and no engine pause', async () => {
+    const wanted = { value: false }
+    const { play, size, duration } = await slowPlay(1.4, wanted)
+    await firstPicture(play)
+    expect(play.stats.at(-1)?.storedBytes ?? 0).toBeLessThan(size)
+    const target = Math.floor(duration * 0.7)
+    const seeks = ofType(play.events, 'seek').length
+    play.video.currentTime = target
+    await until(play, "the seek's event", 20_000, () => ofType(play.events, 'seek').length > seeks)
+    const mark = play.events.length
+    const pauses: number[] = []
+    play.video.addEventListener('pause', () => pauses.push(performance.now()))
+    wanted.value = true
+    void play.video.play().catch(() => undefined)
+    await until(
+      play,
+      'the clock to play on',
+      40_000,
+      () => play.video.currentTime > target + 0.5 && !play.video.paused,
+    )
+    expect(
+      ofType(play.events.slice(mark), 'hold').filter((event) => event.reason === 'seek'),
+    ).toEqual([])
+    expect(pauses).toEqual([])
+  })
+})
