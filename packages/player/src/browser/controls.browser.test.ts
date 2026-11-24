@@ -5,6 +5,7 @@
 // engine.browser.test.ts. A file that is not served (no `corpus:make`) skips its tests, with the reason.
 
 import { afterEach, describe, expect, test, vi } from 'vitest'
+import { Downloader } from '../downloader.ts'
 import { Feeder } from '../engine/feeder.ts'
 import { MediaSourceSink } from '../page/index.ts'
 import { Seeks } from '../page/seeks.ts'
@@ -908,12 +909,15 @@ suite(NAME)("playStreamed: a viewer's play or pause while a seek is served", () 
   test('a paused seek outside the window on a link that keeps up, then a Play during the serve: no seek hold and no engine pause', async () => {
     const wanted = { value: false }
     const { play, size, duration } = await slowPlay(1.4, wanted)
+    const state = trackStates()
     await firstPicture(play)
     expect(play.stats.at(-1)?.storedBytes ?? 0).toBeLessThan(size)
     const target = Math.floor(duration * 0.7)
     const seeks = ofType(play.events, 'seek').length
     play.video.currentTime = target
     await until(play, "the seek's event", 20_000, () => ofType(play.events, 'seek').length > seeks)
+    // A full or finished download gives no rate (the goal would be 2 s, or nothing to wait for): the case needs it reading at the seek.
+    expect(state()).toBe('reading')
     // The Play comes during the serve, before the seek's picture.
     expect(shown(play).some((seek) => Math.abs(seek.to - target) < 0.1)).toBe(false)
     const mark = play.events.length
@@ -955,6 +959,147 @@ suite(NAME)("playStreamed: a viewer's play or pause while a seek is served", () 
     expect(plays).toBe(0)
     expect(play.video.paused).toBe(true)
     expect(play.video.currentTime).toBeLessThan(target + FRAME_SECONDS)
+  })
+
+  /** The downloader's states as the hold read them: the latest, so a test can say the store was not full at a seek (a full store gives no rate, so the goal would be 2 s and a fast link would hold). */
+  function trackStates(): () => string | undefined {
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- called on the Downloader it was taken from, below.
+    const { state: realState } = Downloader.prototype
+    let latest: string | undefined
+    vi.spyOn(Downloader.prototype, 'state').mockImplementation(function (this: Downloader) {
+      latest = realState.call(this)
+      return latest as ReturnType<Downloader['state']>
+    })
+    return () => latest
+  }
+
+  // Task 5 (final review I-1): the Play comes after the seek was decided, when nothing is served and nothing is held. An in-window seek is used, as in the first test of this file: the link is throttled hard so the store holds under the goal ahead of the target, and the element has 0.4 s past it. (A seek outside the window of this file is never short of the goal at its serve's end: one read of 1 MiB holds more than 2 s of it.)
+  test('a paused seek inside the window on a slow link, then a Play: a seek hold, no burst, then it plays', async () => {
+    const wanted = { value: false }
+    const { play, bitrate, size } = await slowPlay(0.6, wanted)
+    await firstPicture(play)
+    expect(play.video.paused).toBe(true)
+    const edge = (): number => bufferedEnd(play.video) - 0.4
+    await until(
+      play,
+      'data ahead of the paused clock',
+      40_000,
+      () => edge() > play.video.currentTime + 0.3,
+    )
+    await control({ bandwidthBytesPerSecond: 10_000 })
+    expect(edge()).toBeLessThan((size - TAIL_BYTES) / bitrate - 1)
+    const target = edge()
+    const seeks = shown(play).length
+    play.video.currentTime = target
+    await until(play, "the seek's picture", 20_000, () => shown(play).length > seeks)
+    expect(shown(play).at(-1)).toMatchObject({ inWindow: true })
+    await pause(300)
+    expect(play.video.paused).toBe(true)
+    const mark = play.events.length
+    const burst = watchBurst(play, target, () => mark)
+    wanted.value = true
+    void play.video.play().catch(() => undefined)
+    await until(
+      play,
+      'a hold, or the clock to play on',
+      10_000,
+      () =>
+        ofType(play.events.slice(mark), 'hold').length > 0 || play.video.currentTime > target + 0.2,
+    )
+    expect(ofType(play.events.slice(mark), 'hold')[0]).toMatchObject({ on: true, reason: 'seek' })
+    await control({ bandwidthBytesPerSecond: Math.ceil(0.6 * bitrate) })
+    await until(play, 'the hold to let go', 60_000, () =>
+      ofType(play.events.slice(mark), 'hold').some((event) => !event.on),
+    )
+    expect(burst()).toBeLessThan(FRAME_SECONDS)
+    await until(
+      play,
+      'the clock to play on',
+      30_000,
+      () => play.video.currentTime > target + 0.5 && !play.video.paused,
+    )
+    expect(ofType(play.events, 'error')).toEqual([])
+  })
+
+  test('a paused seek outside the window on a link that keeps up, its picture shown, then a Play: no hold and no engine pause', async () => {
+    const wanted = { value: false }
+    const { play, size, duration } = await slowPlay(1.2, wanted)
+    const state = trackStates()
+    await firstPicture(play)
+    expect(play.stats.at(-1)?.storedBytes ?? 0).toBeLessThan(size)
+    const target = Math.floor(duration * 0.6)
+    play.video.currentTime = target
+    await until(play, "the seek's picture", 40_000, () =>
+      shown(play).some((seek) => Math.abs(seek.to - target) < 0.1),
+    )
+    await pause(100)
+    // The rate is known only while the downloader reads: a full or finished download would make the goal 2 s or nothing to wait for.
+    expect(state()).toBe('reading')
+    const mark = play.events.length
+    const pauses: number[] = []
+    play.video.addEventListener('pause', () => pauses.push(performance.now()))
+    wanted.value = true
+    void play.video.play().catch(() => undefined)
+    await until(
+      play,
+      'the clock to play on',
+      40_000,
+      () => play.video.currentTime > target + 0.5 && !play.video.paused,
+    )
+    expect(ofType(play.events.slice(mark), 'hold')).toEqual([])
+    expect(pauses).toEqual([])
+  })
+
+  // An in-window seek's hold, after no serve: the viewer's pause ends it, and a Play at the same place waits for the goal again, with no burst of the 0.4 s the element holds past the target.
+  test("a playing slow in-window seek's hold: the viewer pauses, then plays: a seek hold again, no burst", async () => {
+    const wanted = { value: true }
+    const { play, bitrate, size } = await slowPlay(0.6, wanted)
+    const playingFree = (): boolean => !play.video.paused && play.stats.at(-1)?.holding === false
+    const edge = (): number => bufferedEnd(play.video) - 0.4
+    await until(
+      play,
+      'a free play with data ahead',
+      40_000,
+      () => play.video.currentTime > 1 && playingFree() && edge() > play.video.currentTime + 0.3,
+    )
+    await control({ bandwidthBytesPerSecond: 10_000 })
+    expect(playingFree()).toBe(true)
+    expect(edge()).toBeLessThan((size - TAIL_BYTES) / bitrate - 1)
+    const target = edge()
+    const mark = play.events.length
+    play.video.currentTime = target
+    await until(play, "the seek's hold", 20_000, () =>
+      ofType(play.events.slice(mark), 'hold').some((event) => event.on),
+    )
+    // The viewer pauses (a no-op on the held element: `autoplay()` tells), and the hold lets go.
+    wanted.value = false
+    play.video.pause()
+    await until(play, 'the hold to let go', 2_000, () =>
+      ofType(play.events.slice(mark), 'hold').some((event) => !event.on),
+    )
+    const second = ofType(play.events.slice(mark), 'hold').length
+    const againMark = play.events.length
+    const burst = watchBurst(play, target, () => againMark)
+    wanted.value = true
+    void play.video.play().catch(() => undefined)
+    await until(
+      play,
+      'a hold again, or the clock to play on',
+      10_000,
+      () =>
+        ofType(play.events.slice(mark), 'hold').length > second ||
+        play.video.currentTime > target + 0.2,
+    )
+    expect(ofType(play.events.slice(mark), 'hold')[second]).toMatchObject({
+      on: true,
+      reason: 'seek',
+    })
+    await control({ bandwidthBytesPerSecond: Math.ceil(0.6 * bitrate) })
+    await until(play, 'the second hold to let go', 60_000, () =>
+      ofType(play.events.slice(againMark), 'hold').some((event) => !event.on),
+    )
+    expect(burst()).toBeLessThan(FRAME_SECONDS)
+    expect(ofType(play.events, 'error')).toEqual([])
   })
 
   // G2: a reopen's own pause is not the viewer's. After the feed has ended a seek outside the window reopens Media Source, which pauses the element; a second seek during that serve must still be a playing seek.

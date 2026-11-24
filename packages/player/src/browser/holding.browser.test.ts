@@ -498,6 +498,147 @@ describe('Holding', () => {
   })
 
   // I1: a wanted seek outside the window holds at the seek on a slow link, before anything plays. The seek's target is 4 s, its feed starts at the offset 4 MB (1 MB a second).
+  // Task 5: a viewer's "no" leaves a standing goal, and a Play at the same place waits for it (final review I-1).
+  describe('the standing goal', () => {
+    /** A viewer's play: the element plays, then its event. */
+    function viewerPlays(play: Setup): void {
+      play.video.paused = false
+      play.holding.played()
+    }
+
+    test('a hold left by autoplay() turning to no: a Play at the same place on a slow link holds again, the element paused back', () => {
+      const play = setup({ at: 4 })
+      play.holding.begin('seek', true)
+      expect(holds(play.events)[0]).toMatchObject({ on: true, reason: 'seek' })
+      play.want.autoplay = false
+      play.holding.check()
+      expect(play.holding.holding).toBe(false)
+      play.want.autoplay = true
+      viewerPlays(play)
+      expect(play.holding.holding).toBe(true)
+      expect(holds(play.events).map((event) => event.on)).toEqual([true, false, true])
+      expect(holds(play.events)[2]).toMatchObject({ on: true, reason: 'seek' })
+      expect(play.video.paused).toBe(true)
+      expect(play.calls).toEqual(['pause'])
+      // The pause event of that pause is the hold's own.
+      play.holding.paused()
+      expect(play.holding.holding).toBe(true)
+    })
+
+    test("a hold the viewer's pause ended (a pause event that is not the hold's): a Play at the same place holds again", () => {
+      const play = setup({ at: 4 })
+      play.holding.begin('seek', true)
+      expect(play.holding.holding).toBe(true)
+      // The element was paused already, so the hold made no pause: this event is the viewer's.
+      play.holding.paused()
+      expect(play.holding.holding).toBe(false)
+      viewerPlays(play)
+      expect(play.holding.holding).toBe(true)
+      expect(holds(play.events).map((event) => event.on)).toEqual([true, false, true])
+      expect(holds(play.events).at(-1)).toMatchObject({ on: true, reason: 'seek' })
+      expect(play.video.paused).toBe(true)
+    })
+
+    test('on a link that keeps up, or with the goal already stored, a Play at the place is not held', () => {
+      const fast = setup({ at: 4, offset: 4_000_000 })
+      fast.holding.begin('seek', false)
+      fast.link.rate = 5_000_000
+      // Something is stored ahead (a fast link is never held with data at the target).
+      fast.held.add({ start: 4_000_000, end: 4_500_000 })
+      viewerPlays(fast)
+      expect(fast.holding.holding).toBe(false)
+      expect(fast.calls).toEqual([])
+
+      const stored = setup({ at: 4, offset: 4_000_000 })
+      stored.holding.begin('seek', false)
+      stored.held.add({ start: 4_000_000, end: 10_000_000 })
+      viewerPlays(stored)
+      expect(stored.holding.holding).toBe(false)
+      expect(holds(stored.events)).toEqual([])
+    })
+
+    test('a seek of the viewer (moved) ends the goal; the engine own seek keeps it', () => {
+      const own = setup({ at: 4 })
+      own.holding.begin('seek', false)
+      own.holding.moved(true)
+      viewerPlays(own)
+      expect(holds(own.events)[0]).toMatchObject({ on: true, reason: 'seek' })
+
+      const viewer = setup({ at: 4 })
+      viewer.holding.begin('seek', false)
+      viewer.holding.moved()
+      viewerPlays(viewer)
+      expect(holds(viewer.events)).toEqual([])
+    })
+
+    test('a clock moved past the place ends the goal', () => {
+      const play = setup({ at: 4 })
+      play.holding.begin('seek', false)
+      play.video.currentTime = 4.5
+      viewerPlays(play)
+      expect(holds(play.events)).toEqual([])
+    })
+
+    test('a seek not wanted, then a Play at the place on a slow link: a seek hold; the goal is used once', () => {
+      const play = setup({ at: 4 })
+      play.holding.begin('seek', false)
+      expect(holds(play.events)).toEqual([])
+      viewerPlays(play)
+      expect(holds(play.events)[0]).toMatchObject({ on: true, reason: 'seek' })
+      // Used up: the viewer's next play (the hold ended by it) is not re-held.
+      viewerPlays(play)
+      expect(play.holding.holding).toBe(false)
+      viewerPlays(play)
+      expect(holds(play.events).map((event) => event.on)).toEqual([true, false])
+    })
+
+    test('a start that is not wanted leaves a start goal', () => {
+      const play = setup({ autoplay: false })
+      play.holding.begin('start')
+      play.want.autoplay = true
+      viewerPlays(play)
+      expect(holds(play.events)[0]).toMatchObject({ on: true, reason: 'start' })
+    })
+
+    test('a goal is not asked while the engine cannot check (a serve runs), and is used up', () => {
+      const play = setup({ at: 4 })
+      play.holding.begin('seek', false)
+      play.engine.canCheck = false
+      viewerPlays(play)
+      expect(holds(play.events)).toEqual([])
+      play.engine.canCheck = true
+      play.video.paused = true
+      viewerPlays(play)
+      expect(holds(play.events)).toEqual([])
+    })
+
+    test('a Play while autoplay() says no, or after dropGoal(), is not held', () => {
+      const no = setup({ at: 4 })
+      no.holding.begin('seek', false)
+      no.want.autoplay = false
+      viewerPlays(no)
+      expect(holds(no.events)).toEqual([])
+
+      const dropped = setup({ at: 4 })
+      dropped.holding.begin('seek', false)
+      dropped.holding.dropGoal()
+      viewerPlays(dropped)
+      expect(holds(dropped.events)).toEqual([])
+    })
+
+    test("the engine's own play never uses the goal", () => {
+      const play = setup({ at: 4 })
+      play.holding.begin('seek', false)
+      // A wanted begin on a download that is done plays by itself: its play event finds no goal left.
+      play.link.state = 'done'
+      play.holding.begin('seek', true)
+      expect(play.calls).toEqual(['play'])
+      play.link.state = 'reading'
+      play.holding.played()
+      expect(holds(play.events)).toEqual([])
+    })
+  })
+
   describe('seekStarted', () => {
     const TO = 4
     const AT = 4_000_000

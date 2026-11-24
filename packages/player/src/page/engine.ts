@@ -703,8 +703,10 @@ class Play {
     const at = video.currentTime
     const own = this.#ownSeek
     this.#ownSeek = null
-    this.#holding.moved()
-    if (own !== null && Math.abs(own - at) < 1e-3) {
+    const ownSeek = own !== null && Math.abs(own - at) < 1e-3
+    // Only a viewer's seek ends a standing goal: the engine's own (a start, a reopen's deferred seek) follows the decision that set it.
+    this.#holding.moved(ownSeek)
+    if (ownSeek) {
       this.#wake()
       return
     }
@@ -1103,6 +1105,8 @@ class Play {
         !this.#holding.holding &&
         isPaused(video)
       ) {
+        // The engine's own play never re-holds on a standing goal.
+        this.#holding.dropGoal()
         video.play().catch(() => undefined)
       }
       this.#pausedByReopen = false
