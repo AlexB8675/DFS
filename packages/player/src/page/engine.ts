@@ -205,9 +205,9 @@ class Play {
   #request: Request | null = null
   /** The request the pump is serving: merged back into the next when a newer one aborts it. */
   #serving: Request | null = null
-  /** A viewer's seek in its serve's feed phase, from the serve's start to its end-of-serve rule: its target, and its start offset once `feeder.seek` has answered (a number, or null when there is no next read). */
   /** True from a reopen that paused the element (while the viewer wanted a play) until a serve completes or the element plays: the pause is the reopen's, not the viewer's "no" (which comes through `autoplay()`). */
   #pausedByReopen = false
+  /** A viewer's seek in its serve's feed phase, from the serve's start to its end-of-serve rule: its target, and its start offset once `feeder.seek` has answered (a number, or null when there is no next read). */
   #seekFeed: { to: number; offset: number | null | undefined } | null = null
   /** True while the pump awaits `feeder.feed`: a feed that waits for bytes. */
   #feeding = false
@@ -1087,6 +1087,8 @@ class Play {
       // A clock that is not at the target yet (a seek the sink deferred) leaves the playhead at the target for the feed.
       if (Math.abs(video.currentTime - to) > 1e-6) this.#pendingStart = to
       const startOffset = await feeder.seek(to, signal)
+      // A newer request supersedes this one: no hold on a stale target.
+      if (this.#requested()) return
       if (this.#seekFeed !== null) this.#seekFeed.offset = startOffset
       // A wanted seek on a link that does not keep up holds here, at the seek, with the sink empty: nothing plays from the first fragments before its goal (§10.4). The rule reads the offset the feed starts at, since the positions still hold the old runs.
       if (request.seek) this.#holding.seekStarted(playingNow(), to, startOffset)
@@ -1099,7 +1101,7 @@ class Play {
       if (request.seek) this.#holding.begin('seek', playingNow())
       // A new Media Source pauses the element: the engine gives back what it took, unless an autoplay now says the viewer does not want it played.
       if (
-        reopen &&
+        (reopen || this.#pausedByReopen) &&
         playingNow() &&
         (this.#options.autoplay?.() ?? true) &&
         !this.#holding.holding &&
@@ -1120,6 +1122,8 @@ class Play {
       this.#seekFeed = null
       const newer = this.#waiting()
       if (!completed && newer !== null) this.#request = mergeRequests(request, newer)
+      // A serve that exits with nothing queued must not leave the reopen's pause behind as the viewer's wanted play.
+      if (newer === null) this.#pausedByReopen = false
     }
   }
 

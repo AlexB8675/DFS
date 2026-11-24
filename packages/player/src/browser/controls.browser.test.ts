@@ -1141,6 +1141,40 @@ suite(NAME)("playStreamed: a viewer's play or pause while a seek is served", () 
       expect(ofType(play.events, 'error')).toEqual([])
     })
 
+    // With no `autoplay` the reopen's resume reads only the element: a second serve that is not a reopen itself must still resume what the first one's reopen paused.
+    test("with no autoplay, two quick seeks after the end, the second during the first's reopen serve: it plays at the end", async () => {
+      const watch = { on: false }
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- called on the feeder it was taken from, below.
+      const { seek: realSeek } = Feeder.prototype
+      vi.spyOn(Feeder.prototype, 'seek').mockImplementation(async function (
+        this: Feeder,
+        ...args: Parameters<Feeder['seek']>
+      ) {
+        const at = await realSeek.apply(this, args)
+        if (watch.on) await pause(1_500)
+        return at
+      })
+      const play = begin(NAME, { windowBytes: 2 * 1024 * 1024 })
+      play.video.playbackRate = 4
+      await play.video.play()
+      await until(play, 'the feed to end', 60_000, () =>
+        ofType(play.events, 'phase').some((event) => event.phase === 'ended'),
+      )
+      expect(play.video.paused).toBe(false)
+      watch.on = true
+      play.video.currentTime = 1
+      await until(play, "the reopen's pause", 20_000, () => play.video.paused)
+      watch.on = false
+      play.video.currentTime = 2
+      await until(
+        play,
+        'the clock to play on',
+        40_000,
+        () => play.video.currentTime > 2.5 && !play.video.paused,
+      )
+      expect(ofType(play.events, 'error')).toEqual([])
+    })
+
     test("a direct pause made before the reopen: the serve's end does not play it", async () => {
       const play = await endedPlay()
       // eslint-disable-next-line @typescript-eslint/unbound-method -- called on the Seeks it was taken from, below.

@@ -1,6 +1,8 @@
 // What the pump is asked to do (DESIGN.md §10.4): a refeed, a seek outside the window, or a reopen of Media
-// Source. Requests are merged and never dropped: a seek's target and its play intent outlive a refeed or a
-// reopen that comes while it waits or is served. It uses no DOM type and no timer.
+// Source. Requests are merged and never dropped: a seek's target outlives a refeed or a reopen that comes while
+// it waits or is served. The play intent they carry is informational: the serve reads the live intent at each
+// decision (the element playing now, a hold for a wanted play, the reopen's own pause), not the request's. It uses
+// no DOM type and no timer.
 
 export interface Request {
   kind: 'refeed' | 'seek' | 'reopen'
@@ -10,7 +12,7 @@ export interface Request {
   told: boolean
   /** True when a viewer's seek is in it: the serve ends with the hold for a seek. */
   seek: boolean
-  /** The play intent: the element was playing, or a hold for a wanted play was on. */
+  /** The play intent when the request was posted: the element was playing, or a hold for a wanted play was on. Informational (written by `#onSeeking` and `#own`, merged): the serve does not read it. */
   playing: boolean
 }
 
