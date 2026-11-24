@@ -1079,7 +1079,10 @@ class Play {
         this.#ownSeek = to
         // What the viewer wants now, kept across the pause that the new Media Source gives the element.
         this.#pausedByReopen = !isPaused(video) || this.#holding.wantsPlay || this.#pausedByReopen
-        await sink.reopen(to, signal)
+        const reopened = sink.reopen(to, signal)
+        // The load has run, synchronously inside the call: it cancelled every queued media event, the hold's pause among them.
+        this.#holding.mediaLoaded()
+        await reopened
       } else {
         await this.#clearSink()
       }
@@ -1107,9 +1110,8 @@ class Play {
         !this.#holding.holding &&
         isPaused(video)
       ) {
-        // The engine's own play never re-holds on a standing goal.
-        this.#holding.dropGoal()
-        video.play().catch(() => undefined)
+        // A standing goal still set is a viewer's Play whose event the reopen's load cancelled: it holds by the rule instead of playing unheld.
+        if (!this.#holding.resumeHolds()) video.play().catch(() => undefined)
       }
       this.#pausedByReopen = false
       completed = true

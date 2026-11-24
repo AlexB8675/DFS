@@ -571,12 +571,46 @@ describe('Holding', () => {
       expect(holds(viewer.events)).toEqual([])
     })
 
-    test('a clock moved past the place ends the goal', () => {
+    test('an engine own seek that moves the clock far keeps the goal, and a Play holds at the playhead it finds', () => {
       const play = setup({ at: 4 })
       play.holding.begin('seek', false)
-      play.video.currentTime = 4.5
+      play.video.currentTime = 5
+      play.holding.moved(true)
       viewerPlays(play)
-      expect(holds(play.events)).toEqual([])
+      expect(holds(play.events)[0]).toMatchObject({ on: true, reason: 'seek' })
+    })
+
+    test('resumeHolds(): with a goal on a slow link it holds with no pause made; on a link that keeps up it plays on and the goal is gone; with no goal it does nothing', () => {
+      const slow = setup({ at: 4 })
+      slow.holding.begin('seek', false)
+      expect(slow.holding.resumeHolds()).toBe(true)
+      expect(holds(slow.events)[0]).toMatchObject({ on: true, reason: 'seek' })
+      expect(slow.calls).toEqual([])
+
+      const fast = setup({ at: 4, offset: 4_000_000 })
+      fast.holding.begin('seek', false)
+      fast.link.rate = 5_000_000
+      fast.held.add({ start: 4_000_000, end: 4_500_000 })
+      expect(fast.holding.resumeHolds()).toBe(false)
+      expect(holds(fast.events)).toEqual([])
+      fast.video.paused = false
+      fast.holding.played()
+      expect(holds(fast.events)).toEqual([])
+
+      const none = setup({ at: 4 })
+      expect(none.holding.resumeHolds()).toBe(false)
+      expect(holds(none.events)).toEqual([])
+    })
+
+    test("mediaLoaded() forgets the hold's queued pause: a viewer's pause after it ends the hold", () => {
+      const play = setup({ at: 4 })
+      play.video.paused = false
+      play.holding.seekStarted(true, 4, 4_000_000)
+      expect(play.calls).toEqual(['pause'])
+      // A media load cancelled the pause event: none is delivered.
+      play.holding.mediaLoaded()
+      play.holding.paused()
+      expect(play.holding.holding).toBe(false)
     })
 
     test('a seek not wanted, then a Play at the place on a slow link: a seek hold; the goal is used once', () => {
