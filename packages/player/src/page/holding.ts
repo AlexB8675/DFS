@@ -278,9 +278,9 @@ export class Holding {
   /**
    * The element's `play` event: the viewer's play during a hold ends it (the engine's own play comes after the hold is
    * left). An event for an element that is paused at dispatch is stale (the play was undone, by the hold's own pause or
-   * the viewer's): it ends nothing. With no hold on, a standing goal at this place is asked of the rule again, when the
-   * engine can check (not busy: a serve decides for itself, and `#decide` reads stale numbers then): on a link that does
-   * not keep up the play is held, the element paused back as the hold's own pause. The goal is used up either way.
+   * the viewer's): it ends nothing. With no hold on, a standing goal at this place is used up and asked of the rule again:
+   * on a link that does not keep up the play is held, the element paused back as the hold's own pause. While the engine
+   * cannot check (a serve runs) it holds at once and the timer's check decides later.
    */
   played(): void {
     const { video } = this.#world
@@ -289,30 +289,17 @@ export class Holding {
       this.#leave()
       return
     }
-    // Used up only when it is evaluated: while the engine is busy a serve decides (`served()` asks it at a non-seek serve's end).
-    if (this.#world.autoplay?.() !== true || !this.#world.canCheck()) return
-    this.#ask()
-  }
-
-  /**
-   * The end of a completed serve that is not a seek's (a refeed, a reopen: no `begin` follows). A viewer's Play that came
-   * during it, with a standing goal at this place, is asked of the rule now, as `played()` would have: the serve is still
-   * running, so `canCheck` is not read, and the numbers are fresh. An element that is paused keeps the goal.
-   */
-  served(): void {
-    if (this.#holding || this.#world.video.paused) return
-    if (this.#world.autoplay?.() !== true) return
-    this.#ask()
-  }
-
-  /** Uses the standing goal: asks the rule for its reason and holds on a wait, when the clock is still at its place. */
-  #ask(): void {
-    const { video } = this.#world
     const standing = this.#standing
     if (standing === null) return
+    // Used up at this play, whatever comes of it.
     this.#standing = null
+    // A play the intent does not back, one away from the goal's place, or one of a play that is over, is not the goal's.
+    if (this.#world.autoplay?.() !== true || !this.#world.alive()) return
     if (Math.abs(video.currentTime - standing.at) > STANDING_PLACE_SECONDS) return
-    if (this.#decide(standing.reason)?.hold === true) this.#enter(standing.reason)
+    // While the engine cannot check (a refeed or a reopen is served or queued: `#decide` would read stale numbers) the goal holds now, with no decision: the hold's timer decides once the engine can, and lets go at once on a link that keeps up. The hold's event then carries the last numbers measured.
+    if (!this.#world.canCheck() || this.#decide(standing.reason)?.hold === true) {
+      this.#enter(standing.reason)
+    }
   }
 
   /** Stops the check of a hold that is on: the play is over. */

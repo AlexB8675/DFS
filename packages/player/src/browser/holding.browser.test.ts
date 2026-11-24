@@ -600,41 +600,58 @@ describe('Holding', () => {
       expect(holds(play.events)[0]).toMatchObject({ on: true, reason: 'start' })
     })
 
-    test('a goal is not asked while the engine cannot check (a serve runs), and is kept: the serve end asks it', () => {
-      const play = setup({ at: 4 })
+    test('a Play while the engine cannot check holds at once with the goal reason; the check lets go when it can on a link that keeps up', () => {
+      const play = setup({ at: 4, offset: 4_000_000 })
       play.holding.begin('seek', false)
       play.engine.canCheck = false
       viewerPlays(play)
-      expect(holds(play.events)).toEqual([])
-      // The serve's end (a non-seek serve): the element plays at the place on a slow link, so the goal holds it.
-      play.holding.served()
       expect(holds(play.events)[0]).toMatchObject({ on: true, reason: 'seek' })
       expect(play.video.paused).toBe(true)
+      // The pause event of that pause is the hold's own.
+      play.holding.paused()
+      expect(play.holding.holding).toBe(true)
+      // The serve is over and the link keeps up (something stored ahead): the check lets go and plays.
+      play.engine.canCheck = true
+      play.link.rate = 5_000_000
+      play.held.add({ start: 4_000_000, end: 4_500_000 })
+      play.holding.check()
+      expect(play.holding.holding).toBe(false)
+      expect(holds(play.events).map((event) => event.on)).toEqual([true, false])
+      expect(play.calls).toEqual(['pause', 'play'])
     })
 
-    test('served() on a link that keeps up holds nothing; with the element paused it keeps the goal; past the place it holds nothing', () => {
-      const fast = setup({ at: 4, offset: 4_000_000 })
-      fast.holding.begin('seek', false)
-      fast.link.rate = 5_000_000
-      fast.held.add({ start: 4_000_000, end: 4_500_000 })
-      fast.video.paused = false
-      fast.holding.served()
-      expect(holds(fast.events)).toEqual([])
+    test('a hold taken while the engine cannot check stays on a slow link until the goal is stored', () => {
+      const play = setup({ at: 4, offset: 4_000_000 })
+      play.holding.begin('seek', false)
+      play.engine.canCheck = false
+      viewerPlays(play)
+      play.engine.canCheck = true
+      play.holding.check()
+      expect(play.holding.holding).toBe(true)
+      play.held.add({ start: 4_000_000, end: 7_000_000 })
+      play.holding.check()
+      expect(play.holding.holding).toBe(false)
+      expect(play.calls).toEqual(['pause', 'play'])
+    })
 
-      const paused = setup({ at: 4 })
-      paused.holding.begin('seek', false)
-      paused.holding.served()
-      expect(holds(paused.events)).toEqual([])
-      // Kept: a later Play at the place, the engine able to check, still holds.
-      viewerPlays(paused)
-      expect(holds(paused.events)[0]).toMatchObject({ on: true, reason: 'seek' })
+    test('a Play while autoplay() is not true uses the goal up: a later Play holds nothing; a play that is not alive holds nothing', () => {
+      const no = setup({ at: 4 })
+      no.holding.begin('seek', false)
+      no.engine.canCheck = false
+      no.want.autoplay = false
+      viewerPlays(no)
+      expect(holds(no.events)).toEqual([])
+      no.want.autoplay = true
+      no.video.paused = true
+      viewerPlays(no)
+      expect(holds(no.events)).toEqual([])
 
-      const moved = setup({ at: 4 })
-      moved.holding.begin('seek', false)
-      moved.video.paused = false
-      moved.video.currentTime = 4.5
-      moved.holding.served()
-      expect(holds(moved.events)).toEqual([])
+      const dead = setup({ at: 4 })
+      dead.holding.begin('seek', false)
+      dead.engine.canCheck = false
+      dead.engine.alive = false
+      viewerPlays(dead)
+      expect(holds(dead.events)).toEqual([])
     })
 
     test('a Play while autoplay() says no, or after dropGoal(), is not held', () => {

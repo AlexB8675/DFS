@@ -1099,8 +1099,6 @@ class Play {
       this.#givePosition()
       this.#seekFeed = null
       if (request.seek) this.#holding.begin('seek', playingNow())
-      // A Play the viewer made during a serve that is not a seek's waits for a standing goal too (the element plays at the place).
-      else this.#holding.served()
       // A new Media Source pauses the element: the engine gives back what it took, unless an autoplay now says the viewer does not want it played.
       if (
         (reopen || this.#pausedByReopen) &&
