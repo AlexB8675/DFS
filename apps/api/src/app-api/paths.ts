@@ -38,9 +38,15 @@ function checkSegment(segment: string): string {
   return segment
 }
 
+/** Most folders deep a path may go: each segment is a query under the drive's lock. */
+export const MAX_SEGMENTS = 128
+
 function splitChecked(raw: string, decode: boolean): string[] {
   if (raw === '') return []
   const parts = raw.split('/')
+  if (parts.length > MAX_SEGMENTS) {
+    throw invalid(`A path is at most ${String(MAX_SEGMENTS)} folders deep.`)
+  }
   return parts.map((part, index) => {
     let value = part
     if (decode) {

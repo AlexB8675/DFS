@@ -182,6 +182,42 @@ describe('POST /api/v1/folders', () => {
     expect(response.statusCode).toBe(201)
   })
 
+  it('answers stored names when two requests make a folder at once in different case', async () => {
+    const { token } = await setup()
+    for (let round = 0; round < 4; round += 1) {
+      const root = `Round${String(round)}`
+      const [one, two] = await Promise.all([
+        call('POST', `/api/v1/folders/${root}/2024`, token),
+        call('POST', `/api/v1/folders/${root.toLowerCase()}/2024`, token),
+      ])
+      const stat = await call('GET', `/api/v1/stat/${root}/2024`, token)
+      expect(stat.statusCode).toBe(200)
+      const stored = stat.json<AppItem>()
+      for (const response of [one, two]) {
+        expect([200, 201]).toContain(response.statusCode)
+        expect(response.json<AppItem>()).toMatchObject({
+          id: stored.id,
+          name: stored.name,
+          path: stored.path,
+        })
+      }
+    }
+  })
+
+  it('takes paths of 128 segments, and refuses 129', async () => {
+    const { token } = await setup()
+    const ok = await call('POST', `/api/v1/folders/${Array(128).fill('a').join('/')}`, token)
+    expect(ok.statusCode).toBe(201)
+    const long = Array(129).fill('a').join('/')
+    for (const url of [`/api/v1/stat/${long}`, `/api/v1/folders/${long}`]) {
+      const response = await call(url.includes('stat') ? 'GET' : 'POST', url, token)
+      expect(response.statusCode).toBe(400)
+      expect(response.json()).toMatchObject({
+        error: { code: 'invalid_path' },
+      })
+    }
+  })
+
   it('refuses a bad name with 400 invalid_path', async () => {
     const { token } = await setup()
     const response = await call('POST', '/api/v1/folders/a/b%2Fc', token)
@@ -191,6 +227,14 @@ describe('POST /api/v1/folders', () => {
 })
 
 describe('POST /api/v1/move', () => {
+  it('refuses a `to` of 129 segments with 400 invalid_path', async () => {
+    const { token, home } = await setup()
+    await file(home.id, 'f.txt')
+    const response = await move(token, 'f.txt', `${Array(128).fill('a').join('/')}/f.txt`)
+    expect(response.statusCode).toBe(400)
+    expect(response.json()).toMatchObject({ error: { code: 'invalid_path' } })
+  })
+
   it('moves a file, and the old path is gone', async () => {
     const { token, home } = await setup()
     await folder(home.id, 'Sub')

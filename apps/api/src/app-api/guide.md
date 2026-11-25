@@ -25,7 +25,7 @@ Tokens never go in URLs. Only this header is read, never a cookie.
 - Every path is **relative to the token's folder**, with no leading slash: `notes/today.md`. The folder itself is the empty path: write `/api/v1/list` or `/api/v1/list/`. Nothing else may end in `/`.
 - In a URL, **encode each segment** with `encodeURIComponent` and join them with `/`. A name may hold spaces, `%`, `?` or `#`.
 - Names are **Unicode NFC** (`name.normalize('NFC')`), at most 255 characters, with no `/`, `\` or control characters, no outer spaces, never `.` or `..`. Case is kept, but names are unique ignoring case (`A.txt` and `a.txt` clash).
-- Any other path is `400 invalid_path`: an empty segment (a trailing or doubled `/`), `.` or `..`, an invalid or non-NFC name.
+- Any other path is `400 invalid_path`: an empty segment (a trailing or doubled `/`), `.` or `..`, an invalid or non-NFC name, or more than 128 segments (paths are at most 128 folders deep).
 - In JSON bodies (`move`) a path is **plain text**, not percent-encoded. One leading `/` is allowed.
 - Answers give each item's `path` as stored, relative to the folder.
 

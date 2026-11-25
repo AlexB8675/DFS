@@ -39,9 +39,11 @@ export async function makeFolders(
     if (rest.length === 0) {
       return { item: await itemOf(tx, ownerId, deepest.id, path), created: false }
     }
-    const id = await ensureBelow(tx, ownerId, deepest.id, rest)
-    const full = rest.reduce(joinPath, path)
-    return { item: await itemOf(tx, ownerId, id, full), created: true }
+    await ensureBelow(tx, ownerId, deepest.id, rest)
+    // The path comes from the stored names: a request made at once in another
+    // case may have made the folders first.
+    const made = await resolvePrefix(tx, token, segments)
+    return { item: await itemOf(tx, ownerId, made.deepest.id, made.path), created: true }
   })
 }
 
@@ -95,9 +97,11 @@ export async function moveItem(
       }
     }
     const { deepest, path, rest } = await resolvePrefix(tx, token, parentSegments)
+    // (the parent path is taken again from the stored names once made)
     const parentId =
       rest.length === 0 ? deepest.id : await ensureBelow(tx, ownerId, deepest.id, rest)
-    const parentPath = rest.reduce(joinPath, path)
+    const parentPath =
+      rest.length === 0 ? path : (await resolvePrefix(tx, token, parentSegments)).path
     const taken = await takenBy(tx, ownerId, parentId, toName)
     const exists = (): ApiError =>
       new ApiError(409, 'exists', `“${joinPath(parentPath, toName)}” already exists.`)
