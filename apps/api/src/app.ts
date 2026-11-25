@@ -6,12 +6,16 @@ import { createDatabase, createPool, Metrics, recordProcess, type Database } fro
 import { LocalBlobStore, Staging, type BlobReader } from '@dfs/storage'
 import Fastify, {
   LogController,
+  type FastifyError,
   type FastifyInstance,
+  type FastifyReply,
   type FastifyRequest,
   type FastifyServerOptions,
 } from 'fastify'
 import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod'
 import type pg from 'pg'
+import { appApiRoutes } from './app-api/routes.ts'
+import { APP_CORS_HEADERS, isAppApiPath, registerAppCors } from './app-api/cors.ts'
 import { registerAccess } from './auth/access.ts'
 import { RateLimiter } from './auth/rate-limit.ts'
 import { Checks } from './checks.ts'
@@ -62,6 +66,8 @@ declare module 'fastify' {
       streamLinks: RateLimiter
       deviceTokens: RateLimiter
       shareGuesses: RateLimiter
+      appTokens: RateLimiter
+      appRequests: RateLimiter
     }
     /** Frames received but not yet stored (§6.1), and whether there is room for more. */
     staging: Staging
@@ -167,6 +173,11 @@ export async function buildApp({
     trustProxy: config.trustedProxyCidrs,
     // A stream link's token is about 170 characters (§6.7); past the default 100, a 414.
     routerOptions: { maxParamLength: 300 },
+    // Fastify answers a URL it can't decode, or a parameter too long, without
+    // running a hook: the API's error shape, and CORS on /api/v1, go here.
+    frameworkErrors: (error, request, reply) => {
+      answerFrameworkError(error, request, reply)
+    },
   })
 
   app.setValidatorCompiler(validatorCompiler)
@@ -207,6 +218,9 @@ export async function buildApp({
     deviceTokens: new RateLimiter(30, 10 * 60_000),
     // Links that don't exist, asked for by token, per address, so a short code can't be guessed (§7.5, D46).
     shareGuesses: new RateLimiter(30, 10 * 60_000),
+    // App tokens that fail, per address block (§7.8); and what a working token asks, per token.
+    appTokens: new RateLimiter(30, 10 * 60_000),
+    appRequests: new RateLimiter(1200, 60_000),
   })
   app.decorate('staging', new Staging(config.stagingDir))
   app.decorate('stagingRoom', new StagingRoom(db, config.stagingMaxBytes))
@@ -313,9 +327,11 @@ export async function buildApp({
   })
 
   await app.register(cookie)
+  registerAppCors(app)
   registerAccess(app)
 
   await app.register(healthRoutes, { prefix: '/api' })
+  await app.register(appApiRoutes, { prefix: '/api' })
   await app.register(authRoutes, { prefix: '/api' })
   await app.register(devicesRoutes, { prefix: '/api' })
   await app.register(appTokensRoutes, { prefix: '/api' })
@@ -331,6 +347,25 @@ export async function buildApp({
   // Outside /api: the media service's alone, which the edge never forwards.
   await app.register(internalMediaRoutes)
   return app
+}
+
+/** Fastify's own errors, in the API's shape (§9); `/api/v1` also gets its CORS headers (§7.8). */
+function answerFrameworkError(
+  error: FastifyError,
+  request: FastifyRequest,
+  reply: FastifyReply,
+): void {
+  const v1 = isAppApiPath(request.raw.url ?? '')
+  let status = error.statusCode ?? 400
+  let code = 'invalid_request'
+  if (error.code === 'FST_ERR_BAD_URL') {
+    status = 400
+    if (v1) code = 'invalid_path'
+  } else if (error.code === 'FST_ERR_MAX_PARAM_LENGTH') {
+    status = 414
+  }
+  if (v1) void reply.headers(APP_CORS_HEADERS)
+  void reply.code(status).send({ error: { code, message: error.message } })
 }
 
 /** The API only reads blobs; the bot stores them (DESIGN.md §3.1). */
