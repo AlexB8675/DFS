@@ -2,7 +2,7 @@ import { appItemSchema, appListSchema } from '@dfs/shared'
 import type { FastifyInstance } from 'fastify'
 import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
-import { requireAppToken } from '../auth/access.ts'
+import { limitAppSearches, requireAppToken } from '../auth/access.ts'
 import { sendFile } from '../content/send.ts'
 import { ApiError } from '../errors.ts'
 import { listChildRows } from '../nodes/read.ts'
@@ -84,6 +84,7 @@ export function readRoutes(app: FastifyInstance): void {
     { config, schema: { querystring: searchQuery, response: { 200: appListSchema } } },
     async (request) => {
       const token = requireAppToken(request.appToken)
+      limitAppSearches(app, token)
       const folder = request.appFolder ?? (await appFolder(app.db, token))
       const { q, cursor, limit } = request.query
       return searchFolder(app.db, folder, q, cursor, limit)

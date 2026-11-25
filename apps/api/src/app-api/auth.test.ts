@@ -254,6 +254,25 @@ describe('GET /api/v1/me', () => {
     }
   })
 
+  it('limits searches to 60 a minute per token, and lists still work', async () => {
+    const root = await rootOf()
+    const { token } = await makeToken(root)
+    const real = app.limits.appSearches
+    app.limits.appSearches = new RateLimiter(60, 60_000)
+    try {
+      for (let i = 0; i < 60; i += 1) {
+        expect((await get('/api/v1/search?q=a', token)).statusCode).toBe(200)
+      }
+      const response = await get('/api/v1/search?q=a', token)
+      expect(response.statusCode).toBe(429)
+      expect(response.json()).toMatchObject({ error: { code: 'rate_limited' } })
+      expect(Number(response.headers['retry-after'])).toBeGreaterThan(0)
+      expect((await get('/api/v1/list', token)).statusCode).toBe(200)
+    } finally {
+      app.limits.appSearches = real
+    }
+  })
+
   it('notes a use of the token', async () => {
     const root = await rootOf()
     const { token, appToken } = await makeToken(root)
@@ -291,6 +310,49 @@ describe('the token’s folder', () => {
     const movedError = moved.json<{ error: { code: string; message: string } }>().error
     expect(movedError.code).toBe('folder_unavailable')
     expect(movedError.message).toContain('no longer in My drive')
+  })
+})
+
+describe('a token whose folder is inside a trashed folder', () => {
+  it('answers 409 folder_unavailable while the web app has the parent in the trash, and works after a restore', async () => {
+    const root = await rootOf()
+    const parent = await folderIn(root, 'Outer')
+    const inner = await folderIn(parent.id, 'Inner')
+    const { token } = await makeToken(inner.id)
+    expect((await get('/api/v1/me', token)).statusCode).toBe(200)
+
+    const login = await app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      headers: { origin },
+      payload: { username: 'alice', password: 'the-alice-password' },
+    })
+    const session = login.cookies.find((c) => c.name === sessionCookieName(app.config))
+    const web = {
+      cookie: `${sessionCookieName(app.config)}=${session?.value ?? ''}`,
+      'x-csrf-token': login.json<{ csrfToken: string }>().csrfToken,
+    }
+    const trashed = await app.inject({
+      method: 'DELETE',
+      url: `/api/nodes/${parent.id}`,
+      headers: web,
+    })
+    expect(trashed.statusCode).toBe(204)
+    // The web app trashes the folder and marks what is below it `trashed_via`.
+    const [row] = await app.db.select().from(nodes).where(eq(nodes.id, inner.id))
+    expect(row?.deletedAt).toBeNull()
+    expect(row?.trashedVia).not.toBeNull()
+    const answer = await get('/api/v1/me', token)
+    expect(answer.statusCode).toBe(409)
+    expect(answer.json()).toMatchObject({ error: { code: 'folder_unavailable' } })
+
+    const restored = await app.inject({
+      method: 'POST',
+      url: `/api/nodes/${parent.id}/restore`,
+      headers: web,
+    })
+    expect(restored.statusCode).toBe(200)
+    expect((await get('/api/v1/me', token)).statusCode).toBe(200)
   })
 })
 

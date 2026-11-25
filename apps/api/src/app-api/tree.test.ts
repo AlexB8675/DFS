@@ -249,6 +249,15 @@ describe('POST /api/v1/move', () => {
     expect(await live(sub.id, 'In')).toBeUndefined()
   })
 
+  it('answers 415 unsupported_media_type to a move without a JSON Content-Type', async () => {
+    const { token } = await setup()
+    const response = await call('POST', '/api/v1/move', token, '{"from":"a","to":"b"}', {
+      'content-type': 'application/octet-stream',
+    })
+    expect(response.statusCode).toBe(415)
+    expect(response.json()).toMatchObject({ error: { code: 'unsupported_media_type' } })
+  })
+
   it('refuses the token’s folder as `from`', async () => {
     const { token } = await setup()
     for (const from of ['', '/']) {

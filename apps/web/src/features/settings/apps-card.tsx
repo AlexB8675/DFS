@@ -224,7 +224,7 @@ function MakeDialog({ onClose }: { onClose: () => void }) {
               <Input
                 id="app-token-name"
                 value={name}
-                maxLength={100}
+                maxLength={80}
                 placeholder="Notes helper"
                 autoComplete="off"
                 onChange={(event) => {

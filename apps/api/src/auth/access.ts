@@ -213,6 +213,18 @@ async function authenticateAppToken(
   return found
 }
 
+/** Counts a search against the token's 60 a minute, or answers 429 (§7.8). */
+export function limitAppSearches(app: FastifyInstance, token: AppTokenAuth): void {
+  const busy = app.limits.appSearches.waitMs(token.tokenId)
+  if (busy > 0) {
+    throw tooManyRequests(
+      busy,
+      'This app token is searching too often. Wait a little, then try again.',
+    )
+  }
+  app.limits.appSearches.hit(token.tokenId)
+}
+
 function tooManyRequests(retryAfterMs: number, message: string): ApiError {
   return new ApiError(429, 'rate_limited', message, {
     'retry-after': String(Math.ceil(retryAfterMs / 1000)),

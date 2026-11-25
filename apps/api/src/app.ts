@@ -68,6 +68,7 @@ declare module 'fastify' {
       shareGuesses: RateLimiter
       appTokens: RateLimiter
       appRequests: RateLimiter
+      appSearches: RateLimiter
     }
     /** Frames received but not yet stored (§6.1), and whether there is room for more. */
     staging: Staging
@@ -222,6 +223,8 @@ export async function buildApp({
     // App tokens that fail, per address block (§7.8); and what a working token asks, per token.
     appTokens: new RateLimiter(30, 10 * 60_000),
     appRequests: new RateLimiter(1200, 60_000),
+    // Search reads the whole subtree, so it has its own, smaller, limit (§7.8).
+    appSearches: new RateLimiter(60, 60_000),
   })
   app.decorate('staging', new Staging(config.stagingDir))
   app.decorate('stagingRoom', new StagingRoom(db, config.stagingMaxBytes))

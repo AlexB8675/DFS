@@ -267,7 +267,7 @@ function AppTokens({ onConfirm }: { onConfirm: (confirmation: Confirmation) => v
       {!tokens.data ? (
         <Skeleton className="h-16 rounded-lg" />
       ) : tokens.data.length === 0 ? (
-        <AllClear>No app token has been made.</AllClear>
+        <AllClear>No app tokens.</AllClear>
       ) : (
         <ul className="grid gap-2">
           {tokens.data.map((token) => (

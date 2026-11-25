@@ -62,7 +62,7 @@ This guide, as `text/markdown`. No token.
 
 ### GET /api/v1/me
 
-What the token is and who it acts as. `folder.path` is the folder's place in the owner's drive, for people.
+What the token is and who it acts as. `folder.path` is the folder's place in the owner's drive, **for display only**: API paths are always relative to the folder.
 
 ```sh
 curl -H "Authorization: Bearer $TOKEN" $API/me
@@ -74,7 +74,7 @@ const me = await (await fetch(`${API}/me`, { headers })).json()
 
 ```json 200 GET /api/v1/me
 {
-  "token": { "name": "Notes app", "folder": { "name": "notes", "path": "notes" }, "canWrite": true },
+  "token": { "name": "Notes app", "folder": { "name": "notes", "path": "My Drive / notes" }, "canWrite": true },
   "user": { "displayName": "Sam" }
 }
 ```
@@ -292,7 +292,7 @@ await fetch(`${API}/files/${enc('notes/today.md')}`, { method: 'DELETE', headers
 ```
 
 ```json 400 DELETE /api/v1/files/{path}
-{ "error": { "code": "token_folder", "message": "The token's folder itself cannot be trashed." } }
+{ "error": { "code": "token_folder", "message": "The token’s folder cannot be trashed." } }
 ```
 
 ## 5. Errors
@@ -300,7 +300,7 @@ await fetch(`${API}/files/${enc('notes/today.md')}`, { method: 'DELETE', headers
 Every error is `{ "error": { "code", "message" } }`; branch on `code`, show `message`.
 
 ```json 401 GET /api/v1/me
-{ "error": { "code": "invalid_token", "message": "This app token is not valid." } }
+{ "error": { "code": "invalid_token", "message": "This app token isn’t valid. It may have been removed." } }
 ```
 
 | Status | `code` | Meaning |
@@ -316,6 +316,7 @@ Every error is `{ "error": { "code", "message" } }`; branch on `code`, show `mes
 | 401 | `invalid_token` | Wrong, removed or ended token |
 | 403 | `read_only` | A write with a read-only token |
 | 404 | `not_found` | Nothing at the path (also a `list` of a file) |
+| 404 | `upload_not_found` | The upload was given up (by an admin, or after a long stall); start again |
 | 409 | `folder_unavailable` | The token's folder is trashed or out of My drive |
 | 409 | `not_a_folder` | A file where a folder is needed |
 | 409 | `not_a_file` | `PUT` onto a folder |
@@ -326,6 +327,7 @@ Every error is `{ "error": { "code", "message" } }`; branch on `code`, show `mes
 | 412 | `exists` | `If-None-Match: *` and the file exists |
 | 412 | `version_changed` | `If-Match` does not match the file's version |
 | 413 | `file_too_large` | Larger than DFS accepts in one file |
+| 415 | `unsupported_media_type` | `POST /move` sent without `Content-Type: application/json` |
 | 429 | `rate_limited` | Too many requests or failed tokens; wait `Retry-After` seconds |
 | 429 | `too_many_uploads` | Already 3 uploads in flight; `Retry-After: 5` |
 | 503 | `staging_full` | DFS's upload room is full; retry later |
@@ -337,13 +339,13 @@ An unknown route is `404 not_found`.
 
 - **`Content-Length` is required**, or the answer is `411 length_required`. Send a `Blob`, `ArrayBuffer`, typed array or string; **never a stream or `FormData`** (a stream goes chunked, and `FormData` would be stored with its multipart envelope).
 - **`Content-Type`** is stored as sent, trimmed, and set anew on a replace. Always send it yourself: a client may add a default you did not mean (`fetch` with a string adds `text/plain`, `curl -d` adds `application/x-www-form-urlencoded`). None means no type (served as `application/octet-stream`); over 255 characters is `400 invalid_request`.
-- **An existing file is replaced**, with a new `version`; there are no earlier versions. To avoid overwriting a change made elsewhere:
+- **An existing file is replaced**, with a new `version`; there are no earlier versions, and the share links made for the file are deleted with it. To avoid overwriting a change made elsewhere:
   - `If-None-Match: *` fails the `PUT` with `412 exists` if the file is there. It is the only value allowed (anything else is `400 invalid_request`).
   - `If-Match: "<version>"` (quoted or not, or `*`) fails with `412 version_changed` unless the file is at that version. A weak `W/"..."` never matches. Use the `version` from a list, stat or earlier `PUT`.
 - Both conditions are checked again when the upload completes, so two `PUT`s to one path cannot both win.
 - **Missing parent folders are made**, and stay if the `PUT` is then refused (like `mkdir -p`).
 - **There are no resumable uploads.** A cut-off `PUT` is cancelled and stores nothing: start it again from the beginning.
-- If the file is renamed, moved (to any folder) or trashed while it uploads, or its folder leaves the token's folder, the answer is `409 path_changed`; if the token's folder itself goes, `409 folder_unavailable`. Nothing is stored. A folder above it renamed inside the token's folder does not stop it (the answer then gives the path as it was at the start).
+- If the file is renamed, moved (to any folder) or trashed while it uploads, or its folder leaves the token's folder, the answer is `409 path_changed`; if the token's folder itself goes, `409 folder_unavailable`. Nothing is stored. A folder above it renamed **or moved** inside the token's folder does not stop it (the answer then gives the path as it was at the start).
 - The answer describes this upload's own version, size and type. An `If-Match` `PUT` whose parent folders are missing answers `412 version_changed` before making any folder.
 - At most **3 uploads in flight per token** (`429 too_many_uploads`, `Retry-After: 5`).
 
@@ -364,7 +366,8 @@ do {
 ## 8. Limits
 
 - **1,200 requests a minute per token.** Beyond that: `429 rate_limited` with `Retry-After` (seconds). Wait that long, then continue.
-- **Failed tokens:** 30 failures per 10 minutes from one address, then `429 rate_limited`. A request with no header costs nothing.
+- **Failed tokens:** 30 failures per 10 minutes from one address, then `429 rate_limited`. A request with no `Authorization` header costs nothing, but a malformed one counts (for example `Bearer undefined`, from a missing environment variable).
+- **60 searches a minute per token**, within the 1,200: the 61st is `429 rate_limited` with `Retry-After`. List, stat and downloads are not limited this way.
 - Uploads: 3 in flight per token. The owner's quota bounds what is stored.
 
 ## 9. Browser apps

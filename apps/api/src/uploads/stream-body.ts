@@ -25,7 +25,7 @@ const STAGING_POLL_MS = 2_000
 /**
  * A stream renews its reservation this often (one not renewed for 90 s stops
  * counting, D38) and tells the session it is alive, so a slow body is not
- * swept as idle (ง6.1) between two parts.
+ * swept as idle (ยง6.1) between two parts.
  */
 const RESERVATION_RENEW_MS = 30_000
 
