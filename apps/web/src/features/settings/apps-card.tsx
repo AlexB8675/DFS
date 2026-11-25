@@ -182,6 +182,7 @@ function MakeDialog({ onClose }: { onClose: () => void }) {
       {
         onSuccess: (result) => {
           setMade({ token: result.token, folderName, canWrite: result.appToken.canWrite })
+          make.reset()
         },
         onError: (error) => {
           toast.error('Couldn’t make it', { description: errorMessage(error) })
@@ -194,10 +195,19 @@ function MakeDialog({ onClose }: { onClose: () => void }) {
     <Dialog
       open
       onOpenChange={(open) => {
-        if (!open) onClose()
+        if (!open && !make.isPending) onClose()
       }}
     >
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent
+        className="sm:max-w-lg"
+        // The answer holds the only copy of the token: a stray click or Escape must not lose it.
+        onInteractOutside={(event) => {
+          if (made) event.preventDefault()
+        }}
+        onEscapeKeyDown={(event) => {
+          if (made) event.preventDefault()
+        }}
+      >
         {made ? (
           <Answer made={made} onClose={onClose} />
         ) : (
@@ -252,7 +262,7 @@ function MakeDialog({ onClose }: { onClose: () => void }) {
             </fieldset>
 
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={onClose}>
+              <Button type="button" variant="outline" disabled={make.isPending} onClick={onClose}>
                 Cancel
               </Button>
               <Button type="submit" disabled={make.isPending || !current || name.trim() === ''}>

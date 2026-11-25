@@ -43,6 +43,8 @@ export function useMakeAppToken() {
   return useMutation({
     mutationFn: (input: MakeAppTokenInput) =>
       apiSend('POST', '/app-tokens', input, madeAppTokenSchema),
+    // The answer holds the token: keep it in no cache, the dialog holds it alone.
+    gcTime: 0,
     onSettled: invalidateAppTokens,
   })
 }

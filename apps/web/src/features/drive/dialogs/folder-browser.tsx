@@ -25,6 +25,7 @@ export function FolderBrowser({ folderId, onFolderChange, disabledIds }: FolderB
       <div className="flex h-11 items-center gap-1 border-b bg-muted/30 px-2 text-sm">
         {parent ? (
           <Button
+            type="button"
             variant="ghost"
             size="icon-sm"
             aria-label={`Back to ${parent.name}`}
@@ -78,6 +79,7 @@ export function FolderBrowser({ folderId, onFolderChange, disabledIds }: FolderB
         {subfolders.hasNextPage && (
           <li>
             <Button
+              type="button"
               variant="ghost"
               size="sm"
               className="w-full"
