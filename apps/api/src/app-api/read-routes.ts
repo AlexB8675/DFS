@@ -16,7 +16,7 @@ const listQuery = z.object({
   cursor: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(1000).default(1000),
 })
-const searchQuery = listQuery.extend({ q: z.string().min(1).max(200) })
+const searchQuery = listQuery.extend({ q: z.string().trim().min(1).max(200) })
 
 /** The v1 reads (DESIGN.md §7.8): list, stat, files and search, all inside the token's folder. */
 export function readRoutes(app: FastifyInstance): void {
@@ -70,6 +70,9 @@ export function readRoutes(app: FastifyInstance): void {
       const { node } = await resolvePath(app.db, token, urlSegments(request.url, '/api/v1/files'))
       if (node.kind !== 'file') {
         throw new ApiError(400, 'not_a_file', 'This path is a folder: use list for folders.')
+      }
+      if (node.version_state === 'failed') {
+        throw new ApiError(409, 'not_ready', 'This file could not be stored, so it cannot be read.')
       }
       const file = await downloadableFile(app.db, node.id)
       return sendFile(app, request, reply, file, { readerId: token.user.id })

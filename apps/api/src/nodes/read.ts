@@ -237,7 +237,7 @@ async function listSegment(
     : sql``
   const completed =
     options.completedOnly && kind === 'file' ? sql`AND n.current_version_id IS NOT NULL` : sql``
-  const drive = options.driveOnly ? sql`AND n.tree = 'drive'` : sql``
+  const drive = options.driveOnly ? sql`AND n.tree = 'drive' AND n.trashed_via IS NULL` : sql``
   const { rows } = await db.execute<NodeRow & { sort_value: string }>(sql`
     SELECT ${NODE_COLUMNS}, (${expression})::text AS sort_value
     FROM nodes n /* tree: by parent */ ${NODE_JOINS}
