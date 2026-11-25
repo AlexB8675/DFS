@@ -41,6 +41,8 @@ export async function streamBody(
   body.once('close', () => {
     if (!body.complete) gone.abort()
   })
+  // A client that left while its caller worked has closed already: no event comes.
+  if ((body.destroyed || body.closed) && !body.complete) gone.abort()
   const chunks = body[Symbol.asyncIterator]() as AsyncIterator<Buffer>
   const read = async () => {
     try {
@@ -142,27 +144,29 @@ function store(
  * (§6.1, D38): the browser's sending pauses with it. Each try keeps the
  * stream's turn; past `STAGING_WAIT_MS`, a 503 its client waits out.
  */
-async function reserveRoom(
+export async function reserveRoom(
   app: FastifyInstance,
   uploadId: string,
   needBytes: number,
   signal: AbortSignal,
 ): Promise<void> {
   const giveUpAt = Date.now() + STAGING_WAIT_MS
-  while (!(await app.stagingRoom.admit(uploadId, needBytes))) {
-    if (Date.now() >= giveUpAt) throw stagingFull()
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, STAGING_POLL_MS)
-      signal.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer)
-          resolve()
-        },
-        { once: true },
-      )
-    })
+  for (;;) {
+    // A listener added to a signal already aborted never fires: look first.
     if (signal.aborted) throw interrupted()
+    if (await app.stagingRoom.admit(uploadId, needBytes)) return
+    if (Date.now() >= giveUpAt) throw stagingFull()
+    // It may have left while admit() ran.
+    if ((signal as { aborted: boolean }).aborted) throw interrupted()
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer)
+        signal.removeEventListener('abort', done)
+        resolve()
+      }
+      const timer = setTimeout(done, STAGING_POLL_MS)
+      signal.addEventListener('abort', done, { once: true })
+    })
   }
 }
 
