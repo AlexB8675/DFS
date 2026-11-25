@@ -119,7 +119,7 @@ const item = await (await fetch(`${API}/stat/${enc('notes/today.md')}`, { header
 
 ### GET /api/v1/files/{path}
 
-The file's bytes, with `Content-Type` as stored (`application/octet-stream` if none), `ETag` (its version), `Content-Length`, `Accept-Ranges: bytes`, `Content-Disposition: attachment` and `nosniff`. `Range` and `If-Range` work (`206`). A folder is `400 not_a_file`. A file whose upload failed is `409 not_ready`.
+The file's bytes, with `Content-Type` as stored (`application/octet-stream` if none), `ETag` (its version), `Content-Length`, `Accept-Ranges: bytes`, `Content-Disposition: attachment` and `nosniff`. `ETag` is the version in quotes. One `bytes=a-b` range is served (`206`; several ranges get the whole file), an unsatisfiable one is `416`, `If-Range` takes the quoted `ETag`, and `If-None-Match` with it gets `304`. A folder is `400 not_a_file`. A file whose upload failed is `409 not_ready`.
 
 ```sh
 curl -H "Authorization: Bearer $TOKEN" -o today.md $API/files/notes/today.md
@@ -281,7 +281,7 @@ await fetch(`${API}/move`, {
 
 ### DELETE /api/v1/files/{path}
 
-Sends a file or a folder (with everything in it) to the trash and answers `204`. It only trashes: the owner can restore it from the web app's trash for 30 days, and nothing is deleted for good. The token's folder itself is `400 token_folder`. Needs a write token.
+Sends a file or a folder (with everything in it) to the trash and answers `204`. It only trashes: the owner can restore it from the web app's trash until its retention period ends (30 days by default). This API never deletes for good. The token's folder itself is `400 token_folder`. Needs a write token.
 
 ```sh
 curl -X DELETE -H "Authorization: Bearer $TOKEN" $API/files/notes/today.md
@@ -312,7 +312,7 @@ Every error is `{ "error": { "code", "message" } }`; branch on `code`, show `mes
 | 400 | `token_folder` | Moving or trashing the token's own folder |
 | 400 | `invalid_cursor` | A `cursor` that this API did not give |
 | 400 | `upload_interrupted` | The body ended or differed from `Content-Length`; nothing was stored |
-| 401 | `unauthenticated` | No token |
+| 401 | `unauthenticated` | No token, or one that is not an app token (it starts `dfs_app_`) |
 | 401 | `invalid_token` | Wrong, removed or ended token |
 | 403 | `read_only` | A write with a read-only token |
 | 404 | `not_found` | Nothing at the path (also a `list` of a file) |
@@ -321,7 +321,7 @@ Every error is `{ "error": { "code", "message" } }`; branch on `code`, show `mes
 | 409 | `not_a_file` | `PUT` onto a folder |
 | 409 | `not_ready` | The file's upload failed, so it cannot be read |
 | 409 | `exists` | `move` onto another item |
-| 409 | `path_changed` | The file's folder moved or left the token's reach while it uploaded |
+| 409 | `path_changed` | The file was renamed, moved or trashed while it uploaded, or its folder left the token's folder |
 | 411 | `length_required` | `PUT` without `Content-Length` |
 | 412 | `exists` | `If-None-Match: *` and the file exists |
 | 412 | `version_changed` | `If-Match` does not match the file's version |
@@ -336,14 +336,15 @@ An unknown route is `404 not_found`.
 ## 6. Uploads
 
 - **`Content-Length` is required**, or the answer is `411 length_required`. Send a `Blob`, `ArrayBuffer`, typed array or string; **never a stream or `FormData`** (a stream goes chunked, and `FormData` would be stored with its multipart envelope).
-- **`Content-Type`** is stored as sent, trimmed, and set anew on a replace. None means no type (served as `application/octet-stream`); over 255 characters is `400 invalid_request`.
+- **`Content-Type`** is stored as sent, trimmed, and set anew on a replace. Always send it yourself: a client may add a default you did not mean (`fetch` with a string adds `text/plain`, `curl -d` adds `application/x-www-form-urlencoded`). None means no type (served as `application/octet-stream`); over 255 characters is `400 invalid_request`.
 - **An existing file is replaced**, with a new `version`; there are no earlier versions. To avoid overwriting a change made elsewhere:
   - `If-None-Match: *` fails the `PUT` with `412 exists` if the file is there. It is the only value allowed (anything else is `400 invalid_request`).
   - `If-Match: "<version>"` (quoted or not, or `*`) fails with `412 version_changed` unless the file is at that version. A weak `W/"..."` never matches. Use the `version` from a list, stat or earlier `PUT`.
 - Both conditions are checked again when the upload completes, so two `PUT`s to one path cannot both win.
 - **Missing parent folders are made**, and stay if the `PUT` is then refused (like `mkdir -p`).
 - **There are no resumable uploads.** A cut-off `PUT` is cancelled and stores nothing: start it again from the beginning.
-- If the folder moves while the file uploads, the answer is `409 path_changed` or `409 folder_unavailable`, and nothing is stored.
+- If the file is renamed, moved (to any folder) or trashed while it uploads, or its folder leaves the token's folder, the answer is `409 path_changed`; if the token's folder itself goes, `409 folder_unavailable`. Nothing is stored. A folder above it renamed inside the token's folder does not stop it (the answer then gives the path as it was at the start).
+- The answer describes this upload's own version, size and type. An `If-Match` `PUT` whose parent folders are missing answers `412 version_changed` before making any folder.
 - At most **3 uploads in flight per token** (`429 too_many_uploads`, `Retry-After: 5`).
 
 ## 7. Paging
@@ -370,8 +371,9 @@ do {
 
 - Every `/api/v1` answer, errors included, carries `Access-Control-Allow-Origin: *`, and preflights (`OPTIONS`) are answered. Allowed methods: `GET, PUT, POST, DELETE`; allowed headers: `Authorization, Content-Type, Range, If-Range, If-None-Match, If-Match`; readable response headers: `Content-Range, Content-Length, Accept-Ranges, ETag, Retry-After`. Credentials are never allowed, and no cookie is read.
 - Call with `fetch` and the `Authorization` header, as above.
-- **A token in a web page can be read by anyone who opens the page.** For any page other people can open, use a **read-only token**. Keep read and write tokens in scripts, servers, or pages only the owner opens.
-- To show an image or document, fetch it with the header and use a Blob URL:
+- **A token in a web page can be read by anyone who opens the page.** For any page other people can open, use a **read-only token**, made for a folder that holds only what everyone may see: a read-only token still lists, searches and downloads every file below its folder. Never put a read and write token in such a page. Keep tokens out of repositories and logs.
+- Names and file contents are untrusted: show text with `textContent`, never `innerHTML`.
+- To show an image, fetch it with the header and put a Blob URL in an `<img>` (also `<audio>`, `<video>` for known media types). Never open, frame or navigate to a Blob of HTML, SVG or an unknown type: it would run in your app's origin, where the token is.
 
 ```js
 const res = await fetch(`${API}/files/${enc('photos/2024/a.jpg')}`, { headers })
@@ -383,7 +385,7 @@ img.src = URL.createObjectURL(await res.blob())
 ## 10. What the API does not do
 
 - No other files of the owner, no vault, no Backups drive, no share links, no settings.
-- Nothing is deleted for good and nothing is restored: `DELETE` only trashes.
+- Nothing is deleted for good or restored: `DELETE` only trashes.
 - No resumable or chunked uploads, no thumbnails, no webhooks or live events.
 - No IDs in requests: paths only.
 - No sign-in for other people: the token acts as its owner.

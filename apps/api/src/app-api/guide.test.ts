@@ -15,32 +15,34 @@ import { appApiRoutes } from './routes.ts'
 
 const GUIDE = readFileSync(path.join(import.meta.dirname, 'guide.md'), 'utf8')
 
-/** The v1 error codes the guide may show (the plan's Global Constraints, and the API's usual ones). */
-const ERROR_CODES = new Set([
-  'invalid_request',
-  'invalid_cursor',
-  'not_found',
-  'invalid_path',
-  'not_a_file',
-  'invalid_move',
-  'token_folder',
-  'upload_interrupted',
-  'unauthenticated',
-  'invalid_token',
-  'read_only',
-  'folder_unavailable',
-  'not_a_folder',
-  'not_ready',
-  'exists',
-  'path_changed',
-  'length_required',
-  'version_changed',
-  'file_too_large',
-  'rate_limited',
-  'too_many_uploads',
-  'staging_full',
-  'quota_exceeded',
-])
+/** The v1 errors, as (status, code): the plan's Global Constraints, and the API's usual ones. */
+const ERRORS = [
+  '400 invalid_request',
+  '400 invalid_path',
+  '400 not_a_file',
+  '400 invalid_move',
+  '400 token_folder',
+  '400 invalid_cursor',
+  '400 upload_interrupted',
+  '401 unauthenticated',
+  '401 invalid_token',
+  '403 read_only',
+  '404 not_found',
+  '409 folder_unavailable',
+  '409 not_a_folder',
+  '409 not_a_file',
+  '409 not_ready',
+  '409 exists',
+  '409 path_changed',
+  '411 length_required',
+  '412 exists',
+  '412 version_changed',
+  '413 file_too_large',
+  '429 rate_limited',
+  '429 too_many_uploads',
+  '503 staging_full',
+  '507 quota_exceeded',
+]
 
 /** `GET /api/v1/list/*` and `GET /api/v1/list` are both `GET /api/v1/list/{path}`. */
 function headingOf(method: string, url: string): string {
@@ -114,6 +116,8 @@ describe('the guide and the routes', () => {
 
   it('has every JSON example parse against its route’s schema', () => {
     const examples = guideExamples()
+    // Every json fence is an example the pattern understood, none silently skipped.
+    expect(examples.length).toBe([...GUIDE.matchAll(/^```json/gm)].length)
     expect(examples.length).toBeGreaterThan(10)
     const answered = new Set<string>()
     for (const example of examples) {
@@ -127,7 +131,7 @@ describe('the guide and the routes', () => {
       } else if (example.status.startsWith('4')) {
         schema = apiErrorSchema
         const code = apiErrorSchema.parse(json).error.code
-        expect(ERROR_CODES.has(code), `${label}: ${code}`).toBe(true)
+        expect(ERRORS, label).toContain(`${example.status} ${code}`)
       } else {
         const schemas: Record<string, ZodType> = {
           me: appMeSchema,
@@ -150,10 +154,22 @@ describe('the guide and the routes', () => {
     }
   })
 
-  it('shows only error codes the API has, in its table', () => {
-    const table = [...GUIDE.matchAll(/^\| \d{3} \| `([a-z_]+)` \|/gm)].map((match) => match[1] ?? '')
-    expect(table.length).toBeGreaterThan(20)
-    for (const code of table) expect(ERROR_CODES.has(code), code).toBe(true)
+  it('has an errors table of exactly the API’s (status, code) pairs', () => {
+    const table = [...GUIDE.matchAll(/^\| (\d{3}) \| `([a-z_]+)` \|/gm)].map(
+      (match) => `${match[1] ?? ''} ${match[2] ?? ''}`,
+    )
+    expect([...table].sort()).toEqual([...ERRORS].sort())
+  })
+
+  it('has a curl and a fetch example in every route’s section', () => {
+    const sections = GUIDE.split(/^### /m).slice(1)
+    expect(sections.length).toBe(guideHeadings().length)
+    for (const section of sections) {
+      const heading = section.split('\n')[0] ?? ''
+      if (heading.includes('/api/v1/guide')) continue
+      expect(section, heading).toMatch(/^```sh$/m)
+      expect(section, heading).toMatch(/^```js$/m)
+    }
   })
 })
 

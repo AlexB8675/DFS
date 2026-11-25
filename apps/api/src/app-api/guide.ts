@@ -9,5 +9,7 @@ const TEMPLATE = readFileSync(path.join(import.meta.dirname, 'guide.md'), 'utf8'
 
 /** The guide, with the instance's address (no trailing slash) filled in. */
 export function loadGuide(baseUrl: string): string {
-  return TEMPLATE.replaceAll('{{BASE_URL}}', baseUrl.replace(/\/+$/, ''))
+  const clean = baseUrl.replace(/\/+$/, '')
+  // A function, so a `$` in the address is not read as a replacement pattern.
+  return TEMPLATE.replaceAll('{{BASE_URL}}', () => clean)
 }
