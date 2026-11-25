@@ -8,6 +8,7 @@ import { LAST_SEEN_EVERY_MS, type Auth, type UserRow } from '../auth/sessions.ts
 import { hashSecret } from '../devices/devices.ts'
 import { ApiError } from '../errors.ts'
 import { folderLocations, VISIBLE } from '../nodes/read.ts'
+import { lockDrive } from '../nodes/write.ts'
 
 // App tokens (DESIGN.md §7.8): a credential for a script or an AI agent, with
 // one folder of My drive to read or write. Found by its SHA-256 and never
@@ -119,7 +120,10 @@ export async function makeAppToken(
   input: MakeAppTokenInput,
 ): Promise<MadeAppToken> {
   const token = newAppToken()
-  const id = await app.db.transaction(async (tx) => {
+  const appToken = await app.db.transaction(async (tx) => {
+    // The drive's shared tree lock first, as starting an upload takes it: a
+    // purge or a trash of the folder waits, so it stays as checked until commit.
+    await lockDrive(tx, auth.user.id, 'shared')
     // The user's row serializes two requests at once, so they can't both make
     // the 50th. It also settles the race with a password change: its
     // `endUserSessions` either committed first, and the session is gone, or
@@ -162,21 +166,32 @@ export async function makeAppToken(
         folderId: input.folderId,
         canWrite: input.canWrite,
       })
-      .returning({ id: appTokens.id })
+      .returning()
     if (!made) throw new Error('The app token was not made.')
+    const path = (await folderLocations(tx, [made.folderId])).get(made.folderId) ?? ''
     await appendJournal(
       tx,
       await audit(tx, {
         actorId: auth.user.id,
         action: 'app_token.made',
         target: input.name,
-        details: input.canWrite ? 'read and write' : 'read only',
+        details: `${path}, ${input.canWrite ? 'read and write' : 'read only'}`,
+        nodeId: made.folderId,
       }),
     )
-    return made.id
+    return {
+      id: made.id,
+      name: made.name,
+      folderId: made.folderId,
+      folderPath: path,
+      folderAvailable: true,
+      canWrite: made.canWrite,
+      createdAt: made.createdAt.toISOString(),
+      lastUsedAt: null,
+      lastAddress: null,
+      lastAgent: null,
+    }
   })
-  const [appToken] = await queryTokens(app, sql`token.id = ${id}`)
-  if (!appToken) throw new Error('The app token disappeared.')
   return { token, appToken }
 }
 
@@ -205,11 +220,16 @@ export async function removeAppToken(app: FastifyInstance, auth: Auth, id: strin
     const [removed] = await tx
       .delete(appTokens)
       .where(and(eq(appTokens.id, id), eq(appTokens.userId, auth.user.id)))
-      .returning({ name: appTokens.name })
+      .returning({ name: appTokens.name, folderId: appTokens.folderId })
     if (!removed) throw new ApiError(404, 'not_found', 'No such app token.')
     await appendJournal(
       tx,
-      await audit(tx, { actorId: auth.user.id, action: 'app_token.removed', target: removed.name }),
+      await audit(tx, {
+        actorId: auth.user.id,
+        action: 'app_token.removed',
+        target: removed.name,
+        nodeId: removed.folderId,
+      }),
     )
   })
 }

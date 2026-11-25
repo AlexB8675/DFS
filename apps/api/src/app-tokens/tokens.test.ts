@@ -6,10 +6,21 @@ import { and, eq, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest'
 import { buildApp } from '../app.ts'
-import { sessionCookieName, type Auth } from '../auth/sessions.ts'
+import {
+  endUserSessions,
+  LAST_SEEN_EVERY_MS,
+  sessionCookieName,
+  type Auth,
+} from '../auth/sessions.ts'
 import { testConfig } from '../testing/config.ts'
 import { seedUser } from '../testing/seed.ts'
-import { APP_TOKEN_PATTERN, findAppToken, makeAppToken, newAppToken } from './tokens.ts'
+import {
+  APP_TOKEN_PATTERN,
+  findAppToken,
+  makeAppToken,
+  newAppToken,
+  touchAppToken,
+} from './tokens.ts'
 
 // Making, listing and removing app tokens (DESIGN.md §7.8), and ending them
 // with the user's sessions, against a real database.
@@ -152,7 +163,11 @@ describe('app tokens (§7.8)', () => {
       .from(auditLog)
       .where(and(eq(auditLog.userId, alice.userId), eq(auditLog.action, 'app_token.made')))
     expect(audited).toHaveLength(1)
-    expect(audited[0]?.meta).toMatchObject({ target: 'Notes agent' })
+    expect(audited[0]?.meta).toMatchObject({
+      target: 'Notes agent',
+      details: 'My Drive / Notes, read and write',
+    })
+    expect(audited[0]?.nodeId).toBe(notes.id)
     const { rows: journaled } = await app.db.execute<{ n: number }>(sql`
       SELECT count(*)::int AS n FROM journal
       WHERE kind = 'audit.added' AND record::text LIKE '%app_token.made%'`)
@@ -298,6 +313,7 @@ describe('app tokens (§7.8)', () => {
       .where(and(eq(auditLog.userId, hana.userId), eq(auditLog.action, 'app_token.removed')))
     expect(audited).toHaveLength(1)
     expect(audited[0]?.meta).toMatchObject({ target: 'Removable' })
+    expect(audited[0]?.nodeId).toBe(await rootOf(hana.userId))
   })
 
   it('ends a user’s tokens with their sessions', async () => {
@@ -364,7 +380,9 @@ describe('app tokens (§7.8)', () => {
       canRemove: false,
     })
     expect(byId.get(bossToken.appToken.id)).toMatchObject({ username: 'boss', canRemove: true })
-    expect(items.length).toBeGreaterThan(2)
+    expect(items.map((item) => item.id)).toEqual(
+      expect.arrayContaining([ownerToken.appToken.id, bossToken.appToken.id]),
+    )
 
     const one = await asBrowser(boss, 'GET', `/api/admin/app-tokens?userId=${boss.userId}`)
     expect(one.json<AdminAppToken[]>().every((item) => item.userId === boss.userId)).toBe(true)
@@ -400,6 +418,80 @@ describe('app tokens (§7.8)', () => {
       .where(and(eq(auditLog.userId, owner.userId), eq(auditLog.action, 'app_token.removed')))
     expect(audited).toHaveLength(1)
     expect(audited[0]?.meta).toMatchObject({ target: 'Boss’s', details: '@boss' })
+    expect(audited[0]?.nodeId).toBe(await rootOf(boss.userId))
+  })
+
+  it('notes a use at most once in a while, and cuts the agent', async () => {
+    const hana = await signIn('hana')
+    const token = await made(hana, await rootOf(hana.userId), 'Touched')
+    const auth = await findAppToken(app.db, token.token)
+    if (!auth) throw new Error('not found')
+    await touchAppToken(app.db, auth, { ip: '203.0.113.5', agent: 'x'.repeat(500) })
+    const [row] = await app.db.select().from(appTokens).where(eq(appTokens.id, auth.tokenId))
+    expect(row?.lastUsedAt).not.toBeNull()
+    expect(row?.lastAddress).toBe('203.0.113.5')
+    expect(row?.lastAgent).toBe('x'.repeat(200))
+    const listed = (await asBrowser(hana, 'GET', '/api/app-tokens')).json<AppToken[]>()
+    expect(listed.find((item) => item.id === auth.tokenId)).toMatchObject({
+      lastAddress: '203.0.113.5',
+      lastAgent: 'x'.repeat(200),
+    })
+
+    // A second use within the interval writes nothing.
+    const again = await findAppToken(app.db, token.token)
+    if (!again) throw new Error('not found')
+    expect(Date.now() - (again.lastUsedAt?.getTime() ?? 0)).toBeLessThan(LAST_SEEN_EVERY_MS)
+    await touchAppToken(app.db, again, { ip: '203.0.113.9', agent: 'other' })
+    const [after] = await app.db.select().from(appTokens).where(eq(appTokens.id, auth.tokenId))
+    expect(after?.lastAddress).toBe('203.0.113.5')
+    expect(after?.lastAgent).toBe('x'.repeat(200))
+  })
+
+  it('ends a token made by a request that waited on the user’s row for a sign-out', async () => {
+    const root = await signIn('root')
+    const gina = await signIn('gina')
+    const [user] = await app.db.select().from(users).where(eq(users.id, gina.userId))
+    const [session] = await app.db.select().from(sessions).where(eq(sessions.userId, gina.userId))
+    if (!user || !session) throw new Error('missing')
+    const auth: Auth = {
+      sessionId: session.id,
+      csrfToken: session.csrfToken,
+      expiresAt: session.expiresAt,
+      seenAt: null,
+      user,
+      limited: false,
+    }
+    const folderId = await rootOf(gina.userId)
+
+    // A sign-out that holds the user's row; the token request queues behind it.
+    let release: () => void = () => undefined
+    const held = new Promise<void>((resolve) => (release = resolve))
+    let locked: () => void = () => undefined
+    const hasLock = new Promise<void>((resolve) => (locked = resolve))
+    const signOut = app.db.transaction(async (tx) => {
+      await endUserSessions(tx, gina.userId)
+      locked()
+      await held
+    })
+    await hasLock
+    const pending = makeAppToken(app, auth, { name: 'Queued', folderId, canWrite: false }).then(
+      () => 'made',
+      (error: unknown) => (error as { code?: string }).code,
+    )
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    release()
+    await signOut
+    expect(await pending).toBe('unauthenticated')
+
+    // And through the admin route: a token made before is gone after.
+    const again = await signIn('gina')
+    const token = await made(again, folderId, 'Before sign-out')
+    const out = await asBrowser(root, 'POST', `/api/admin/users/${gina.userId}/sign-out`)
+    expect(out.statusCode).toBe(200)
+    expect(await findAppToken(app.db, token.token)).toBeNull()
+    expect(
+      await app.db.select().from(appTokens).where(eq(appTokens.userId, gina.userId)),
+    ).toHaveLength(0)
   })
 
   it('keeps the admin pages from plain users', async () => {

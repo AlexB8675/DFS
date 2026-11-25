@@ -131,7 +131,9 @@ export async function signOutUser(
   const { rows: live } = await app.db.execute<{ count: number }>(sql`
     SELECT count(*)::int AS count FROM sessions
     WHERE user_id = ${userId} AND expires_at > now() AND id <> ${admin.sessionId}`)
-  await endUserSessions(app.db, userId, userId === admin.user.id ? admin.sessionId : undefined)
+  await app.db.transaction((tx) =>
+    endUserSessions(tx, userId, userId === admin.user.id ? admin.sessionId : undefined),
+  )
   await auditAlone(app.db, {
     actorId: admin.user.id,
     action: 'user.signed_out',
@@ -256,8 +258,13 @@ export async function removeAppTokenAsAdmin(
   id: string,
 ): Promise<void> {
   await app.db.transaction(async (tx) => {
-    const { rows } = await tx.execute<{ name: string; username: string; is_owner: boolean }>(sql`
-      SELECT token.name, account.username, account.is_owner
+    const { rows } = await tx.execute<{
+      name: string
+      folder_id: string
+      username: string
+      is_owner: boolean
+    }>(sql`
+      SELECT token.name, token.folder_id, account.username, account.is_owner
       FROM app_tokens token JOIN users account ON account.id = token.user_id
       WHERE token.id = ${id}`)
     const [token] = rows
@@ -282,6 +289,7 @@ export async function removeAppTokenAsAdmin(
         action: 'app_token.removed',
         target: token.name,
         details: `@${token.username}`,
+        nodeId: token.folder_id,
       }),
     )
   })

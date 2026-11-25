@@ -130,6 +130,11 @@ export async function endUserSessions(
   userId: string,
   except?: string,
 ): Promise<void> {
+  // Locks the user's row first, so a request that makes a credential under
+  // the same lock (an app token) either commits before this and is deleted
+  // below, or runs after and sees its session gone. Call it inside a
+  // transaction, so the lock is held until the deletes commit.
+  await db.execute(sql`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`)
   await db
     .delete(sessions)
     .where(and(eq(sessions.userId, userId), except ? ne(sessions.id, except) : undefined))
