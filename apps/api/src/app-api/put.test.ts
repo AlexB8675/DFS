@@ -440,6 +440,7 @@ describe('PUT /api/v1/files: conditions', () => {
   it('lets one of two uploads of a new path win: the other is another version, refused at the end', async () => {
     const headers = { 'if-none-match': '*' }
     const base = await sessionCount()
+    const reserved = await reservedBytes('alice')
     const first = rawPut('twin.txt', 10, headers)
     const second = rawPut('twin.txt', 10, headers)
     await first.write(bytes(5))
@@ -456,6 +457,9 @@ describe('PUT /api/v1/files: conditions', () => {
     expect(await versionsOf(files[0]?.id ?? '')).toBe(1)
     // The winner's session stays, completed; the loser's went with its version.
     expect(await sessionCount()).toBe(base + 1)
+    // Only the winner's 10 bytes stay reserved-then-used: the loser's room went back.
+    expect(await reservedBytes('alice')).toBe(reserved)
+    expect(await stagingReserved()).toBe(0)
   })
 })
 
@@ -658,5 +662,147 @@ describe('PUT /api/v1/files: checked again on completion', () => {
     } finally {
       release()
     }
+  })
+})
+
+describe('PUT /api/v1/files: fix round 1', () => {
+  async function scenario() {
+    const folder = await createFolder(owner, rootId, `Fix-${crypto.randomUUID().slice(0, 8)}`)
+    const made = await makeAppToken(owner, folder.id, true)
+    return { folder, ...made }
+  }
+
+  it('answers each upload with its own version and size', async () => {
+    const base = await sessionCount()
+    const first = rawPut('own.txt', 10)
+    const second = rawPut('own.txt', 12)
+    await first.write(bytes(5))
+    await second.write(bytes(5))
+    await sessionsReach(base + 2)
+    first.end(bytes(5))
+    second.end(bytes(7))
+    const answers = await Promise.all([first.answer, second.answer])
+    const items = answers.map((a) => a.json as Item)
+    expect(answers.map((a) => a.status).sort()).toEqual([200, 201])
+    expect(items[0]?.size).toBe(10)
+    expect(items[1]?.size).toBe(12)
+    expect(items[0]?.version).not.toBe(items[1]?.version)
+    // The later commit pruned the earlier version: the file's current one is one of the two.
+    const current = (await stat('own.txt')).version
+    expect(items.map((item) => item.version)).toContain(current)
+  })
+
+  it('refuses a file moved to another folder inside the token’s folder', async () => {
+    const { folder, token: bearer } = await scenario()
+    await put('Sub/a.txt', bytes(3), {}, bearer)
+    const file = await stat('Sub/a.txt', bearer)
+    const base = await sessionCount()
+    const stream = rawPut('Sub/a.txt', 10, {}, bearer)
+    await stream.write(bytes(5))
+    await sessionsReach(base + 1)
+    await owner.send('PATCH', `/nodes/${file.id}`, { json: { parentId: folder.id } })
+    stream.end(bytes(5))
+    const answer = await stream.answer
+    expect(answer.status).toBe(409)
+    expect((answer.json as Failure).error.code).toBe('path_changed')
+    expect(await sessionCount()).toBe(base)
+    expect(await versionsOf(file.id)).toBe(1)
+  })
+
+  it('answers 412 to an If-Match with missing folders, and makes none', async () => {
+    const response = await put('Fresh/Deep/a.txt', bytes(3), { 'if-match': '"x"' })
+    expect(response.status).toBe(412)
+    expect(((await response.json()) as Failure).error.code).toBe('version_changed')
+    expect(await nodesNamed('Fresh')).toHaveLength(0)
+  })
+
+  it('cancels a cut-off body of more than one part once a part is stored', async () => {
+    const reserved = await reservedBytes('alice')
+    const base = await sessionCount()
+    const { chunkSize } = app.config.sizes
+    const stream = rawPut('cut-big.bin', chunkSize + 100)
+    await stream.write(bytes(chunkSize + 5))
+    await sessionsReach(base + 1)
+    const { rows } = await app.db.execute<{ version_id: string }>(
+      sql`SELECT version_id FROM upload_sessions ORDER BY id DESC LIMIT 1`,
+    )
+    const versionId = rows[0]?.version_id ?? ''
+    const chunksOf = async () =>
+      (
+        await app.db.execute<{ n: number }>(
+          sql`SELECT count(*)::int AS n FROM chunks WHERE version_id = ${versionId}`,
+        )
+      ).rows[0]?.n
+    await vi.waitFor(
+      async () => {
+        expect(await chunksOf()).toBeGreaterThan(0)
+      },
+      { timeout: 20_000 },
+    )
+    stream.abort()
+    await vi.waitFor(
+      async () => {
+        expect(await sessionCount()).toBe(base)
+        expect(await chunksOf()).toBe(0)
+        const versions = await app.db.execute<{ n: number }>(
+          sql`SELECT count(*)::int AS n FROM file_versions WHERE id = ${versionId}`,
+        )
+        expect(versions.rows[0]?.n).toBe(0)
+        expect(await nodesNamed('cut-big.bin')).toHaveLength(0)
+        expect(await reservedBytes('alice')).toBe(reserved)
+        expect(await stagingReserved()).toBe(0)
+      },
+      { timeout: 10_000 },
+    )
+  })
+
+  it('counts an upload out of the token’s three after an abort and after a refusal', async () => {
+    const { token: bearer } = await scenario()
+    const refused = (await (await put('r.txt', bytes(3), {}, bearer)).json()) as Item
+    const base = await sessionCount()
+    const aborted = rawPut('a.bin', 10, {}, bearer)
+    const failing = rawPut('r.txt', 10, {}, bearer)
+    const kept = rawPut('c.bin', 10, {}, bearer)
+    for (const stream of [aborted, failing, kept]) await stream.write(bytes(5))
+    await sessionsReach(base + 3)
+    expect((await put('d.bin', bytes(3), {}, bearer)).status).toBe(429)
+    aborted.abort()
+    await sessionsReach(base + 2)
+    await owner.send('PATCH', `/nodes/${refused.id}`, { json: { name: 'r2.txt' } })
+    failing.end(bytes(5))
+    expect((await failing.answer).status).toBe(409)
+    expect((await put('d.bin', bytes(3), {}, bearer)).status).toBe(201)
+    kept.end(bytes(5))
+    expect((await kept.answer).status).toBe(201)
+  })
+
+  it('answers 409 folder_unavailable for a token whose folder is in the trash, using nothing', async () => {
+    const { folder, token: bearer } = await scenario()
+    await owner.send('POST', '/nodes/trash', { json: { ids: [folder.id] } })
+    const reserved = await reservedBytes('alice')
+    const base = await sessionCount()
+    const response = await put('x.bin', bytes(50), {}, bearer)
+    expect(response.status).toBe(409)
+    expect(((await response.json()) as Failure).error.code).toBe('folder_unavailable')
+    expect(await sessionCount()).toBe(base)
+    expect(await reservedBytes('alice')).toBe(reserved)
+    expect(await stagingReserved()).toBe(0)
+  })
+
+  it('leaves other routes’ content-type handling alone', async () => {
+    const odd = await fetch(`${baseUrl}/api/v1/folders/x`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'not a type' },
+      body: new Uint8Array(0),
+    })
+    expect(odd.status).toBe(415)
+    await put('mv.txt', bytes(3))
+    const moved = await fetch(`${baseUrl}/api/v1/move`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ from: 'mv.txt', to: 'mv2.txt' }),
+    })
+    expect(moved.status).toBe(200)
+    expect(((await moved.json()) as Item).path).toBe('mv2.txt')
   })
 })

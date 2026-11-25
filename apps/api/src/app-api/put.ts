@@ -132,14 +132,17 @@ export function appPutRoute(app: FastifyInstance, _options: object, done: () => 
     reply: FastifyReply,
     token: ReturnType<typeof requireAppToken>,
     name: string,
-    parentSegments: string[],
+    segments: string[],
     sizeBytes: number,
     type: string | null,
     conditions: Conditions,
   ) => {
     const ownerId = token.user.id
+    const parentSegments = segments.slice(0, -1)
     // Missing folders first, in a transaction of their own (a ruling: see the plan).
     if ((await resolvePrefix(app.db, token, parentSegments)).rest.length > 0) {
+      // Missing parents mean no file: an If-Match can only fail, and no folder is made for it.
+      if (conditions.ifMatch !== undefined) checkConditions(conditions, null, segments.join('/'))
       await app.db.transaction(async (tx) => {
         await lockDrive(tx, ownerId, 'shared')
         const { deepest, rest } = await resolvePrefix(tx, token, parentSegments)
@@ -169,7 +172,7 @@ export function appPutRoute(app: FastifyInstance, _options: object, done: () => 
           ? new ApiError(409, 'not_a_file', `“${full}” is a folder, not a file.`)
           : outcome
       }
-      return { session: outcome, parentPath: path }
+      return { session: outcome, parentPath: path, parentId: deepest.id }
     })
 
     const { uploadId, nodeId } = started.session
@@ -184,6 +187,9 @@ export function appPutRoute(app: FastifyInstance, _options: object, done: () => 
         }
         await appFolder(tx, token)
         if (!file.visible || file.nameKey !== nameKey(name)) throw pathChanged()
+        // Moved to another folder meanwhile (within the token's folder or out of it).
+        // A rename of an ancestor is accepted: the answer's path is the one from the start.
+        if (uploaded.parentId !== started.parentId) throw pathChanged()
         await checkReach(tx, ownerId, token.folderId, uploaded.parentId)
         checkConditions(conditions, file.currentVersionId, joinPath(started.parentPath, name))
         wasNew = file.currentVersionId === null
@@ -210,7 +216,15 @@ export function appPutRoute(app: FastifyInstance, _options: object, done: () => 
       WHERE n.id = ${nodeId}`)
     const row = rows[0]
     if (!row) throw new Error('A stored upload’s file is gone.')
-    return { item: toAppItem(row, joinPath(started.parentPath, row.name)), created: wasNew }
+    // This upload's own version, size and type: a PUT that committed right after
+    // must not hand its version to this client, which would hide a lost update.
+    const item = {
+      ...toAppItem(row, joinPath(started.parentPath, row.name)),
+      version: started.session.versionId,
+      size: sizeBytes,
+      mimeType: type,
+    }
+    return { item, created: wasNew }
   }
 
   const put = async (request: FastifyRequest, reply: FastifyReply) => {
@@ -241,7 +255,7 @@ export function appPutRoute(app: FastifyInstance, _options: object, done: () => 
         reply,
         token,
         name,
-        segments.slice(0, -1),
+        segments,
         sizeBytes,
         type,
         conditions,
