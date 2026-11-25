@@ -28,6 +28,7 @@ import {
   type CreateUploadInput,
   type CreateVaultInput,
   type Delivery,
+  type AppToken,
   type Device,
   type DeviceMe,
   type DeviceToken,
@@ -40,6 +41,8 @@ import {
   type NodeKind,
   type NodePath,
   type Page,
+  type MadeAppToken,
+  type MakeAppTokenInput,
   type PairDeviceInput,
   type PairingCode,
   type PasswordChange,
@@ -201,6 +204,20 @@ export interface MockDevice {
   lastAgent: string | null
 }
 
+/** An app's token (§7.8); the mock keeps it in the clear, which the real API never does. */
+export interface MockAppToken {
+  id: string
+  userId: string
+  name: string
+  token: string
+  folderId: string
+  canWrite: boolean
+  createdAt: string
+  lastUsedAt: string | null
+  lastAddress: string | null
+  lastAgent: string | null
+}
+
 /** A code the page got for an app, until the app trades it for a token (kept in memory only). */
 interface MockPairing {
   userId: string
@@ -239,6 +256,8 @@ export interface MockState {
   positions?: Record<string, { versionId: string; positionMs: number }>
   /** Backup apps' devices (§7.6), newest first. Optional so that older saved states still load. */
   devices?: MockDevice[]
+  /** Apps' tokens (§7.8), newest first. Optional so that older saved states still load. */
+  appTokens?: MockAppToken[]
   /** When the vault open in the current session locks; absent or null when it isn't open (§7.7). */
   vaultLocksAt?: string | null
 }
@@ -297,6 +316,10 @@ const VAULT_RESET_MS = 7 * 24 * 60 * 60_000
 const RECOVERY_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
 /** `dfs_` and 32 random bytes in base64url (§7.6). */
 const DEVICE_TOKEN_PATTERN = /^dfs_[A-Za-z0-9_-]{43}$/
+/** `dfs_app_` and 32 random bytes in base64url (§7.8). */
+const APP_TOKEN_PREFIX = 'dfs_app_'
+/** At most this many app tokens a user (`MAX_TOKENS` in the API). */
+const MAX_APP_TOKENS = 50
 /** Where the mock's requests come from, as the audit log and the device list show it. */
 const MOCK_ADDRESS = '127.0.0.1'
 /** Enough to tell programs apart, as for the real API's sessions. */
@@ -563,6 +586,92 @@ export class MockDb {
     this.save()
   }
 
+  // ── App tokens (§7.8) ──────────────────────────────────────────────────────
+
+  /** Every user's tokens, newest first; those whose folder is gone for good go with it (the API's FK cascade). */
+  protected get appTokens(): MockAppToken[] {
+    const tokens = (this.state.appTokens ??= [])
+    if (tokens.some((token) => !this.state.nodes[token.folderId])) {
+      this.state.appTokens = tokens.filter((token) => this.state.nodes[token.folderId])
+    }
+    return this.state.appTokens ?? tokens
+  }
+
+  /** A token as its owner's list shows it: never the token itself. */
+  protected listedAppToken(token: MockAppToken): AppToken {
+    const { id, name, folderId, canWrite, createdAt, lastUsedAt, lastAddress, lastAgent } = token
+    const folder = this.state.nodes[folderId]
+    return {
+      id,
+      name,
+      folderId,
+      folderPath: folder
+        ? this.ancestors(folder)
+            .map((ancestor) => ancestor.name)
+            .join(' / ')
+        : '',
+      folderAvailable: folder?.kind === 'folder' && isVisible(folder),
+      canWrite,
+      createdAt,
+      lastUsedAt,
+      lastAddress,
+      lastAgent,
+    }
+  }
+
+  /** `POST /app-tokens`: makes a token for one of the signed-in user's folders. Shown once. */
+  makeAppToken({ name, folderId, canWrite }: MakeAppTokenInput): MadeAppToken {
+    const user = this.currentUser()
+    const folder = this.requireFolder(folderId)
+    if (this.appTokens.filter((token) => token.userId === user.id).length >= MAX_APP_TOKENS) {
+      throw new MockApiError(
+        409,
+        'too_many_tokens',
+        `You can have at most ${String(MAX_APP_TOKENS)} app tokens. Remove one first.`,
+      )
+    }
+    const made: MockAppToken = {
+      id: crypto.randomUUID(),
+      userId: user.id,
+      name,
+      token: `${APP_TOKEN_PREFIX}${randomSecret()}`,
+      folderId: folder.id,
+      canWrite,
+      createdAt: new Date().toISOString(),
+      lastUsedAt: null,
+      lastAddress: null,
+      lastAgent: null,
+    }
+    this.state.appTokens = [made, ...this.appTokens]
+    this.audit('app_token.made', name, canWrite ? 'read and write' : 'read only')
+    this.save()
+    return { token: made.token, appToken: this.listedAppToken(made) }
+  }
+
+  /** `GET /app-tokens`: the signed-in user's tokens, newest first. */
+  myAppTokens(): AppToken[] {
+    const { id } = this.currentUser()
+    return this.appTokens
+      .filter((token) => token.userId === id)
+      .map((token) => this.listedAppToken(token))
+  }
+
+  /** `DELETE /app-tokens/:id`: ends one of the signed-in user's own tokens. */
+  removeAppToken(id: string): void {
+    const user = this.currentUser()
+    const token = this.appTokens.find(
+      (candidate) => candidate.id === id && candidate.userId === user.id,
+    )
+    if (!token) throw new MockApiError(404, 'not_found', 'No such app token.')
+    this.dropAppToken(token)
+    this.audit('app_token.removed', token.name)
+    this.save()
+  }
+
+  protected dropAppToken(token: MockAppToken): void {
+    this.state.appTokens = this.appTokens.filter((candidate) => candidate !== token)
+  }
+
   protected dropDevice(device: MockDevice): void {
     this.state.devices = this.devices.filter((candidate) => candidate !== device)
   }
@@ -576,6 +685,7 @@ export class MockDb {
       if (pairing.userId === userId) this.pairings.delete(code)
     }
     this.state.devices = this.devices.filter((device) => device.userId !== userId)
+    this.state.appTokens = this.appTokens.filter((token) => token.userId !== userId)
   }
 
   // ── The vault (§7.7) ───────────────────────────────────────────────────────

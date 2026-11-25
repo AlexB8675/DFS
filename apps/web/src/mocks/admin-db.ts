@@ -1,5 +1,6 @@
 import {
   ADMIN_TASK_LABELS,
+  type AdminAppToken,
   type AdminDevice,
   type AdminSession,
   type AdminShare,
@@ -481,6 +482,43 @@ export class AdminMockDb extends MockDb {
     }
     this.dropDevice(device)
     this.audit('device.removed', device.name, `@${user.username}`)
+    this.save()
+  }
+
+  /** `GET /admin/app-tokens`: every user's tokens, newest first; one user's with `userId`. */
+  adminAppTokens(userId?: string): AdminAppToken[] {
+    const admin = this.requireAdmin()
+    return this.appTokens
+      .filter((token) => !userId || token.userId === userId)
+      .slice(0, 500)
+      .map((token) => {
+        const user = this.findUser(token.userId)
+        return {
+          ...this.listedAppToken(token),
+          userId: user.id,
+          username: user.username,
+          displayName: user.displayName,
+          // The owner's only by the owner.
+          canRemove: !user.isOwner || admin.isOwner,
+        }
+      })
+  }
+
+  /** `DELETE /admin/app-tokens/:id`: removes any user's token. */
+  removeAppTokenAsAdmin(id: string): void {
+    const admin = this.requireAdmin()
+    const token = this.appTokens.find((candidate) => candidate.id === id)
+    if (!token) throw new MockApiError(404, 'not_found', 'No such app token.')
+    const user = this.findUser(token.userId)
+    if (user.isOwner && !admin.isOwner) {
+      throw new MockApiError(
+        409,
+        'owner_protected',
+        'Only the owner can remove the owner’s app tokens.',
+      )
+    }
+    this.dropAppToken(token)
+    this.audit('app_token.removed', token.name, `@${user.username}`)
     this.save()
   }
 

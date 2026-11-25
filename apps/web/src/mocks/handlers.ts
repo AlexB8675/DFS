@@ -11,6 +11,7 @@ import {
   createUserSchema,
   createVaultSchema,
   deviceTokenRequestSchema,
+  makeAppTokenSchema,
   ensureFoldersSchema,
   adminTaskRequestSchema,
   auditQuerySchema,
@@ -192,6 +193,19 @@ export const handlers = [
   http.delete<Id>('/api/devices/:id', ({ request, params }) =>
     respondEmpty(request, () => {
       db.removeDevice(params.id)
+    }),
+  ),
+
+  // ── App tokens (§7.8). The mock serves their management, not /api/v1. ────────
+  http.post('/api/app-tokens', ({ request }) =>
+    respond(request, async () => db.makeAppToken(makeAppTokenSchema.parse(await request.json())), {
+      status: 201,
+    }),
+  ),
+  http.get('/api/app-tokens', ({ request }) => respond(request, () => db.myAppTokens())),
+  http.delete<Id>('/api/app-tokens/:id', ({ request, params }) =>
+    respondEmpty(request, () => {
+      db.removeAppToken(params.id)
     }),
   ),
 
@@ -622,6 +636,16 @@ export const handlers = [
     respond(request, () =>
       db.adminDevices(readQuery(request, z.object({ userId: z.uuid().optional() })).userId),
     ),
+  ),
+  http.get('/api/admin/app-tokens', ({ request }) =>
+    respond(request, () =>
+      db.adminAppTokens(readQuery(request, z.object({ userId: z.uuid().optional() })).userId),
+    ),
+  ),
+  http.delete<Id>('/api/admin/app-tokens/:id', ({ request, params }) =>
+    respondEmpty(request, () => {
+      db.removeAppTokenAsAdmin(params.id)
+    }),
   ),
   http.delete<Id>('/api/admin/devices/:id', ({ request, params }) =>
     respondEmpty(request, () => {
