@@ -1,5 +1,6 @@
 import http, { type IncomingHttpHeaders } from 'node:http'
 import { ApiClient, createFolder, text, uploadFile, workspace } from '@dfs/contract'
+import { abandonIdleUploads } from '@dfs/db'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
 import { madeAppTokenSchema } from '@dfs/shared'
 import { sql } from 'drizzle-orm'
@@ -524,6 +525,54 @@ describe('PUT /api/v1/files: a client that leaves', () => {
       },
       { timeout: 10_000 },
     )
+  })
+})
+
+describe('PUT /api/v1/files: a slow stream', () => {
+  it('keeps its session alive, so the idle sweep leaves it and it completes', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    try {
+      const base = await sessionCount()
+      const body = bytes(200)
+      const stream = rawPut('slow.bin', 200)
+      await stream.write(body.subarray(0, 50))
+      await sessionsReach(base + 1)
+      const { rows: made } = await app.db.execute<{ id: string }>(
+        sql`SELECT id FROM upload_sessions ORDER BY id DESC LIMIT 1`,
+      )
+      const sessionId = made[0]?.id ?? ''
+      // The stream's timer is set once its room is reserved. (`vi.waitFor`
+      // polls on setInterval, which is faked here: poll with setTimeout.)
+      const until = async (check: () => Promise<boolean>) => {
+        for (let tries = 0; tries < 200 && !(await check()); tries += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 50))
+        }
+      }
+      await until(async () => (await stagingReserved()) > 0)
+      await new Promise((resolve) => setImmediate(resolve))
+      // The page has said nothing for 15 minutes, as far as the row knows.
+      await app.db.execute(sql`
+        UPDATE upload_sessions SET alive_at = now() - interval '15 minutes'
+        WHERE id = ${sessionId}`)
+      await vi.advanceTimersByTimeAsync(30_000)
+      const fresh = async () => {
+        const { rows } = await app.db.execute<{ fresh: boolean }>(sql`
+          SELECT alive_at > now() - interval '1 minute' AS fresh
+          FROM upload_sessions WHERE id = ${sessionId}`)
+        return rows[0]?.fresh === true
+      }
+      await until(fresh)
+      expect(await fresh()).toBe(true)
+      await abandonIdleUploads(app.db, 10)
+      const { rows: kept } = await app.db.execute(
+        sql`SELECT 1 FROM upload_sessions WHERE id = ${sessionId}`,
+      )
+      expect(kept).toHaveLength(1)
+      stream.end(body.subarray(50))
+      expect((await stream.answer).status).toBe(201)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

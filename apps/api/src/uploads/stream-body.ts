@@ -1,7 +1,12 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import type { Owner } from '../auth/sessions.ts'
 import { ApiError } from '../errors.ts'
-import { receiveStreamedPart, stagingFull, type StreamStart } from './uploads.ts'
+import {
+  keepUploadsAlive,
+  receiveStreamedPart,
+  stagingFull,
+  type StreamStart,
+} from './uploads.ts'
 
 // The loop of a streamed upload (DESIGN.md ยง6.1), shared by every route that
 // takes a file as one request body: it cuts the body into parts as it arrives
@@ -17,7 +22,11 @@ import { receiveStreamedPart, stagingFull, type StreamStart } from './uploads.ts
  */
 const STAGING_WAIT_MS = 45_000
 const STAGING_POLL_MS = 2_000
-/** A stream renews its reservation this often; one not renewed for 90 s stops counting (D38). */
+/**
+ * A stream renews its reservation this often (one not renewed for 90 s stops
+ * counting, D38) and tells the session it is alive, so a slow body is not
+ * swept as idle (ง6.1) between two parts.
+ */
 const RESERVATION_RENEW_MS = 30_000
 
 /**
@@ -68,12 +77,21 @@ export async function streamBody(
     try {
       if (reserving) {
         await reserveRoom(app, uploadId, start.needBytes, gone.signal)
-        renewal = setInterval(() => {
-          app.stagingRoom.renew(uploadId).catch((error: unknown) => {
-            request.log.warn({ err: error, uploadId }, 'could not renew a staging reservation')
-          })
-        }, RESERVATION_RENEW_MS)
       }
+      // One after the other: the reservation's renewal updates the session's
+      // row, and the keep-alive skips a row that is locked.
+      renewal = setInterval(() => {
+        void (async () => {
+          if (reserving) {
+            await app.stagingRoom.renew(uploadId).catch((error: unknown) => {
+              request.log.warn({ err: error, uploadId }, 'could not renew a staging reservation')
+            })
+          }
+          await keepUploadsAlive(app, owner, [uploadId]).catch((error: unknown) => {
+            request.log.warn({ err: error, uploadId }, 'could not keep an upload alive')
+          })
+        })()
+      }, RESERVATION_RENEW_MS)
       for (let next = await read(); !next.done; next = await read()) {
         const data = next.value
         for (let offset = 0; offset < data.length;) {
