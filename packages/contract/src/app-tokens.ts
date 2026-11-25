@@ -1,5 +1,6 @@
 import {
   adminAppTokenListSchema,
+  adminUserSchema,
   appTokenListSchema,
   madeAppTokenSchema,
   sessionSchema,
@@ -31,6 +32,8 @@ export function appTokenTests({
   }
 
   const notFound = { status: 404, code: 'not_found' }
+
+  // The mock has no vault or Backups tree, so those refusals are tested only in apps/api/src/app-tokens/tokens.test.ts.
 
   describe('app tokens (§7.8)', () => {
     it('makes a token for a folder, shown once, with where the folder is', async () => {
@@ -71,9 +74,7 @@ export function appTokenTests({
       })
       expect(await client.error('POST', '/app-tokens', body(trashed.id))).toEqual(notFound)
       expect(await client.error('POST', '/app-tokens', body(theirs.id))).toEqual(notFound)
-      expect(await client.error('POST', '/app-tokens', body(crypto.randomUUID()))).toEqual(
-        notFound,
-      )
+      expect(await client.error('POST', '/app-tokens', body(crypto.randomUUID()))).toEqual(notFound)
       expect(await client.call('GET', '/app-tokens', appTokenListSchema)).toEqual([])
     })
 
@@ -169,11 +170,67 @@ export function appTokenTests({
       const again = await owner()
       await again.send('DELETE', `/admin/app-tokens/${ownersToken.appToken.id}`)
       await again.send('DELETE', `/admin/app-tokens/${made.appToken.id}`)
-      expect(await again.error('DELETE', `/admin/app-tokens/${made.appToken.id}`)).toEqual(
-        notFound,
-      )
+      expect(await again.error('DELETE', `/admin/app-tokens/${made.appToken.id}`)).toEqual(notFound)
       const theirs = await signIn(username, chosenPassword(username))
       expect(await theirs.call('GET', '/app-tokens', appTokenListSchema)).toEqual([])
+    })
+
+    it('answers invalid_request to an ID that isn’t a UUID', async () => {
+      const { client } = await activatedUser()
+      const invalid = { status: 400, code: 'invalid_request' }
+      expect(await client.error('DELETE', '/app-tokens/not-an-id')).toEqual(invalid)
+      const admin = await owner()
+      expect(await admin.error('DELETE', '/admin/app-tokens/not-an-id')).toEqual(invalid)
+    })
+
+    it('allows 50 tokens a user, and refuses the 51st', async () => {
+      const { client } = await activatedUser()
+      const root = await workspace(client)
+      for (let n = 1; n <= 50; n += 1) await make(client, root.id, `App ${String(n)}`)
+      expect(
+        await client.error('POST', '/app-tokens', {
+          json: { name: 'One more', folderId: root.id, canWrite: false },
+        }),
+      ).toEqual({ status: 409, code: 'too_many_tokens' })
+      expect(await client.call('GET', '/app-tokens', appTokenListSchema)).toHaveLength(50)
+    })
+
+    it('shows another admin the owner’s tokens as theirs alone to remove', async () => {
+      const admin = await owner()
+      const ownerFolder = await workspace(admin)
+      const ownersToken = await make(admin, ownerFolder.id, 'Owner app')
+      const { client: user } = await activatedUser()
+      const userFolder = await workspace(user)
+      const usersToken = await make(user, userFolder.id, 'User app')
+      const { client: otherAdmin } = await activatedUser('admin')
+
+      const seen = await otherAdmin.call('GET', '/admin/app-tokens', adminAppTokenListSchema)
+      expect(seen.find((token) => token.id === usersToken.appToken.id)?.canRemove).toBe(true)
+      expect(seen.find((token) => token.id === ownersToken.appToken.id)?.canRemove).toBe(false)
+    })
+
+    it('an admin’s disabling or password reset of a user ends their tokens', async () => {
+      const ends = [
+        (admin: ApiClient, userId: string) =>
+          admin.call('POST', `/admin/users/${userId}/password`, adminUserSchema, {
+            json: { temporaryPassword: `reset-${crypto.randomUUID()}` },
+          }),
+        (admin: ApiClient, userId: string) =>
+          admin.call('PATCH', `/admin/users/${userId}`, adminUserSchema, {
+            json: { disabled: true },
+          }),
+      ]
+      for (const end of ends) {
+        const { user, client } = await activatedUser()
+        const root = await workspace(client)
+        await make(client, root.id, 'Agent')
+
+        const admin = await owner()
+        await end(admin, user.id)
+        expect(
+          await admin.call('GET', `/admin/app-tokens?userId=${user.id}`, adminAppTokenListSchema),
+        ).toEqual([])
+      }
     })
 
     it('is a session’s to make: without the CSRF token it is refused', async () => {

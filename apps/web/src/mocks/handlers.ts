@@ -205,7 +205,7 @@ export const handlers = [
   http.get('/api/app-tokens', ({ request }) => respond(request, () => db.myAppTokens())),
   http.delete<Id>('/api/app-tokens/:id', ({ request, params }) =>
     respondEmpty(request, () => {
-      db.removeAppToken(params.id)
+      db.removeAppToken(z.uuid().parse(params.id))
     }),
   ),
 
@@ -644,7 +644,7 @@ export const handlers = [
   ),
   http.delete<Id>('/api/admin/app-tokens/:id', ({ request, params }) =>
     respondEmpty(request, () => {
-      db.removeAppTokenAsAdmin(params.id)
+      db.removeAppTokenAsAdmin(z.uuid().parse(params.id))
     }),
   ),
   http.delete<Id>('/api/admin/devices/:id', ({ request, params }) =>
