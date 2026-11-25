@@ -171,17 +171,18 @@ describe('streamed uploads (§6.1)', () => {
     const owner = await signIn('owner')
     const bytes = new Uint8Array(app.config.sizes.chunkSize + 5).map((_, i) => i % 7)
     const session = await startUpload(owner, bytes.length)
-    const chunked = (data: Uint8Array) =>
+    const chunked = (data: Uint8Array, split = data.length) =>
       new ReadableStream<Uint8Array>({
         start(controller) {
-          controller.enqueue(data)
+          controller.enqueue(data.slice(0, split))
+          if (split < data.length) controller.enqueue(data.slice(split))
           controller.close()
         },
       })
 
     const longer = new Uint8Array(bytes.length + 1)
     longer.set(bytes)
-    const refused = await stream(owner, session, 0, chunked(longer))
+    const refused = await stream(owner, session, 0, chunked(longer, bytes.length))
     expect(refused.status).toBe(400)
     // The last part waits for the end of the body: the refused stream recorded none of it.
     expect(await received(owner, session)).toEqual([0])
@@ -251,7 +252,9 @@ describe('streamed uploads (§6.1)', () => {
       0,
       new ReadableStream<Uint8Array>({
         start(controller) {
-          controller.enqueue(longer)
+          // The file's bytes, then the extra one on its own: the last part is held across a read.
+          controller.enqueue(longer.slice(0, 10))
+          controller.enqueue(longer.slice(10))
           controller.close()
         },
       }),
@@ -259,6 +262,8 @@ describe('streamed uploads (§6.1)', () => {
     expect(refused.status).toBe(400)
     expect(await refused.json()).toMatchObject({ error: { code: 'invalid_part' } })
 
+    expect(await received(owner, second)).toEqual([])
+    expect(await reserved(second)).toBe(0)
     expect(await current()).toBe(first.versionId)
     const { rows: versions } = await app.db.execute<{ id: string }>(sql`
       SELECT id FROM file_versions WHERE id = ${first.versionId}`)
