@@ -171,6 +171,10 @@ export interface ListOptions {
   order: SortOrder
   cursor?: string | undefined
   limit: number
+  /** Leaves out files with no current version: still uploading, so not there yet. */
+  completedOnly?: boolean
+  /** Only nodes of My drive (`tree = 'drive'`): the vault's and Backups' are not listed. */
+  driveOnly?: boolean
 }
 
 /** Where a page ended: the segment (folders, then files), its sort value, and the ID. */
@@ -183,6 +187,16 @@ export async function listChildren(
   parentId: string,
   options: ListOptions,
 ): Promise<Page<DriveNode>> {
+  const { rows, nextCursor } = await listChildRows(db, parentId, options)
+  return { items: rows.map(toDriveNode), nextCursor }
+}
+
+/** `listChildren`'s page as rows, for callers that show them their own way. */
+export async function listChildRows(
+  db: Executor,
+  parentId: string,
+  options: ListOptions,
+): Promise<{ rows: NodeRow[]; nextCursor: string | null }> {
   const after = options.cursor ? decodeCursor(options.cursor) : null
   const segments: NodeKind[] = options.kind ? [options.kind] : ['folder', 'file']
   const start = after ? segments.indexOf(after.k) : 0
@@ -202,7 +216,7 @@ export async function listChildren(
   const last = page.at(-1)
   const more = rows.length > options.limit && last !== undefined
   return {
-    items: page.map(toDriveNode),
+    rows: page,
     nextCursor: more ? encodeCursor({ k: last.kind, v: last.sort_value, id: last.id }) : null,
   }
 }
@@ -221,10 +235,13 @@ async function listSegment(
   const resume = after
     ? sql`AND (${expression}, n.id) ${comparison} (${cast(after.v)}, ${after.id}::uuid)`
     : sql``
+  const completed =
+    options.completedOnly && kind === 'file' ? sql`AND n.current_version_id IS NOT NULL` : sql``
+  const drive = options.driveOnly ? sql`AND n.tree = 'drive'` : sql``
   const { rows } = await db.execute<NodeRow & { sort_value: string }>(sql`
     SELECT ${NODE_COLUMNS}, (${expression})::text AS sort_value
     FROM nodes n /* tree: by parent */ ${NODE_JOINS}
-    WHERE n.parent_id = ${parentId} AND n.kind = ${kind} AND n.deleted_at IS NULL ${resume}
+    WHERE n.parent_id = ${parentId} AND n.kind = ${kind} AND n.deleted_at IS NULL ${completed} ${drive} ${resume}
     ORDER BY ${expression} ${direction}, n.id ${direction}
     LIMIT ${limit}`)
   return rows

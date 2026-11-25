@@ -121,6 +121,7 @@ export const READ_AHEAD_BYTES = 512 * 1024 * 1024
 const UNTIMED_ROUTES = new Set([
   '/api/events',
   '/api/files/:id/content',
+  '/api/v1/files/*',
   '/api/folders/:id/archive',
   '/api/archive/:token',
   '/api/uploads/:id/parts/:index',
