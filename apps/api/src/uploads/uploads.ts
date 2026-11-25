@@ -34,7 +34,7 @@ import { eq, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { fromDrizzle, type PgBoss } from 'pg-boss'
 import { audit } from '../audit.ts'
-import type { Auth } from '../auth/sessions.ts'
+import type { Owner } from '../auth/sessions.ts'
 import { ApiError } from '../errors.ts'
 import { NOT_VAULT, notFound, VISIBLE } from '../nodes/read.ts'
 import { checkedName, lockDrive, nameConflict } from '../nodes/write.ts'
@@ -80,10 +80,10 @@ interface UploadRow extends Record<string, unknown> {
 /** `POST /uploads/batch`: answers per upload, so one bad name doesn't sink the rest. */
 export async function createUploads(
   app: FastifyInstance,
-  auth: Auth,
+  owner: Owner,
   inputs: CreateUploadInput[],
 ): Promise<UploadBatchResult['results']> {
-  const outcomes = await app.db.transaction((tx) => startUploads(app, tx, auth, inputs))
+  const outcomes = await app.db.transaction((tx) => startUploads(app, tx, owner, inputs))
   return outcomes.map((outcome) =>
     outcome instanceof ApiError
       ? {
@@ -124,10 +124,10 @@ class AlreadyUploaded extends ApiError {
 /** `POST /uploads`. */
 export async function createUpload(
   app: FastifyInstance,
-  auth: Auth,
+  owner: Owner,
   input: CreateUploadInput,
 ): Promise<UploadSession> {
-  const [outcome] = await app.db.transaction((tx) => startUploads(app, tx, auth, [input]))
+  const [outcome] = await app.db.transaction((tx) => startUploads(app, tx, owner, [input]))
   if (!outcome || outcome instanceof ApiError) throw outcome ?? new Error('No upload started.')
   return outcome
 }
@@ -147,13 +147,13 @@ interface Plan {
  * counted against one lock of the user's row, and new files, versions and
  * sessions are inserted together. A problem with one upload is its own answer.
  */
-async function startUploads(
+export async function startUploads(
   app: FastifyInstance,
   tx: Executor,
-  auth: Auth,
+  owner: Owner,
   inputs: CreateUploadInput[],
 ): Promise<(UploadSession | ApiError)[]> {
-  const ownerId = auth.user.id
+  const ownerId = owner.user.id
   await lockDrive(tx, ownerId, 'shared')
   const outcomes: (UploadSession | ApiError)[] = []
   const fail = (index: number, error: unknown) => {
@@ -449,10 +449,10 @@ function sameFile(found: FoundName | undefined, input: CreateUploadInput): boole
 /** `GET /uploads/:id`: the parts already here, also after completion. */
 export async function uploadStatus(
   app: FastifyInstance,
-  auth: Auth,
+  owner: Owner,
   uploadId: string,
 ): Promise<UploadSessionStatus> {
-  const upload = await findUpload(app.db, auth, uploadId)
+  const upload = await findUpload(app.db, owner, uploadId)
   const { rows } = await app.db.execute<{ idx: number }>(sql`
     SELECT idx FROM chunks WHERE version_id = ${upload.version_id} ORDER BY idx`)
   return {
@@ -469,14 +469,14 @@ export async function uploadStatus(
  */
 export async function keepUploadsAlive(
   app: FastifyInstance,
-  auth: Auth,
+  owner: Owner,
   ids: readonly string[],
 ): Promise<void> {
   await app.db.execute(sql`
     UPDATE upload_sessions SET alive_at = now(), expires_at = ${extendedExpiry}
     WHERE id IN (
       SELECT id FROM upload_sessions
-      WHERE id = ANY(${uuidArray(ids)}) AND user_id = ${auth.user.id} AND state = 'receiving'
+      WHERE id = ANY(${uuidArray(ids)}) AND user_id = ${owner.user.id} AND state = 'receiving'
         AND expires_at > now()
       ORDER BY id FOR UPDATE SKIP LOCKED)`)
 }
@@ -488,7 +488,7 @@ export async function keepUploadsAlive(
  */
 export async function receivePart(
   app: FastifyInstance,
-  auth: Auth,
+  owner: Owner,
   uploadId: string,
   index: number,
   body: Uint8Array,
@@ -497,7 +497,7 @@ export async function receivePart(
   if (!Number.isInteger(index) || index < 0 || index > 0x7fffffff) {
     throw new ApiError(400, 'invalid_part', 'Part index out of range.')
   }
-  const upload = await findUpload(app.db, auth, uploadId, { partIndex: index })
+  const upload = await findUpload(app.db, owner, uploadId, { partIndex: index })
   checkPart(upload, index, body)
   const plainHash = await sha256(body)
   if (sha256Header !== undefined) {
@@ -506,7 +506,20 @@ export async function receivePart(
       throw new ApiError(400, 'hash_mismatch', 'The part was corrupted in transit.')
     }
   }
-  await storePart(app, auth, upload, index, body, plainHash, { reserved: false })
+  await storePart(app, owner, upload, index, body, plainHash, {
+    reserved: false,
+    completeAlone: true,
+  })
+}
+
+/** Where a streamed upload may start, and what must follow. */
+export interface StreamStart {
+  chunkSize: number
+  chunkCount: number
+  bytes: number
+  completed: boolean
+  /** The frames of the parts from `from` not received yet: what to reserve in staging (D38). */
+  needBytes: number
 }
 
 /**
@@ -515,18 +528,11 @@ export async function receivePart(
  */
 export async function streamStart(
   app: FastifyInstance,
-  auth: Auth,
+  owner: Owner,
   uploadId: string,
   from: number,
-): Promise<{
-  chunkSize: number
-  chunkCount: number
-  bytes: number
-  completed: boolean
-  /** The frames of the parts from `from` not received yet: what to reserve in staging (D38). */
-  needBytes: number
-}> {
-  const upload = await findUpload(app.db, auth, uploadId)
+): Promise<StreamStart> {
+  const upload = await findUpload(app.db, owner, uploadId)
   if (!Number.isInteger(from) || from < 0 || from >= upload.chunk_count) {
     throw new ApiError(400, 'invalid_part', 'The stream starts past the end of the file.')
   }
@@ -551,17 +557,24 @@ export async function streamStart(
  * A part cut from a streamed upload, stored as `PUT /uploads/:id/parts/:index`
  * stores one. The stream carries no hashes: completing the upload checks
  * them all (`completeUpload`).
+ *
+ * A single-part upload completes with its part, unless `completeAlone` is
+ * false: then the caller completes it, with a guard perhaps.
  */
 export async function receiveStreamedPart(
   app: FastifyInstance,
-  auth: Auth,
+  owner: Owner,
   uploadId: string,
   index: number,
   body: Uint8Array,
+  { completeAlone = true }: { completeAlone?: boolean } = {},
 ): Promise<void> {
-  const upload = await findUpload(app.db, auth, uploadId, { partIndex: index })
+  const upload = await findUpload(app.db, owner, uploadId, { partIndex: index })
   checkPart(upload, index, body)
-  await storePart(app, auth, upload, index, body, await sha256(body), { reserved: true })
+  await storePart(app, owner, upload, index, body, await sha256(body), {
+    reserved: true,
+    completeAlone,
+  })
 }
 
 /** Staging backpressure (§6.1): a `503` the client waits out. */
@@ -599,18 +612,18 @@ function checkPart(upload: UploadRow, index: number, body: Uint8Array): void {
  */
 async function storePart(
   app: FastifyInstance,
-  auth: Auth,
+  owner: Owner,
   upload: UploadRow,
   index: number,
   body: Uint8Array,
   plainHash: Uint8Array,
-  { reserved }: { reserved: boolean },
+  { reserved, completeAlone }: { reserved: boolean; completeAlone: boolean },
 ): Promise<void> {
   const uploadId = upload.id
   // A retry of an acknowledged part needs no encryption, fsync or staging space.
   if (receivedPartMatches(upload.received_hash, plainHash)) {
-    if (upload.chunk_count === 1 && upload.state !== 'completed') {
-      await completeUpload(app, auth, uploadId)
+    if (completeAlone && upload.chunk_count === 1 && upload.state !== 'completed') {
+      await completeUpload(app, owner, uploadId)
     }
     return
   }
@@ -623,7 +636,7 @@ async function storePart(
     app.keys.unwrapDek(upload.wrapped_dek, upload.key_id, uuidBytes(versionId)),
   )
   // A single-part upload completes on its own, saving a request per small file.
-  const queue = upload.chunk_count === 1 ? await app.queue.get() : null
+  const queue = completeAlone && upload.chunk_count === 1 ? await app.queue.get() : null
   // Each attempt owns its file; a late or duplicate PUT cannot overwrite an
   // accepted frame. Only publishing the chunk takes the session's row lock,
   // so different parts can still encrypt and write in parallel.
@@ -641,7 +654,7 @@ async function storePart(
       chunkContext(versionId, index),
     )
     await app.db.transaction(async (tx) => {
-      const current = await findUpload(tx, auth, uploadId, { lock: true })
+      const current = await findUpload(tx, owner, uploadId, { lock: true })
       if (current.state === 'receiving') {
         const inserted = await tx.execute<{ idx: number }>(sql`
           INSERT INTO chunks (version_id, idx, plain_size, frame_size, plain_sha256, frame_sha256, staged_path)
@@ -667,7 +680,7 @@ async function storePart(
       }
       // In the same transaction as the part: one lock of the session and one
       // commit per small file.
-      if (queue) finished = await finishUpload(app, tx, queue, auth, current)
+      if (queue) finished = await finishUpload(app, tx, queue, owner, current)
       attempt.committing = true
     })
   } finally {
@@ -701,20 +714,64 @@ function uploadCompleted(): ApiError {
  *
  * With `partSha256`, every part's SHA-256 as the client read it, the parts
  * are checked first: a streamed upload's only check of what arrived.
+ *
+ * With a `guard`, the transaction first takes the drive's tree lock, shared,
+ * then the session, then the file's row `FOR NO KEY UPDATE` (never `FOR
+ * UPDATE`: starting an upload key-share locks that row while it holds the
+ * user's row, which a completion needs next), and the guard's check sees the
+ * file as it is, before this completion changes it.
  */
 export async function completeUpload(
   app: FastifyInstance,
-  auth: Auth,
+  owner: Owner,
   uploadId: string,
   partSha256?: readonly string[],
+  guard?: CompletionGuard,
 ): Promise<void> {
-  if (partSha256) await checkParts(app, auth, uploadId, partSha256)
+  if (partSha256) await checkParts(app, owner, uploadId, partSha256)
   const queue = await app.queue.get()
   const finished = await app.db.transaction(async (tx) => {
-    const upload = await findUpload(tx, auth, uploadId, { lock: true })
-    return finishUpload(app, tx, queue, auth, upload)
+    if (guard) await lockDrive(tx, owner.user.id, 'shared')
+    const upload = await findUpload(tx, owner, uploadId, { lock: true })
+    if (guard && upload.state === 'receiving') {
+      const { rows } = await tx.execute<{
+        current_version_id: string | null
+        name_key: string
+        visible: boolean
+      }>(sql`
+        SELECT n.current_version_id, n.name_key, (${VISIBLE}) AS visible
+        FROM nodes n /* tree: by id, gated */ WHERE n.id = ${upload.node_id}
+        FOR NO KEY UPDATE OF n`)
+      const file = rows[0]
+      if (!file) throw new ApiError(404, 'upload_not_found', 'This upload has expired.')
+      await guard.check(
+        tx,
+        { nodeId: upload.node_id, parentId: upload.parent_id, versionId: upload.version_id },
+        {
+          currentVersionId: file.current_version_id,
+          nameKey: file.name_key,
+          visible: file.visible,
+        },
+      )
+    }
+    return finishUpload(app, tx, queue, owner, upload, guard?.mimeType)
   })
   await afterFinishing(app, finished)
+}
+
+/**
+ * Checked inside a completion's transaction, under the file's row lock, so
+ * what it saw is what the completion changes.
+ */
+export interface CompletionGuard {
+  /** Throws to refuse the completion, which then rolls back whole. */
+  check(
+    tx: Executor,
+    upload: { nodeId: string; parentId: string | null; versionId: string },
+    file: { currentVersionId: string | null; nameKey: string; visible: boolean },
+  ): Promise<void>
+  /** The file's type from now on, unless `undefined`; `null` clears it. */
+  mimeType?: string | null
 }
 
 /** Once an upload's completion commits: its pruned versions' frames go, and audio and video are examined (§6.7). */
@@ -730,12 +787,12 @@ async function afterFinishing(app: FastifyInstance, finished: Finished): Promise
  */
 async function checkParts(
   app: FastifyInstance,
-  auth: Auth,
+  owner: Owner,
   uploadId: string,
   partSha256: readonly string[],
 ): Promise<void> {
   const dropped = await app.db.transaction(async (tx) => {
-    const upload = await findUpload(tx, auth, uploadId, { lock: true })
+    const upload = await findUpload(tx, owner, uploadId, { lock: true })
     if (partSha256.length !== upload.chunk_count) {
       throw new ApiError(400, 'invalid_request', 'There must be a hash for every part.')
     }
@@ -780,8 +837,9 @@ async function finishUpload(
   app: FastifyInstance,
   tx: Executor,
   queue: PgBoss,
-  auth: Auth,
+  owner: Owner,
   upload: UploadRow,
+  mimeType?: string | null,
 ): Promise<Finished> {
   if (upload.state === 'completed') return { pruned: [], completed: null }
   // Committed without waiting for the disk (D43): completions queue on the
@@ -830,6 +888,8 @@ async function finishUpload(
       // "Modified" is the file's own date, so a version uploaded today of a
       // file last changed last year says last year.
       updatedAt: upload.modified_at ? new Date(upload.modified_at) : new Date(),
+      // A guard's type, if it has one: the journal and what follows carry it.
+      ...(mimeType !== undefined && { mimeType }),
     })
     .where(eq(nodes.id, upload.node_id))
     .returning()
@@ -848,7 +908,7 @@ async function finishUpload(
     WHERE node_id = ${upload.node_id} AND id <> ${upload.version_id}
       AND state IN ('syncing', 'stored', 'failed')`)
   const prunedIds = earlier.map((row) => row.id)
-  const pruneRecords = await purgeVersions(tx, auth.user.id, prunedIds)
+  const pruneRecords = await purgeVersions(tx, owner.user.id, prunedIds)
   const deletedLinks =
     upload.version_no > 1
       ? await tx
@@ -867,12 +927,12 @@ async function finishUpload(
     UPDATE users SET
       used_bytes = used_bytes + ${upload.size_bytes},
       reserved_bytes = greatest(0, reserved_bytes - ${upload.reserved_bytes})
-    WHERE id = ${auth.user.id}`)
+    WHERE id = ${owner.user.id}`)
   if (upload.parent_id) await markFoldersDirty(tx, [upload.parent_id])
   const size = formatBytes(upload.size_bytes)
   const links = deletedLinks.length
   const audited = await audit(tx, {
-    actorId: auth.user.id,
+    actorId: owner.user.id,
     action: 'upload.completed',
     target: node.name,
     details:
@@ -906,12 +966,12 @@ async function finishUpload(
 /** `DELETE /uploads/:id`. A completed upload stays: its file is in the drive now. */
 export async function cancelUpload(
   app: FastifyInstance,
-  auth: Auth,
+  owner: Owner,
   uploadId: string,
 ): Promise<void> {
   const staged = await app.db.transaction(async (tx) => {
     const { rows } = await tx.execute<{ id: string }>(sql`
-      SELECT id FROM upload_sessions WHERE id = ${uploadId} AND user_id = ${auth.user.id}`)
+      SELECT id FROM upload_sessions WHERE id = ${uploadId} AND user_id = ${owner.user.id}`)
     return rows[0] ? abandonUploads(tx, [uploadId]) : []
   })
   await removeStagedVersions(app, staged)
@@ -919,7 +979,7 @@ export async function cancelUpload(
 
 async function findUpload(
   db: Executor,
-  auth: Auth,
+  owner: Owner,
   uploadId: string,
   { lock = false, partIndex }: { lock?: boolean; partIndex?: number } = {},
 ): Promise<UploadRow> {
@@ -938,7 +998,7 @@ async function findUpload(
     FROM upload_sessions session
     JOIN file_versions version ON version.id = session.version_id
     JOIN nodes node /* tree: by id, gated */ ON node.id = session.node_id
-    WHERE session.id = ${uploadId} AND session.user_id = ${auth.user.id}
+    WHERE session.id = ${uploadId} AND session.user_id = ${owner.user.id}
       AND session.expires_at > now()
     ${lock ? sql`FOR UPDATE OF session` : sql``}`)
   const [upload] = rows

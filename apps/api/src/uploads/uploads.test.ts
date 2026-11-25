@@ -21,6 +21,7 @@ import {
   keepUploadsAlive,
   receivePart,
   receiveStreamedPart,
+  type CompletionGuard,
 } from './uploads.ts'
 
 /** The frame of the 3-byte parts these tests send. */
@@ -655,5 +656,168 @@ describe('the cap on a file (D38)', () => {
     expect(tooLarge?.ok === false && tooLarge.error.message).toContain(formatBytes(limit))
     if (!fits?.ok) throw new Error('The smaller file should have started.')
     await cancelUpload(app, auth, fits.session.uploadId)
+  })
+})
+
+describe('uploads an app drives', () => {
+  /** A one-part upload of a named file in the root, its part stored but not completed. */
+  async function receiving(name: string, body = 'abc') {
+    if (!auth.user.rootNodeId) throw new Error('Missing root folder.')
+    const [result] = await createUploads(app, auth, [
+      { ...input(auth.user.rootNodeId, name), sizeBytes: body.length },
+    ])
+    if (!result?.ok) throw new Error('Could not start test upload.')
+    await receiveStreamedPart(app, auth, result.session.uploadId, 0, Buffer.from(body), {
+      completeAlone: false,
+    })
+    return result.session
+  }
+
+  async function stateOf(uploadId: string) {
+    const { rows } = await app.db.execute<{ state: string }>(sql`
+      SELECT state FROM upload_sessions WHERE id = ${uploadId}`)
+    return rows[0]?.state
+  }
+
+  async function fileRow(nodeId: string) {
+    const { rows } = await app.db.execute<{
+      current_version_id: string | null
+      mime_type: string | null
+    }>(sql`
+      SELECT current_version_id, mime_type FROM nodes /* tree: by id, gated */ WHERE id = ${nodeId}`)
+    return rows[0]
+  }
+
+  async function quota() {
+    const { rows } = await app.db.execute<{ used: number; reserved: number }>(sql`
+      SELECT used_bytes::float8 AS used, reserved_bytes::float8 AS reserved
+      FROM users WHERE id = ${auth.user.id}`)
+    return rows[0]
+  }
+
+  it('stores a single part without completing it when asked, and a completion then finishes it', async () => {
+    const session = await receiving(`${crypto.randomUUID()}.txt`)
+    expect(await stateOf(session.uploadId)).toBe('receiving')
+    // A retry of the same part doesn't complete it either.
+    await receiveStreamedPart(app, auth, session.uploadId, 0, Buffer.from('abc'), {
+      completeAlone: false,
+    })
+    expect(await stateOf(session.uploadId)).toBe('receiving')
+    await completeUpload(app, auth, session.uploadId)
+    expect(await stateOf(session.uploadId)).toBe('completed')
+    expect((await fileRow(session.nodeId))?.current_version_id).toBe(session.versionId)
+  })
+
+  it('completes a single part on its own by default', async () => {
+    if (!auth.user.rootNodeId) throw new Error('Missing root folder.')
+    const [result] = await createUploads(app, auth, [
+      input(auth.user.rootNodeId, `${crypto.randomUUID()}.txt`),
+    ])
+    if (!result?.ok) throw new Error('Could not start test upload.')
+    await receiveStreamedPart(app, auth, result.session.uploadId, 0, Buffer.from('abc'))
+    expect(await stateOf(result.session.uploadId)).toBe('completed')
+  })
+
+  it('rolls everything back when its guard refuses', async () => {
+    const name = `${crypto.randomUUID()}.txt`
+    const first = await receiving(name)
+    await completeUpload(app, auth, first.uploadId)
+    const second = await receiving(name)
+    const before = await quota()
+    const guard: CompletionGuard = {
+      check: () => Promise.reject(new Error('The guard refused.')),
+      mimeType: 'text/csv',
+    }
+    await expect(completeUpload(app, auth, second.uploadId, undefined, guard)).rejects.toThrow(
+      'The guard refused.',
+    )
+    expect(await stateOf(second.uploadId)).toBe('receiving')
+    expect(await fileRow(first.nodeId)).toEqual({
+      current_version_id: first.versionId,
+      mime_type: 'text/plain',
+    })
+    expect(await quota()).toEqual(before)
+  })
+
+  it('shows its guard the file as it was before, and applies the type it sets', async () => {
+    const name = `${crypto.randomUUID()}.txt`
+    const first = await receiving(name)
+    await completeUpload(app, auth, first.uploadId)
+    const second = await receiving(name)
+    let seen: unknown
+    const guard: CompletionGuard = {
+      check: (_tx, upload, file) => {
+        seen = { upload, file }
+        return Promise.resolve()
+      },
+      mimeType: 'text/csv',
+    }
+    await completeUpload(app, auth, second.uploadId, undefined, guard)
+    expect(seen).toEqual({
+      upload: {
+        nodeId: second.nodeId,
+        parentId: auth.user.rootNodeId,
+        versionId: second.versionId,
+      },
+      file: { currentVersionId: first.versionId, nameKey: nameKey(name), visible: true },
+    })
+    expect(await fileRow(second.nodeId)).toEqual({
+      current_version_id: second.versionId,
+      mime_type: 'text/csv',
+    })
+    const { rows } = await app.db.execute<{ record: { mimeType: string | null } }>(sql`
+      SELECT record FROM journal
+      WHERE kind = 'node.upsert' AND record->>'currentVersionId' = ${second.versionId}`)
+    expect(rows[0]?.record.mimeType).toBe('text/csv')
+  })
+
+  it('clears the type with a null one, and leaves it with none', async () => {
+    const cleared = await receiving(`${crypto.randomUUID()}.txt`)
+    await completeUpload(app, auth, cleared.uploadId, undefined, {
+      check: () => Promise.resolve(),
+      mimeType: null,
+    })
+    expect((await fileRow(cleared.nodeId))?.mime_type).toBeNull()
+    const kept = await receiving(`${crypto.randomUUID()}.txt`)
+    await completeUpload(app, auth, kept.uploadId, undefined, { check: () => Promise.resolve() })
+    expect((await fileRow(kept.nodeId))?.mime_type).toBe('text/plain')
+  })
+
+  it('lets exactly one of two guarded completions of one file through', async () => {
+    const name = `${crypto.randomUUID()}.txt`
+    const base = await receiving(name)
+    await completeUpload(app, auth, base.uploadId)
+    const a = await receiving(name, 'aaa')
+    const b = await receiving(name, 'bbb')
+    const guard: CompletionGuard = {
+      check: (_tx, _upload, file) =>
+        file.currentVersionId === base.versionId
+          ? Promise.resolve()
+          : Promise.reject(new Error('The file changed.')),
+    }
+    const results = await Promise.allSettled([
+      completeUpload(app, auth, a.uploadId, undefined, guard),
+      completeUpload(app, auth, b.uploadId, undefined, guard),
+    ])
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1)
+  })
+
+  it('does not deadlock a guarded completion with an upload starting on the same file', async () => {
+    if (!auth.user.rootNodeId) throw new Error('Missing root folder.')
+    const name = `${crypto.randomUUID()}.txt`
+    const base = await receiving(name)
+    await completeUpload(app, auth, base.uploadId)
+    for (let round = 0; round < 20; round += 1) {
+      const pending = await receiving(name)
+      const [completed, started] = await Promise.all([
+        completeUpload(app, auth, pending.uploadId, undefined, {
+          check: () => Promise.resolve(),
+        }),
+        createUploads(app, auth, [input(auth.user.rootNodeId, name)]),
+      ])
+      expect(completed).toBeUndefined()
+      expect(started[0]?.ok).toBe(true)
+    }
   })
 })

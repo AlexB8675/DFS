@@ -30,6 +30,9 @@ export interface Auth {
   limited: boolean
 }
 
+/** Whose drive a call works on: all the upload code needs of who is calling. */
+export type Owner = Pick<Auth, 'user'>
+
 /** The browser a session signs in from, as Admin → Access shows it. */
 export interface SessionClient {
   ip: string
