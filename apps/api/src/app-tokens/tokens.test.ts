@@ -495,7 +495,7 @@ describe('app tokens (§7.8)', () => {
     ).toHaveLength(0)
   })
 
-  it('does not deadlock a removal with the end of a user's sessions', async () => {
+  it('does not deadlock a removal with the end of the user sessions', async () => {
     // The removal holds its token's row and then audits (a row that names the
     // user); the end of sessions locks the user's row and then deletes tokens.
     // With FOR UPDATE on the user's row the two wait on each other (40P01).

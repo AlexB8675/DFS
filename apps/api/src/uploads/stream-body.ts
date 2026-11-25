@@ -1,12 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import type { Owner } from '../auth/sessions.ts'
 import { ApiError } from '../errors.ts'
-import {
-  keepUploadsAlive,
-  receiveStreamedPart,
-  stagingFull,
-  type StreamStart,
-} from './uploads.ts'
+import { keepUploadsAlive, receiveStreamedPart, stagingFull, type StreamStart } from './uploads.ts'
 
 // The loop of a streamed upload (DESIGN.md §6.1), shared by every route that
 // takes a file as one request body: it cuts the body into parts as it arrives
