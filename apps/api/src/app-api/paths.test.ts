@@ -72,7 +72,36 @@ describe('urlSegments', () => {
   })
 })
 
+describe('urlSegments, more', () => {
+  it('refuses a slash, backslash or NUL in a middle segment', () => {
+    invalidPath(() => urlSegments(`${LIST}/a/b%2Fc/d`, LIST))
+    invalidPath(() => urlSegments(`${LIST}/a/b%5Cc/d`, LIST))
+    invalidPath(() => urlSegments(`${LIST}/a/b%00c/d`, LIST))
+  })
+
+  it('keeps an encoded ? in a deeper segment', () => {
+    expect(urlSegments(`${LIST}/a/b/c%3Fd/e?x=1`, LIST)).toEqual(['a', 'b', 'c?d', 'e'])
+  })
+
+  it('cuts at the first ?, even before a /', () => {
+    expect(urlSegments(`${LIST}?x/y`, LIST)).toEqual([])
+  })
+
+  it('refuses a doubled slash at the end', () => {
+    invalidPath(() => urlSegments(`${LIST}//`, LIST))
+  })
+
+  it('refuses a URL that does not start with the literal prefix', () => {
+    invalidPath(() => urlSegments('/api/%76%31/list/x', LIST))
+    invalidPath(() => urlSegments('/api/v1/listx', LIST))
+  })
+})
+
 describe('bodySegments', () => {
+  it('refuses a lone surrogate', () => {
+    invalidPath(() => bodySegments('a/\uD800b'), /well-formed/)
+  })
+
   it('allows one leading slash', () => {
     expect(bodySegments('/a/b')).toEqual(['a', 'b'])
     expect(bodySegments('a/b')).toEqual(['a', 'b'])
@@ -105,10 +134,21 @@ describe('resolving', () => {
   let notes: typeof nodes.$inferSelect
   let token: AppTokenAuth
 
-  async function folder(parentId: string, name: string, tree: 'drive' | 'vault' = 'drive') {
+  async function folder(
+    parentId: string,
+    name: string,
+    tree: 'drive' | 'vault' | 'backups' = 'drive',
+  ) {
     const [row] = await app.db
       .insert(nodes)
-      .values({ ownerId: userId, parentId, kind: 'folder', name, nameKey: name.toLowerCase(), tree })
+      .values({
+        ownerId: userId,
+        parentId,
+        kind: 'folder',
+        name,
+        nameKey: name.toLowerCase(),
+        tree,
+      })
       .returning()
     if (!row) throw new Error('no folder')
     return row
@@ -165,6 +205,16 @@ describe('resolving', () => {
     const trashed = await file(sub.id, 'gone.txt')
     await app.db.update(nodes).set({ deletedAt: new Date() }).where(eq(nodes.id, trashed.id))
     await folder(rootId, 'Other')
+    const dead = await folder(notes.id, 'Dead')
+    const innerFile = await file(dead.id, 'inner.txt')
+    await app.db.update(nodes).set({ trashedVia: dead.id }).where(eq(nodes.id, innerFile.id))
+    await app.db.update(nodes).set({ deletedAt: new Date() }).where(eq(nodes.id, dead.id))
+    const vaulted = await folder(notes.id, 'Vaulted')
+    await app.db.update(nodes).set({ tree: 'vault' }).where(eq(nodes.id, vaulted.id))
+    const elsewhere = await folder(notes.id, 'Elsewhere')
+    await app.db.update(nodes).set({ tree: 'backups' }).where(eq(nodes.id, elsewhere.id))
+    await file(notes.id, 'É.txt')
+    await file(notes.id, '%2F')
     token = {
       tokenId: '00000000-0000-0000-0000-000000000000',
       tokenName: 'Notes agent',
@@ -216,12 +266,21 @@ describe('resolving', () => {
   })
 
   it('does not see an unfinished file or a trashed one', async () => {
-    expect(await code(() => resolvePath(app.db, token, ['Sub', 'pending.txt']))).toEqual([404, 'not_found'])
-    expect(await code(() => resolvePath(app.db, token, ['Sub', 'gone.txt']))).toEqual([404, 'not_found'])
+    expect(await code(() => resolvePath(app.db, token, ['Sub', 'pending.txt']))).toEqual([
+      404,
+      'not_found',
+    ])
+    expect(await code(() => resolvePath(app.db, token, ['Sub', 'gone.txt']))).toEqual([
+      404,
+      'not_found',
+    ])
   })
 
   it('does not walk through a file', async () => {
-    expect(await code(() => resolvePath(app.db, token, ['Sub', 'x.txt', 'y']))).toEqual([404, 'not_found'])
+    expect(await code(() => resolvePath(app.db, token, ['Sub', 'x.txt', 'y']))).toEqual([
+      404,
+      'not_found',
+    ])
   })
 
   it('never reaches a sibling of the token’s folder', async () => {
@@ -236,8 +295,35 @@ describe('resolving', () => {
     expect((await resolvePrefix(app.db, token, [])).rest).toEqual([])
   })
 
-  it('refuses a file where a folder must be', async () => {
-    expect(await code(() => resolvePrefix(app.db, token, ['Sub', 'x.txt', 'y']))).toEqual([409, 'not_a_folder'])
+  it('refuses a file where a folder must be, finished or not', async () => {
+    expect(await code(() => resolvePrefix(app.db, token, ['Sub', 'x.txt', 'y']))).toEqual([
+      409,
+      'not_a_folder',
+    ])
+    expect(await code(() => resolvePrefix(app.db, token, ['Sub', 'pending.txt', 'y']))).toEqual([
+      409,
+      'not_a_folder',
+    ])
+  })
+
+  it('does not see below a trashed folder, the vault or Backups', async () => {
+    expect(await code(() => resolvePath(app.db, token, ['Dead', 'inner.txt']))).toEqual([
+      404,
+      'not_found',
+    ])
+    expect(await code(() => resolvePath(app.db, token, ['Vaulted']))).toEqual([404, 'not_found'])
+    expect(await code(() => resolvePath(app.db, token, ['Elsewhere']))).toEqual([404, 'not_found'])
+    const prefix = await resolvePrefix(app.db, token, ['Vaulted', 'x'])
+    expect(prefix.deepest.id).toBe(notes.id)
+    expect(prefix.rest).toEqual(['Vaulted', 'x'])
+  })
+
+  it('finds a name by its Unicode case, and a literal %2F name', async () => {
+    expect((await resolvePath(app.db, token, ['é.txt'])).node.name).toBe('É.txt')
+    const literal = urlSegments(`${LIST}/%252F`, LIST)
+    expect(literal).toEqual(['%2F'])
+    expect((await resolvePath(app.db, token, literal)).path).toBe('%2F')
+    expect(await code(() => resolvePath(app.db, token, ['%2F', 'y']))).toEqual([404, 'not_found'])
   })
 
   it('answers folder_unavailable once the folder is in the vault', async () => {

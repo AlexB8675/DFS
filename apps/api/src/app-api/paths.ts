@@ -22,6 +22,9 @@ function checkSegment(segment: string): string {
   if (segment === '.' || segment === '..') {
     throw invalid(`The segment ${shown} is not allowed: paths have no . or .. segments.`)
   }
+  if (!segment.isWellFormed()) {
+    throw invalid(`The segment ${shown} is not a valid name: it is not well-formed Unicode.`)
+  }
   if (segment.normalize('NFC') !== segment) {
     throw invalid(`The segment ${shown} is not a valid name: send names in Unicode NFC.`)
   }
@@ -85,16 +88,23 @@ export interface Resolved {
   path: string
 }
 
-/** The visible child of `parentId` named `segment`; an unfinished file is not there. */
+/**
+ * The owner's visible child of `parentId` named `segment` in My drive. An
+ * unfinished file is there only when `unfinished` is set. Callers that act on
+ * the result pass a transaction.
+ */
 async function child(
   db: Executor,
+  ownerId: string,
   parentId: string,
   segment: string,
+  unfinished = false,
 ): Promise<NodeRow | undefined> {
   const { rows } = await db.execute<NodeRow>(sql`
     SELECT ${NODE_COLUMNS} FROM nodes n /* tree: by parent */ ${NODE_JOINS}
-    WHERE n.parent_id = ${parentId} AND n.name_key = ${nameKey(segment)} AND ${VISIBLE}
-      AND (n.kind = 'folder' OR n.current_version_id IS NOT NULL)`)
+    WHERE n.parent_id = ${parentId} AND n.owner_id = ${ownerId} AND n.tree = 'drive'
+      AND n.name_key = ${nameKey(segment)} AND ${VISIBLE}
+      AND (${unfinished} OR n.kind = 'folder' OR n.current_version_id IS NOT NULL)`)
   return rows[0]
 }
 
@@ -113,7 +123,7 @@ export async function resolvePath(
   let path = ''
   for (const segment of segments) {
     if (node.kind !== 'folder') throw notFound()
-    const next = await child(db, node.id, segment)
+    const next = await child(db, token.user.id, node.id, segment)
     if (!next) throw notFound()
     node = next
     path = joinPath(path, node.name)
@@ -131,7 +141,7 @@ export async function resolvePrefix(
   let deepest = folder
   let path = ''
   for (const [index, segment] of segments.entries()) {
-    const next = await child(db, deepest.id, segment)
+    const next = await child(db, token.user.id, deepest.id, segment, true)
     if (!next) return { folder, deepest, path, rest: segments.slice(index) }
     if (next.kind !== 'folder') {
       throw new ApiError(
