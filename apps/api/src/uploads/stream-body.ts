@@ -65,6 +65,9 @@ export async function streamBody(
   let filled = 0
   // The part being stored while the next one arrives.
   let storing: Promise<void> | null = null
+  // The last part, full and counted, but kept until the body has ended: stored
+  // earlier, it would complete a file that a longer stream then refuses.
+  let last: Buffer | null = null
   // Room for every part still to come, reserved before reading a byte (D38).
   const reserving = !start.completed && start.needBytes > 0
   let renewal: NodeJS.Timeout | undefined
@@ -97,6 +100,11 @@ export async function streamBody(
           filled += taken
           offset += taken
           if (filled < part.length) continue
+          if (index === start.chunkCount - 1) {
+            last = part
+            index += 1
+            continue
+          }
           await storing
           storing = store(app, owner, uploadId, index, part, completeAlone)
           index += 1
@@ -107,6 +115,10 @@ export async function streamBody(
         }
       }
       await storing
+      if (last) {
+        storing = store(app, owner, uploadId, index - 1, last, completeAlone)
+        await storing
+      }
     } catch (error) {
       // Its staged file is cleaned up, or kept, before the answer.
       await storing?.catch(() => undefined)

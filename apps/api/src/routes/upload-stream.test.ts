@@ -1,6 +1,7 @@
 import { readdir } from 'node:fs/promises'
 import path from 'node:path'
 import { chunkFrameLength } from '@dfs/crypto'
+import { shareLinks, users } from '@dfs/db'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
 import {
   sessionSchema,
@@ -8,10 +9,11 @@ import {
   uploadStatusSchema,
   type UploadSession,
 } from '@dfs/shared'
-import { sql } from 'drizzle-orm'
+import { eq, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest'
 import { buildApp } from '../app.ts'
+import { createShare } from '../shares/shares.ts'
 import { testConfig } from '../testing/config.ts'
 import { seedUser } from '../testing/seed.ts'
 import { framedBytes } from '../uploads/framed-bytes.ts'
@@ -181,9 +183,88 @@ describe('streamed uploads (§6.1)', () => {
     longer.set(bytes)
     const refused = await stream(owner, session, 0, chunked(longer))
     expect(refused.status).toBe(400)
+    // The last part waits for the end of the body: the refused stream recorded none of it.
+    expect(await received(owner, session)).toEqual([0])
     const accepted = await stream(owner, session, 0, chunked(bytes))
     expect(accepted.status).toBe(204)
     expect(await received(owner, session)).toEqual([0, 1])
+  })
+
+  it('completes nothing for a single-part stream longer than its file', async () => {
+    const owner = await signIn('owner')
+    const { user } = sessionSchema.parse(
+      await (await fetch(`${base}/api/auth/me`, { headers: owner })).json(),
+    )
+    const [row] = await app.db.select().from(users).where(eq(users.id, user.id))
+    if (!row) throw new Error('Missing test user.')
+    const auth = {
+      user: row,
+      sessionId: 'test',
+      csrfToken: 'test',
+      expiresAt: new Date(Date.now() + 60_000),
+      seenAt: null,
+      limited: false,
+    }
+    const name = `${crypto.randomUUID()}.bin`
+    const begin = async (sizeBytes: number) => {
+      const response = await fetch(`${base}/api/uploads/batch`, {
+        method: 'POST',
+        headers: { ...owner, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          uploads: [
+            {
+              parentId: user.rootFolderId,
+              name,
+              sizeBytes,
+              mimeType: 'application/octet-stream',
+              ifExists: 'replace',
+            },
+          ],
+        }),
+      })
+      const [result] = uploadBatchResultSchema.parse(await response.json()).results
+      if (!result?.ok) throw new Error('Could not start the test upload.')
+      return result.session
+    }
+    const first = await begin(10)
+    expect((await stream(owner, first, 0, new Uint8Array(10).fill(1))).status).toBe(204)
+    const link = await createShare(app, auth, {
+      nodeId: first.nodeId,
+      expiresAt: null,
+      password: null,
+      maxDownloads: null,
+    })
+    const current = async () => {
+      const { rows } = await app.db.execute<{ id: string | null }>(sql`
+        SELECT current_version_id AS id FROM nodes WHERE id = ${first.nodeId}`)
+      return rows[0]?.id
+    }
+    expect(await current()).toBe(first.versionId)
+
+    // A body sent without its length, one byte longer than the file it replaces.
+    const second = await begin(10)
+    expect(second.nodeId).toBe(first.nodeId)
+    const longer = new Uint8Array(11).fill(2)
+    const refused = await stream(
+      owner,
+      second,
+      0,
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(longer)
+          controller.close()
+        },
+      }),
+    )
+    expect(refused.status).toBe(400)
+    expect(await refused.json()).toMatchObject({ error: { code: 'invalid_part' } })
+
+    expect(await current()).toBe(first.versionId)
+    const { rows: versions } = await app.db.execute<{ id: string }>(sql`
+      SELECT id FROM file_versions WHERE id = ${first.versionId}`)
+    expect(versions).toHaveLength(1)
+    const [kept] = await app.db.select().from(shareLinks).where(eq(shareLinks.id, link.id))
+    expect(kept?.versionId).toBe(first.versionId)
   })
 
   it('answers for another user’s upload as for one that doesn’t exist', async () => {
