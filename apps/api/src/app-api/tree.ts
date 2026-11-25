@@ -46,7 +46,7 @@ export async function makeFolders(
 }
 
 /** Makes `names` below `parentId`; a file in the way is `not_a_folder`. */
-async function ensureBelow(
+export async function ensureBelow(
   tx: Executor,
   ownerId: string,
   parentId: string,

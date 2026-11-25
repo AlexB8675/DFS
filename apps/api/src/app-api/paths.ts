@@ -93,7 +93,7 @@ export interface Resolved {
  * unfinished file is there only when `unfinished` is set. Callers that act on
  * the result pass a transaction.
  */
-async function child(
+export async function childNamed(
   db: Executor,
   ownerId: string,
   parentId: string,
@@ -123,7 +123,7 @@ export async function resolvePath(
   let path = ''
   for (const segment of segments) {
     if (node.kind !== 'folder') throw notFound()
-    const next = await child(db, token.user.id, node.id, segment)
+    const next = await childNamed(db, token.user.id, node.id, segment)
     if (!next) throw notFound()
     node = next
     path = joinPath(path, node.name)
@@ -141,7 +141,7 @@ export async function resolvePrefix(
   let deepest = folder
   let path = ''
   for (const [index, segment] of segments.entries()) {
-    const next = await child(db, token.user.id, deepest.id, segment, true)
+    const next = await childNamed(db, token.user.id, deepest.id, segment, true)
     if (!next) return { folder, deepest, path, rest: segments.slice(index) }
     if (next.kind !== 'folder') {
       throw new ApiError(

@@ -4,6 +4,7 @@ import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { requireAppToken } from '../auth/access.ts'
 import { folderLocations, type NodeRow } from '../nodes/read.ts'
 import { appFolder } from './folder.ts'
+import { appPutRoute } from './put.ts'
 import { readRoutes } from './read-routes.ts'
 import { treeRoutes } from './tree-routes.ts'
 
@@ -66,6 +67,7 @@ export function appApiRoutes(app: FastifyInstance, _options: object, done: () =>
   treeRoutes(app)
 
   readRoutes(app)
+  app.register(appPutRoute)
 
   done()
 }
