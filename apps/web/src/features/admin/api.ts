@@ -1,4 +1,5 @@
 import {
+  adminAppTokenListSchema,
   adminDeviceListSchema,
   adminSessionListSchema,
   adminShareOwnerListSchema,
@@ -284,6 +285,16 @@ export function adminDevicesQuery(userId?: string) {
   })
 }
 
+/** App tokens (AI agents' access to a folder): everyone's, or one user's. */
+export function adminAppTokensQuery(userId?: string) {
+  return queryOptions({
+    queryKey: ['admin', 'app-tokens', userId ?? 'everyone'],
+    queryFn: ({ signal }) =>
+      apiGet('/admin/app-tokens', adminAppTokenListSchema, { query: { userId }, signal }),
+    refetchInterval: 30_000,
+  })
+}
+
 export const adminUploadsQuery = queryOptions({
   queryKey: ['admin', 'uploads'],
   queryFn: ({ signal }) => apiGet('/admin/uploads', adminUploadListSchema, { signal }),
@@ -427,4 +438,17 @@ async function invalidateChannels(): Promise<void> {
     queryClient.invalidateQueries({ queryKey: channelsQuery.queryKey }),
     queryClient.invalidateQueries({ queryKey: ['admin', 'audit'] }),
   ])
+}
+
+/** Removes any user's app token, which ends it at once. */
+export function useRemoveAdminAppToken() {
+  return useMutation({
+    mutationFn: (id: string) => apiSend('DELETE', `/admin/app-tokens/${id}`),
+    onSettled: () =>
+      Promise.all([
+        afterAccessChange('app-tokens'),
+        // A token of the admin's own is also in Settings.
+        queryClient.invalidateQueries({ queryKey: ['app-tokens'] }),
+      ]),
+  })
 }

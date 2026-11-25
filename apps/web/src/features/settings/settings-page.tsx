@@ -20,6 +20,7 @@ import { appRelease } from '@/lib/env'
 import { formatBytes, formatFullDate } from '@/lib/format'
 import { shake } from '@/lib/motion'
 import { useThemeStore, type Theme } from '@/lib/theme'
+import { AppsCard } from './apps-card'
 import { DevicesCard } from './devices-card'
 
 /** `/settings`: profile, password, appearance, storage and devices. */
@@ -97,6 +98,8 @@ export function SettingsPage() {
           </Card>
 
           <DevicesCard />
+
+          <AppsCard />
 
           <Card>
             <CardHeader>

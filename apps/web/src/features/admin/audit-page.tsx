@@ -70,6 +70,17 @@ const ACTIONS: Record<string, { label: string; icon: LucideIcon; tone?: string }
     icon: ShieldAlert,
     tone: 'text-destructive',
   },
+  'app_token.made': { label: 'Made an app token', icon: KeyRound },
+  'app_token.removed': {
+    label: 'Removed an app token',
+    icon: KeyRound,
+    tone: 'text-amber-700 dark:text-amber-500',
+  },
+  'auth.app_token_failed': {
+    label: 'Refused an app token',
+    icon: ShieldAlert,
+    tone: 'text-destructive',
+  },
   'share.created': { label: 'Shared a link', icon: Link2 },
   'share.revoked': { label: 'Deleted a link', icon: Link2Off },
   'admin.viewed': { label: 'Viewed a drive', icon: Eye },
@@ -130,7 +141,7 @@ const ACTIONS: Record<string, { label: string; icon: LucideIcon; tone?: string }
 /** Kinds of action to narrow the log to, by the prefixes of their names. */
 const CATEGORIES = [
   { value: 'all', label: 'All', actions: [] },
-  { value: 'sign-ins', label: 'Sign-ins', actions: ['auth.', 'session.', 'device.'] },
+  { value: 'sign-ins', label: 'Sign-ins', actions: ['auth.', 'session.', 'device.', 'app_token.'] },
   { value: 'accounts', label: 'Accounts', actions: ['user.'] },
   { value: 'sharing', label: 'Sharing', actions: ['share.'] },
   { value: 'content', label: 'Content', actions: ['node.', 'upload.', 'admin.'] },

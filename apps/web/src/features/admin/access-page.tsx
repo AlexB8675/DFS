@@ -1,4 +1,4 @@
-import type { AdminDevice, AdminSession, AdminUpload } from '@dfs/shared'
+import type { AdminAppToken, AdminDevice, AdminSession, AdminUpload } from '@dfs/shared'
 import { useQuery } from '@tanstack/react-query'
 import { KeyRound, LogOut, Unplug, XCircle } from 'lucide-react'
 import { useState } from 'react'
@@ -18,16 +18,19 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 import { Skeleton } from '@/components/ui/skeleton'
+import { AppTokenUsage } from '@/features/settings/app-token-usage'
 import { DeviceUsage } from '@/features/devices/device-usage'
 import { errorMessage } from '@/lib/api/client'
 import { formatBytes, formatDateInSentence, formatFullDate } from '@/lib/format'
 import { describeUserAgent } from '@/lib/user-agent'
 import {
+  adminAppTokensQuery,
   adminDevicesQuery,
   adminSessionsQuery,
   adminUploadsQuery,
   useCancelUploadAsAdmin,
   useEndSession,
+  useRemoveAdminAppToken,
   useRemoveAdminDevice,
 } from './api'
 import { AllClear, Section } from './section'
@@ -58,6 +61,7 @@ export function AccessPage() {
       <div className="mx-auto grid max-w-6xl gap-6 p-4 sm:p-6">
         <Sessions />
         <Devices onConfirm={setConfirming} />
+        <AppTokens onConfirm={setConfirming} />
         <ShareLinks onConfirm={setConfirming} />
         <Uploads onConfirm={setConfirming} />
       </div>
@@ -242,6 +246,74 @@ function DeviceRow({ device, onRemove }: { device: AdminDevice; onRemove: () => 
         size="sm"
         disabled={!device.canRemove}
         title={device.canRemove ? undefined : 'Only the owner can remove the owner’s devices.'}
+        onClick={onRemove}
+      >
+        <Unplug /> Remove
+      </Button>
+    </li>
+  )
+}
+
+/** Every user's app tokens, newest first: an AI agent's access to one folder. */
+function AppTokens({ onConfirm }: { onConfirm: (confirmation: Confirmation) => void }) {
+  const tokens = useQuery(adminAppTokensQuery())
+  const remove = useRemoveAdminAppToken()
+
+  return (
+    <Section
+      title="App tokens"
+      description="Access to a folder that someone gave an AI agent, newest first. Removing one stops that agent at once."
+    >
+      {!tokens.data ? (
+        <Skeleton className="h-16 rounded-lg" />
+      ) : tokens.data.length === 0 ? (
+        <AllClear>No app token has been made.</AllClear>
+      ) : (
+        <ul className="grid gap-2">
+          {tokens.data.map((token) => (
+            <AppTokenRow
+              key={token.id}
+              token={token}
+              onRemove={() => {
+                onConfirm({
+                  title: `Remove ${token.name}?`,
+                  description: `The agent using it loses access to ${token.displayName}’s folder at once.`,
+                  action: 'Remove it',
+                  run: () => remove.mutateAsync(token.id),
+                  done: `Removed ${token.displayName}’s ${token.name}`,
+                })
+              }}
+            />
+          ))}
+        </ul>
+      )}
+    </Section>
+  )
+}
+
+function AppTokenRow({ token, onRemove }: { token: AdminAppToken; onRemove: () => void }) {
+  return (
+    <li className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+      <span className="grid min-w-0 flex-1 gap-0.5">
+        <span className="flex flex-wrap items-center gap-x-2">
+          <span className="font-medium">{token.name}</span>
+          <Link
+            to={`/admin/users/${token.userId}`}
+            className="text-muted-foreground underline-offset-4 hover:underline"
+          >
+            {token.displayName} <span className="font-mono text-xs">@{token.username}</span>
+          </Link>
+        </span>
+        <span className="flex flex-wrap gap-x-3 text-xs text-muted-foreground">
+          <AppTokenUsage token={token} />
+        </span>
+      </span>
+      {/* The owner's are the owner's to remove. */}
+      <Button
+        variant="outline"
+        size="sm"
+        disabled={!token.canRemove}
+        title={token.canRemove ? undefined : 'Only the owner can remove the owner’s app tokens.'}
         onClick={onRemove}
       >
         <Unplug /> Remove

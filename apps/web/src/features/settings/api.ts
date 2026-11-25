@@ -1,4 +1,9 @@
-import { deviceListSchema } from '@dfs/shared'
+import {
+  appTokenListSchema,
+  deviceListSchema,
+  madeAppTokenSchema,
+  type MakeAppTokenInput,
+} from '@dfs/shared'
 import { queryOptions, useMutation } from '@tanstack/react-query'
 import { queryClient } from '@/app/query-client'
 import { apiGet, apiSend } from '@/lib/api/client'
@@ -23,4 +28,38 @@ export function useRemoveDevice() {
         queryClient.invalidateQueries({ queryKey: ['admin', 'audit'] }),
       ]),
   })
+}
+
+/** The signed-in user's app tokens, newest first: what lets an AI agent reach one folder. */
+export function appTokensQuery() {
+  return queryOptions({
+    queryKey: ['app-tokens'],
+    queryFn: ({ signal }) => apiGet('/app-tokens', appTokenListSchema, { signal }),
+  })
+}
+
+/** Makes a token; the answer holds it, the only time it is ever shown. */
+export function useMakeAppToken() {
+  return useMutation({
+    mutationFn: (input: MakeAppTokenInput) =>
+      apiSend('POST', '/app-tokens', input, madeAppTokenSchema),
+    onSettled: invalidateAppTokens,
+  })
+}
+
+/** Removing a token ends it at once. */
+export function useRemoveAppToken() {
+  return useMutation({
+    mutationFn: (id: string) => apiSend('DELETE', `/app-tokens/${id}`),
+    onSettled: invalidateAppTokens,
+  })
+}
+
+function invalidateAppTokens() {
+  return Promise.all([
+    queryClient.invalidateQueries({ queryKey: ['app-tokens'] }),
+    // The admin's view of everyone's tokens, and the audit log's entry for this one.
+    queryClient.invalidateQueries({ queryKey: ['admin', 'app-tokens'] }),
+    queryClient.invalidateQueries({ queryKey: ['admin', 'audit'] }),
+  ])
 }
