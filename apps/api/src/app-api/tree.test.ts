@@ -1,4 +1,4 @@
-import { fileVersions, nodes, users } from '@dfs/db'
+import { auditLog, fileVersions, nodes, users } from '@dfs/db'
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
 import type { AppItem, MadeAppToken } from '@dfs/shared'
 import { and, eq, isNull } from 'drizzle-orm'
@@ -416,5 +416,69 @@ describe('a read-only token', () => {
     expect(await live(home.id, 'a.txt')).toBeDefined()
     expect(await live(home.id, 'b.txt')).toBeUndefined()
     expect(await live(home.id, 'new')).toBeUndefined()
+  })
+})
+
+describe('the write routes’ errors', () => {
+  it('carry CORS headers, for a browser', async () => {
+    const readOnly = await setup(false)
+    const refused = await call(
+      'POST',
+      '/api/v1/move',
+      readOnly.token,
+      { from: 'a', to: 'b' },
+      { origin: 'https://app.example.test' },
+    )
+    expect(refused.statusCode).toBe(403)
+    expect(refused.json()).toMatchObject({ error: { code: 'read_only' } })
+    expect(refused.headers['access-control-allow-origin']).toBe('*')
+
+    const { token, home } = await setup()
+    await file(home.id, 'a.txt')
+    await file(home.id, 'b.txt')
+    const exists = await call(
+      'POST',
+      '/api/v1/move',
+      token,
+      { from: 'a.txt', to: 'b.txt' },
+      { origin: 'https://app.example.test' },
+    )
+    expect(exists.statusCode).toBe(409)
+    expect(exists.json()).toMatchObject({ error: { code: 'exists' } })
+    expect(exists.headers['access-control-allow-origin']).toBe('*')
+  })
+})
+
+describe('the trash audit', () => {
+  it('notes one node.trashed for the node, as the token’s user', async () => {
+    const { token, home } = await setup()
+    const a = await file(home.id, 'audited.txt')
+    expect((await call('DELETE', '/api/v1/files/audited.txt', token)).statusCode).toBe(204)
+    const entries = await app.db.select().from(auditLog).where(eq(auditLog.nodeId, a.id))
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({ action: 'node.trashed', userId })
+  })
+})
+
+describe('a token whose folder is in the trash', () => {
+  it('is refused on each write route with 409 folder_unavailable', async () => {
+    const { token, home } = await setup()
+    await file(home.id, 'x')
+    const trashed = await app.inject({
+      method: 'POST',
+      url: '/api/nodes/trash',
+      headers: { cookie, 'x-csrf-token': csrf, origin },
+      payload: { ids: [home.id] },
+    })
+    expect(trashed.statusCode).toBe(204)
+    const answers = [
+      await call('POST', '/api/v1/folders/x', token),
+      await move(token, 'x', 'y'),
+      await call('DELETE', '/api/v1/files/x', token),
+    ]
+    for (const response of answers) {
+      expect(response.statusCode).toBe(409)
+      expect(response.json()).toMatchObject({ error: { code: 'folder_unavailable' } })
+    }
   })
 })
