@@ -1,5 +1,11 @@
 import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
-import { apiErrorSchema, appItemSchema, appListSchema, appMeSchema, appMoveSchema } from '@dfs/shared'
+import {
+  apiErrorSchema,
+  appItemSchema,
+  appListSchema,
+  appMeSchema,
+  appMoveSchema,
+} from '@dfs/shared'
 import Fastify, { type FastifyInstance } from 'fastify'
 import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod'
 import { readFileSync } from 'node:fs'
