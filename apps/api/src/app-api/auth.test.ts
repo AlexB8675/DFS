@@ -3,8 +3,11 @@ import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
 import type { MadeAppToken } from '@dfs/shared'
 import { eq } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
+import { type ZodTypeProvider } from 'fastify-type-provider-zod'
+import { z } from 'zod'
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest'
 import { buildApp } from '../app.ts'
+import { useAppJsonParser } from './routes.ts'
 import { RateLimiter } from '../auth/rate-limit.ts'
 import { sessionCookieName } from '../auth/sessions.ts'
 import { newAppToken } from '../app-tokens/tokens.ts'
@@ -28,6 +31,26 @@ beforeAll(async () => {
   origin = setup.config.publicBaseUrl
   app = await buildApp({ config: setup.config, logger: false })
   await seedUser(app.db, { username: 'alice', password: 'the-alice-password' })
+  // Throwaway v1 routes under the plugin's parser, for what no real route has yet.
+  await app.register(
+    (scope, _options, done) => {
+      useAppJsonParser(scope)
+      const routes = scope.withTypeProvider<ZodTypeProvider>()
+      routes.get(
+        '/v1/probe',
+        {
+          config: { access: 'app' },
+          schema: { querystring: z.object({ n: z.coerce.number().int() }) },
+        },
+        () => ({ ok: true }),
+      )
+      const echo = (request: { body: unknown }) => ({ body: request.body ?? null })
+      scope.delete('/v1/probe', { config: { access: 'app' } }, echo)
+      scope.post('/v1/probe', { config: { access: 'app' } }, echo)
+      done()
+    },
+    { prefix: '/api' },
+  )
   baseUrl = await app.listen({ port: 0, host: '127.0.0.1' })
 })
 
@@ -162,6 +185,12 @@ describe('GET /api/v1/me', () => {
     expect(response.statusCode).toBe(401)
     expect(response.json()).toMatchObject({ error: { code: 'unauthenticated' } })
     expect(await app.db.select().from(auditLog)).toHaveLength(before.length)
+
+    const from = address()
+    for (let i = 0; i < 30; i += 1) {
+      expect((await get('/api/v1/me', newDeviceToken(), from)).statusCode).toBe(401)
+    }
+    expect((await get('/api/v1/me', newDeviceToken(), from)).statusCode).toBe(429)
   })
 
   it('refuses a well-formed wrong token and audits it with the address', async () => {
@@ -332,6 +361,57 @@ describe('CORS', () => {
         name.startsWith('access-control-'),
       )
       expect(names).toEqual([])
+    }
+  })
+})
+
+describe('the v1 plugin’s scope', () => {
+  async function send(
+    method: 'GET' | 'POST' | 'DELETE',
+    url: string,
+    token: string,
+    body?: string,
+  ) {
+    return app.inject({
+      method,
+      url,
+      remoteAddress: address(),
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      ...(body === undefined ? {} : { payload: body }),
+    })
+  }
+
+  it('reaches a route through a percent-encoded prefix, with CORS', async () => {
+    const { token } = await makeToken(await rootOf())
+    const response = await get('/api/%76%31/me', token)
+    expect(response.statusCode).toBe(200)
+    expectCors(response.headers)
+  })
+
+  it('marks a Zod 400 with CORS, in the API’s shape', async () => {
+    const { token } = await makeToken(await rootOf())
+    const response = await send('GET', '/api/v1/probe?n=x', token)
+    expect(response.statusCode).toBe(400)
+    expect(response.json()).toMatchObject({ error: { code: 'invalid_request' } })
+    expectCors(response.headers)
+  })
+
+  it('takes an empty or blank JSON body as none', async () => {
+    const { token } = await makeToken(await rootOf())
+    for (const body of [undefined, '', '  \n']) {
+      const response = await send('DELETE', '/api/v1/probe', token, body)
+      expect(response.statusCode).toBe(200)
+      expect(response.json()).toEqual({ body: null })
+    }
+  })
+
+  it('refuses invalid JSON and a poisoned prototype, with CORS', async () => {
+    const { token } = await makeToken(await rootOf())
+    for (const body of ['{', '{"__proto__": {"admin": true}}']) {
+      const response = await send('POST', '/api/v1/probe', token, body)
+      expect(response.statusCode).toBe(400)
+      expect(response.json()).toMatchObject({ error: { code: 'invalid_request' } })
+      expectCors(response.headers)
     }
   })
 })

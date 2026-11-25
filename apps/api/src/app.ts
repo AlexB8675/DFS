@@ -176,7 +176,7 @@ export async function buildApp({
     // Fastify answers a URL it can't decode, or a parameter too long, without
     // running a hook: the API's error shape, and CORS on /api/v1, go here.
     frameworkErrors: (error, request, reply) => {
-      answerFrameworkError(error, request, reply)
+      answerFrameworkError(error, request, reply, config.release.version)
     },
   })
 
@@ -354,8 +354,12 @@ function answerFrameworkError(
   error: FastifyError,
   request: FastifyRequest,
   reply: FastifyReply,
+  version: string,
 ): void {
+  // No hook runs for these, so the headers the hooks add go on here.
+  void reply.header('x-request-id', request.id).header('x-dfs-version', version)
   const v1 = isAppApiPath(request.raw.url ?? '')
+  if (v1) void reply.headers(APP_CORS_HEADERS)
   let status = error.statusCode ?? 400
   let code = 'invalid_request'
   if (error.code === 'FST_ERR_BAD_URL') {
@@ -364,7 +368,17 @@ function answerFrameworkError(
   } else if (error.code === 'FST_ERR_MAX_PARAM_LENGTH') {
     status = 414
   }
-  if (v1) void reply.headers(APP_CORS_HEADERS)
+  if (status >= 500) {
+    request.log.error({ err: error }, 'request failed')
+    void reply.code(500).send({
+      error: {
+        code: 'internal_error',
+        message: `Something went wrong on the server (request ${request.id}).`,
+      },
+    })
+    return
+  }
+  request.log.info({ code }, 'request refused')
   void reply.code(status).send({ error: { code, message: error.message } })
 }
 

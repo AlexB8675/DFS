@@ -12,32 +12,34 @@ declare module 'fastify' {
   }
 }
 
+/**
+ * An empty body is no body: an agent's `fetch` wrapper often sends
+ * `Content-Type: application/json` on a DELETE with nothing in it, which
+ * Fastify's own parser refuses. Anything else is Fastify's default parser,
+ * with its protection against `__proto__` and `constructor`.
+ */
+export function useAppJsonParser(app: FastifyInstance): void {
+  const parse = app.getDefaultJsonParser('error', 'error')
+  app.removeContentTypeParser('application/json')
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (request, body, done) => {
+    if (String(body).trim() === '') {
+      done(null, undefined)
+      return
+    }
+    void parse(request, body as string, done)
+  })
+}
+
 /** `/api/v1` (DESIGN.md §7.8): what an app token may do, in its one folder. */
 export function appApiRoutes(app: FastifyInstance, _options: object, done: () => void): void {
   const routes = app.withTypeProvider<ZodTypeProvider>()
 
-  // An agent's `fetch` wrapper often sends `Content-Type: application/json`
-  // on a DELETE with no body, which Fastify's own parser refuses.
-  app.removeContentTypeParser('application/json')
-  app.addContentTypeParser('application/json', { parseAs: 'string' }, (_request, body, next) => {
-    const text = typeof body === 'string' ? body : body.toString('utf8')
-    if (text.trim() === '') {
-      next(null, undefined)
-      return
-    }
-    try {
-      next(null, JSON.parse(text))
-    } catch (error) {
-      const failure = error as Error & { statusCode?: number }
-      failure.statusCode = 400
-      next(failure, undefined)
-    }
-  })
+  useAppJsonParser(app)
 
   app.decorateRequest('appFolder', null)
-  // Every v1 request starts with the folder: before validation, so a token
-  // whose folder is gone hears that first.
-  app.addHook('preValidation', async (request) => {
+  // Every v1 request starts with the folder, before any body is read: the
+  // access hook ran first. Routes that aren't `app` (the guide) skip it.
+  app.addHook('onRequest', async (request) => {
     if (request.routeOptions.config.access !== 'app') return
     request.appFolder = await appFolder(app.db, requireAppToken(request.appToken))
   })
