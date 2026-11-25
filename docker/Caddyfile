@@ -24,16 +24,20 @@
 		# One upload part (a chunk, just under the 20 MiB attachment limit),
 		# and headroom (§6.1); a test in packages/config checks it. A file
 		# streamed whole is as large as the file: the API checks its length
-		# against the upload.
-		@bounded not path_regexp ^/api/uploads/[^/]+/content$
+		# against the upload. The agent API's PUT /api/v1/files/... streams a
+		# file whole the same way, so it is uncapped too.
+		@bounded not path_regexp ^/api/(uploads/[^/]+/content|v1/files/.+)$
 		request_body @bounded {
 			max_size 22MiB
 		}
 		# Bodies stream both ways, unbuffered: uploaded files, downloads,
 		# archives and live events. Only the API's JSON answers are
 		# compressed (listings, the admin's figures): a download keeps the
-		# length its progress is shown by, and its bytes rarely shrink.
-		@answers not path_regexp ^/api/(files/[^/]+/content|archive/[^/]+|s/[^/]+/(files/[^/]+/content|archive))$
+		# length its progress is shown by, and its bytes rarely shrink. The
+		# agent API's /api/v1/files/... never compresses: a stored .json file
+		# is typed application/json, and must keep its Content-Length and
+		# its byte ranges.
+		@answers not path_regexp ^/api/(files/[^/]+/content|archive/[^/]+|s/[^/]+/(files/[^/]+/content|archive)|v1/files/.+)$
 		encode @answers zstd gzip {
 			match {
 				header Content-Type application/json*

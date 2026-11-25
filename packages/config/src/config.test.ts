@@ -54,6 +54,27 @@ describe('loadConfig', () => {
     expect(limit ?? 0).toBeGreaterThanOrEqual(sizes.chunkSize + MiB)
   })
 
+  it('leaves the streamed routes uncapped and the file routes uncompressed (docker/Caddyfile)', () => {
+    const caddyfile = readFileSync(new URL('../../../docker/Caddyfile', import.meta.url), 'utf8')
+    // Both matchers are `not path_regexp <pattern>`: a path the pattern matches is outside the matcher.
+    // Caddy compiles these with Go RE2, so the patterns keep to syntax JS shares.
+    const pattern = (name: string): RegExp => {
+      const found = new RegExp(String.raw`@${name}\s+not\s+path_regexp\s+(\S+)`).exec(caddyfile)
+      expect(found).not.toBeNull()
+      return new RegExp(found?.[1] ?? '')
+    }
+    const bounded = pattern('bounded')
+    const answers = pattern('answers')
+    // A file written through the agent API streams in whole: no cap, and its bytes are never compressed.
+    expect(bounded.test('/api/v1/files/a/b.json')).toBe(true)
+    expect(answers.test('/api/v1/files/a/b.json')).toBe(true)
+    // Its listings stay capped and compressed.
+    expect(bounded.test('/api/v1/list/a')).toBe(false)
+    expect(answers.test('/api/v1/list/a')).toBe(false)
+    expect(bounded.test('/api/uploads/x/content')).toBe(true)
+    expect(answers.test('/api/files/x/content')).toBe(true)
+  })
+
   it('runs in development with no settings, against the dev compose database', () => {
     const config = loadConfig({}, api)
     expect(config).toMatchObject({
