@@ -127,8 +127,9 @@ export async function makeAppToken(
     // The user's row serializes two requests at once, so they can't both make
     // the 50th. It also settles the race with a password change: its
     // `endUserSessions` either committed first, and the session is gone, or
-    // comes after and deletes this token too.
-    await tx.execute(sql`SELECT id FROM users WHERE id = ${auth.user.id} FOR UPDATE`)
+    // comes after and deletes this token too. NO KEY UPDATE, so the inserts that
+    // name the user (an audit row) are not blocked: see `endUserSessions`.
+    await tx.execute(sql`SELECT id FROM users WHERE id = ${auth.user.id} FOR NO KEY UPDATE`)
     const { rows: live } = await tx.execute(
       sql`SELECT 1 FROM sessions WHERE id = ${auth.sessionId} AND expires_at > now()`,
     )

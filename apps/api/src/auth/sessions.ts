@@ -136,8 +136,11 @@ export async function endUserSessions(
   // Locks the user's row first, so a request that makes a credential under
   // the same lock (an app token) either commits before this and is deleted
   // below, or runs after and sees its session gone. Call it inside a
-  // transaction, so the lock is held until the deletes commit.
-  await db.execute(sql`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`)
+  // transaction, so the lock is held until the deletes commit. NO KEY UPDATE,
+  // not UPDATE: it still excludes the other user-row lockers, but it lets in
+  // the key-share lock every insert of a row that names the user (an audit
+  // row, a device token) takes, which would deadlock with the deletes below.
+  await db.execute(sql`SELECT id FROM users WHERE id = ${userId} FOR NO KEY UPDATE`)
   await db
     .delete(sessions)
     .where(and(eq(sessions.userId, userId), except ? ne(sessions.id, except) : undefined))

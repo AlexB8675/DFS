@@ -4,7 +4,8 @@ import { createTestDatabase, type TestDatabase } from '@dfs/db/testing'
 import type { AdminAppToken, AppToken, MadeAppToken } from '@dfs/shared'
 import { and, eq, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
-import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest'
+import { audit } from '../audit.ts'
 import { buildApp } from '../app.ts'
 import {
   endUserSessions,
@@ -492,6 +493,48 @@ describe('app tokens (Â§7.8)', () => {
     expect(
       await app.db.select().from(appTokens).where(eq(appTokens.userId, gina.userId)),
     ).toHaveLength(0)
+  })
+
+  it('does not deadlock a removal with the end of the user’s sessions', async () => {
+    // The removal holds its token's row and then audits (a row that names the
+    // user); the end of sessions locks the user's row and then deletes tokens.
+    // With FOR UPDATE on the user's row the two wait on each other (40P01).
+    await seedUser(app.db, { username: 'kate', password: 'the-kate-password' })
+    const kate = await signIn('kate')
+    const token = await made(kate, await rootOf(kate.userId), 'Deadlock')
+    const release = Promise.withResolvers<undefined>()
+    const held = Promise.withResolvers<undefined>()
+    const removal = app.db.transaction(async (tx) => {
+      await tx.delete(appTokens).where(eq(appTokens.id, token.appToken.id))
+      held.resolve(undefined)
+      await release.promise
+      await audit(tx, { actorId: kate.userId, action: 'app_token.removed', target: 'Deadlock' })
+    })
+    const settle = (p: Promise<unknown>) =>
+      p.then(
+        () => 'ok',
+        (error: unknown) => (error as { cause?: { code?: string } }).cause?.code ?? String(error),
+      )
+    const removalOutcome = settle(removal)
+    await held.promise
+    const ending = settle(
+      app.db.transaction(async (tx) => {
+        await tx.update(users).set({ disabledAt: new Date() }).where(eq(users.id, kate.userId))
+        await endUserSessions(tx, kate.userId)
+      }),
+    )
+    // Wait until the ending is stuck on the removal's token row.
+    await vi.waitFor(
+      async () => {
+        const { rows } = await app.db.execute<{ n: number }>(sql`
+          SELECT count(*)::int AS n FROM pg_stat_activity
+          WHERE wait_event_type = 'Lock' AND query ILIKE '%delete from "app_tokens"%'`)
+        expect(rows[0]?.n).toBeGreaterThan(0)
+      },
+      { timeout: 10_000 },
+    )
+    release.resolve(undefined)
+    expect([await removalOutcome, await ending]).toEqual(['ok', 'ok'])
   })
 
   it('keeps the admin pages from plain users', async () => {
