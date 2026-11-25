@@ -232,6 +232,13 @@
       "when": 1792510822136,
       "tag": "0032_timelines",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1795633634166,
+      "tag": "0033_app_tokens",
+      "breakpoints": true
     }
   ]
 }

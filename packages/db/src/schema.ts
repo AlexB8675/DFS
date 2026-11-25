@@ -188,6 +188,39 @@ export const deviceTokens = pgTable(
 )
 
 /**
+ * An app's credential (§7.8): found by the SHA-256 of its token, which is
+ * shown once and never kept, and good for one folder of My drive and
+ * everything below it, to read or to write. The token goes with its folder
+ * when that is deleted for good, and with its user. Not journaled: after a
+ * recovery, apps get new tokens.
+ */
+export const appTokens = pgTable(
+  'app_tokens',
+  {
+    id: uuidv7('id').primaryKey(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    tokenHash: bytea('token_hash').notNull(),
+    folderId: uuid('folder_id')
+      .notNull()
+      .references((): AnyPgColumn => nodes.id, { onDelete: 'cascade' }),
+    canWrite: boolean('can_write').notNull(),
+    createdAt: timestamptz('created_at').notNull().defaultNow(),
+    /** Every 5 minutes at most, as devices' (§7.8). */
+    lastUsedAt: timestamptz('last_used_at'),
+    lastAddress: text('last_address'),
+    lastAgent: text('last_agent'),
+  },
+  (t) => [
+    uniqueIndex('app_tokens_token_hash').on(t.tokenHash),
+    index('app_tokens_user_id').on(t.userId),
+    index('app_tokens_folder_id').on(t.folderId),
+  ],
+)
+
+/**
  * A pairing its signed-in user approved (§7.6): a one-time code, good for a
  * minute, that the backup app trades with its PKCE verifier for a token.
  */
