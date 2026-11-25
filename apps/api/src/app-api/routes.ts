@@ -4,6 +4,7 @@ import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { requireAppToken } from '../auth/access.ts'
 import { folderLocations, type NodeRow } from '../nodes/read.ts'
 import { appFolder } from './folder.ts'
+import { loadGuide } from './guide.ts'
 import { appPutRoute } from './put.ts'
 import { readRoutes } from './read-routes.ts'
 import { treeRoutes } from './tree-routes.ts'
@@ -46,6 +47,10 @@ export function appApiRoutes(app: FastifyInstance, _options: object, done: () =>
     if (request.routeOptions.config.access !== 'app') return
     request.appFolder = await appFolder(app.db, requireAppToken(request.appToken))
   })
+
+  routes.get('/v1/guide', { config: { access: 'public' } }, (_request, reply) =>
+    reply.type('text/markdown; charset=utf-8').send(loadGuide(app.config.publicBaseUrl)),
+  )
 
   routes.get(
     '/v1/me',

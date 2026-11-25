@@ -1,0 +1,5 @@
+# DFS
+
+> A self-hosted drive. It has an app API: its owner makes an app token for one folder, and an app or agent can then list, read, upload, move and trash files in that folder over plain HTTP.
+
+The guide for building against it, with every route and an example, is at /api/v1/guide (Markdown, no token needed). Read it before writing any code.
