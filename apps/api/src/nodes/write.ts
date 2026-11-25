@@ -63,60 +63,73 @@ export async function ensureFolders(
   return app.db.transaction(async (tx) => {
     await lockDrive(tx, ownerId, 'shared')
     await visibleFolder(tx, ownerId, parentId)
-    const resolved = new Map<string, string>()
-    const created: NodeState[] = []
-    const result: Record<string, string> = {}
-    const ordered = paths
-      .map((path) => {
-        const names = path.split('/').filter(Boolean).map(checkedName)
-        // NUL cannot occur in a name and sorts before name characters, keeping
-        // each parent's whole subtree together in the same lock order.
-        return { path, names, key: names.map(nameKey).join('\0') }
-      })
-      .sort((left, right) => (left.key < right.key ? -1 : left.key > right.key ? 1 : 0))
-
-    for (const { path, names } of ordered) {
-      let currentId = parentId
-      let prefix = ''
-      for (const name of names) {
-        prefix += `/${nameKey(name)}`
-        const known = resolved.get(prefix)
-        if (known) {
-          currentId = known
-          continue
-        }
-        const existing = await childByName(tx, currentId, name)
-        if (existing?.kind === 'file') throw nameConflict(name)
-        if (existing) {
-          currentId = existing.id
-        } else {
-          const [folder] = await tx
-            // tree: inherits
-            .insert(nodes)
-            .values({ ownerId, parentId: currentId, kind: 'folder', name, nameKey: nameKey(name) })
-            .onConflictDoNothing({
-              target: [nodes.parentId, nodes.nameKey],
-              where: sql`deleted_at IS NULL`,
-            })
-            .returning()
-          if (folder) {
-            created.push(folder)
-            currentId = folder.id
-          } else {
-            // The insert waits for a concurrent creator to commit. Look it up
-            // again in this statement's fresh snapshot before using it.
-            const concurrent = await childByName(tx, currentId, name)
-            if (concurrent?.kind !== 'folder') throw nameConflict(name)
-            currentId = concurrent.id
-          }
-        }
-        resolved.set(prefix, currentId)
-      }
-      result[path] = currentId
-    }
-    await appendJournal(tx, nodeRecords(created))
-    return result
+    return ensureFoldersIn(tx, ownerId, parentId, paths)
   })
+}
+
+/**
+ * `ensureFolders`' body for a caller that holds the drive's lock and has
+ * checked `parentId`: makes the folders and journals them.
+ */
+export async function ensureFoldersIn(
+  tx: Executor,
+  ownerId: string,
+  parentId: string,
+  paths: string[],
+): Promise<Record<string, string>> {
+  const resolved = new Map<string, string>()
+  const created: NodeState[] = []
+  const result: Record<string, string> = {}
+  const ordered = paths
+    .map((path) => {
+      const names = path.split('/').filter(Boolean).map(checkedName)
+      // NUL cannot occur in a name and sorts before name characters, keeping
+      // each parent's whole subtree together in the same lock order.
+      return { path, names, key: names.map(nameKey).join('\0') }
+    })
+    .sort((left, right) => (left.key < right.key ? -1 : left.key > right.key ? 1 : 0))
+
+  for (const { path, names } of ordered) {
+    let currentId = parentId
+    let prefix = ''
+    for (const name of names) {
+      prefix += `/${nameKey(name)}`
+      const known = resolved.get(prefix)
+      if (known) {
+        currentId = known
+        continue
+      }
+      const existing = await childByName(tx, currentId, name)
+      if (existing?.kind === 'file') throw nameConflict(name)
+      if (existing) {
+        currentId = existing.id
+      } else {
+        const [folder] = await tx
+          // tree: inherits
+          .insert(nodes)
+          .values({ ownerId, parentId: currentId, kind: 'folder', name, nameKey: nameKey(name) })
+          .onConflictDoNothing({
+            target: [nodes.parentId, nodes.nameKey],
+            where: sql`deleted_at IS NULL`,
+          })
+          .returning()
+        if (folder) {
+          created.push(folder)
+          currentId = folder.id
+        } else {
+          // The insert waits for a concurrent creator to commit. Look it up
+          // again in this statement's fresh snapshot before using it.
+          const concurrent = await childByName(tx, currentId, name)
+          if (concurrent?.kind !== 'folder') throw nameConflict(name)
+          currentId = concurrent.id
+        }
+      }
+      resolved.set(prefix, currentId)
+    }
+    result[path] = currentId
+  }
+  await appendJournal(tx, nodeRecords(created))
+  return result
 }
 
 /** `PATCH /nodes/:id`: renames and/or moves one item. */
@@ -134,29 +147,58 @@ export async function updateNode(
       throw new ApiError(403, 'forbidden', 'The root folder cannot be changed.')
     }
     const name = changes.name === undefined ? node.name : checkedName(changes.name)
-    const parentId = changes.parentId ?? node.parent_id
-    const moving = parentId !== node.parent_id
-    if (moving) await assertCanMove(tx, ownerId, [node], parentId)
-    if (!moving && name === node.name) return
-
-    const [updated] = await guardName(name, () =>
-      tx
-        // tree: by id, gated
-        .update(nodes)
-        .set({
-          ...(changes.name !== undefined && { name, nameKey: nameKey(name) }),
-          ...(changes.parentId !== undefined && { parentId }),
-          // A file's "Modified" is its content's: a rename or move leaves it.
-          ...(node.kind === 'folder' && { updatedAt: new Date() }),
-        })
-        .where(eq(nodes.id, id))
-        .returning(),
-    )
-    if (!updated) throw notFound()
-    if (moving) await markFoldersDirty(tx, [node.parent_id, parentId])
-    await appendJournal(tx, nodeRecords([updated]))
+    await moveIn(tx, ownerId, node, changes.parentId ?? node.parent_id, name, {
+      renamed: changes.name !== undefined,
+      moved: changes.parentId !== undefined,
+    })
   })
   return toDriveNode(await visibleNode(app.db, ownerId, id))
+}
+
+/**
+ * `updateNode`'s body after its lookup: renames and/or moves `node` (not a
+ * root) to `parentId` and `name`, which the caller has checked. A move needs
+ * the drive's exclusive lock. Returns the node as it is.
+ */
+export async function moveIn(
+  tx: Executor,
+  ownerId: string,
+  node: NodeRow,
+  parentId: string,
+  name: string,
+  set: { renamed?: boolean; moved?: boolean } = { renamed: true, moved: true },
+): Promise<NodeState> {
+  const moving = parentId !== node.parent_id
+  if (moving) await assertCanMove(tx, ownerId, [node], parentId)
+  if (!moving && name === node.name) return stateOf(tx, node.id)
+
+  const [updated] = await guardName(name, () =>
+    tx
+      // tree: by id, gated
+      .update(nodes)
+      .set({
+        ...(set.renamed && { name, nameKey: nameKey(name) }),
+        ...(set.moved && { parentId }),
+        // A file's "Modified" is its content's: a rename or move leaves it.
+        ...(node.kind === 'folder' && { updatedAt: new Date() }),
+      })
+      .where(eq(nodes.id, node.id))
+      .returning(),
+  )
+  if (!updated) throw notFound()
+  if (moving && node.parent_id) await markFoldersDirty(tx, [node.parent_id, parentId])
+  await appendJournal(tx, nodeRecords([updated]))
+  return updated
+}
+
+async function stateOf(tx: Executor, id: string): Promise<NodeState> {
+  const [row] = await tx
+    .select()
+    // tree: by id, gated
+    .from(nodes)
+    .where(eq(nodes.id, id))
+  if (!row) throw notFound()
+  return row
 }
 
 /** `POST /nodes/move`: moves several items into one folder. */
@@ -209,26 +251,33 @@ export async function trashNodes(app: FastifyInstance, auth: Auth, ids: string[]
   const ownerId = auth.user.id
   await app.db.transaction(async (tx) => {
     await lockDrive(tx, ownerId)
-    const trashed = await visibleNodes(tx, ownerId, ids)
-    if (trashed.some((node) => node.parent_id === null)) {
-      throw new ApiError(403, 'forbidden', 'The root folder cannot be trashed.')
-    }
-    const updated = await markTrashed(tx, ids)
-    await markFoldersDirty(
-      tx,
-      trashed.flatMap((node) => node.parent_id ?? []),
-    )
-    const audited = await audit(
-      tx,
-      updated.map((node) => ({
-        actorId: ownerId,
-        action: 'node.trashed',
-        target: node.name,
-        nodeId: node.id,
-      })),
-    )
-    await appendJournal(tx, [...nodeRecords(updated), ...audited])
+    await trashIn(tx, ownerId, await visibleNodes(tx, ownerId, ids))
   })
+}
+
+/** `trashNodes`' body after its lookup: the caller holds the drive's exclusive lock. */
+export async function trashIn(tx: Executor, ownerId: string, trashed: NodeRow[]): Promise<void> {
+  if (trashed.some((node) => node.parent_id === null)) {
+    throw new ApiError(403, 'forbidden', 'The root folder cannot be trashed.')
+  }
+  const updated = await markTrashed(
+    tx,
+    trashed.map((node) => node.id),
+  )
+  await markFoldersDirty(
+    tx,
+    trashed.flatMap((node) => node.parent_id ?? []),
+  )
+  const audited = await audit(
+    tx,
+    updated.map((node) => ({
+      actorId: ownerId,
+      action: 'node.trashed',
+      target: node.name,
+      nodeId: node.id,
+    })),
+  )
+  await appendJournal(tx, [...nodeRecords(updated), ...audited])
 }
 
 /**

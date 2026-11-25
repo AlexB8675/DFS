@@ -5,6 +5,7 @@ import { requireAppToken } from '../auth/access.ts'
 import { folderLocations, type NodeRow } from '../nodes/read.ts'
 import { appFolder } from './folder.ts'
 import { readRoutes } from './read-routes.ts'
+import { treeRoutes } from './tree-routes.ts'
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -62,6 +63,7 @@ export function appApiRoutes(app: FastifyInstance, _options: object, done: () =>
       }
     },
   )
+  treeRoutes(app)
 
   readRoutes(app)
 
