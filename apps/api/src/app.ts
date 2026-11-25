@@ -33,6 +33,7 @@ import { JobQueue } from './queue.ts'
 import { adminRoutes } from './routes/admin.ts'
 import { authRoutes } from './routes/auth.ts'
 import { contentRoutes } from './routes/content.ts'
+import { appTokensRoutes } from './routes/app-tokens.ts'
 import { devicesRoutes } from './routes/devices.ts'
 import { eventRoutes } from './routes/events.ts'
 import { healthRoutes } from './routes/health.ts'
@@ -317,6 +318,7 @@ export async function buildApp({
   await app.register(healthRoutes, { prefix: '/api' })
   await app.register(authRoutes, { prefix: '/api' })
   await app.register(devicesRoutes, { prefix: '/api' })
+  await app.register(appTokensRoutes, { prefix: '/api' })
   await app.register(vaultRoutes, { prefix: '/api' })
   await app.register(adminRoutes, { prefix: '/api' })
   await app.register(nodeRoutes, { prefix: '/api' })

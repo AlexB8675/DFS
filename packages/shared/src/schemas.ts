@@ -489,6 +489,49 @@ export const deviceMeSchema = z.object({
 })
 export type DeviceMe = z.infer<typeof deviceMeSchema>
 
+// ── App tokens (§7.8) ────────────────────────────────────────────────────────
+
+/** An app token: one folder of My drive, readable or writable, for a script or an AI agent. Never the token itself. */
+export const appTokenSchema = z.object({
+  id,
+  name: z.string(),
+  folderId: id,
+  /** Where the folder is now, as the drive shows it: "My Drive / Notes". */
+  folderPath: z.string(),
+  /** Whether the folder is visible and in My drive; a token whose folder is in the trash reaches nothing. */
+  folderAvailable: z.boolean(),
+  canWrite: z.boolean(),
+  createdAt: timestamp,
+  lastUsedAt: timestamp.nullable(),
+  lastAddress: z.string().nullable(),
+  lastAgent: z.string().nullable(),
+})
+export type AppToken = z.infer<typeof appTokenSchema>
+export const appTokenListSchema = z.array(appTokenSchema)
+
+/** `POST /app-tokens`. */
+export const makeAppTokenSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+  folderId: id,
+  canWrite: z.boolean(),
+})
+export type MakeAppTokenInput = z.infer<typeof makeAppTokenSchema>
+
+/** Answered once, when the token is made: it is never shown again. */
+export const madeAppTokenSchema = z.object({ token: z.string(), appToken: appTokenSchema })
+export type MadeAppToken = z.infer<typeof madeAppTokenSchema>
+
+/** Any user's app token, as an admin sees it: never the token itself. */
+export const adminAppTokenSchema = appTokenSchema.extend({
+  userId: id,
+  username: z.string(),
+  displayName: z.string(),
+  /** Whether the admin asking may remove it: the owner's only when the owner asks. */
+  canRemove: z.boolean(),
+})
+export type AdminAppToken = z.infer<typeof adminAppTokenSchema>
+export const adminAppTokenListSchema = z.array(adminAppTokenSchema)
+
 // ── The vault (§7.7) ─────────────────────────────────────────────────────────
 
 /** A lock code being chosen: at least 6 characters, so a six-digit PIN will do. */

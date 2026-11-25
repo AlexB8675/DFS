@@ -1,4 +1,5 @@
 import {
+  adminAppTokenListSchema,
   adminDeviceListSchema,
   adminSessionListSchema,
   adminShareOwnerListSchema,
@@ -44,12 +45,14 @@ import { adminNode, anyVisibleNode, linksToDelete, moderate, userUsage } from '.
 import {
   cancelUploadAsAdmin,
   endSessionAsAdmin,
+  listAdminAppTokens,
   listAdminDevices,
   listSessions,
   listShares,
   shareOwners,
   listUploads,
   deleteShareAsAdmin,
+  removeAppTokenAsAdmin,
   removeDeviceAsAdmin,
   signOutUser,
 } from '../admin/access.ts'
@@ -236,6 +239,27 @@ export function adminRoutes(app: FastifyInstance, _options: object, done: () => 
     { config: admin, schema: { params: byId, response: noContent } },
     async (request, reply) => {
       await removeDeviceAsAdmin(app, requireAuth(request.auth), request.params.id)
+      return reply.code(204).send(null)
+    },
+  )
+
+  routes.get(
+    '/admin/app-tokens',
+    {
+      config: admin,
+      schema: {
+        querystring: z.object({ userId: z.uuid().optional() }),
+        response: { 200: adminAppTokenListSchema },
+      },
+    },
+    (request) => listAdminAppTokens(app, requireAuth(request.auth), request.query.userId),
+  )
+
+  routes.delete(
+    '/admin/app-tokens/:id',
+    { config: admin, schema: { params: byId, response: noContent } },
+    async (request, reply) => {
+      await removeAppTokenAsAdmin(app, requireAuth(request.auth), request.params.id)
       return reply.code(204).send(null)
     },
   )

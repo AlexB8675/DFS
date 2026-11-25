@@ -1,6 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import type { Config } from '@dfs/config'
-import { devicePairings, deviceTokens, sessions, users, type Executor } from '@dfs/db'
+import { appTokens, devicePairings, deviceTokens, sessions, users, type Executor } from '@dfs/db'
 import { and, eq, gt, isNull, ne, sql } from 'drizzle-orm'
 import type { FastifyReply } from 'fastify'
 
@@ -121,7 +121,7 @@ export async function endSession(db: Executor, sessionId: string): Promise<void>
 /**
  * Signs a user out everywhere, except perhaps the session making the change.
  * A password change, an admin's reset, disabling and signing out everywhere
- * end the user's devices as they end sessions, and the one `except` spares
+ * end the user's devices and app tokens as they end sessions, and the one `except` spares
  * is not a device's: a device token is a credential too, and a code not yet
  * traded for one is a chance to get one (§7.6).
  */
@@ -137,6 +137,9 @@ export async function endUserSessions(
   // its token, so the delete of tokens below sees that token (§7.6).
   await db.delete(devicePairings).where(eq(devicePairings.userId, userId))
   await db.delete(deviceTokens).where(eq(deviceTokens.userId, userId))
+  // App tokens too: one made as this runs either saw its session gone or is
+  // deleted here (§7.8).
+  await db.delete(appTokens).where(eq(appTokens.userId, userId))
 }
 
 export function csrfMatches(auth: Auth, header: string | undefined): boolean {

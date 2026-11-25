@@ -1,12 +1,14 @@
 import {
   abandonUploads,
   appendJournal,
+  appTokens,
   deviceTokens,
   shareDeletedRecords,
   shareLinks,
   WORKING_LINK,
 } from '@dfs/db'
 import type {
+  AdminAppToken,
   AdminDevice,
   AdminSession,
   AdminShare,
@@ -16,9 +18,11 @@ import type {
 } from '@dfs/shared'
 import { eq, sql } from 'drizzle-orm'
 import type { FastifyInstance } from 'fastify'
+import { TOKEN_COLUMNS, toAppToken, type TokenRow } from '../app-tokens/tokens.ts'
 import { audit, auditAlone } from '../audit.ts'
 import { endSession, endUserSessions, type Auth } from '../auth/sessions.ts'
 import { ApiError } from '../errors.ts'
+import { folderLocations } from '../nodes/read.ts'
 import { escapeLike } from '../nodes/write.ts'
 import { removeStagedVersions } from '../staging.ts'
 
@@ -209,6 +213,75 @@ export async function removeDeviceAsAdmin(
         action: 'device.removed',
         target: device.name,
         details: `@${device.username}`,
+      }),
+    )
+  })
+}
+
+/** `GET /admin/app-tokens`: every user's app tokens, newest first; one user's with `userId`. */
+export async function listAdminAppTokens(
+  app: FastifyInstance,
+  admin: Auth,
+  userId: string | undefined,
+): Promise<AdminAppToken[]> {
+  const { rows } = await app.db.execute<
+    TokenRow & { user_id: string; username: string; display_name: string; can_remove: boolean }
+  >(sql`
+    SELECT ${TOKEN_COLUMNS}, token.user_id, account.username, account.display_name,
+      -- As removeAppTokenAsAdmin allows: the owner's only by the owner.
+      (NOT account.is_owner OR ${admin.user.isOwner}) AS can_remove
+    FROM app_tokens token JOIN users account ON account.id = token.user_id
+    ${userId ? sql`WHERE token.user_id = ${userId}` : sql``}
+    ORDER BY token.created_at DESC, token.id DESC LIMIT 500`)
+  const paths = await folderLocations(
+    app.db,
+    rows.map((row) => row.folder_id),
+  )
+  return rows.map((row) => ({
+    ...toAppToken(row, paths),
+    userId: row.user_id,
+    username: row.username,
+    displayName: row.display_name,
+    canRemove: row.can_remove,
+  }))
+}
+
+/**
+ * `DELETE /admin/app-tokens/:id`: removes any user's app token. An admin may
+ * remove their own: no session is lost with it.
+ */
+export async function removeAppTokenAsAdmin(
+  app: FastifyInstance,
+  admin: Auth,
+  id: string,
+): Promise<void> {
+  await app.db.transaction(async (tx) => {
+    const { rows } = await tx.execute<{ name: string; username: string; is_owner: boolean }>(sql`
+      SELECT token.name, account.username, account.is_owner
+      FROM app_tokens token JOIN users account ON account.id = token.user_id
+      WHERE token.id = ${id}`)
+    const [token] = rows
+    if (!token) throw new ApiError(404, 'not_found', 'No such app token.')
+    if (token.is_owner && !admin.user.isOwner) {
+      throw new ApiError(
+        409,
+        'owner_protected',
+        'Only the owner can remove the owner’s app tokens.',
+      )
+    }
+    const removed = await tx
+      .delete(appTokens)
+      .where(eq(appTokens.id, id))
+      .returning({ id: appTokens.id })
+    // Removed by its user between the look and the delete: answered as if it were never there.
+    if (removed.length === 0) throw new ApiError(404, 'not_found', 'No such app token.')
+    await appendJournal(
+      tx,
+      await audit(tx, {
+        actorId: admin.user.id,
+        action: 'app_token.removed',
+        target: token.name,
+        details: `@${token.username}`,
       }),
     )
   })
