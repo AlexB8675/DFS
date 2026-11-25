@@ -32,12 +32,14 @@ export interface NodeRow extends Record<string, unknown> {
   moderation_reason: string | null
   version_state: string | null
   has_child_folders: boolean
+  current_version_id: string | null
 }
 
 /** The columns of a `NodeRow`, for `FROM nodes n` joined with `NODE_JOINS`. */
 export const NODE_COLUMNS = sql`
   n.id, n.owner_id, n.parent_id, n.kind, n.name, n.mime_type, n.created_at, n.updated_at,
   n.deleted_at, n.trashed_via, n.moderation_reason,
+  n.current_version_id,
   (CASE WHEN n.kind = 'folder' THEN coalesce(stats.total_bytes, 0) ELSE n.size_bytes END)::float8
     AS size_bytes,
   version.state::text AS version_state,
