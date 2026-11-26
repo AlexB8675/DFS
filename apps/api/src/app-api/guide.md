@@ -44,7 +44,7 @@ An item:
 }
 ```
 
-`version` is the file's current version, for `If-Match`; a folder has `null`, and its `size` is its total. `mimeType` is what was stored, or `null`.
+`version` is the file's current version, for `If-Match`; a folder has `null`, and its `size` is its total. `mimeType` is what was stored, or `null`. A file's `modifiedAt` dates its content: a `PUT` sets it to now, a rename or move keeps it (files uploaded in the web app keep their own dates). A folder's changes when it is made, renamed or moved, not when what is inside it changes.
 
 ## 4. Routes
 
@@ -81,7 +81,7 @@ const me = await (await fetch(`${API}/me`, { headers })).json()
 
 ### GET /api/v1/list/{path}
 
-The items of a folder: folders first, then files, each by name (natural order). A file's path is `404 not_found`. Files still uploading are not listed. Pages: see section 7.
+The items of a folder: folders first, then files, each by name (natural order). There is no other order: to show the newest first, read every page and sort on `modifiedAt`. A file's path is `404 not_found`. Files still uploading are not listed. Pages: see section 7.
 
 ```sh
 curl -H "Authorization: Bearer $TOKEN" "$API/list/photos/2024?limit=100"
@@ -150,7 +150,7 @@ const size = Number(res.headers.get('Content-Length'))
 
 ### GET /api/v1/search
 
-`?q=` finds names containing `q`, ignoring case, in the token's folder and below (the folder itself is not a result). Items as in a list, ordered by name, paged with `cursor` and `limit`. `q` is 1-200 characters.
+`?q=` finds files and folders whose names contain `q`, ignoring case, in the token's folder and below (the folder itself is not a result). Items as in a list, but folders and files mixed, ordered by name only, paged with `cursor` and `limit`. `q` is 1-200 characters.
 
 ```sh
 curl -H "Authorization: Bearer $TOKEN" "$API/search?q=today"
@@ -326,7 +326,7 @@ Every error is `{ "error": { "code", "message" } }`; branch on `code`, show `mes
 | 411 | `length_required` | `PUT` without `Content-Length` |
 | 412 | `exists` | `If-None-Match: *` and the file exists |
 | 412 | `version_changed` | `If-Match` does not match the file's version |
-| 413 | `file_too_large` | Larger than DFS accepts in one file |
+| 413 | `file_too_large` | Larger than DFS accepts in one file; the message names the limit |
 | 415 | `unsupported_media_type` | `POST /move` sent without `Content-Type: application/json` |
 | 429 | `rate_limited` | Too many requests or failed tokens; wait `Retry-After` seconds |
 | 429 | `too_many_uploads` | Already 3 uploads in flight; `Retry-After: 5` |
@@ -339,9 +339,10 @@ An unknown route is `404 not_found`.
 
 - **`Content-Length` is required**, or the answer is `411 length_required`. Send a `Blob`, `ArrayBuffer`, typed array or string; **never a stream or `FormData`** (a stream goes chunked, and `FormData` would be stored with its multipart envelope).
 - **`Content-Type`** is stored as sent, trimmed, and set anew on a replace. Always send it yourself: a client may add a default you did not mean (`fetch` with a string adds `text/plain`, `curl -d` adds `application/x-www-form-urlencoded`). None means no type (served as `application/octet-stream`); over 255 characters is `400 invalid_request`.
-- **An existing file is replaced**, with a new `version`; there are no earlier versions, and the share links made for the file are deleted with it. To avoid overwriting a change made elsewhere:
+- **An existing file is replaced**, with a new `version`; there are no earlier versions, and the share links made for the file are deleted with it. A name that differs only in case is the same file: a `PUT` of `a.txt` replaces `A.txt` and keeps the name `A.txt` (to change the case, `move` it). To avoid overwriting a change made elsewhere:
   - `If-None-Match: *` fails the `PUT` with `412 exists` if the file is there. It is the only value allowed (anything else is `400 invalid_request`).
-  - `If-Match: "<version>"` (quoted or not, or `*`) fails with `412 version_changed` unless the file is at that version. A weak `W/"..."` never matches. Use the `version` from a list, stat or earlier `PUT`.
+  - `If-Match: "<version>"` (quoted or not, or `*`) fails with `412 version_changed` unless the file is at that version. A weak `W/"..."` never matches. Use the `version` from a list, stat or earlier `PUT`, or the `ETag` of a `GET` or `HEAD`. A file that is no longer there fails it too.
+  - To edit safely: `GET` the file and keep its `ETag`, then `PUT` with `If-Match` set to it, and keep the answer's `version` for the next save (a `PUT` answer has no `ETag` header). On `412 version_changed`, stat the path (`404` means it was moved or trashed, a new `version` that it was changed) and let the user choose; never retry blindly.
 - Both conditions are checked again when the upload completes, so two `PUT`s to one path cannot both win.
 - **Missing parent folders are made**, and stay if the `PUT` is then refused (like `mkdir -p`).
 - **There are no resumable uploads.** A cut-off `PUT` is cancelled and stores nothing: start it again from the beginning.

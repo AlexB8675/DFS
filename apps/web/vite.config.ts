@@ -27,6 +27,9 @@ export default defineConfig(({ command, mode }) => {
     server: {
       port: 5173,
       strictPort: true,
+      // Vite's own CORS would answer /api/v1 preflights itself, for localhost
+      // pages only; off, they reach the API through the proxy, as in production.
+      cors: false,
       proxy: useMocks ? undefined : { '/api': 'http://localhost:3000' },
     },
   }
